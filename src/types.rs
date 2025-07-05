@@ -11,6 +11,7 @@ use p3_uni_stark::StarkConfig as InnerStarkConfig;
 
 pub type Val = Goldilocks;
 pub type ExtVal = BinomialExtensionField<Val, 2>;
+pub type Challenger = SerializingChallenger64<Val, HashChallenger<u8, Keccak256Hash, 32>>;
 pub type Mmcs = MerkleTreeMmcs<
     [Val; p3_keccak::VECTOR_LEN],
     [u64; p3_keccak::VECTOR_LEN],
@@ -20,11 +21,7 @@ pub type Mmcs = MerkleTreeMmcs<
 >;
 pub type ExtMmcs = ExtensionMmcs<Val, ExtVal, Mmcs>;
 pub type Pcs = TwoAdicFriPcs<Val, Dft, Mmcs, ExtMmcs>;
-pub type StarkConfig = InnerStarkConfig<
-    Pcs,
-    ExtVal,
-    SerializingChallenger<Val, HashChallenger<u8, Keccak256Hash, 32>>,
->;
+pub type StarkConfig = InnerStarkConfig<Pcs, ExtVal, Challenger>;
 
 pub struct FriParameters {
     pub log_blowup: usize,
@@ -35,7 +32,6 @@ pub struct FriParameters {
 
 type KeccakCompressionFunction =
     CompressionFunctionFromHasher<PaddingFreeSponge<KeccakF, 25, 17, 4>, 2, 4>;
-type SerializingChallenger<F, Inner> = SerializingChallenger64<F, Inner>;
 type Dft = Radix2DitParallel<Val>;
 
 fn new_mmcs() -> Mmcs {
@@ -61,6 +57,6 @@ fn new_pcs(fri_parameters: FriParameters) -> Pcs {
 
 pub fn new_stark_config(fri_parameters: FriParameters) -> StarkConfig {
     let pcs = new_pcs(fri_parameters);
-    let challenger = SerializingChallenger::from_hasher(vec![], Keccak256Hash {});
+    let challenger = Challenger::from_hasher(vec![], Keccak256Hash {});
     StarkConfig::new(pcs, challenger)
 }
