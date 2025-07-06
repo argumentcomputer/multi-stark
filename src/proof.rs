@@ -3,14 +3,18 @@ use crate::types::{Challenger, ExtVal, PackedExtVal, PackedVal, Pcs, StarkConfig
 use p3_air::Air;
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs as PcsTrait, PolynomialSpace};
-use p3_field::{BasedVectorSpace, PackedValue, PrimeCharacteristicRing};
-use p3_matrix::{Matrix, dense::RowMajorMatrix};
+use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
+use p3_matrix::{
+    Matrix,
+    dense::{RowMajorMatrix, RowMajorMatrixView},
+    stack::VerticalPair,
+};
 use p3_maybe_rayon::prelude::*;
 use p3_uni_stark::{
-    Domain, ProverConstraintFolder, StarkGenericConfig, SymbolicAirBuilder, SymbolicExpression,
-    get_symbolic_constraints,
+    Domain, PcsError, ProverConstraintFolder, StarkGenericConfig, SymbolicAirBuilder,
+    VerificationError, VerifierConstraintFolder, get_log_quotient_degree, get_symbolic_constraints,
 };
-use p3_util::{log2_ceil_usize, log2_strict_usize};
+use p3_util::{log2_strict_usize, zip_eq::zip_eq};
 
 pub struct Proof {
     pub commitments: Commitments,
@@ -47,15 +51,7 @@ where
     let degree = trace.height();
     let log_degree = log2_strict_usize(degree);
 
-    let symbolic_constraints = get_symbolic_constraints(air, 0, public_values.len());
-    let constraint_count = symbolic_constraints.len();
-    let constraint_degree = symbolic_constraints
-        .iter()
-        .map(SymbolicExpression::degree_multiple)
-        .max()
-        .unwrap_or(0);
-
-    let log_quotient_degree = log2_ceil_usize(constraint_degree - 1);
+    let log_quotient_degree = get_log_quotient_degree::<Val, A>(air, 0, public_values.len(), 0);
     let quotient_degree = 1 << log_quotient_degree;
 
     let pcs: &Pcs = config.pcs();
@@ -83,6 +79,7 @@ where
         quotient_domain,
     );
 
+    let constraint_count = get_symbolic_constraints(air, 0, public_values.len()).len();
     let quotient_values = quotient_values(
         air,
         public_values,
@@ -223,4 +220,158 @@ where
             })
         })
         .collect()
+}
+
+pub fn verify<A>(
+    config: &StarkConfig,
+    air: &A,
+    proof: &Proof,
+    public_values: &Vec<Val>,
+) -> Result<(), VerificationError<PcsError<StarkConfig>>>
+where
+    A: Air<SymbolicAirBuilder<Val>> + for<'a> Air<VerifierConstraintFolder<'a, StarkConfig>>,
+{
+    let Proof {
+        commitments,
+        opened_values,
+        opening_proof,
+        degree_bits,
+    } = proof;
+
+    let pcs = config.pcs();
+
+    let degree = 1 << degree_bits;
+    let log_quotient_degree = get_log_quotient_degree::<Val, A>(air, 0, public_values.len(), 0);
+    let quotient_degree = 1 << log_quotient_degree;
+
+    let mut challenger = config.initialise_challenger();
+    let trace_domain =
+        <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
+
+    let quotient_domain =
+        trace_domain.create_disjoint_domain(1 << (degree_bits + log_quotient_degree));
+    let quotient_chunks_domains = quotient_domain.split_domains(quotient_degree);
+
+    let randomized_quotient_chunks_domains = quotient_chunks_domains
+        .iter()
+        .map(|domain| {
+            <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, domain.size())
+        })
+        .collect::<Vec<_>>();
+
+    if opened_values.random.is_some() || commitments.random.is_some() {
+        return Err(VerificationError::RandomizationError);
+    }
+
+    let air_width = A::width(air);
+    let valid_shape = opened_values.trace_local.len() == air_width
+        && opened_values.trace_next.len() == air_width
+        && opened_values.quotient_chunks.len() == quotient_degree
+        && opened_values
+            .quotient_chunks
+            .iter()
+            .all(|qc| qc.len() == <ExtVal as BasedVectorSpace<Val>>::DIMENSION)
+        && if let Some(r_comm) = &opened_values.random {
+            r_comm.len() == <ExtVal as BasedVectorSpace<Val>>::DIMENSION
+        } else {
+            true
+        };
+    if !valid_shape {
+        return Err(VerificationError::InvalidProofShape);
+    }
+
+    challenger.observe(Val::from_usize(proof.degree_bits));
+    challenger.observe(Val::from_usize(proof.degree_bits - config.is_zk()));
+    challenger.observe(commitments.trace);
+    challenger.observe_slice(public_values);
+
+    let alpha: ExtVal = challenger.sample_algebra_element();
+    challenger.observe(commitments.quotient_chunks);
+
+    let zeta: ExtVal = challenger.sample_algebra_element();
+    let zeta_next: ExtVal = trace_domain.next_point(zeta).unwrap();
+
+    let coms_to_verify = vec![
+        (
+            commitments.trace,
+            vec![(
+                trace_domain,
+                vec![
+                    (zeta, opened_values.trace_local.clone()),
+                    (zeta_next, opened_values.trace_next.clone()),
+                ],
+            )],
+        ),
+        (
+            commitments.quotient_chunks,
+            zip_eq(
+                randomized_quotient_chunks_domains.iter(),
+                &opened_values.quotient_chunks,
+                VerificationError::InvalidProofShape,
+            )?
+            .map(|(domain, values)| (*domain, vec![(zeta, values.clone())]))
+            .collect::<Vec<_>>(),
+        ),
+    ];
+
+    pcs.verify(coms_to_verify, opening_proof, &mut challenger)
+        .map_err(VerificationError::InvalidOpeningArgument)?;
+
+    let zps = quotient_chunks_domains
+        .iter()
+        .enumerate()
+        .map(|(i, domain)| {
+            quotient_chunks_domains
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, other_domain)| {
+                    other_domain.vanishing_poly_at_point(zeta)
+                        * other_domain
+                            .vanishing_poly_at_point(domain.first_point())
+                            .inverse()
+                })
+                .product::<ExtVal>()
+        })
+        .collect::<Vec<_>>();
+
+    let quotient = opened_values
+        .quotient_chunks
+        .iter()
+        .enumerate()
+        .map(|(ch_i, ch)| {
+            zps[ch_i]
+                * ch.iter()
+                    .enumerate()
+                    .map(|(e_i, &c)| {
+                        <ExtVal as BasedVectorSpace<Val>>::ith_basis_element(e_i).unwrap() * c
+                    })
+                    .sum::<ExtVal>()
+        })
+        .sum::<ExtVal>();
+
+    let sels = trace_domain.selectors_at_point(zeta);
+
+    let main = VerticalPair::new(
+        RowMajorMatrixView::new_row(&opened_values.trace_local),
+        RowMajorMatrixView::new_row(&opened_values.trace_next),
+    );
+
+    let mut folder = VerifierConstraintFolder {
+        main,
+        public_values,
+        is_first_row: sels.is_first_row,
+        is_last_row: sels.is_last_row,
+        is_transition: sels.is_transition,
+        alpha,
+        accumulator: ExtVal::ZERO,
+    };
+    air.eval(&mut folder);
+    let folded_constraints = folder.accumulator;
+
+    if folded_constraints * sels.inv_vanishing != quotient {
+        return Err(VerificationError::OodEvaluationMismatch);
+    }
+
+    Ok(())
 }
