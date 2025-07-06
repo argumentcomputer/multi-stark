@@ -1,10 +1,16 @@
 use crate::{
     ensure,
-    types::{ExtVal, StarkConfig, Val},
+    types::{Challenger, ExtVal, Pcs, StarkConfig, Val},
 };
 use p3_air::{Air, BaseAirWithPublicValues};
-use p3_matrix::dense::RowMajorMatrix;
-use p3_uni_stark::{ProverConstraintFolder, SymbolicAirBuilder};
+use p3_challenger::{CanObserve, FieldChallenger};
+use p3_commit::Pcs as PcsTrait;
+use p3_field::PrimeCharacteristicRing;
+use p3_matrix::{Matrix, dense::RowMajorMatrix};
+use p3_uni_stark::{
+    ProverConstraintFolder, StarkGenericConfig, SymbolicAirBuilder, get_log_quotient_degree,
+};
+use p3_util::log2_strict_usize;
 use std::collections::BTreeMap as Map;
 
 pub type Name = &'static str;
@@ -75,11 +81,65 @@ impl<A: BaseAirWithPublicValues<Val>> System<A> {
     }
 }
 
-impl<A: Air<SymbolicAirBuilder<Val>> + for<'a> Air<ProverConstraintFolder<'a, StarkConfig>>>
-    System<A>
+impl<
+    A: BaseAirWithPublicValues<Val>
+        + Air<SymbolicAirBuilder<Val>>
+        + for<'a> Air<ProverConstraintFolder<'a, StarkConfig>>,
+> System<A>
 {
     #[allow(unused_variables)]
-    pub fn prove(&self, claim: Claim, witness: SystemWitness) -> Proof {
+    #[allow(unused_mut)]
+    pub fn prove(&self, config: &StarkConfig, claim: Claim, witness: SystemWitness) -> Proof {
+        // initialize pcs and challenger
+        let pcs = config.pcs();
+        let mut challenger = config.initialise_challenger();
+        // compute domains for all circuits
+        let mut stage2_traces = vec![];
+        let mut log_degrees = vec![];
+        for (circuit, witness) in self.circuits.iter().zip(witness.circuits.into_iter()) {
+            let air = &circuit.air;
+            let trace = witness.stage1;
+            // TODO: allow preprocessed tables
+            let preprocessed_width = 0;
+            // TODO: perhaps implement zero-knowledge. Although the better idea might be
+            // to get zero-knowledge through the compression SNARK.
+            let is_zk = 0;
+
+            let degree = trace.height();
+            let log_degree = log2_strict_usize(degree);
+            let log_quotient_degree = get_log_quotient_degree::<Val, A>(
+                air,
+                preprocessed_width,
+                air.num_public_values(),
+                is_zk,
+            );
+            let quotient_degree = 1 << log_quotient_degree;
+            let trace_domain =
+                <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
+            let (trace_commit, trace_data) =
+                <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, [(trace_domain, trace)]);
+
+            challenger.observe(Val::from_u8(log_degree as u8));
+            challenger.observe(trace_commit);
+
+            stage2_traces.push(witness.stage2);
+            log_degrees.push(log_degree);
+        }
+        // generate lookup challenges
+        let lookup_argument_challenge: ExtVal = challenger.sample_algebra_element();
+        challenger.observe_algebra_element(lookup_argument_challenge);
+        let fingerprint_challenge: ExtVal = challenger.sample_algebra_element();
+        challenger.observe_algebra_element(fingerprint_challenge);
+        // TODO: implement stage 2
+
+        // observe the claim
+        challenger.observe(Val::from_usize(
+            *self.circuit_names.get(claim.circuit_name).unwrap(),
+        ));
+        challenger.observe_slice(&claim.args);
+
+        // generate constraint challenge
+        let constraint_challenge: ExtVal = challenger.sample_algebra_element();
         todo!()
     }
 
