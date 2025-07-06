@@ -63,7 +63,6 @@ where
         <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, [(trace_domain, trace)]);
 
     challenger.observe(Val::from_u8(log_degree as u8));
-    challenger.observe(Val::from_u8(log_degree as u8));
     challenger.observe(trace_commit);
     challenger.observe_slice(public_values);
 
@@ -281,7 +280,6 @@ where
     }
 
     challenger.observe(Val::from_usize(proof.degree_bits));
-    challenger.observe(Val::from_usize(proof.degree_bits - config.is_zk()));
     challenger.observe(commitments.trace);
     challenger.observe_slice(public_values);
 
@@ -374,4 +372,51 @@ where
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::types::{FriParameters, new_stark_config};
+    use p3_air::{AirBuilderWithPublicValues, BaseAir};
+
+    fn demo_trace() -> RowMajorMatrix<Val> {
+        let f = Val::from_u32;
+        let trace = [3, 4, 5, 5, 12, 13, 8, 15, 17, 7, 24, 25].map(f).to_vec();
+        RowMajorMatrix::new(trace, 3)
+    }
+
+    struct CS {}
+
+    impl<F> BaseAir<F> for CS {
+        fn width(&self) -> usize {
+            3
+        }
+    }
+
+    impl<AB: AirBuilderWithPublicValues> Air<AB> for CS {
+        fn eval(&self, builder: &mut AB) {
+            let main = builder.main();
+            let local = main.row_slice(0).unwrap();
+            let expr1 = local[0] * local[0] + local[1] * local[1];
+            let expr2 = local[2] * local[2];
+            builder.assert_eq(expr1, expr2);
+        }
+    }
+
+    #[test]
+    fn prove_verify_test() {
+        let fri_parameters = FriParameters {
+            log_blowup: 1,
+            log_final_poly_len: 0,
+            num_queries: 64,
+            proof_of_work_bits: 0,
+        };
+        let config = new_stark_config(fri_parameters);
+
+        let trace = demo_trace();
+        let pis = vec![];
+        let proof = prove(&config, &CS {}, trace, &pis);
+        verify(&config, &CS {}, &proof, &pis).expect("verification failed");
+    }
 }
