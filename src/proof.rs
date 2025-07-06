@@ -1,4 +1,7 @@
-use crate::types::{Challenger, ExtVal, PackedExtVal, PackedVal, Pcs, StarkConfig, Val};
+use crate::{
+    ensure,
+    types::{Challenger, ExtVal, PackedExtVal, PackedVal, Pcs, StarkConfig, Val},
+};
 
 use p3_air::Air;
 use p3_challenger::{CanObserve, FieldChallenger};
@@ -258,9 +261,10 @@ where
         })
         .collect::<Vec<_>>();
 
-    if opened_values.random.is_some() || commitments.random.is_some() {
-        return Err(VerificationError::RandomizationError);
-    }
+    ensure!(
+        opened_values.random.is_none() && commitments.random.is_none(),
+        VerificationError::RandomizationError
+    );
 
     let air_width = A::width(air);
     let valid_shape = opened_values.trace_local.len() == air_width
@@ -275,9 +279,7 @@ where
         } else {
             true
         };
-    if !valid_shape {
-        return Err(VerificationError::InvalidProofShape);
-    }
+    ensure!(valid_shape, VerificationError::InvalidProofShape);
 
     challenger.observe(Val::from_usize(proof.degree_bits));
     challenger.observe(commitments.trace);
@@ -367,9 +369,10 @@ where
     air.eval(&mut folder);
     let folded_constraints = folder.accumulator;
 
-    if folded_constraints * sels.inv_vanishing != quotient {
-        return Err(VerificationError::OodEvaluationMismatch);
-    }
+    ensure!(
+        folded_constraints * sels.inv_vanishing == quotient,
+        VerificationError::OodEvaluationMismatch
+    );
 
     Ok(())
 }
