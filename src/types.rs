@@ -1,7 +1,7 @@
 use p3_challenger::{HashChallenger, SerializingChallenger64};
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
-use p3_field::extension::BinomialExtensionField;
+use p3_field::{ExtensionField, Field, extension::BinomialExtensionField};
 use p3_fri::{FriParameters as InnerFriParameters, TwoAdicFriPcs};
 use p3_goldilocks::Goldilocks;
 use p3_keccak::{Keccak256Hash, KeccakF};
@@ -10,7 +10,9 @@ use p3_symmetric::{CompressionFunctionFromHasher, PaddingFreeSponge, Serializing
 use p3_uni_stark::StarkConfig as InnerStarkConfig;
 
 pub type Val = Goldilocks;
+pub type PackedVal = <Val as Field>::Packing;
 pub type ExtVal = BinomialExtensionField<Val, 2>;
+pub type PackedExtVal = <ExtVal as ExtensionField<Val>>::ExtensionPacking;
 pub type Challenger = SerializingChallenger64<Val, HashChallenger<u8, Keccak256Hash, 32>>;
 pub type Mmcs = MerkleTreeMmcs<
     [Val; p3_keccak::VECTOR_LEN],
