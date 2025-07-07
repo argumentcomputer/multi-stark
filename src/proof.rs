@@ -51,15 +51,11 @@ pub fn prove<A>(
 where
     A: Air<SymbolicAirBuilder<Val>> + for<'a> Air<ProverConstraintFolder<'a, StarkConfig>>,
 {
-    let degree = trace.height();
-    let log_degree = log2_strict_usize(degree);
-
-    let log_quotient_degree = get_log_quotient_degree::<Val, A>(air, 0, public_values.len(), 0);
-    let quotient_degree = 1 << log_quotient_degree;
-
     let pcs: &Pcs = config.pcs();
     let mut challenger = config.initialise_challenger();
 
+    let degree = trace.height();
+    let log_degree = log2_strict_usize(degree);
     let trace_domain =
         <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
     let (trace_commit, trace_data) =
@@ -71,9 +67,9 @@ where
 
     let alpha: ExtVal = challenger.sample_algebra_element();
 
+    let log_quotient_degree = get_log_quotient_degree::<Val, A>(air, 0, public_values.len(), 0);
     let quotient_domain =
         trace_domain.create_disjoint_domain(1 << (log_degree + log_quotient_degree));
-
     let trace_on_quotient_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
         pcs,
         &trace_data,
@@ -93,7 +89,7 @@ where
     );
 
     let quotient_flat = RowMajorMatrix::new_col(quotient_values).flatten_to_base();
-
+    let quotient_degree = 1 << log_quotient_degree;
     let (quotient_commit, quotient_data) = <Pcs as PcsTrait<ExtVal, Challenger>>::commit_quotient(
         pcs,
         quotient_domain,

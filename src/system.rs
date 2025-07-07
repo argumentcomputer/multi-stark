@@ -8,9 +8,10 @@ use p3_commit::Pcs as PcsTrait;
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_uni_stark::{
-    ProverConstraintFolder, StarkGenericConfig, SymbolicAirBuilder, get_log_quotient_degree,
+    ProverConstraintFolder, StarkGenericConfig, SymbolicAirBuilder, get_max_constraint_degree,
+    get_symbolic_constraints,
 };
-use p3_util::log2_strict_usize;
+use p3_util::{log2_ceil_usize, log2_strict_usize};
 use std::collections::BTreeMap as Map;
 
 pub type Name = &'static str;
@@ -26,6 +27,9 @@ pub struct System<A> {
 
 pub struct Circuit<A> {
     pub air: A,
+    pub constraint_count: usize,
+    pub max_constraint_degree: usize,
+    pub preprocessed_width: usize,
     pub stage1_width: usize,
     pub stage2_width: usize,
 }
@@ -48,23 +52,38 @@ pub struct Proof {
     pub claim: Claim,
 }
 
-impl<A: BaseAirWithPublicValues<Val>> Circuit<A> {
+impl<A: BaseAirWithPublicValues<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
     pub fn is_well_formed(&self) -> Result<(), String> {
+        let io_size = self.air.num_public_values();
+        let preprocessed_width = self.air.preprocessed_trace().map_or(0, |mat| mat.width());
+        let constraint_count =
+            get_symbolic_constraints(&self.air, preprocessed_width, io_size).len();
+        let max_constraint_count =
+            get_max_constraint_degree(&self.air, preprocessed_width, io_size);
         let width = self.air.width();
         // As of now, only the minimum IO size is supported.
+        ensure!(io_size == MIN_IO_SIZE, "Incompatible IO size");
         ensure!(
-            self.air.num_public_values() == MIN_IO_SIZE,
-            "Incompatible IO size"
+            self.constraint_count == constraint_count,
+            "Incompatible constraint count"
         );
         ensure!(
-            self.stage1_width + self.stage2_width == width,
+            self.max_constraint_degree == max_constraint_count,
+            "Incompatible constraint degree"
+        );
+        ensure!(
+            self.preprocessed_width == preprocessed_width,
+            "Incompatible widths"
+        );
+        ensure!(
+            self.stage1_width + self.stage2_width + self.preprocessed_width == width,
             "Incompatible widths"
         );
         Ok(())
     }
 }
 
-impl<A: BaseAirWithPublicValues<Val>> System<A> {
+impl<A: BaseAirWithPublicValues<Val> + Air<SymbolicAirBuilder<Val>>> System<A> {
     pub fn is_well_formed(&self) -> Result<(), String> {
         ensure!(
             self.circuits.len() == self.circuit_names.len(),
@@ -81,39 +100,21 @@ impl<A: BaseAirWithPublicValues<Val>> System<A> {
     }
 }
 
-impl<
-    A: BaseAirWithPublicValues<Val>
-        + Air<SymbolicAirBuilder<Val>>
-        + for<'a> Air<ProverConstraintFolder<'a, StarkConfig>>,
-> System<A>
+impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, StarkConfig>>>
+    System<A>
 {
-    #[allow(unused_variables)]
-    #[allow(unused_mut)]
     pub fn prove(&self, config: &StarkConfig, claim: Claim, witness: SystemWitness) -> Proof {
         // initialize pcs and challenger
         let pcs = config.pcs();
         let mut challenger = config.initialise_challenger();
-        // compute domains for all circuits
+        // commit to stage 1 traces
+        let mut traces_data = vec![];
         let mut stage2_traces = vec![];
         let mut log_degrees = vec![];
-        for (circuit, witness) in self.circuits.iter().zip(witness.circuits.into_iter()) {
-            let air = &circuit.air;
+        for witness in witness.circuits.into_iter() {
             let trace = witness.stage1;
-            // TODO: allow preprocessed tables
-            let preprocessed_width = 0;
-            // TODO: perhaps implement zero-knowledge. Although the better idea might be
-            // to get zero-knowledge through the compression SNARK.
-            let is_zk = 0;
-
             let degree = trace.height();
             let log_degree = log2_strict_usize(degree);
-            let log_quotient_degree = get_log_quotient_degree::<Val, A>(
-                air,
-                preprocessed_width,
-                air.num_public_values(),
-                is_zk,
-            );
-            let quotient_degree = 1 << log_quotient_degree;
             let trace_domain =
                 <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
             let (trace_commit, trace_data) =
@@ -122,6 +123,7 @@ impl<
             challenger.observe(Val::from_u8(log_degree as u8));
             challenger.observe(trace_commit);
 
+            traces_data.push(trace_data);
             stage2_traces.push(witness.stage2);
             log_degrees.push(log_degree);
         }
@@ -133,13 +135,19 @@ impl<
         // TODO: implement stage 2
 
         // observe the claim
-        challenger.observe(Val::from_usize(
-            *self.circuit_names.get(claim.circuit_name).unwrap(),
-        ));
+        let circuit_index = Val::from_usize(*self.circuit_names.get(claim.circuit_name).unwrap());
+        challenger.observe(circuit_index);
         challenger.observe_slice(&claim.args);
 
         // generate constraint challenge
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();
+
+        for circuit in self.circuits.iter() {
+            let air = &circuit.air;
+            let log_quotient_degree = log2_ceil_usize(circuit.max_constraint_degree.max(2) - 1);
+            let quotient_degree = 1 << log_quotient_degree;
+        }
+
         todo!()
     }
 
