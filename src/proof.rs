@@ -32,14 +32,12 @@ type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
 pub struct Commitments {
     pub trace: Commitment,
     pub quotient_chunks: Commitment,
-    pub random: Option<Commitment>,
 }
 
 pub struct OpenedValues {
     pub trace_local: Vec<ExtVal>,
     pub trace_next: Vec<ExtVal>,
     pub quotient_chunks: Vec<Vec<ExtVal>>,
-    pub random: Option<Vec<ExtVal>>,
 }
 
 pub fn prove<A>(
@@ -101,7 +99,6 @@ where
     let commitments = Commitments {
         trace: trace_commit,
         quotient_chunks: quotient_commit,
-        random: None,
     };
 
     let zeta: ExtVal = challenger.sample_algebra_element();
@@ -123,12 +120,10 @@ where
         .iter()
         .map(|v| v[0].clone())
         .collect();
-    let random = None;
     let opened_values = OpenedValues {
         trace_local,
         trace_next,
         quotient_chunks,
-        random,
     };
     Proof {
         commitments,
@@ -257,11 +252,6 @@ where
         })
         .collect::<Vec<_>>();
 
-    ensure!(
-        opened_values.random.is_none() && commitments.random.is_none(),
-        VerificationError::RandomizationError
-    );
-
     let air_width = A::width(air);
     let valid_shape = opened_values.trace_local.len() == air_width
         && opened_values.trace_next.len() == air_width
@@ -269,12 +259,7 @@ where
         && opened_values
             .quotient_chunks
             .iter()
-            .all(|qc| qc.len() == <ExtVal as BasedVectorSpace<Val>>::DIMENSION)
-        && if let Some(r_comm) = &opened_values.random {
-            r_comm.len() == <ExtVal as BasedVectorSpace<Val>>::DIMENSION
-        } else {
-            true
-        };
+            .all(|qc| qc.len() == <ExtVal as BasedVectorSpace<Val>>::DIMENSION);
     ensure!(valid_shape, VerificationError::InvalidProofShape);
 
     challenger.observe(Val::from_usize(proof.degree_bits));
