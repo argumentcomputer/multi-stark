@@ -4,7 +4,7 @@ use crate::{
 };
 use p3_air::{Air, BaseAirWithPublicValues};
 use p3_challenger::{CanObserve, FieldChallenger};
-use p3_commit::{Pcs as PcsTrait, PolynomialSpace};
+use p3_commit::{OpenedValues, Pcs as PcsTrait, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
@@ -36,9 +36,7 @@ pub struct Circuit<A> {
 }
 
 pub struct CircuitWitness {
-    pub stage1: RowMajorMatrix<Val>,
-    // TODO use `ExtVal` instead of `Val`
-    pub stage2: RowMajorMatrix<Val>,
+    pub trace: RowMajorMatrix<Val>,
 }
 
 pub struct SystemWitness {
@@ -50,25 +48,19 @@ pub struct Claim {
     pub args: Vec<Val>,
 }
 
-pub struct OpenedValues {
-    pub trace_local: Vec<ExtVal>,
-    pub trace_next: Vec<ExtVal>,
-    pub quotient_chunks: Vec<Vec<ExtVal>>,
-    pub degree_bits: usize,
-}
-
 type Commitment = <Pcs as PcsTrait<ExtVal, Challenger>>::Commitment;
 type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
 
 pub struct Commitments {
-    pub trace: Commitment,
+    // TODO add stage 2
+    pub stage1_trace: Commitment,
     pub quotient_chunks: Commitment,
 }
 
 pub struct Proof {
     pub claim: Claim,
     pub commitments: Commitments,
-    pub opened_values: Vec<OpenedValues>,
+    pub opened_values: OpenedValues<ExtVal>,
     pub opening_proof: PcsProof,
 }
 
@@ -127,41 +119,31 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
         // initialize pcs and challenger
         let pcs = config.pcs();
         let mut challenger = config.initialise_challenger();
+
         // commit to stage 1 traces
-        let mut stage1_info = vec![];
-        let mut stage2_traces = vec![];
-        for witness in witness.circuits.into_iter() {
-            let trace = witness.stage1;
+        let mut stage1_log_degrees = vec![];
+        let evaluations = witness.circuits.into_iter().map(|witness| {
+            let trace = witness.trace;
             let degree = trace.height();
             let log_degree = log2_strict_usize(degree);
             let trace_domain =
                 <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
-            let (trace_commit, trace_data) =
-                <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, [(trace_domain, trace)]);
-            stage2_traces.push(witness.stage2);
-            stage1_info.push((log_degree, trace_domain, trace_data));
-            challenger.observe(Val::from_u8(log_degree as u8));
-            challenger.observe(trace_commit);
-        }
+            stage1_log_degrees.push(log_degree);
+            (trace_domain, trace)
+        });
+        let (stage1_trace_commit, stage1_trace_data) =
+            <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
+        // TODO: do we have to observe the log_degrees?
+        challenger.observe(stage1_trace_commit);
+
         // generate lookup challenges
         // TODO use `ExtVal` instead of `Val`
         let lookup_argument_challenge: Val = challenger.sample_algebra_element();
         challenger.observe_algebra_element(lookup_argument_challenge);
         let fingerprint_challenge: Val = challenger.sample_algebra_element();
         challenger.observe_algebra_element(fingerprint_challenge);
-        // commit to stage 2 traces
-        let mut stage2_info = vec![];
-        for trace in stage2_traces.into_iter() {
-            let degree = trace.height();
-            let log_degree = log2_strict_usize(degree);
-            let trace_domain =
-                <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
-            let (trace_commit, trace_data) =
-                <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, [(trace_domain, trace)]);
-            stage2_info.push((log_degree, trace_domain, trace_data));
-            challenger.observe(Val::from_u8(log_degree as u8));
-            challenger.observe(trace_commit);
-        }
+        // TODO commit to stage 2 traces
+
         // observe the claim
         let circuit_index = Val::from_usize(*self.circuit_names.get(claim.circuit_name).unwrap());
         challenger.observe(circuit_index);
@@ -174,77 +156,89 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
         // generate constraint challenge
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();
 
-        // TODO add stage2 traces
-        let mut quotient_info = vec![];
-        for (circuit, (log_degree, trace_domain, trace_data)) in
-            self.circuits.iter().zip(stage1_info.iter())
-        {
-            let air = &circuit.air;
-            // the quotient degree is at most the maximum degree of the constraint minus 1, to
-            // account for the zerofier, times the degree of the trace. It is padded to a power of two.
-            let quotient_degree = (circuit.max_constraint_degree.max(2) - 1).next_power_of_two();
-            let log_quotient_degree = quotient_degree.trailing_zeros() as usize;
-            let quotient_domain =
-                trace_domain.create_disjoint_domain(1 << (log_degree + log_quotient_degree));
-            let trace_on_quotient_domain =
-                <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
+        // commit to evaluations of the quotient polynomials
+        let mut quotient_degrees = vec![];
+        let quotient_evaluations = self
+            .circuits
+            .iter()
+            .zip(stage1_log_degrees.iter())
+            .enumerate()
+            .flat_map(|(idx, (circuit, log_degree))| {
+                let air = &circuit.air;
+                // quotient degree is at most 1 less than the max degree, padded to a power of two
+                let quotient_degree =
+                    (circuit.max_constraint_degree.max(2) - 1).next_power_of_two();
+                quotient_degrees.push(quotient_degree);
+                let log_quotient_degree = quotient_degree.trailing_zeros() as usize;
+                let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
                     pcs,
-                    &trace_data,
-                    0,
-                    quotient_domain,
+                    1 << log_degree,
                 );
-            let quotient_values = quotient_values(
-                air,
-                &public_values,
-                *trace_domain,
-                quotient_domain,
-                trace_on_quotient_domain,
-                constraint_challenge,
-                circuit.constraint_count,
-            );
-            let quotient_flat = RowMajorMatrix::new_col(quotient_values).flatten_to_base();
-            let (quotient_commit, quotient_data) =
-                <Pcs as PcsTrait<ExtVal, Challenger>>::commit_quotient(
-                    pcs,
+                let quotient_domain =
+                    trace_domain.create_disjoint_domain(1 << (log_degree + log_quotient_degree));
+                // TODO add stage 2 traces
+                let stage1_trace_on_quotient_domain =
+                    <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
+                        pcs,
+                        &stage1_trace_data,
+                        idx,
+                        quotient_domain,
+                    );
+                // compute the quotient values which are elements of the extension field and flatten it to the base field
+                let quotient_values = quotient_values(
+                    air,
+                    &public_values,
+                    trace_domain,
                     quotient_domain,
-                    quotient_flat,
-                    quotient_degree,
+                    stage1_trace_on_quotient_domain,
+                    constraint_challenge,
+                    circuit.constraint_count,
                 );
-            challenger.observe(quotient_commit);
-            quotient_info.push((quotient_degree, quotient_data));
-        }
-        let zeta: ExtVal = challenger.sample_algebra_element();
-        let (opening_data, opening_proof) = {
-            let mut rounds = vec![];
-            for ((quotient_degree, quotient_data), (_, trace_domain, trace_data)) in
-                quotient_info.iter().zip(stage1_info.iter())
-            {
-                let zeta_next = trace_domain.next_point(zeta).unwrap();
-                let round1 = (trace_data, vec![vec![zeta, zeta_next]]);
-                let round2 = (quotient_data, vec![vec![zeta]; *quotient_degree]);
-                rounds.push(round1);
-                rounds.push(round2);
-            }
-            pcs.open(rounds, &mut challenger)
-        };
-        let mut opened_values = vec![];
-        for (chunk, info) in opening_data.chunks_exact(2).zip(quotient_info.iter()) {
-            let trace_local = chunk[0][0][0].clone();
-            let trace_next = chunk[0][0][1].clone();
-            let quotient_chunks = chunk[1].iter().map(|v| v[0].clone()).collect::<Vec<_>>();
-            let degree_bits = info.0;
-            opened_values.push(OpenedValues {
-                trace_local,
-                trace_next,
-                quotient_chunks,
-                degree_bits,
+                let quotient_flat =
+                    RowMajorMatrix::new_col(quotient_values).flatten_to_base::<Val>();
+                // note that, in general, the quotients have a degree that is greater than the trace polynomials,
+                // so for FRI to work so we must split into smaller polynomials
+                let quotient_sub_evaluations =
+                    quotient_domain.split_evals(quotient_degree, quotient_flat);
+                let quotient_sub_domains = quotient_domain.split_domains(quotient_degree);
+                quotient_sub_domains
+                    .into_iter()
+                    .zip(quotient_sub_evaluations)
             });
-        }
+        let (quotient_commit, quotient_data) =
+            <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, quotient_evaluations);
+        challenger.observe(quotient_commit);
+
+        let commitments = Commitments {
+            stage1_trace: stage1_trace_commit,
+            quotient_chunks: quotient_commit,
+        };
+
+        let zeta: ExtVal = challenger.sample_algebra_element();
+        let mut round1_openings = vec![];
+        let mut round2_openings = vec![];
+        stage1_log_degrees
+            .iter()
+            .zip(quotient_degrees.iter())
+            .for_each(|(log_degree, quotient_degree)| {
+                let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
+                    pcs,
+                    1 << log_degree,
+                );
+                let zeta_next = trace_domain.next_point(zeta).unwrap();
+                round1_openings.push(vec![zeta, zeta_next]);
+                round2_openings.extend(vec![vec![zeta]; *quotient_degree]);
+            });
+        let rounds = vec![
+            (&stage1_trace_data, round1_openings),
+            (&quotient_data, round2_openings),
+        ];
+        let (opened_values, opening_proof) = pcs.open(rounds, &mut challenger);
         Proof {
             claim,
+            commitments,
             opened_values,
             opening_proof,
-            commitments: todo!(),
         }
     }
 
