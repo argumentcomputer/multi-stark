@@ -50,8 +50,26 @@ pub struct Claim {
     pub args: Vec<Val>,
 }
 
+pub struct OpenedValues {
+    pub trace_local: Vec<ExtVal>,
+    pub trace_next: Vec<ExtVal>,
+    pub quotient_chunks: Vec<Vec<ExtVal>>,
+    pub degree_bits: usize,
+}
+
+type Commitment = <Pcs as PcsTrait<ExtVal, Challenger>>::Commitment;
+type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
+
+pub struct Commitments {
+    pub trace: Commitment,
+    pub quotient_chunks: Commitment,
+}
+
 pub struct Proof {
     pub claim: Claim,
+    pub commitments: Commitments,
+    pub opened_values: Vec<OpenedValues>,
+    pub opening_proof: PcsProof,
 }
 
 impl<A: BaseAirWithPublicValues<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
@@ -157,6 +175,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();
 
         // TODO add stage2 traces
+        let mut quotient_info = vec![];
         for (circuit, (log_degree, trace_domain, trace_data)) in
             self.circuits.iter().zip(stage1_info.iter())
         {
@@ -192,8 +211,41 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
                     quotient_degree,
                 );
             challenger.observe(quotient_commit);
+            quotient_info.push((quotient_degree, quotient_data));
         }
-        todo!()
+        let zeta: ExtVal = challenger.sample_algebra_element();
+        let (opening_data, opening_proof) = {
+            let mut rounds = vec![];
+            for ((quotient_degree, quotient_data), (_, trace_domain, trace_data)) in
+                quotient_info.iter().zip(stage1_info.iter())
+            {
+                let zeta_next = trace_domain.next_point(zeta).unwrap();
+                let round1 = (trace_data, vec![vec![zeta, zeta_next]]);
+                let round2 = (quotient_data, vec![vec![zeta]; *quotient_degree]);
+                rounds.push(round1);
+                rounds.push(round2);
+            }
+            pcs.open(rounds, &mut challenger)
+        };
+        let mut opened_values = vec![];
+        for (chunk, info) in opening_data.chunks_exact(2).zip(quotient_info.iter()) {
+            let trace_local = chunk[0][0][0].clone();
+            let trace_next = chunk[0][0][1].clone();
+            let quotient_chunks = chunk[1].iter().map(|v| v[0].clone()).collect::<Vec<_>>();
+            let degree_bits = info.0;
+            opened_values.push(OpenedValues {
+                trace_local,
+                trace_next,
+                quotient_chunks,
+                degree_bits,
+            });
+        }
+        Proof {
+            claim,
+            opened_values,
+            opening_proof,
+            commitments: todo!(),
+        }
     }
 
     #[allow(unused_variables)]
