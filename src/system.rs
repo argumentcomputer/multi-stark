@@ -4,13 +4,17 @@ use crate::{
 };
 use p3_air::{Air, BaseAirWithPublicValues};
 use p3_challenger::{CanObserve, FieldChallenger};
-use p3_commit::{OpenedValues, OpenedValuesForRound, Pcs as PcsTrait, PolynomialSpace};
+use p3_commit::{OpenedValuesForRound, Pcs as PcsTrait, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
-use p3_matrix::{Matrix, dense::RowMajorMatrix};
+use p3_matrix::{
+    Matrix,
+    dense::{RowMajorMatrix, RowMajorMatrixView},
+    stack::VerticalPair,
+};
 use p3_maybe_rayon::prelude::*;
 use p3_uni_stark::{
     Domain, PcsError, ProverConstraintFolder, StarkGenericConfig, SymbolicAirBuilder,
-    get_max_constraint_degree, get_symbolic_constraints,
+    VerifierConstraintFolder, get_max_constraint_degree, get_symbolic_constraints,
 };
 use p3_util::log2_strict_usize;
 use std::{collections::BTreeMap as Map, iter::once};
@@ -163,8 +167,11 @@ impl<A: BaseAirWithPublicValues<Val> + Air<SymbolicAirBuilder<Val>>> System<A> {
     }
 }
 
-impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, StarkConfig>>>
-    System<A>
+impl<
+    A: BaseAirWithPublicValues<Val>
+        + for<'a> Air<ProverConstraintFolder<'a, StarkConfig>>
+        + for<'a> Air<VerifierConstraintFolder<'a, StarkConfig>>,
+> System<A>
 {
     pub fn prove(&self, config: &StarkConfig, claim: Claim, witness: SystemWitness) -> Proof {
         // initialize pcs and challenger
@@ -315,7 +322,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
             claim,
             log_degrees,
         } = proof;
-        let num_chips = self.circuits.len();
+        let num_circuits = self.circuits.len();
 
         // check the claim and proof shape
         let circuit_index = Val::from_usize(
@@ -326,7 +333,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
         );
         // stage 1 round
         ensure!(
-            stage1_opened_values.len() == num_chips,
+            stage1_opened_values.len() == num_circuits,
             VerificationError::InvalidProofShape(1)
         );
         for (i, circuit) in self.circuits.iter().enumerate() {
@@ -355,6 +362,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
             quotient_opened_values.len() == quotient_size,
             VerificationError::InvalidProofShape(4)
         );
+        #[allow(clippy::needless_range_loop)]
         for i in 0..quotient_size {
             // zeta
             let num_openings = 1;
@@ -451,6 +459,83 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
         ];
         pcs.verify(coms_to_verify, opening_proof, &mut challenger)
             .map_err(VerificationError::InvalidOpeningArgument)?;
+
+        // use the opened values to compute the composition polynomial for each circuit
+        // and check that the evaluation of the composition polynomial equals the
+        // product of the zerofier with the quotient
+        let mut last_quotient_i = 0;
+        for i in 0..num_circuits {
+            let circuit = &self.circuits[i];
+            let degree = 1 << log_degrees[i];
+            let quotient_degree = quotient_degrees[i];
+            let row = &stage1_opened_values[i][0];
+            let next_row = &stage1_opened_values[i][0];
+            let quotient_chunks = quotient_opened_values
+                [last_quotient_i..last_quotient_i + quotient_degree]
+                .iter()
+                .map(|values| &values[0]);
+            last_quotient_i += quotient_degree;
+
+            // compute the composition polynomial evaluation
+            let trace_domain =
+                <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
+            let sels = trace_domain.selectors_at_point(zeta);
+            let main = VerticalPair::new(
+                RowMajorMatrixView::new_row(row),
+                RowMajorMatrixView::new_row(next_row),
+            );
+            let mut folder = VerifierConstraintFolder {
+                main,
+                public_values: &public_values,
+                is_first_row: sels.is_first_row,
+                is_last_row: sels.is_last_row,
+                is_transition: sels.is_transition,
+                alpha: constraint_challenge,
+                accumulator: ExtVal::ZERO,
+            };
+            circuit.air.eval(&mut folder);
+            let composition_polynomial = folder.accumulator;
+            // compute the quotient evaluation
+            let quotient_domain = trace_domain.create_disjoint_domain(degree * quotient_degree);
+            let quotient_chunks_domains = quotient_domain.split_domains(quotient_degree);
+            let zps = quotient_chunks_domains
+                .iter()
+                .enumerate()
+                .map(|(i, domain)| {
+                    quotient_chunks_domains
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != i)
+                        .map(|(_, other_domain)| {
+                            other_domain.vanishing_poly_at_point(zeta)
+                                * other_domain
+                                    .vanishing_poly_at_point(domain.first_point())
+                                    .inverse()
+                        })
+                        .product::<ExtVal>()
+                })
+                .collect::<Vec<_>>();
+            let quotient = quotient_chunks
+                .enumerate()
+                .map(|(ch_i, ch)| {
+                    zps[ch_i]
+                        * ch.iter()
+                            .enumerate()
+                            .map(|(e_i, &c)| {
+                                <ExtVal as BasedVectorSpace<Val>>::ith_basis_element(e_i).unwrap()
+                                    * c
+                            })
+                            .sum::<ExtVal>()
+                })
+                .sum::<ExtVal>();
+
+            // finally, check that the composition polynomial
+            // is divisible by the quotient polynomial
+            ensure!(
+                composition_polynomial * sels.inv_vanishing == quotient,
+                VerificationError::OodEvaluationMismatch
+            );
+        }
 
         Ok(())
     }
