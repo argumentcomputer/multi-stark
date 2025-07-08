@@ -9,7 +9,7 @@ use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 use p3_uni_stark::{
-    Domain, ProverConstraintFolder, StarkGenericConfig, SymbolicAirBuilder,
+    Domain, PcsError, ProverConstraintFolder, StarkGenericConfig, SymbolicAirBuilder,
     get_max_constraint_degree, get_symbolic_constraints,
 };
 use p3_util::log2_strict_usize;
@@ -55,6 +55,12 @@ pub struct Circuit<A> {
     pub stage2_width: usize,
 }
 
+impl<A> Circuit<A> {
+    pub fn width(&self) -> usize {
+        self.stage1_width + self.stage2_width + self.preprocessed_width
+    }
+}
+
 pub struct CircuitWitness {
     pub trace: RowMajorMatrix<Val>,
 }
@@ -82,6 +88,15 @@ pub struct Proof {
     pub commitments: Commitments,
     pub opened_values: OpenedValues<ExtVal>,
     pub opening_proof: PcsProof,
+    pub stage1_log_degrees: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub enum VerificationError<PcsErr> {
+    InvalidClaim,
+    InvalidProofShape(u32),
+    InvalidOpeningArgument(PcsErr),
+    OodEvaluationMismatch,
 }
 
 impl<A: BaseAirWithPublicValues<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
@@ -125,10 +140,7 @@ impl<A: BaseAirWithPublicValues<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> 
             self.preprocessed_width == preprocessed_width,
             "Incompatible widths"
         );
-        ensure!(
-            self.stage1_width + self.stage2_width + self.preprocessed_width == width,
-            "Incompatible widths"
-        );
+        ensure!(self.width() == width, "Incompatible widths");
         Ok(())
     }
 }
@@ -206,8 +218,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
                 // quotient degree is at most 1 less than the max degree, padded to a power of two
                 let quotient_degree =
                     (circuit.max_constraint_degree.max(2) - 1).next_power_of_two();
-                quotient_degrees.push(quotient_degree);
-                let log_quotient_degree = quotient_degree.trailing_zeros() as usize;
+                let log_quotient_degree = log2_strict_usize(quotient_degree);
                 let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
                     pcs,
                     1 << log_degree,
@@ -239,6 +250,8 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
                 let quotient_sub_evaluations =
                     quotient_domain.split_evals(quotient_degree, quotient_flat);
                 let quotient_sub_domains = quotient_domain.split_domains(quotient_degree);
+                // need to save the quotient degree for later
+                quotient_degrees.push(quotient_degree);
                 quotient_sub_domains
                     .into_iter()
                     .zip(quotient_sub_evaluations)
@@ -272,16 +285,115 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
             (&quotient_data, round2_openings),
         ];
         let (opened_values, opening_proof) = pcs.open(rounds, &mut challenger);
+        let stage1_log_degrees = stage1_log_degrees.into_iter().map(|n| n as u8).collect();
         Proof {
             claim,
             commitments,
             opened_values,
             opening_proof,
+            stage1_log_degrees,
         }
     }
 
-    #[allow(unused_variables)]
-    pub fn verify(&self, proof: Proof) {}
+    pub fn verify(
+        &self,
+        config: &StarkConfig,
+        proof: &Proof,
+    ) -> Result<(), VerificationError<PcsError<StarkConfig>>> {
+        let Proof {
+            commitments,
+            opened_values,
+            opening_proof,
+            claim,
+            stage1_log_degrees,
+        } = proof;
+        let num_chips = self.circuits.len();
+
+        // check the claim and proof shape
+        let circuit_index = Val::from_usize(
+            *self
+                .circuit_names
+                .get(claim.circuit_name)
+                .ok_or(VerificationError::InvalidClaim)?,
+        );
+        // TODO missing stage 2 round
+        let num_rounds = 2;
+        ensure!(
+            opened_values.len() == num_rounds,
+            VerificationError::InvalidProofShape(0)
+        );
+        // stage 1 round
+        let stage1_round = 0;
+        ensure!(
+            opened_values[stage1_round].len() == num_chips,
+            VerificationError::InvalidProofShape(1)
+        );
+        for (i, circuit) in self.circuits.iter().enumerate() {
+            // zeta and zeta_next
+            let num_openings = 2;
+            ensure!(
+                opened_values[stage1_round][i].len() == num_openings,
+                VerificationError::InvalidProofShape(2)
+            );
+            for j in 0..num_openings {
+                ensure!(
+                    opened_values[stage1_round][i][j].len() == circuit.width(),
+                    VerificationError::InvalidProofShape(3)
+                );
+            }
+        }
+        // TODO missing stage 2 round
+        // quotient round
+        let quotient_round = 1;
+        let mut quotient_degrees = vec![];
+        for circuit in self.circuits.iter() {
+            let quotient_degree = (circuit.max_constraint_degree.max(2) - 1).next_power_of_two();
+            quotient_degrees.push(quotient_degree);
+        }
+        let quotient_size: usize = quotient_degrees.iter().sum();
+        ensure!(
+            opened_values[quotient_round].len() == quotient_size,
+            VerificationError::InvalidProofShape(4)
+        );
+        for i in 0..quotient_size {
+            // zeta
+            let num_openings = 1;
+            ensure!(
+                opened_values[quotient_round][i].len() == num_openings,
+                VerificationError::InvalidProofShape(2)
+            );
+            ensure!(
+                opened_values[quotient_round][i][0].len()
+                    == <ExtVal as BasedVectorSpace<Val>>::DIMENSION,
+                VerificationError::InvalidProofShape(3)
+            );
+        }
+
+        // initialize pcs and challenger
+        let pcs = config.pcs();
+        let mut challenger = config.initialise_challenger();
+
+        // observe stage1 commitment
+        challenger.observe(commitments.stage1_trace);
+
+        // generate lookup challenges
+        // TODO use `ExtVal` instead of `Val`
+        let lookup_argument_challenge: Val = challenger.sample_algebra_element();
+        challenger.observe_algebra_element(lookup_argument_challenge);
+        let fingerprint_challenge: Val = challenger.sample_algebra_element();
+        challenger.observe_algebra_element(fingerprint_challenge);
+        // TODO commit to stage 2 traces
+
+        // observe the claim
+        challenger.observe(circuit_index);
+        challenger.observe_slice(&claim.args);
+        // construct the accumulator from the claim
+        let claim_iter = claim.args.iter().rev().copied().chain(once(circuit_index));
+        let init_acc = fingerprint_reverse(fingerprint_challenge, claim_iter);
+        let public_values = vec![init_acc, lookup_argument_challenge, fingerprint_challenge];
+
+        Ok(())
+    }
 }
 
 // Compute a fingerprint of the coefficients in reverse using Horner's method:
@@ -406,7 +518,8 @@ mod tests {
                         let local = main.row_slice(0).unwrap();
                         let expr1 = local[0] * local[0] + local[1] * local[1];
                         let expr2 = local[2] * local[2];
-                        builder.assert_eq(expr1, expr2);
+                        // this extra `local[0]` multiplication is there to increase the maximum constraint degree
+                        builder.assert_eq(local[0] * expr1, local[0] * expr2);
                     }
                     CS::Complex => {
                         let main = builder.main();
@@ -460,6 +573,7 @@ mod tests {
             proof_of_work_bits: 0,
         };
         let config = new_stark_config(fri_parameters);
-        system.prove(&config, dummy_claim, witness);
+        let proof = system.prove(&config, dummy_claim, witness);
+        system.verify(&config, &proof).unwrap();
     }
 }
