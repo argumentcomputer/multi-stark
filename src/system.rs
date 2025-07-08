@@ -26,6 +26,26 @@ pub struct System<A> {
     pub circuit_names: Map<Name, usize>,
 }
 
+impl<A> System<A> {
+    pub fn new<Iter: Iterator<Item = (Name, Circuit<A>)>>(iter: Iter) -> Self {
+        let mut circuits = vec![];
+        let mut circuit_names = Map::new();
+        iter.for_each(|(name, circuit)| {
+            let idx = circuits.len();
+            if let Some(prev_idx) = circuit_names.insert(name, idx) {
+                eprintln!("Warning: circuit of name `{name}` was redefined");
+                circuits[prev_idx] = circuit;
+            } else {
+                circuits.push(circuit);
+            }
+        });
+        Self {
+            circuits,
+            circuit_names,
+        }
+    }
+}
+
 pub struct Circuit<A> {
     pub air: A,
     pub constraint_count: usize,
@@ -65,6 +85,24 @@ pub struct Proof {
 }
 
 impl<A: BaseAirWithPublicValues<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
+    pub fn from_air_single_stage(air: A) -> Result<Self, String> {
+        let io_size = air.num_public_values();
+        ensure!(io_size == MIN_IO_SIZE, "Incompatible IO size");
+        let preprocessed_width = air.preprocessed_trace().map_or(0, |mat| mat.width());
+        let constraint_count = get_symbolic_constraints(&air, preprocessed_width, io_size).len();
+        let max_constraint_degree = get_max_constraint_degree(&air, preprocessed_width, io_size);
+        let stage1_width = air.width() - preprocessed_width;
+        let stage2_width = 0;
+        Ok(Self {
+            air,
+            max_constraint_degree,
+            preprocessed_width,
+            constraint_count,
+            stage1_width,
+            stage2_width,
+        })
+    }
+
     pub fn is_well_formed(&self) -> Result<(), String> {
         let io_size = self.air.num_public_values();
         let preprocessed_width = self.air.preprocessed_trace().map_or(0, |mat| mat.width());
@@ -151,7 +189,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
         // construct the accumulator from the claim
         let claim_iter = claim.args.iter().rev().copied().chain(once(circuit_index));
         let init_acc = fingerprint_reverse(fingerprint_challenge, claim_iter);
-        let public_values = vec![lookup_argument_challenge, fingerprint_challenge, init_acc];
+        let public_values = vec![init_acc, lookup_argument_challenge, fingerprint_challenge];
 
         // generate constraint challenge
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();
@@ -332,4 +370,96 @@ where
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use p3_air::{AirBuilderWithPublicValues, BaseAir};
+
+    use crate::types::{FriParameters, new_stark_config};
+
+    use super::*;
+    #[test]
+    fn multi_stark_test() {
+        enum CS {
+            Pythagorean,
+            Complex,
+        }
+        impl<F> BaseAir<F> for CS {
+            fn width(&self) -> usize {
+                match self {
+                    CS::Pythagorean => 3,
+                    CS::Complex => 6,
+                }
+            }
+        }
+        impl<F> BaseAirWithPublicValues<F> for CS {
+            fn num_public_values(&self) -> usize {
+                MIN_IO_SIZE
+            }
+        }
+        impl<AB: AirBuilderWithPublicValues> Air<AB> for CS {
+            fn eval(&self, builder: &mut AB) {
+                match self {
+                    CS::Pythagorean => {
+                        let main = builder.main();
+                        let local = main.row_slice(0).unwrap();
+                        let expr1 = local[0] * local[0] + local[1] * local[1];
+                        let expr2 = local[2] * local[2];
+                        builder.assert_eq(expr1, expr2);
+                    }
+                    CS::Complex => {
+                        let main = builder.main();
+                        let local = main.row_slice(0).unwrap();
+                        // (a + ib)(c + id) = (ac - bd) + i(ad + bc)
+                        let expr1 = local[0] * local[2] - local[1] * local[3];
+                        let expr2 = local[4];
+                        let expr3 = local[0] * local[3] + local[1] * local[2];
+                        let expr4 = local[5];
+                        builder.assert_eq(expr1, expr2);
+                        builder.assert_eq(expr3, expr4);
+                    }
+                }
+            }
+        }
+        let pythagorean_circuit = Circuit::from_air_single_stage(CS::Pythagorean).unwrap();
+        let complex_circuit = Circuit::from_air_single_stage(CS::Complex).unwrap();
+        let system = System::new(
+            [
+                ("pythagorean", pythagorean_circuit),
+                ("complex", complex_circuit),
+            ]
+            .into_iter(),
+        );
+        let f = Val::from_u32;
+        let witness = SystemWitness {
+            circuits: vec![
+                CircuitWitness {
+                    trace: RowMajorMatrix::new(
+                        [3, 4, 5, 5, 12, 13, 8, 15, 17, 7, 24, 25].map(f).to_vec(),
+                        3,
+                    ),
+                },
+                CircuitWitness {
+                    trace: RowMajorMatrix::new(
+                        [4, 2, 3, 1, 10, 10, 3, 2, 5, 1, 13, 13].map(f).to_vec(),
+                        6,
+                    ),
+                },
+            ],
+        };
+        // lookup arguments not yet implemented so the claim doesn't matter
+        let dummy_claim = Claim {
+            circuit_name: "complex",
+            args: vec![],
+        };
+        let fri_parameters = FriParameters {
+            log_blowup: 1,
+            log_final_poly_len: 0,
+            num_queries: 64,
+            proof_of_work_bits: 0,
+        };
+        let config = new_stark_config(fri_parameters);
+        system.prove(&config, dummy_claim, witness);
+    }
 }
