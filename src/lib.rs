@@ -1,6 +1,7 @@
-pub mod proof;
+pub mod prover;
 pub mod system;
 pub mod types;
+pub mod verifier;
 
 #[macro_export]
 macro_rules! ensure {
