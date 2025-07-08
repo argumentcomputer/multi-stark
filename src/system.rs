@@ -4,7 +4,7 @@ use crate::{
 };
 use p3_air::{Air, BaseAirWithPublicValues};
 use p3_challenger::{CanObserve, FieldChallenger};
-use p3_commit::{OpenedValues, Pcs as PcsTrait, PolynomialSpace};
+use p3_commit::{OpenedValues, OpenedValuesForRound, Pcs as PcsTrait, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
@@ -86,9 +86,10 @@ pub struct Commitments {
 pub struct Proof {
     pub claim: Claim,
     pub commitments: Commitments,
-    pub opened_values: OpenedValues<ExtVal>,
+    pub log_degrees: Vec<u8>,
     pub opening_proof: PcsProof,
-    pub stage1_log_degrees: Vec<u8>,
+    pub stage1_opened_values: OpenedValuesForRound<ExtVal>,
+    pub quotient_opened_values: OpenedValuesForRound<ExtVal>,
 }
 
 #[derive(Debug)]
@@ -171,14 +172,14 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
         let mut challenger = config.initialise_challenger();
 
         // commit to stage 1 traces
-        let mut stage1_log_degrees = vec![];
+        let mut log_degrees = vec![];
         let evaluations = witness.circuits.into_iter().map(|witness| {
             let trace = witness.trace;
             let degree = trace.height();
             let log_degree = log2_strict_usize(degree);
             let trace_domain =
                 <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
-            stage1_log_degrees.push(log_degree);
+            log_degrees.push(log_degree);
             (trace_domain, trace)
         });
         let (stage1_trace_commit, stage1_trace_data) =
@@ -211,7 +212,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
         let quotient_evaluations = self
             .circuits
             .iter()
-            .zip(stage1_log_degrees.iter())
+            .zip(log_degrees.iter())
             .enumerate()
             .flat_map(|(idx, (circuit, log_degree))| {
                 let air = &circuit.air;
@@ -260,18 +261,18 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, quotient_evaluations);
         challenger.observe(quotient_commit);
 
+        // save the commitments
         let commitments = Commitments {
             stage1_trace: stage1_trace_commit,
             quotient_chunks: quotient_commit,
         };
 
+        // generate the out of domain point and prove polynomial evaluations
         let zeta: ExtVal = challenger.sample_algebra_element();
         let mut round1_openings = vec![];
         let mut round2_openings = vec![];
-        stage1_log_degrees
-            .iter()
-            .zip(quotient_degrees.iter())
-            .for_each(|(log_degree, quotient_degree)| {
+        log_degrees.iter().zip(quotient_degrees.iter()).for_each(
+            |(log_degree, quotient_degree)| {
                 let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
                     pcs,
                     1 << log_degree,
@@ -279,19 +280,25 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
                 let zeta_next = trace_domain.next_point(zeta).unwrap();
                 round1_openings.push(vec![zeta, zeta_next]);
                 round2_openings.extend(vec![vec![zeta]; *quotient_degree]);
-            });
+            },
+        );
         let rounds = vec![
             (&stage1_trace_data, round1_openings),
             (&quotient_data, round2_openings),
         ];
         let (opened_values, opening_proof) = pcs.open(rounds, &mut challenger);
-        let stage1_log_degrees = stage1_log_degrees.into_iter().map(|n| n as u8).collect();
+        let mut opened_values_iter = opened_values.into_iter();
+        let stage1_opened_values = opened_values_iter.next().unwrap();
+        let quotient_opened_values = opened_values_iter.next().unwrap();
+        debug_assert!(opened_values_iter.next().is_none());
+        let log_degrees = log_degrees.into_iter().map(|n| n as u8).collect();
         Proof {
             claim,
             commitments,
-            opened_values,
+            stage1_opened_values,
+            quotient_opened_values,
             opening_proof,
-            stage1_log_degrees,
+            log_degrees,
         }
     }
 
@@ -302,10 +309,11 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
     ) -> Result<(), VerificationError<PcsError<StarkConfig>>> {
         let Proof {
             commitments,
-            opened_values,
+            stage1_opened_values,
+            quotient_opened_values,
             opening_proof,
             claim,
-            stage1_log_degrees,
+            log_degrees,
         } = proof;
         let num_chips = self.circuits.len();
 
@@ -316,35 +324,27 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
                 .get(claim.circuit_name)
                 .ok_or(VerificationError::InvalidClaim)?,
         );
-        // TODO missing stage 2 round
-        let num_rounds = 2;
-        ensure!(
-            opened_values.len() == num_rounds,
-            VerificationError::InvalidProofShape(0)
-        );
         // stage 1 round
-        let stage1_round = 0;
         ensure!(
-            opened_values[stage1_round].len() == num_chips,
+            stage1_opened_values.len() == num_chips,
             VerificationError::InvalidProofShape(1)
         );
         for (i, circuit) in self.circuits.iter().enumerate() {
             // zeta and zeta_next
             let num_openings = 2;
             ensure!(
-                opened_values[stage1_round][i].len() == num_openings,
+                stage1_opened_values[i].len() == num_openings,
                 VerificationError::InvalidProofShape(2)
             );
             for j in 0..num_openings {
                 ensure!(
-                    opened_values[stage1_round][i][j].len() == circuit.width(),
+                    stage1_opened_values[i][j].len() == circuit.width(),
                     VerificationError::InvalidProofShape(3)
                 );
             }
         }
         // TODO missing stage 2 round
         // quotient round
-        let quotient_round = 1;
         let mut quotient_degrees = vec![];
         for circuit in self.circuits.iter() {
             let quotient_degree = (circuit.max_constraint_degree.max(2) - 1).next_power_of_two();
@@ -352,19 +352,18 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
         }
         let quotient_size: usize = quotient_degrees.iter().sum();
         ensure!(
-            opened_values[quotient_round].len() == quotient_size,
+            quotient_opened_values.len() == quotient_size,
             VerificationError::InvalidProofShape(4)
         );
         for i in 0..quotient_size {
             // zeta
             let num_openings = 1;
             ensure!(
-                opened_values[quotient_round][i].len() == num_openings,
+                quotient_opened_values[i].len() == num_openings,
                 VerificationError::InvalidProofShape(2)
             );
             ensure!(
-                opened_values[quotient_round][i][0].len()
-                    == <ExtVal as BasedVectorSpace<Val>>::DIMENSION,
+                quotient_opened_values[i][0].len() == <ExtVal as BasedVectorSpace<Val>>::DIMENSION,
                 VerificationError::InvalidProofShape(3)
             );
         }
@@ -391,6 +390,46 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
         let claim_iter = claim.args.iter().rev().copied().chain(once(circuit_index));
         let init_acc = fingerprint_reverse(fingerprint_challenge, claim_iter);
         let public_values = vec![init_acc, lookup_argument_challenge, fingerprint_challenge];
+        // TODO stage 2
+
+        // generate constraint challenge
+        let constraint_challenge: ExtVal = challenger.sample_algebra_element();
+
+        // observe quotient commitment
+        challenger.observe(commitments.quotient_chunks);
+
+        // generate out of domain points and verify the PCS opening
+        let zeta: ExtVal = challenger.sample_algebra_element();
+        // let stage1_trace_evaluations = vec![];
+        // let quotient_chunks_evaluations = vec![];
+        log_degrees.iter().zip(quotient_degrees.iter()).for_each(
+            |(log_degree, quotient_degree)| {
+                let log_quotient_degree = log2_strict_usize(*quotient_degree);
+                let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
+                    pcs,
+                    1 << log_degree,
+                );
+                let quotient_domain =
+                    trace_domain.create_disjoint_domain((1 << log_degree) << log_quotient_degree);
+                let quotient_chunks_domains = quotient_domain.split_domains(*quotient_degree);
+                let unshifted_quotient_chunks_domains = quotient_chunks_domains
+                    .iter()
+                    .map(|domain| {
+                        <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
+                            pcs,
+                            domain.size(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                // stage1_trace_evaluations.push((trace_domain, vec![(zeta, opened_values[0][i][0])]))
+            },
+        );
+        // let coms_to_verify = vec![
+        //     (commitments.stage1_trace, stage1_trace_evaluations),
+        //     (commitments.quotient_chunks, quotient_chunks_evaluations),
+        // ];
+        // pcs.verify(coms_to_verify, opening_proof, &mut challenger)
+        //     .map_err(VerificationError::InvalidOpeningArgument)?;
 
         Ok(())
     }

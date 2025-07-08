@@ -245,7 +245,7 @@ where
         trace_domain.create_disjoint_domain(1 << (degree_bits + log_quotient_degree));
     let quotient_chunks_domains = quotient_domain.split_domains(quotient_degree);
 
-    let randomized_quotient_chunks_domains = quotient_chunks_domains
+    let unshifted_quotient_chunks_domains = quotient_chunks_domains
         .iter()
         .map(|domain| {
             <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, domain.size())
@@ -286,7 +286,7 @@ where
         (
             commitments.quotient_chunks,
             zip_eq(
-                randomized_quotient_chunks_domains.iter(),
+                unshifted_quotient_chunks_domains.iter(),
                 &opened_values.quotient_chunks,
                 VerificationError::InvalidProofShape,
             )?
