@@ -400,10 +400,14 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
 
         // generate out of domain points and verify the PCS opening
         let zeta: ExtVal = challenger.sample_algebra_element();
-        // let stage1_trace_evaluations = vec![];
-        // let quotient_chunks_evaluations = vec![];
-        log_degrees.iter().zip(quotient_degrees.iter()).for_each(
-            |(log_degree, quotient_degree)| {
+        let mut stage1_trace_evaluations = vec![];
+        let mut quotient_chunks_evaluations = vec![];
+        let mut last_quotient_i = 0;
+        log_degrees
+            .iter()
+            .zip(quotient_degrees.iter())
+            .enumerate()
+            .for_each(|(i, (log_degree, quotient_degree))| {
                 let log_quotient_degree = log2_strict_usize(*quotient_degree);
                 let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
                     pcs,
@@ -421,15 +425,32 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, St
                         )
                     })
                     .collect::<Vec<_>>();
-                // stage1_trace_evaluations.push((trace_domain, vec![(zeta, opened_values[0][i][0])]))
-            },
-        );
-        // let coms_to_verify = vec![
-        //     (commitments.stage1_trace, stage1_trace_evaluations),
-        //     (commitments.quotient_chunks, quotient_chunks_evaluations),
-        // ];
-        // pcs.verify(coms_to_verify, opening_proof, &mut challenger)
-        //     .map_err(VerificationError::InvalidOpeningArgument)?;
+                let zeta_next = trace_domain.next_point(zeta).unwrap();
+                stage1_trace_evaluations.push((
+                    trace_domain,
+                    vec![
+                        (zeta, stage1_opened_values[i][0].clone()),
+                        (zeta_next, stage1_opened_values[i][1].clone()),
+                    ],
+                ));
+                let iter = unshifted_quotient_chunks_domains
+                    .into_iter()
+                    .zip(
+                        quotient_opened_values[last_quotient_i..last_quotient_i + quotient_degree]
+                            .iter(),
+                    )
+                    .map(|(domain, opened_values)| {
+                        (domain, vec![(zeta, opened_values[0].clone())])
+                    });
+                quotient_chunks_evaluations.extend(iter);
+                last_quotient_i += quotient_degree;
+            });
+        let coms_to_verify = vec![
+            (commitments.stage1_trace, stage1_trace_evaluations),
+            (commitments.quotient_chunks, quotient_chunks_evaluations),
+        ];
+        pcs.verify(coms_to_verify, opening_proof, &mut challenger)
+            .map_err(VerificationError::InvalidOpeningArgument)?;
 
         Ok(())
     }
