@@ -8,6 +8,7 @@ pub mod verifier;
 macro_rules! ensure {
     ($condition:expr, $err:expr) => {
         if !$condition {
+            eprintln!("assertion failed on file {} line {}", file!(), line!());
             return std::result::Result::Err($err.into());
         }
     };

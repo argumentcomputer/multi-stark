@@ -17,7 +17,7 @@ use std::iter::once;
 #[derive(Debug)]
 pub enum VerificationError<PcsErr> {
     InvalidClaim,
-    InvalidProofShape(u32),
+    InvalidProofShape,
     InvalidOpeningArgument(PcsErr),
     OodEvaluationMismatch,
 }
@@ -48,19 +48,19 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
         // stage 1 round
         ensure!(
             stage1_opened_values.len() == num_circuits,
-            VerificationError::InvalidProofShape(1)
+            VerificationError::InvalidProofShape
         );
         for (i, circuit) in self.circuits.iter().enumerate() {
             // zeta and zeta_next
             let num_openings = 2;
             ensure!(
                 stage1_opened_values[i].len() == num_openings,
-                VerificationError::InvalidProofShape(2)
+                VerificationError::InvalidProofShape
             );
             for j in 0..num_openings {
                 ensure!(
                     stage1_opened_values[i][j].len() == circuit.width(),
-                    VerificationError::InvalidProofShape(3)
+                    VerificationError::InvalidProofShape
                 );
             }
         }
@@ -74,7 +74,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
         let quotient_size: usize = quotient_degrees.iter().sum();
         ensure!(
             quotient_opened_values.len() == quotient_size,
-            VerificationError::InvalidProofShape(4)
+            VerificationError::InvalidProofShape
         );
         #[allow(clippy::needless_range_loop)]
         for i in 0..quotient_size {
@@ -82,11 +82,11 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
             let num_openings = 1;
             ensure!(
                 quotient_opened_values[i].len() == num_openings,
-                VerificationError::InvalidProofShape(2)
+                VerificationError::InvalidProofShape
             );
             ensure!(
                 quotient_opened_values[i][0].len() == <ExtVal as BasedVectorSpace<Val>>::DIMENSION,
-                VerificationError::InvalidProofShape(3)
+                VerificationError::InvalidProofShape
             );
         }
 
