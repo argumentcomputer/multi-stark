@@ -7,7 +7,7 @@ use p3_air::{Air, BaseAirWithPublicValues};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use std::collections::BTreeMap as Map;
 
-pub type Name = &'static str;
+pub type Name = String;
 
 /// Each circuit is required to have at least 3 arguments. Namely,
 /// the accumulator, the lookup challenge and the fingerprint challenge.
@@ -19,13 +19,16 @@ pub struct System<A> {
 }
 
 impl<A> System<A> {
-    pub fn new<Iter: Iterator<Item = (Name, Circuit<A>)>>(iter: Iter) -> Self {
+    pub fn new<Str: ToString, Iter: Iterator<Item = (Str, Circuit<A>)>>(iter: Iter) -> Self {
         let mut circuits = vec![];
         let mut circuit_names = Map::new();
         iter.for_each(|(name, circuit)| {
             let idx = circuits.len();
-            if let Some(prev_idx) = circuit_names.insert(name, idx) {
-                eprintln!("Warning: circuit of name `{name}` was redefined");
+            if let Some(prev_idx) = circuit_names.insert(name.to_string(), idx) {
+                eprintln!(
+                    "Warning: circuit of name `{}` was redefined",
+                    name.to_string()
+                );
                 circuits[prev_idx] = circuit;
             } else {
                 circuits.push(circuit);

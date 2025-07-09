@@ -41,7 +41,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
         let circuit_index = Val::from_usize(
             *self
                 .circuit_names
-                .get(claim.circuit_name)
+                .get(&claim.circuit_name)
                 .ok_or(VerificationError::InvalidClaim)?,
         );
         // stage 1 round
@@ -315,18 +315,21 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn multi_stark_test() {
+    fn system() -> System<CS> {
         let pythagorean_circuit = Circuit::from_air_single_stage(CS::Pythagorean).unwrap();
         let complex_circuit = Circuit::from_air_single_stage(CS::Complex).unwrap();
-        let system = System::new(
+        System::new(
             [
                 ("pythagorean", pythagorean_circuit),
                 ("complex", complex_circuit),
             ]
             .into_iter(),
-        );
+        )
+    }
+
+    #[test]
+    fn multi_stark_test() {
+        let system = system();
         let f = Val::from_u32;
         let witness = SystemWitness {
             circuits: vec![
@@ -346,7 +349,7 @@ mod tests {
         };
         // lookup arguments not yet implemented so the claim doesn't matter
         let dummy_claim = Claim {
-            circuit_name: "complex",
+            circuit_name: "complex".into(),
             args: vec![],
         };
         let fri_parameters = FriParameters {
@@ -366,15 +369,7 @@ mod tests {
         // To run this benchmark effectively, run the following command
         // RUSTFLAGS="-Ctarget-cpu=native" cargo test multi_stark_benchmark_test --release --features parallel -- --include-ignored --nocapture
         const LOG_HEIGHT: usize = 20;
-        let pythagorean_circuit = Circuit::from_air_single_stage(CS::Pythagorean).unwrap();
-        let complex_circuit = Circuit::from_air_single_stage(CS::Complex).unwrap();
-        let system = System::new(
-            [
-                ("pythagorean", pythagorean_circuit),
-                ("complex", complex_circuit),
-            ]
-            .into_iter(),
-        );
+        let system = system();
         let f = Val::from_u32;
         let mut pythagorean_trace = [3, 4, 5].map(f).to_vec();
         let mut complex_trace = [4, 2, 3, 1, 10, 10].map(f).to_vec();
@@ -394,7 +389,7 @@ mod tests {
         };
         // lookup arguments not yet implemented so the claim doesn't matter
         let dummy_claim = Claim {
-            circuit_name: "complex",
+            circuit_name: "complex".into(),
             args: vec![],
         };
         let fri_parameters = FriParameters {
@@ -405,6 +400,12 @@ mod tests {
         };
         let config = new_stark_config(fri_parameters);
         let proof = benchmark!(system.prove(&config, dummy_claim, witness), "proof: ");
+        let bincode_config = bincode::config::standard()
+            .with_little_endian()
+            .with_fixed_int_encoding();
+        let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode_config)
+            .expect("Failed to serialize proof");
+        println!("Proof size: {} bytes", proof_bytes.len());
         benchmark!(system.verify(&config, &proof).unwrap(), "verification: ");
     }
 }

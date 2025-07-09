@@ -10,8 +10,10 @@ use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
+use serde::{Deserialize, Serialize};
 use std::{cmp::min, iter::once};
 
+#[derive(Serialize, Deserialize)]
 pub struct Claim {
     pub circuit_name: Name,
     pub args: Vec<Val>,
@@ -20,12 +22,14 @@ pub struct Claim {
 type Commitment = <Pcs as PcsTrait<ExtVal, Challenger>>::Commitment;
 type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
 
+#[derive(Serialize, Deserialize)]
 pub struct Commitments {
     // TODO add stage 2
     pub stage1_trace: Commitment,
     pub quotient_chunks: Commitment,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Proof {
     pub claim: Claim,
     pub commitments: Commitments,
@@ -66,7 +70,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
         // TODO commit to stage 2 traces
 
         // observe the claim
-        let circuit_index = Val::from_usize(*self.circuit_names.get(claim.circuit_name).unwrap());
+        let circuit_index = Val::from_usize(*self.circuit_names.get(&claim.circuit_name).unwrap());
         challenger.observe(circuit_index);
         challenger.observe_slice(&claim.args);
         // construct the accumulator from the claim
