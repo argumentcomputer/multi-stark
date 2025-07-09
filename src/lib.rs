@@ -20,3 +20,14 @@ macro_rules! ensure_eq {
         $crate::ensure!($a == $b, $err);
     };
 }
+
+#[macro_export]
+macro_rules! benchmark {
+    ($bench:expr, $msg:expr $(,$msg_args:expr)*) => {{
+        let now = std::time::Instant::now();
+        let result = std::hint::black_box($bench);
+        print!($msg $(,$msg_args)*);
+        println!("{:?}", now.elapsed());
+        result
+    }};
+}

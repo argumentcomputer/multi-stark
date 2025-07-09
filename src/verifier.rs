@@ -10,7 +10,6 @@ use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs as PcsTrait, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
-use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use std::iter::once;
 
@@ -264,60 +263,61 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
 
 #[cfg(test)]
 mod tests {
-    use p3_air::{AirBuilderWithPublicValues, BaseAir};
-    use p3_matrix::{Matrix, dense::RowMajorMatrix};
-
+    use super::*;
     use crate::{
+        benchmark,
         prover::Claim,
         system::{Circuit, CircuitWitness, MIN_IO_SIZE, SystemWitness},
         types::{FriParameters, new_stark_config},
     };
+    use p3_air::{AirBuilderWithPublicValues, BaseAir};
+    use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
-    use super::*;
+    enum CS {
+        Pythagorean,
+        Complex,
+    }
+    impl<F> BaseAir<F> for CS {
+        fn width(&self) -> usize {
+            match self {
+                CS::Pythagorean => 3,
+                CS::Complex => 6,
+            }
+        }
+    }
+    impl<F> BaseAirWithPublicValues<F> for CS {
+        fn num_public_values(&self) -> usize {
+            MIN_IO_SIZE
+        }
+    }
+    impl<AB: AirBuilderWithPublicValues> Air<AB> for CS {
+        fn eval(&self, builder: &mut AB) {
+            match self {
+                CS::Pythagorean => {
+                    let main = builder.main();
+                    let local = main.row_slice(0).unwrap();
+                    let expr1 = local[0] * local[0] + local[1] * local[1];
+                    let expr2 = local[2] * local[2];
+                    // this extra `local[0]` multiplication is there to increase the maximum constraint degree
+                    builder.assert_eq(local[0] * expr1, local[0] * expr2);
+                }
+                CS::Complex => {
+                    let main = builder.main();
+                    let local = main.row_slice(0).unwrap();
+                    // (a + ib)(c + id) = (ac - bd) + i(ad + bc)
+                    let expr1 = local[0] * local[2] - local[1] * local[3];
+                    let expr2 = local[4];
+                    let expr3 = local[0] * local[3] + local[1] * local[2];
+                    let expr4 = local[5];
+                    builder.assert_eq(expr1, expr2);
+                    builder.assert_eq(expr3, expr4);
+                }
+            }
+        }
+    }
+
     #[test]
     fn multi_stark_test() {
-        enum CS {
-            Pythagorean,
-            Complex,
-        }
-        impl<F> BaseAir<F> for CS {
-            fn width(&self) -> usize {
-                match self {
-                    CS::Pythagorean => 3,
-                    CS::Complex => 6,
-                }
-            }
-        }
-        impl<F> BaseAirWithPublicValues<F> for CS {
-            fn num_public_values(&self) -> usize {
-                MIN_IO_SIZE
-            }
-        }
-        impl<AB: AirBuilderWithPublicValues> Air<AB> for CS {
-            fn eval(&self, builder: &mut AB) {
-                match self {
-                    CS::Pythagorean => {
-                        let main = builder.main();
-                        let local = main.row_slice(0).unwrap();
-                        let expr1 = local[0] * local[0] + local[1] * local[1];
-                        let expr2 = local[2] * local[2];
-                        // this extra `local[0]` multiplication is there to increase the maximum constraint degree
-                        builder.assert_eq(local[0] * expr1, local[0] * expr2);
-                    }
-                    CS::Complex => {
-                        let main = builder.main();
-                        let local = main.row_slice(0).unwrap();
-                        // (a + ib)(c + id) = (ac - bd) + i(ad + bc)
-                        let expr1 = local[0] * local[2] - local[1] * local[3];
-                        let expr2 = local[4];
-                        let expr3 = local[0] * local[3] + local[1] * local[2];
-                        let expr4 = local[5];
-                        builder.assert_eq(expr1, expr2);
-                        builder.assert_eq(expr3, expr4);
-                    }
-                }
-            }
-        }
         let pythagorean_circuit = Circuit::from_air_single_stage(CS::Pythagorean).unwrap();
         let complex_circuit = Circuit::from_air_single_stage(CS::Complex).unwrap();
         let system = System::new(
@@ -358,5 +358,53 @@ mod tests {
         let config = new_stark_config(fri_parameters);
         let proof = system.prove(&config, dummy_claim, witness);
         system.verify(&config, &proof).unwrap();
+    }
+
+    #[test]
+    #[ignore]
+    fn multi_stark_benchmark_test() {
+        // To run this benchmark effectively, run the following command
+        // RUSTFLAGS="-Ctarget-cpu=native" cargo test multi_stark_benchmark_test --release --features parallel -- --include-ignored --nocapture
+        const LOG_HEIGHT: usize = 20;
+        let pythagorean_circuit = Circuit::from_air_single_stage(CS::Pythagorean).unwrap();
+        let complex_circuit = Circuit::from_air_single_stage(CS::Complex).unwrap();
+        let system = System::new(
+            [
+                ("pythagorean", pythagorean_circuit),
+                ("complex", complex_circuit),
+            ]
+            .into_iter(),
+        );
+        let f = Val::from_u32;
+        let mut pythagorean_trace = [3, 4, 5].map(f).to_vec();
+        let mut complex_trace = [4, 2, 3, 1, 10, 10].map(f).to_vec();
+        for _ in 0..LOG_HEIGHT {
+            pythagorean_trace.extend(pythagorean_trace.clone());
+            complex_trace.extend(complex_trace.clone());
+        }
+        let witness = SystemWitness {
+            circuits: vec![
+                CircuitWitness {
+                    trace: RowMajorMatrix::new(pythagorean_trace, 3),
+                },
+                CircuitWitness {
+                    trace: RowMajorMatrix::new(complex_trace, 6),
+                },
+            ],
+        };
+        // lookup arguments not yet implemented so the claim doesn't matter
+        let dummy_claim = Claim {
+            circuit_name: "complex",
+            args: vec![],
+        };
+        let fri_parameters = FriParameters {
+            log_blowup: 1,
+            log_final_poly_len: 0,
+            num_queries: 100,
+            proof_of_work_bits: 20,
+        };
+        let config = new_stark_config(fri_parameters);
+        let proof = benchmark!(system.prove(&config, dummy_claim, witness), "proof: ");
+        benchmark!(system.verify(&config, &proof).unwrap(), "verification: ");
     }
 }

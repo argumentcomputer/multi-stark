@@ -23,7 +23,7 @@ p3-merkle-tree = { path = "../Plonky3/merkle-tree" }
 p3-symmetric = { path = "../Plonky3/symmetric" }
 p3-util = { path = "../Plonky3/util" }
 [features]
-default = []
+parallel = ["p3-maybe-rayon/parallel"]
 
 # Similar to `release`, but preserves debug info
 [profile.dev-ci]
