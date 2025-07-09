@@ -1,8 +1,11 @@
-use crate::{ensure, types::Val};
+use crate::{
+    builder::symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
+    ensure,
+    types::Val,
+};
 use p3_air::{Air, BaseAirWithPublicValues};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
-use p3_uni_stark::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints};
 use std::collections::BTreeMap as Map;
 
 pub type Name = &'static str;

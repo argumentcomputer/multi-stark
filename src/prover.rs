@@ -1,4 +1,5 @@
 use crate::{
+    builder::folder::ProverConstraintFolder,
     system::{Name, System, SystemWitness},
     types::{Challenger, ExtVal, PackedExtVal, PackedVal, Pcs, StarkConfig, Val},
 };
@@ -8,9 +9,9 @@ use p3_commit::{OpenedValuesForRound, Pcs as PcsTrait, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
-use p3_uni_stark::{Domain, ProverConstraintFolder, StarkGenericConfig};
+use p3_uni_stark::{Domain, StarkGenericConfig};
 use p3_util::log2_strict_usize;
-use std::iter::once;
+use std::{cmp::min, iter::once};
 
 pub struct Claim {
     pub circuit_name: Name,
@@ -251,7 +252,7 @@ where
 
             let quotient = folder.accumulator * inv_vanishing;
 
-            (0..core::cmp::min(quotient_size, PackedVal::WIDTH)).map(move |idx_in_packing| {
+            (0..min(quotient_size, PackedVal::WIDTH)).map(move |idx_in_packing| {
                 ExtVal::from_basis_coefficients_fn(|coeff_idx| {
                     <PackedExtVal as BasedVectorSpace<PackedVal>>::as_basis_coefficients_slice(
                         &quotient,

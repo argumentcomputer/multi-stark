@@ -1,4 +1,5 @@
 use crate::{
+    builder::folder::VerifierConstraintFolder,
     ensure,
     prover::{Proof, fingerprint_reverse},
     system::System,
@@ -10,7 +11,7 @@ use p3_commit::{Pcs as PcsTrait, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 use p3_maybe_rayon::prelude::*;
-use p3_uni_stark::{PcsError, StarkGenericConfig, VerifierConstraintFolder};
+use p3_uni_stark::{PcsError, StarkGenericConfig};
 use p3_util::log2_strict_usize;
 use std::iter::once;
 
