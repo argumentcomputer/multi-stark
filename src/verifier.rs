@@ -1,6 +1,6 @@
 use crate::{
     builder::folder::VerifierConstraintFolder,
-    ensure,
+    ensure_eq,
     prover::{Proof, fingerprint_reverse},
     system::System,
     types::{Challenger, ExtVal, Pcs, PcsError, StarkConfig, Val},
@@ -46,20 +46,23 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
                 .ok_or(VerificationError::InvalidClaim)?,
         );
         // stage 1 round
-        ensure!(
-            stage1_opened_values.len() == num_circuits,
+        ensure_eq!(
+            stage1_opened_values.len(),
+            num_circuits,
             VerificationError::InvalidProofShape
         );
         for (i, circuit) in self.circuits.iter().enumerate() {
             // zeta and zeta_next
             let num_openings = 2;
-            ensure!(
-                stage1_opened_values[i].len() == num_openings,
+            ensure_eq!(
+                stage1_opened_values[i].len(),
+                num_openings,
                 VerificationError::InvalidProofShape
             );
             for j in 0..num_openings {
-                ensure!(
-                    stage1_opened_values[i][j].len() == circuit.width(),
+                ensure_eq!(
+                    stage1_opened_values[i][j].len(),
+                    circuit.width(),
                     VerificationError::InvalidProofShape
                 );
             }
@@ -72,20 +75,23 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
             quotient_degrees.push(quotient_degree);
         }
         let quotient_size: usize = quotient_degrees.iter().sum();
-        ensure!(
-            quotient_opened_values.len() == quotient_size,
+        ensure_eq!(
+            quotient_opened_values.len(),
+            quotient_size,
             VerificationError::InvalidProofShape
         );
         #[allow(clippy::needless_range_loop)]
         for i in 0..quotient_size {
             // zeta
             let num_openings = 1;
-            ensure!(
-                quotient_opened_values[i].len() == num_openings,
+            ensure_eq!(
+                quotient_opened_values[i].len(),
+                num_openings,
                 VerificationError::InvalidProofShape
             );
-            ensure!(
-                quotient_opened_values[i][0].len() == <ExtVal as BasedVectorSpace<Val>>::DIMENSION,
+            ensure_eq!(
+                quotient_opened_values[i][0].len(),
+                <ExtVal as BasedVectorSpace<Val>>::DIMENSION,
                 VerificationError::InvalidProofShape
             );
         }
@@ -245,8 +251,9 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
 
             // finally, check that the composition polynomial
             // is divisible by the quotient polynomial
-            ensure!(
-                composition_polynomial * sels.inv_vanishing == quotient,
+            ensure_eq!(
+                composition_polynomial * sels.inv_vanishing,
+                quotient,
                 VerificationError::OodEvaluationMismatch
             );
         }

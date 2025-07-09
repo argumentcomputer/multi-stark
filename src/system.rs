@@ -1,6 +1,6 @@
 use crate::{
     builder::symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
-    ensure,
+    ensure_eq,
     types::Val,
 };
 use p3_air::{Air, BaseAirWithPublicValues};
@@ -65,7 +65,7 @@ pub struct SystemWitness {
 impl<A: BaseAirWithPublicValues<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
     pub fn from_air_single_stage(air: A) -> Result<Self, String> {
         let io_size = air.num_public_values();
-        ensure!(io_size == MIN_IO_SIZE, "Incompatible IO size");
+        ensure_eq!(io_size, MIN_IO_SIZE, "Incompatible IO size");
         let preprocessed_width = air.preprocessed_trace().map_or(0, |mat| mat.width());
         let constraint_count = get_symbolic_constraints(&air, preprocessed_width, io_size).len();
         let max_constraint_degree = get_max_constraint_degree(&air, preprocessed_width, io_size);
@@ -90,34 +90,39 @@ impl<A: BaseAirWithPublicValues<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> 
             get_max_constraint_degree(&self.air, preprocessed_width, io_size);
         let width = self.air.width();
         // As of now, only the minimum IO size is supported.
-        ensure!(io_size == MIN_IO_SIZE, "Incompatible IO size");
-        ensure!(
-            self.constraint_count == constraint_count,
+        ensure_eq!(io_size, MIN_IO_SIZE, "Incompatible IO size");
+        ensure_eq!(
+            self.constraint_count,
+            constraint_count,
             "Incompatible constraint count"
         );
-        ensure!(
-            self.max_constraint_degree == max_constraint_count,
+        ensure_eq!(
+            self.max_constraint_degree,
+            max_constraint_count,
             "Incompatible constraint degree"
         );
-        ensure!(
-            self.preprocessed_width == preprocessed_width,
+        ensure_eq!(
+            self.preprocessed_width,
+            preprocessed_width,
             "Incompatible widths"
         );
-        ensure!(self.width() == width, "Incompatible widths");
+        ensure_eq!(self.width(), width, "Incompatible widths");
         Ok(())
     }
 }
 
 impl<A: BaseAirWithPublicValues<Val> + Air<SymbolicAirBuilder<Val>>> System<A> {
     pub fn is_well_formed(&self) -> Result<(), String> {
-        ensure!(
-            self.circuits.len() == self.circuit_names.len(),
+        ensure_eq!(
+            self.circuits.len(),
+            self.circuit_names.len(),
             "Map of names is not well-formed"
         );
         let mut idxs = self.circuit_names.values().copied().collect::<Vec<_>>();
         idxs.sort();
-        ensure!(
-            idxs == (0..self.circuits.len()).collect::<Vec<_>>(),
+        ensure_eq!(
+            idxs,
+            (0..self.circuits.len()).collect::<Vec<_>>(),
             "Map of names is not well-formed"
         );
         self.circuits.iter().try_for_each(|c| c.is_well_formed())?;

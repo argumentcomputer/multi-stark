@@ -13,3 +13,10 @@ macro_rules! ensure {
         }
     };
 }
+
+#[macro_export]
+macro_rules! ensure_eq {
+    ($a:expr, $b:expr, $err:expr) => {
+        $crate::ensure!($a == $b, $err);
+    };
+}
