@@ -3,39 +3,40 @@ use p3_air::{AirBuilder, AirBuilderWithPublicValues};
 use p3_field::{BasedVectorSpace, PackedField};
 use p3_matrix::dense::RowMajorMatrixView;
 use p3_matrix::stack::VerticalPair;
-use p3_uni_stark::{PackedChallenge, PackedVal, StarkGenericConfig, Val};
+
+use crate::types::{ExtVal, PackedExtVal, PackedVal, Val};
 
 #[derive(Debug)]
-pub struct ProverConstraintFolder<'a, SC: StarkGenericConfig> {
-    pub main: RowMajorMatrixView<'a, PackedVal<SC>>,
-    pub public_values: &'a Vec<Val<SC>>,
-    pub is_first_row: PackedVal<SC>,
-    pub is_last_row: PackedVal<SC>,
-    pub is_transition: PackedVal<SC>,
-    pub alpha_powers: &'a [SC::Challenge],
-    pub decomposed_alpha_powers: &'a [Vec<Val<SC>>],
-    pub accumulator: PackedChallenge<SC>,
+pub struct ProverConstraintFolder<'a> {
+    pub main: RowMajorMatrixView<'a, PackedVal>,
+    pub public_values: &'a Vec<Val>,
+    pub is_first_row: PackedVal,
+    pub is_last_row: PackedVal,
+    pub is_transition: PackedVal,
+    pub alpha_powers: &'a [ExtVal],
+    pub decomposed_alpha_powers: &'a [Vec<Val>],
+    pub accumulator: PackedExtVal,
     pub constraint_index: usize,
 }
 
 type ViewPair<'a, T> = VerticalPair<RowMajorMatrixView<'a, T>, RowMajorMatrixView<'a, T>>;
 
 #[derive(Debug)]
-pub struct VerifierConstraintFolder<'a, SC: StarkGenericConfig> {
-    pub main: ViewPair<'a, SC::Challenge>,
-    pub public_values: &'a Vec<Val<SC>>,
-    pub is_first_row: SC::Challenge,
-    pub is_last_row: SC::Challenge,
-    pub is_transition: SC::Challenge,
-    pub alpha: SC::Challenge,
-    pub accumulator: SC::Challenge,
+pub struct VerifierConstraintFolder<'a> {
+    pub main: ViewPair<'a, ExtVal>,
+    pub public_values: &'a Vec<Val>,
+    pub is_first_row: ExtVal,
+    pub is_last_row: ExtVal,
+    pub is_transition: ExtVal,
+    pub alpha: ExtVal,
+    pub accumulator: ExtVal,
 }
 
-impl<'a, SC: StarkGenericConfig> AirBuilder for ProverConstraintFolder<'a, SC> {
-    type F = Val<SC>;
-    type Expr = PackedVal<SC>;
-    type Var = PackedVal<SC>;
-    type M = RowMajorMatrixView<'a, PackedVal<SC>>;
+impl<'a> AirBuilder for ProverConstraintFolder<'a> {
+    type F = Val;
+    type Expr = PackedVal;
+    type Var = PackedVal;
+    type M = RowMajorMatrixView<'a, PackedVal>;
 
     #[inline]
     fn main(&self) -> Self::M {
@@ -59,31 +60,31 @@ impl<'a, SC: StarkGenericConfig> AirBuilder for ProverConstraintFolder<'a, SC> {
         if size == 2 {
             self.is_transition
         } else {
-            panic!("uni-stark only supports a window size of 2")
+            panic!("multi-stark only supports a window size of 2")
         }
     }
 
     #[inline]
     fn assert_zero<I: Into<Self::Expr>>(&mut self, x: I) {
-        let x: PackedVal<SC> = x.into();
+        let x: PackedVal = x.into();
         let alpha_power = self.alpha_powers[self.constraint_index];
-        self.accumulator += Into::<PackedChallenge<SC>>::into(alpha_power) * x;
+        self.accumulator += Into::<PackedExtVal>::into(alpha_power) * x;
         self.constraint_index += 1;
     }
 
     #[inline]
     fn assert_zeros<const N: usize, I: Into<Self::Expr>>(&mut self, array: [I; N]) {
         let expr_array: [Self::Expr; N] = array.map(Into::into);
-        self.accumulator += PackedChallenge::<SC>::from_basis_coefficients_fn(|i| {
+        self.accumulator += PackedExtVal::from_basis_coefficients_fn(|i| {
             let alpha_powers = &self.decomposed_alpha_powers[i]
                 [self.constraint_index..(self.constraint_index + N)];
-            PackedVal::<SC>::packed_linear_combination::<N>(alpha_powers, &expr_array)
+            PackedVal::packed_linear_combination::<N>(alpha_powers, &expr_array)
         });
         self.constraint_index += N;
     }
 }
 
-impl<SC: StarkGenericConfig> AirBuilderWithPublicValues for ProverConstraintFolder<'_, SC> {
+impl AirBuilderWithPublicValues for ProverConstraintFolder<'_> {
     type PublicVar = Self::F;
 
     #[inline]
@@ -92,11 +93,11 @@ impl<SC: StarkGenericConfig> AirBuilderWithPublicValues for ProverConstraintFold
     }
 }
 
-impl<'a, SC: StarkGenericConfig> AirBuilder for VerifierConstraintFolder<'a, SC> {
-    type F = Val<SC>;
-    type Expr = SC::Challenge;
-    type Var = SC::Challenge;
-    type M = ViewPair<'a, SC::Challenge>;
+impl<'a> AirBuilder for VerifierConstraintFolder<'a> {
+    type F = Val;
+    type Expr = ExtVal;
+    type Var = ExtVal;
+    type M = ViewPair<'a, ExtVal>;
 
     fn main(&self) -> Self::M {
         self.main
@@ -116,18 +117,18 @@ impl<'a, SC: StarkGenericConfig> AirBuilder for VerifierConstraintFolder<'a, SC>
         if size == 2 {
             self.is_transition
         } else {
-            panic!("uni-stark only supports a window size of 2")
+            panic!("multi-stark only supports a window size of 2")
         }
     }
 
     fn assert_zero<I: Into<Self::Expr>>(&mut self, x: I) {
-        let x: SC::Challenge = x.into();
+        let x: ExtVal = x.into();
         self.accumulator *= self.alpha;
         self.accumulator += x;
     }
 }
 
-impl<SC: StarkGenericConfig> AirBuilderWithPublicValues for VerifierConstraintFolder<'_, SC> {
+impl AirBuilderWithPublicValues for VerifierConstraintFolder<'_> {
     type PublicVar = Self::F;
 
     fn public_values(&self) -> &[Self::F] {

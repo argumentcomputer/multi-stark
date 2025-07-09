@@ -10,27 +10,17 @@ rust-version = "1.85"
 
 [dependencies]
 p3-air = { path = "../Plonky3/air" }
-p3-baby-bear = { path = "../Plonky3/baby-bear" }
 p3-goldilocks = { path = "../Plonky3/goldilocks" }
-# p3-blake3-air = { path = "../Plonky3/" }
-# p3-field = { path = "../Plonky3/" }
 p3-challenger = { path = "../Plonky3/challenger" }
-# p3-circle = { path = "../Plonky3/" }
 p3-commit = { path = "../Plonky3/commit" }
 p3-dft = { path = "../Plonky3/dft" }
 p3-field = { path = "../Plonky3/field" }
 p3-fri = { path = "../Plonky3/fri" }
 p3-keccak = { path = "../Plonky3/keccak" }
-# p3-keccak-air = { path = "../Plonky3/" }
 p3-matrix = { path = "../Plonky3/matrix" }
 p3-maybe-rayon = { path = "../Plonky3/maybe-rayon" }
 p3-merkle-tree = { path = "../Plonky3/merkle-tree" }
-# p3-mersenne-31 = { path = "../Plonky3/" }
-# p3-monty-31 = { path = "../Plonky3/" }
-# p3-poseidon2 = { path = "../Plonky3/" }
-# p3-poseidon2-air = { path = "../Plonky3/" }
 p3-symmetric = { path = "../Plonky3/symmetric" }
-p3-uni-stark = { path = "../Plonky3/uni-stark" }
 p3-util = { path = "../Plonky3/util" }
 [features]
 default = []

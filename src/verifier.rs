@@ -3,7 +3,7 @@ use crate::{
     ensure,
     prover::{Proof, fingerprint_reverse},
     system::System,
-    types::{Challenger, ExtVal, Pcs, StarkConfig, Val},
+    types::{Challenger, ExtVal, Pcs, PcsError, StarkConfig, Val},
 };
 use p3_air::{Air, BaseAirWithPublicValues};
 use p3_challenger::{CanObserve, FieldChallenger};
@@ -11,7 +11,6 @@ use p3_commit::{Pcs as PcsTrait, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 use p3_maybe_rayon::prelude::*;
-use p3_uni_stark::{PcsError, StarkGenericConfig};
 use p3_util::log2_strict_usize;
 use std::iter::once;
 
@@ -23,14 +22,12 @@ pub enum VerificationError<PcsErr> {
     OodEvaluationMismatch,
 }
 
-impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a, StarkConfig>>>
-    System<A>
-{
+impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
     pub fn verify(
         &self,
         config: &StarkConfig,
         proof: &Proof,
-    ) -> Result<(), VerificationError<PcsError<StarkConfig>>> {
+    ) -> Result<(), VerificationError<PcsError>> {
         let Proof {
             commitments,
             stage1_opened_values,

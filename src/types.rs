@@ -1,5 +1,5 @@
 use p3_challenger::{HashChallenger, SerializingChallenger64};
-use p3_commit::ExtensionMmcs;
+use p3_commit::{ExtensionMmcs, Pcs as PcsTrait};
 use p3_dft::Radix2DitParallel;
 use p3_field::{ExtensionField, Field, extension::BinomialExtensionField};
 use p3_fri::{FriParameters as InnerFriParameters, TwoAdicFriPcs};
@@ -7,7 +7,6 @@ use p3_goldilocks::Goldilocks;
 use p3_keccak::{Keccak256Hash, KeccakF};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher};
-use p3_uni_stark::StarkConfig as InnerStarkConfig;
 
 pub type Val = Goldilocks;
 pub type PackedVal = <Val as Field>::Packing;
@@ -23,7 +22,26 @@ pub type Mmcs = MerkleTreeMmcs<
 >;
 pub type ExtMmcs = ExtensionMmcs<Val, ExtVal, Mmcs>;
 pub type Pcs = TwoAdicFriPcs<Val, Dft, Mmcs, ExtMmcs>;
-pub type StarkConfig = InnerStarkConfig<Pcs, ExtVal, Challenger>;
+
+#[derive(Debug)]
+pub struct StarkConfig {
+    /// The PCS used to commit polynomials and prove opening proofs.
+    pcs: Pcs,
+    /// An initialised instance of the challenger.
+    challenger: Challenger,
+}
+
+pub type Domain = <Pcs as PcsTrait<ExtVal, Challenger>>::Domain;
+pub type PcsError = <Pcs as PcsTrait<ExtVal, Challenger>>::Error;
+
+impl StarkConfig {
+    pub fn pcs(&self) -> &Pcs {
+        &self.pcs
+    }
+    pub fn initialise_challenger(&self) -> Challenger {
+        self.challenger.clone()
+    }
+}
 
 pub struct FriParameters {
     pub log_blowup: usize,
@@ -60,5 +78,5 @@ fn new_pcs(fri_parameters: FriParameters) -> Pcs {
 pub fn new_stark_config(fri_parameters: FriParameters) -> StarkConfig {
     let pcs = new_pcs(fri_parameters);
     let challenger = Challenger::from_hasher(vec![], Keccak256Hash {});
-    StarkConfig::new(pcs, challenger)
+    StarkConfig { pcs, challenger }
 }

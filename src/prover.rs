@@ -1,7 +1,7 @@
 use crate::{
     builder::folder::ProverConstraintFolder,
     system::{Name, System, SystemWitness},
-    types::{Challenger, ExtVal, PackedExtVal, PackedVal, Pcs, StarkConfig, Val},
+    types::{Challenger, Domain, ExtVal, PackedExtVal, PackedVal, Pcs, StarkConfig, Val},
 };
 use p3_air::{Air, BaseAirWithPublicValues};
 use p3_challenger::{CanObserve, FieldChallenger};
@@ -9,7 +9,6 @@ use p3_commit::{OpenedValuesForRound, Pcs as PcsTrait, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
-use p3_uni_stark::{Domain, StarkGenericConfig};
 use p3_util::log2_strict_usize;
 use std::{cmp::min, iter::once};
 
@@ -36,9 +35,7 @@ pub struct Proof {
     pub quotient_opened_values: OpenedValuesForRound<ExtVal>,
 }
 
-impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a, StarkConfig>>>
-    System<A>
-{
+impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
     pub fn prove(&self, config: &StarkConfig, claim: Claim, witness: SystemWitness) -> Proof {
         // initialize pcs and challenger
         let pcs = config.pcs();
@@ -185,14 +182,14 @@ pub(crate) fn fingerprint_reverse<F: Field, Iter: Iterator<Item = F>>(r: F, coef
 fn quotient_values<A, Mat>(
     air: &A,
     public_values: &Vec<Val>,
-    trace_domain: Domain<StarkConfig>,
-    quotient_domain: Domain<StarkConfig>,
+    trace_domain: Domain,
+    quotient_domain: Domain,
     trace_on_quotient_domain: Mat,
     alpha: ExtVal,
     constraint_count: usize,
 ) -> Vec<ExtVal>
 where
-    A: for<'a> Air<ProverConstraintFolder<'a, StarkConfig>>,
+    A: for<'a> Air<ProverConstraintFolder<'a>>,
     Mat: Matrix<Val> + Sync,
 {
     let quotient_size = quotient_domain.size();

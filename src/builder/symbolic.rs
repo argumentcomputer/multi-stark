@@ -391,7 +391,7 @@ impl<F: Field> AirBuilder for SymbolicAirBuilder<F> {
         if size == 2 {
             SymbolicExpression::IsTransition
         } else {
-            panic!("uni-stark only supports a window size of 2")
+            panic!("multi-stark only supports a window size of 2")
         }
     }
 
