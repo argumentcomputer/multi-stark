@@ -67,8 +67,28 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
                 );
             }
         }
-        // TODO missing stage 2 round
-        // quotient round
+        // stage 2 round
+        ensure_eq!(
+            stage_2_opened_values.len(),
+            num_circuits,
+            VerificationError::InvalidProofShape
+        );
+        for (i, circuit) in self.circuits.iter().enumerate() {
+            // zeta and zeta_next
+            let num_openings = 2;
+            ensure_eq!(
+                stage_2_opened_values[i].len(),
+                num_openings,
+                VerificationError::InvalidProofShape
+            );
+            for j in 0..num_openings {
+                ensure_eq!(
+                    stage_2_opened_values[i][j].len(),
+                    circuit.stage_2_width,
+                    VerificationError::InvalidProofShape
+                );
+            }
+        } // quotient round
         let mut quotient_degrees = vec![];
         for circuit in self.circuits.iter() {
             let quotient_degree = (circuit.max_constraint_degree.max(2) - 1).next_power_of_two();
@@ -103,22 +123,24 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
         // observe stage_1 commitment
         challenger.observe(commitments.stage_1_trace);
 
+        // observe the claim
+        challenger.observe(circuit_index);
+        challenger.observe_slice(&claim.args);
+
         // generate lookup challenges
         // TODO use `ExtVal` instead of `Val`
         let lookup_argument_challenge: Val = challenger.sample_algebra_element();
         challenger.observe_algebra_element(lookup_argument_challenge);
         let fingerprint_challenge: Val = challenger.sample_algebra_element();
         challenger.observe_algebra_element(fingerprint_challenge);
-        // TODO commit to stage 2 traces
 
-        // observe the claim
-        challenger.observe(circuit_index);
-        challenger.observe_slice(&claim.args);
+        // observe stage_2 commitment
+        challenger.observe(commitments.stage_2_trace);
+
         // construct the accumulator from the claim
         let claim_iter = claim.args.iter().rev().copied().chain(once(circuit_index));
         let init_acc = fingerprint_reverse(fingerprint_challenge, claim_iter);
         let public_values = vec![init_acc, lookup_argument_challenge, fingerprint_challenge];
-        // TODO stage 2
 
         // generate constraint challenge
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();
@@ -129,6 +151,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
         // generate out of domain points and verify the PCS opening
         let zeta: ExtVal = challenger.sample_algebra_element();
         let mut stage_1_trace_evaluations = vec![];
+        let mut stage_2_trace_evaluations = vec![];
         let mut quotient_chunks_evaluations = vec![];
         let mut last_quotient_i = 0;
         log_degrees
@@ -161,6 +184,13 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
                         (zeta_next, stage_1_opened_values[i][1].clone()),
                     ],
                 ));
+                stage_2_trace_evaluations.push((
+                    trace_domain,
+                    vec![
+                        (zeta, stage_2_opened_values[i][0].clone()),
+                        (zeta_next, stage_2_opened_values[i][1].clone()),
+                    ],
+                ));
                 let iter = unshifted_quotient_chunks_domains
                     .into_iter()
                     .zip(
@@ -175,6 +205,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
             });
         let coms_to_verify = vec![
             (commitments.stage_1_trace, stage_1_trace_evaluations),
+            (commitments.stage_2_trace, stage_2_trace_evaluations),
             (commitments.quotient_chunks, quotient_chunks_evaluations),
         ];
         pcs.verify(coms_to_verify, opening_proof, &mut challenger)
@@ -188,8 +219,10 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
             let circuit = &self.circuits[i];
             let degree = 1 << log_degrees[i];
             let quotient_degree = quotient_degrees[i];
-            let row = &stage_1_opened_values[i][0];
-            let next_row = &stage_1_opened_values[i][0];
+            let stage_1_row = &stage_1_opened_values[i][0];
+            let stage_1_next_row = &stage_1_opened_values[i][1];
+            let stage_2_row = &stage_2_opened_values[i][0];
+            let stage_2_next_row = &stage_2_opened_values[i][1];
             let quotient_chunks = quotient_opened_values
                 [last_quotient_i..last_quotient_i + quotient_degree]
                 .iter()
@@ -200,15 +233,23 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
             let trace_domain =
                 <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
             let sels = trace_domain.selectors_at_point(zeta);
-            let main = VerticalPair::new(
-                RowMajorMatrixView::new_row(row),
-                RowMajorMatrixView::new_row(next_row),
+            // TODO fix preprocessed
+            let preprocessed = VerticalPair::new(
+                RowMajorMatrixView::new(&[], 0),
+                RowMajorMatrixView::new(&[], 0),
+            );
+            let stage_1 = VerticalPair::new(
+                RowMajorMatrixView::new_row(stage_1_row),
+                RowMajorMatrixView::new_row(stage_1_next_row),
+            );
+            let stage_2 = VerticalPair::new(
+                RowMajorMatrixView::new_row(stage_2_row),
+                RowMajorMatrixView::new_row(stage_2_next_row),
             );
             let mut folder = VerifierConstraintFolder {
-                // TODO fix preprocessed and stage_2
-                preprocessed: main,
-                stage_1: main,
-                stage_2: main,
+                preprocessed,
+                stage_1,
+                stage_2,
                 public_values: &public_values,
                 is_first_row: sels.is_first_row,
                 is_last_row: sels.is_last_row,
@@ -324,8 +365,10 @@ mod tests {
         }
     }
     fn system() -> System<CS> {
-        let pythagorean_circuit = Circuit::from_air_single_stage(CS::Pythagorean).unwrap();
-        let complex_circuit = Circuit::from_air_single_stage(CS::Complex).unwrap();
+        // the prover does not support 0 width traces yet
+        let min_stage_2_width = 1;
+        let pythagorean_circuit = Circuit::from_air(CS::Pythagorean, min_stage_2_width).unwrap();
+        let complex_circuit = Circuit::from_air(CS::Complex, min_stage_2_width).unwrap();
         System::new(
             [
                 ("pythagorean", pythagorean_circuit),
@@ -333,6 +376,17 @@ mod tests {
             ]
             .into_iter(),
         )
+    }
+    fn dummy_stage_2_trace(log_heights: &[usize]) -> SystemWitness {
+        let circuits = log_heights
+            .iter()
+            .map(|log_height| {
+                let height = 1 << *log_height;
+                let trace = RowMajorMatrix::new(vec![Val::from_u32(0); height], 1);
+                CircuitWitness { trace }
+            })
+            .collect();
+        SystemWitness { circuits }
     }
 
     #[test]
@@ -367,7 +421,12 @@ mod tests {
             proof_of_work_bits: 0,
         };
         let config = new_stark_config(fri_parameters);
-        let proof = system.prove(&config, dummy_claim, witness);
+        let proof = system.prove(
+            &config,
+            dummy_claim,
+            witness,
+            Box::new(|_| dummy_stage_2_trace(&[2, 1])),
+        );
         system.verify(&config, &proof).unwrap();
     }
 
@@ -407,7 +466,15 @@ mod tests {
             proof_of_work_bits: 20,
         };
         let config = new_stark_config(fri_parameters);
-        let proof = benchmark!(system.prove(&config, dummy_claim, witness), "proof: ");
+        let proof = benchmark!(
+            system.prove(
+                &config,
+                dummy_claim,
+                witness,
+                Box::new(|_| dummy_stage_2_trace(&[LOG_HEIGHT; 2]))
+            ),
+            "proof: "
+        );
         let bincode_config = bincode::config::standard()
             .with_little_endian()
             .with_fixed_int_encoding();

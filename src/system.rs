@@ -59,11 +59,10 @@ pub struct SystemWitness {
 }
 
 impl<A: BaseAirWithPublicValues<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
-    pub fn from_air_single_stage(air: A) -> Result<Self, String> {
+    pub fn from_air(air: A, stage_2_width: usize) -> Result<Self, String> {
         let io_size = air.num_public_values();
         ensure_eq!(io_size, MIN_IO_SIZE, "Incompatible IO size");
         let stage_1_width = air.width();
-        let stage_2_width = 0;
         let preprocessed_width = air.preprocessed_trace().map_or(0, |mat| mat.width());
         let constraint_count = get_symbolic_constraints(
             &air,

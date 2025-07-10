@@ -394,7 +394,7 @@ impl<F: Field> SymbolicAirBuilder<F> {
         Self {
             preprocessed: RowMajorMatrix::new(prep_values, preprocessed_width),
             stage_1: RowMajorMatrix::new(stage_1_values, stage_1_width),
-            stage_2: RowMajorMatrix::new(stage_2_values, stage_1_width),
+            stage_2: RowMajorMatrix::new(stage_2_values, stage_2_width),
             public_values,
             constraints: vec![],
         }

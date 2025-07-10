@@ -41,6 +41,7 @@ pub struct Proof {
 }
 
 impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
+    #[allow(clippy::type_complexity)]
     pub fn prove(
         &self,
         config: &StarkConfig,
@@ -102,6 +103,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
             });
         let (stage_2_trace_commit, stage_2_trace_data) =
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
+        challenger.observe(stage_2_trace_commit);
 
         // generate constraint challenge
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();
@@ -220,7 +222,8 @@ pub(crate) fn fingerprint_reverse<F: Field, Iter: Iterator<Item = F>>(r: F, coef
     coeffs.fold(F::ZERO, |acc, coeff| acc * r + coeff)
 }
 
-// TODO take stage 2 traces and update the accumulator
+// TODO update the accumulator
+#[allow(clippy::too_many_arguments)]
 fn quotient_values<A, Mat>(
     air: &A,
     public_values: &Vec<Val>,
@@ -272,6 +275,7 @@ where
             let is_transition = *PackedVal::from_slice(&sels.is_transition[i_range.clone()]);
             let inv_vanishing = *PackedVal::from_slice(&sels.inv_vanishing[i_range]);
 
+            // TODO fix preprocessed
             let preprocessed = RowMajorMatrix::new(vec![], 0);
             let stage_1 = RowMajorMatrix::new(
                 stage_1_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
@@ -284,7 +288,6 @@ where
 
             let accumulator = PackedExtVal::ZERO;
             let mut folder = ProverConstraintFolder {
-                // TODO fix preprocessed
                 preprocessed: preprocessed.as_view(),
                 stage_1: stage_1.as_view(),
                 stage_2: stage_2.as_view(),
