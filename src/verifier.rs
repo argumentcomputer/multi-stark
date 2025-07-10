@@ -290,7 +290,11 @@ mod tests {
             MIN_IO_SIZE
         }
     }
-    impl<AB: AirBuilderWithPublicValues> Air<AB> for CS {
+    impl<AB> Air<AB> for CS
+    where
+        AB: AirBuilderWithPublicValues,
+        AB::Var: Copy,
+    {
         fn eval(&self, builder: &mut AB) {
             match self {
                 CS::Pythagorean => {
