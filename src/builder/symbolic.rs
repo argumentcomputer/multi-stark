@@ -9,11 +9,13 @@ use std::marker::PhantomData;
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use std::rc::Rc;
 
+use super::TwoStagedBuilder;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Entry {
     Preprocessed { offset: usize },
     Main { offset: usize },
-    Permutation { offset: usize },
+    Stage2 { offset: usize },
     Public,
     Challenge,
 }
@@ -37,7 +39,7 @@ impl<F> SymbolicVariable<F> {
 
     pub const fn degree_multiple(&self) -> usize {
         match self.entry {
-            Entry::Preprocessed { .. } | Entry::Main { .. } | Entry::Permutation { .. } => 1,
+            Entry::Preprocessed { .. } | Entry::Main { .. } | Entry::Stage2 { .. } => 1,
             Entry::Public | Entry::Challenge => 0,
         }
     }
@@ -164,8 +166,6 @@ impl<F: Field> Algebra<F> for SymbolicExpression<F> {}
 
 impl<F: Field> Algebra<SymbolicVariable<F>> for SymbolicExpression<F> {}
 
-// Note we cannot implement PermutationMonomial due to the degree_multiple part which makes
-// operations non invertible.
 impl<F: Field + InjectiveMonomial<N>, const N: u64> InjectiveMonomial<N> for SymbolicExpression<F> {}
 
 impl<F: Field, T> Add<T> for SymbolicExpression<F>
@@ -279,6 +279,8 @@ impl<F: Field, T: Into<Self>> Product<T> for SymbolicExpression<F> {
 pub fn get_log_quotient_degree<F, A>(
     air: &A,
     preprocessed_width: usize,
+    stage_1_width: usize,
+    stage_2_width: usize,
     num_public_values: usize,
     is_zk: usize,
 ) -> usize
@@ -288,8 +290,14 @@ where
 {
     assert!(is_zk <= 1, "is_zk must be either 0 or 1");
     // We pad to at least degree 2, since a quotient argument doesn't make sense with smaller degrees.
-    let constraint_degree =
-        (get_max_constraint_degree(air, preprocessed_width, num_public_values) + is_zk).max(2);
+    let constraint_degree = (get_max_constraint_degree(
+        air,
+        preprocessed_width,
+        stage_1_width,
+        stage_2_width,
+        num_public_values,
+    ) + is_zk)
+        .max(2);
 
     // The quotient's actual degree is approximately (max_constraint_degree - 1) n,
     // where subtracting 1 comes from division by the vanishing polynomial.
@@ -300,29 +308,44 @@ where
 pub fn get_max_constraint_degree<F, A>(
     air: &A,
     preprocessed_width: usize,
+    stage_1_width: usize,
+    stage_2_width: usize,
     num_public_values: usize,
 ) -> usize
 where
     F: Field,
     A: Air<SymbolicAirBuilder<F>>,
 {
-    get_symbolic_constraints(air, preprocessed_width, num_public_values)
-        .iter()
-        .map(|c| c.degree_multiple())
-        .max()
-        .unwrap_or(0)
+    get_symbolic_constraints(
+        air,
+        preprocessed_width,
+        stage_1_width,
+        stage_2_width,
+        num_public_values,
+    )
+    .iter()
+    .map(|c| c.degree_multiple())
+    .max()
+    .unwrap_or(0)
 }
 
 pub fn get_symbolic_constraints<F, A>(
     air: &A,
     preprocessed_width: usize,
+    stage_1_width: usize,
+    stage_2_width: usize,
     num_public_values: usize,
 ) -> Vec<SymbolicExpression<F>>
 where
     F: Field,
     A: Air<SymbolicAirBuilder<F>>,
 {
-    let mut builder = SymbolicAirBuilder::new(preprocessed_width, air.width(), num_public_values);
+    let mut builder = SymbolicAirBuilder::new(
+        preprocessed_width,
+        stage_1_width,
+        stage_2_width,
+        num_public_values,
+    );
     air.eval(&mut builder);
     builder.constraints()
 }
@@ -331,13 +354,19 @@ where
 #[derive(Debug)]
 pub struct SymbolicAirBuilder<F: Field> {
     preprocessed: RowMajorMatrix<SymbolicVariable<F>>,
-    main: RowMajorMatrix<SymbolicVariable<F>>,
+    stage_1: RowMajorMatrix<SymbolicVariable<F>>,
+    stage_2: RowMajorMatrix<SymbolicVariable<F>>,
     public_values: Vec<SymbolicVariable<F>>,
     constraints: Vec<SymbolicExpression<F>>,
 }
 
 impl<F: Field> SymbolicAirBuilder<F> {
-    pub(crate) fn new(preprocessed_width: usize, width: usize, num_public_values: usize) -> Self {
+    pub(crate) fn new(
+        preprocessed_width: usize,
+        stage_1_width: usize,
+        stage_2_width: usize,
+        num_public_values: usize,
+    ) -> Self {
         let prep_values = [0, 1]
             .into_iter()
             .flat_map(|offset| {
@@ -345,10 +374,18 @@ impl<F: Field> SymbolicAirBuilder<F> {
                     .map(move |index| SymbolicVariable::new(Entry::Preprocessed { offset }, index))
             })
             .collect();
-        let main_values = [0, 1]
+        let stage_1_values = [0, 1]
             .into_iter()
             .flat_map(|offset| {
-                (0..width).map(move |index| SymbolicVariable::new(Entry::Main { offset }, index))
+                (0..stage_1_width)
+                    .map(move |index| SymbolicVariable::new(Entry::Main { offset }, index))
+            })
+            .collect();
+        let stage_2_values = [0, 1]
+            .into_iter()
+            .flat_map(|offset| {
+                (0..stage_2_width)
+                    .map(move |index| SymbolicVariable::new(Entry::Stage2 { offset }, index))
             })
             .collect();
         let public_values = (0..num_public_values)
@@ -356,7 +393,8 @@ impl<F: Field> SymbolicAirBuilder<F> {
             .collect();
         Self {
             preprocessed: RowMajorMatrix::new(prep_values, preprocessed_width),
-            main: RowMajorMatrix::new(main_values, width),
+            stage_1: RowMajorMatrix::new(stage_1_values, stage_1_width),
+            stage_2: RowMajorMatrix::new(stage_2_values, stage_1_width),
             public_values,
             constraints: vec![],
         }
@@ -374,7 +412,7 @@ impl<F: Field> AirBuilder for SymbolicAirBuilder<F> {
     type M = RowMajorMatrix<Self::Var>;
 
     fn main(&self) -> Self::M {
-        self.main.clone()
+        self.stage_1.clone()
     }
 
     fn is_first_row(&self) -> Self::Expr {
@@ -410,5 +448,11 @@ impl<F: Field> AirBuilderWithPublicValues for SymbolicAirBuilder<F> {
 impl<F: Field> PairBuilder for SymbolicAirBuilder<F> {
     fn preprocessed(&self) -> Self::M {
         self.preprocessed.clone()
+    }
+}
+
+impl<F: Field> TwoStagedBuilder for SymbolicAirBuilder<F> {
+    fn stage_2(&self) -> Self::M {
+        self.stage_2.clone()
     }
 }

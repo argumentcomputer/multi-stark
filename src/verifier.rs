@@ -29,7 +29,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
     ) -> Result<(), VerificationError<PcsError>> {
         let Proof {
             commitments,
-            stage1_opened_values,
+            stage_1_opened_values,
             quotient_opened_values,
             opening_proof,
             claim,
@@ -46,7 +46,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
         );
         // stage 1 round
         ensure_eq!(
-            stage1_opened_values.len(),
+            stage_1_opened_values.len(),
             num_circuits,
             VerificationError::InvalidProofShape
         );
@@ -54,14 +54,14 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
             // zeta and zeta_next
             let num_openings = 2;
             ensure_eq!(
-                stage1_opened_values[i].len(),
+                stage_1_opened_values[i].len(),
                 num_openings,
                 VerificationError::InvalidProofShape
             );
             for j in 0..num_openings {
                 ensure_eq!(
-                    stage1_opened_values[i][j].len(),
-                    circuit.width(),
+                    stage_1_opened_values[i][j].len(),
+                    circuit.stage_1_width,
                     VerificationError::InvalidProofShape
                 );
             }
@@ -99,8 +99,8 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
         let pcs = config.pcs();
         let mut challenger = config.initialise_challenger();
 
-        // observe stage1 commitment
-        challenger.observe(commitments.stage1_trace);
+        // observe stage_1 commitment
+        challenger.observe(commitments.stage_1_trace);
 
         // generate lookup challenges
         // TODO use `ExtVal` instead of `Val`
@@ -127,7 +127,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
 
         // generate out of domain points and verify the PCS opening
         let zeta: ExtVal = challenger.sample_algebra_element();
-        let mut stage1_trace_evaluations = vec![];
+        let mut stage_1_trace_evaluations = vec![];
         let mut quotient_chunks_evaluations = vec![];
         let mut last_quotient_i = 0;
         log_degrees
@@ -153,11 +153,11 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
                     })
                     .collect::<Vec<_>>();
                 let zeta_next = trace_domain.next_point(zeta).unwrap();
-                stage1_trace_evaluations.push((
+                stage_1_trace_evaluations.push((
                     trace_domain,
                     vec![
-                        (zeta, stage1_opened_values[i][0].clone()),
-                        (zeta_next, stage1_opened_values[i][1].clone()),
+                        (zeta, stage_1_opened_values[i][0].clone()),
+                        (zeta_next, stage_1_opened_values[i][1].clone()),
                     ],
                 ));
                 let iter = unshifted_quotient_chunks_domains
@@ -173,7 +173,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
                 last_quotient_i += quotient_degree;
             });
         let coms_to_verify = vec![
-            (commitments.stage1_trace, stage1_trace_evaluations),
+            (commitments.stage_1_trace, stage_1_trace_evaluations),
             (commitments.quotient_chunks, quotient_chunks_evaluations),
         ];
         pcs.verify(coms_to_verify, opening_proof, &mut challenger)
@@ -187,8 +187,8 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
             let circuit = &self.circuits[i];
             let degree = 1 << log_degrees[i];
             let quotient_degree = quotient_degrees[i];
-            let row = &stage1_opened_values[i][0];
-            let next_row = &stage1_opened_values[i][0];
+            let row = &stage_1_opened_values[i][0];
+            let next_row = &stage_1_opened_values[i][0];
             let quotient_chunks = quotient_opened_values
                 [last_quotient_i..last_quotient_i + quotient_degree]
                 .iter()
@@ -204,7 +204,10 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
                 RowMajorMatrixView::new_row(next_row),
             );
             let mut folder = VerifierConstraintFolder {
-                main,
+                // TODO fix preprocessed and stage_2
+                preprocessed: main,
+                stage_1: main,
+                stage_2: main,
                 public_values: &public_values,
                 is_first_row: sels.is_first_row,
                 is_last_row: sels.is_last_row,

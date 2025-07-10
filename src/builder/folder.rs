@@ -1,14 +1,18 @@
 /// Adapted from Plonky3's `https://github.com/Plonky3/Plonky3/blob/main/uni-stark/src/folder.rs`
-use p3_air::{AirBuilder, AirBuilderWithPublicValues};
+use p3_air::{AirBuilder, AirBuilderWithPublicValues, PairBuilder};
 use p3_field::{BasedVectorSpace, PackedField};
 use p3_matrix::dense::RowMajorMatrixView;
 use p3_matrix::stack::VerticalPair;
 
 use crate::types::{ExtVal, PackedExtVal, PackedVal, Val};
 
+use super::TwoStagedBuilder;
+
 #[derive(Debug)]
 pub struct ProverConstraintFolder<'a> {
-    pub main: RowMajorMatrixView<'a, PackedVal>,
+    pub preprocessed: RowMajorMatrixView<'a, PackedVal>,
+    pub stage_1: RowMajorMatrixView<'a, PackedVal>,
+    pub stage_2: RowMajorMatrixView<'a, PackedVal>,
     pub public_values: &'a Vec<Val>,
     pub is_first_row: PackedVal,
     pub is_last_row: PackedVal,
@@ -23,7 +27,9 @@ type ViewPair<'a, T> = VerticalPair<RowMajorMatrixView<'a, T>, RowMajorMatrixVie
 
 #[derive(Debug)]
 pub struct VerifierConstraintFolder<'a> {
-    pub main: ViewPair<'a, ExtVal>,
+    pub preprocessed: ViewPair<'a, ExtVal>,
+    pub stage_1: ViewPair<'a, ExtVal>,
+    pub stage_2: ViewPair<'a, ExtVal>,
     pub public_values: &'a Vec<Val>,
     pub is_first_row: ExtVal,
     pub is_last_row: ExtVal,
@@ -40,7 +46,7 @@ impl<'a> AirBuilder for ProverConstraintFolder<'a> {
 
     #[inline]
     fn main(&self) -> Self::M {
-        self.main
+        self.stage_1
     }
 
     #[inline]
@@ -93,6 +99,18 @@ impl AirBuilderWithPublicValues for ProverConstraintFolder<'_> {
     }
 }
 
+impl<'a> PairBuilder for ProverConstraintFolder<'a> {
+    fn preprocessed(&self) -> Self::M {
+        self.preprocessed
+    }
+}
+
+impl<'a> TwoStagedBuilder for ProverConstraintFolder<'a> {
+    fn stage_2(&self) -> Self::M {
+        self.stage_2
+    }
+}
+
 impl<'a> AirBuilder for VerifierConstraintFolder<'a> {
     type F = Val;
     type Expr = ExtVal;
@@ -100,7 +118,7 @@ impl<'a> AirBuilder for VerifierConstraintFolder<'a> {
     type M = ViewPair<'a, ExtVal>;
 
     fn main(&self) -> Self::M {
-        self.main
+        self.stage_1
     }
 
     fn is_first_row(&self) -> Self::Expr {
@@ -133,5 +151,17 @@ impl AirBuilderWithPublicValues for VerifierConstraintFolder<'_> {
 
     fn public_values(&self) -> &[Self::F] {
         self.public_values
+    }
+}
+
+impl<'a> PairBuilder for VerifierConstraintFolder<'a> {
+    fn preprocessed(&self) -> Self::M {
+        self.preprocessed
+    }
+}
+
+impl<'a> TwoStagedBuilder for VerifierConstraintFolder<'a> {
+    fn stage_2(&self) -> Self::M {
+        self.stage_2
     }
 }

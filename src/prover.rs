@@ -25,7 +25,7 @@ type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
 #[derive(Serialize, Deserialize)]
 pub struct Commitments {
     // TODO add stage 2
-    pub stage1_trace: Commitment,
+    pub stage_1_trace: Commitment,
     pub quotient_chunks: Commitment,
 }
 
@@ -35,7 +35,7 @@ pub struct Proof {
     pub commitments: Commitments,
     pub log_degrees: Vec<u8>,
     pub opening_proof: PcsProof,
-    pub stage1_opened_values: OpenedValuesForRound<ExtVal>,
+    pub stage_1_opened_values: OpenedValuesForRound<ExtVal>,
     pub quotient_opened_values: OpenedValuesForRound<ExtVal>,
 }
 
@@ -56,10 +56,10 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
             log_degrees.push(log_degree);
             (trace_domain, trace)
         });
-        let (stage1_trace_commit, stage1_trace_data) =
+        let (stage_1_trace_commit, stage_1_trace_data) =
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
         // TODO: do we have to observe the log_degrees?
-        challenger.observe(stage1_trace_commit);
+        challenger.observe(stage_1_trace_commit);
 
         // generate lookup challenges
         // TODO use `ExtVal` instead of `Val`
@@ -101,10 +101,10 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
                 let quotient_domain =
                     trace_domain.create_disjoint_domain(1 << (log_degree + log_quotient_degree));
                 // TODO add stage 2 traces
-                let stage1_trace_on_quotient_domain =
+                let stage_1_trace_on_quotient_domain =
                     <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
                         pcs,
-                        &stage1_trace_data,
+                        &stage_1_trace_data,
                         idx,
                         quotient_domain,
                     );
@@ -114,7 +114,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
                     &public_values,
                     trace_domain,
                     quotient_domain,
-                    stage1_trace_on_quotient_domain,
+                    stage_1_trace_on_quotient_domain,
                     constraint_challenge,
                     circuit.constraint_count,
                 );
@@ -137,7 +137,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
 
         // save the commitments
         let commitments = Commitments {
-            stage1_trace: stage1_trace_commit,
+            stage_1_trace: stage_1_trace_commit,
             quotient_chunks: quotient_commit,
         };
 
@@ -157,19 +157,19 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
             },
         );
         let rounds = vec![
-            (&stage1_trace_data, round1_openings),
+            (&stage_1_trace_data, round1_openings),
             (&quotient_data, round2_openings),
         ];
         let (opened_values, opening_proof) = pcs.open(rounds, &mut challenger);
         let mut opened_values_iter = opened_values.into_iter();
-        let stage1_opened_values = opened_values_iter.next().unwrap();
+        let stage_1_opened_values = opened_values_iter.next().unwrap();
         let quotient_opened_values = opened_values_iter.next().unwrap();
         debug_assert!(opened_values_iter.next().is_none());
         let log_degrees = log_degrees.into_iter().map(|n| n as u8).collect();
         Proof {
             claim,
             commitments,
-            stage1_opened_values,
+            stage_1_opened_values,
             quotient_opened_values,
             opening_proof,
             log_degrees,
@@ -239,7 +239,10 @@ where
 
             let accumulator = PackedExtVal::ZERO;
             let mut folder = ProverConstraintFolder {
-                main: main.as_view(),
+                // TODO fix preprocessed and stage_2
+                preprocessed: main.as_view(),
+                stage_1: main.as_view(),
+                stage_2: main.as_view(),
                 public_values,
                 is_first_row,
                 is_last_row,
