@@ -24,8 +24,8 @@ type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
 
 #[derive(Serialize, Deserialize)]
 pub struct Commitments {
-    // TODO add stage 2
     pub stage_1_trace: Commitment,
+    pub stage_2_trace: Commitment,
     pub quotient_chunks: Commitment,
 }
 
@@ -36,18 +36,25 @@ pub struct Proof {
     pub log_degrees: Vec<u8>,
     pub opening_proof: PcsProof,
     pub stage_1_opened_values: OpenedValuesForRound<ExtVal>,
+    pub stage_2_opened_values: OpenedValuesForRound<ExtVal>,
     pub quotient_opened_values: OpenedValuesForRound<ExtVal>,
 }
 
 impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
-    pub fn prove(&self, config: &StarkConfig, claim: Claim, witness: SystemWitness) -> Proof {
+    pub fn prove(
+        &self,
+        config: &StarkConfig,
+        claim: Claim,
+        stage_1_witness: SystemWitness,
+        stage_2_witness: Box<dyn FnOnce(&[Val]) -> SystemWitness>,
+    ) -> Proof {
         // initialize pcs and challenger
         let pcs = config.pcs();
         let mut challenger = config.initialise_challenger();
 
         // commit to stage 1 traces
         let mut log_degrees = vec![];
-        let evaluations = witness.circuits.into_iter().map(|witness| {
+        let evaluations = stage_1_witness.circuits.into_iter().map(|witness| {
             let trace = witness.trace;
             let degree = trace.height();
             let log_degree = log2_strict_usize(degree);
@@ -61,22 +68,40 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
         // TODO: do we have to observe the log_degrees?
         challenger.observe(stage_1_trace_commit);
 
+        // observe the claim
+        // this has to be done before generating the lookup argument challenge
+        // otherwise the lookup argument can be attacked
+        let circuit_index = Val::from_usize(*self.circuit_names.get(&claim.circuit_name).unwrap());
+        challenger.observe(circuit_index);
+        challenger.observe_slice(&claim.args);
+
         // generate lookup challenges
         // TODO use `ExtVal` instead of `Val`
         let lookup_argument_challenge: Val = challenger.sample_algebra_element();
         challenger.observe_algebra_element(lookup_argument_challenge);
         let fingerprint_challenge: Val = challenger.sample_algebra_element();
         challenger.observe_algebra_element(fingerprint_challenge);
-        // TODO commit to stage 2 traces
 
-        // observe the claim
-        let circuit_index = Val::from_usize(*self.circuit_names.get(&claim.circuit_name).unwrap());
-        challenger.observe(circuit_index);
-        challenger.observe_slice(&claim.args);
         // construct the accumulator from the claim
         let claim_iter = claim.args.iter().rev().copied().chain(once(circuit_index));
         let init_acc = fingerprint_reverse(fingerprint_challenge, claim_iter);
         let public_values = vec![init_acc, lookup_argument_challenge, fingerprint_challenge];
+
+        // commit to stage 2 traces
+        let evaluations = stage_2_witness(&public_values)
+            .circuits
+            .into_iter()
+            .map(|witness| {
+                let trace = witness.trace;
+                let degree = trace.height();
+                let log_degree = log2_strict_usize(degree);
+                let trace_domain =
+                    <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
+                log_degrees.push(log_degree);
+                (trace_domain, trace)
+            });
+        let (stage_2_trace_commit, stage_2_trace_data) =
+            <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
 
         // generate constraint challenge
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();
@@ -100,11 +125,17 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
                 );
                 let quotient_domain =
                     trace_domain.create_disjoint_domain(1 << (log_degree + log_quotient_degree));
-                // TODO add stage 2 traces
                 let stage_1_trace_on_quotient_domain =
                     <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
                         pcs,
                         &stage_1_trace_data,
+                        idx,
+                        quotient_domain,
+                    );
+                let stage_2_trace_on_quotient_domain =
+                    <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
+                        pcs,
+                        &stage_2_trace_data,
                         idx,
                         quotient_domain,
                     );
@@ -115,6 +146,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
                     trace_domain,
                     quotient_domain,
                     stage_1_trace_on_quotient_domain,
+                    stage_2_trace_on_quotient_domain,
                     constraint_challenge,
                     circuit.constraint_count,
                 );
@@ -138,6 +170,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
         // save the commitments
         let commitments = Commitments {
             stage_1_trace: stage_1_trace_commit,
+            stage_2_trace: stage_2_trace_commit,
             quotient_chunks: quotient_commit,
         };
 
@@ -145,6 +178,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
         let zeta: ExtVal = challenger.sample_algebra_element();
         let mut round1_openings = vec![];
         let mut round2_openings = vec![];
+        let mut round3_openings = vec![];
         log_degrees.iter().zip(quotient_degrees.iter()).for_each(
             |(log_degree, quotient_degree)| {
                 let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
@@ -153,16 +187,19 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
                 );
                 let zeta_next = trace_domain.next_point(zeta).unwrap();
                 round1_openings.push(vec![zeta, zeta_next]);
-                round2_openings.extend(vec![vec![zeta]; *quotient_degree]);
+                round2_openings.push(vec![zeta, zeta_next]);
+                round3_openings.extend(vec![vec![zeta]; *quotient_degree]);
             },
         );
         let rounds = vec![
             (&stage_1_trace_data, round1_openings),
-            (&quotient_data, round2_openings),
+            (&stage_2_trace_data, round2_openings),
+            (&quotient_data, round3_openings),
         ];
         let (opened_values, opening_proof) = pcs.open(rounds, &mut challenger);
         let mut opened_values_iter = opened_values.into_iter();
         let stage_1_opened_values = opened_values_iter.next().unwrap();
+        let stage_2_opened_values = opened_values_iter.next().unwrap();
         let quotient_opened_values = opened_values_iter.next().unwrap();
         debug_assert!(opened_values_iter.next().is_none());
         let log_degrees = log_degrees.into_iter().map(|n| n as u8).collect();
@@ -170,6 +207,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
             claim,
             commitments,
             stage_1_opened_values,
+            stage_2_opened_values,
             quotient_opened_values,
             opening_proof,
             log_degrees,
@@ -188,7 +226,8 @@ fn quotient_values<A, Mat>(
     public_values: &Vec<Val>,
     trace_domain: Domain,
     quotient_domain: Domain,
-    trace_on_quotient_domain: Mat,
+    stage_1_on_quotient_domain: Mat,
+    stage_2_on_quotient_domain: Mat,
     alpha: ExtVal,
     constraint_count: usize,
 ) -> Vec<ExtVal>
@@ -197,7 +236,8 @@ where
     Mat: Matrix<Val> + Sync,
 {
     let quotient_size = quotient_domain.size();
-    let width = trace_on_quotient_domain.width();
+    let stage_1_width = stage_1_on_quotient_domain.width();
+    let stage_2_width = stage_2_on_quotient_domain.width();
     let mut sels = trace_domain.selectors_on_coset(quotient_domain);
 
     let qdb = log2_strict_usize(quotient_domain.size()) - log2_strict_usize(trace_domain.size());
@@ -232,17 +272,22 @@ where
             let is_transition = *PackedVal::from_slice(&sels.is_transition[i_range.clone()]);
             let inv_vanishing = *PackedVal::from_slice(&sels.inv_vanishing[i_range]);
 
-            let main = RowMajorMatrix::new(
-                trace_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
-                width,
+            let preprocessed = RowMajorMatrix::new(vec![], 0);
+            let stage_1 = RowMajorMatrix::new(
+                stage_1_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
+                stage_1_width,
+            );
+            let stage_2 = RowMajorMatrix::new(
+                stage_2_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
+                stage_2_width,
             );
 
             let accumulator = PackedExtVal::ZERO;
             let mut folder = ProverConstraintFolder {
-                // TODO fix preprocessed and stage_2
-                preprocessed: main.as_view(),
-                stage_1: main.as_view(),
-                stage_2: main.as_view(),
+                // TODO fix preprocessed
+                preprocessed: preprocessed.as_view(),
+                stage_1: stage_1.as_view(),
+                stage_2: stage_2.as_view(),
                 public_values,
                 is_first_row,
                 is_last_row,

@@ -30,6 +30,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
         let Proof {
             commitments,
             stage_1_opened_values,
+            stage_2_opened_values,
             quotient_opened_values,
             opening_proof,
             claim,
