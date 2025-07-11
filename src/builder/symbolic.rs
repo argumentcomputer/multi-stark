@@ -7,7 +7,7 @@ use std::fmt::Debug;
 use std::iter::{Product, Sum};
 use std::marker::PhantomData;
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use super::TwoStagedBuilder;
 
@@ -93,22 +93,22 @@ pub enum SymbolicExpression<F> {
     IsTransition,
     Constant(F),
     Add {
-        x: Rc<Self>,
-        y: Rc<Self>,
+        x: Arc<Self>,
+        y: Arc<Self>,
         degree_multiple: usize,
     },
     Sub {
-        x: Rc<Self>,
-        y: Rc<Self>,
+        x: Arc<Self>,
+        y: Arc<Self>,
         degree_multiple: usize,
     },
     Neg {
-        x: Rc<Self>,
+        x: Arc<Self>,
         degree_multiple: usize,
     },
     Mul {
-        x: Rc<Self>,
-        y: Rc<Self>,
+        x: Arc<Self>,
+        y: Arc<Self>,
         degree_multiple: usize,
     },
 }
@@ -179,8 +179,8 @@ where
             (Self::Constant(lhs), Self::Constant(rhs)) => Self::Constant(lhs + rhs),
             (lhs, rhs) => Self::Add {
                 degree_multiple: lhs.degree_multiple().max(rhs.degree_multiple()),
-                x: Rc::new(lhs),
-                y: Rc::new(rhs),
+                x: Arc::new(lhs),
+                y: Arc::new(rhs),
             },
         }
     }
@@ -214,8 +214,8 @@ impl<F: Field, T: Into<Self>> Sub<T> for SymbolicExpression<F> {
             (Self::Constant(lhs), Self::Constant(rhs)) => Self::Constant(lhs - rhs),
             (lhs, rhs) => Self::Sub {
                 degree_multiple: lhs.degree_multiple().max(rhs.degree_multiple()),
-                x: Rc::new(lhs),
-                y: Rc::new(rhs),
+                x: Arc::new(lhs),
+                y: Arc::new(rhs),
             },
         }
     }
@@ -238,7 +238,7 @@ impl<F: Field> Neg for SymbolicExpression<F> {
             Self::Constant(c) => Self::Constant(-c),
             expr => Self::Neg {
                 degree_multiple: expr.degree_multiple(),
-                x: Rc::new(expr),
+                x: Arc::new(expr),
             },
         }
     }
@@ -252,8 +252,8 @@ impl<F: Field, T: Into<Self>> Mul<T> for SymbolicExpression<F> {
             (Self::Constant(lhs), Self::Constant(rhs)) => Self::Constant(lhs * rhs),
             (lhs, rhs) => Self::Mul {
                 degree_multiple: lhs.degree_multiple() + rhs.degree_multiple(),
-                x: Rc::new(lhs),
-                y: Rc::new(rhs),
+                x: Arc::new(lhs),
+                y: Arc::new(rhs),
             },
         }
     }
