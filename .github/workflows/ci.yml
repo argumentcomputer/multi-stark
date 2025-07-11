@@ -1,13 +1,9 @@
 name: Build and Test
 
 on:
-  merge_group:
+  push:
+    branches: [main, dev]
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches:
-      - main
-      - 'feat/**'
-      - release-candidate
   workflow_dispatch:
 
 concurrency:
@@ -16,16 +12,14 @@ concurrency:
 
 jobs:
   linux-test:
-    # Change to buildjet-16vcpu-ubuntu-2204 for a more powerful runner (GitHub App must be enabled)
+    # Change to warp-ubuntu-latest-x64-16x for a more powerful runner (GitHub App must be enabled for this repo)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: lurk-lab/ci-workflows
+          repository: argumentcomputer/ci-workflows
       - uses: ./.github/actions/ci-env
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
@@ -33,16 +27,29 @@ jobs:
         run: |
           cargo nextest run --profile ci --cargo-profile dev-ci --workspace
 
-  # Wasm build, rustfmt, clippy, doctests, and MSRV
-  code-quality:
-    uses: lurk-lab/ci-workflows/.github/workflows/lints.yml@main
-
-  # Check documentation links aren't broken
-  link-checker:
-    uses: lurk-lab/ci-workflows/.github/workflows/links-check.yml@main
-    with: 
-      fail-fast: true
-
-  # Lint dependencies for licensing and auditing issues as per `deny.toml`
-  licenses-audits:
-    uses: lurk-lab/ci-workflows/.github/workflows/licenses-audits.yml@main
+  lints:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: argumentcomputer/ci-workflows
+      - uses: ./.github/actions/ci-env
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check Rustfmt code style
+        run: cargo fmt --all --check
+      - name: Check *everything* compiles
+        run: cargo check --all-targets --all-features --workspace
+      - name: Check clippy lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Doctests
+        run: cargo test --doc --workspace
+      - name: Get Rust version
+        run: |
+          echo "RUST_VERSION=$(awk -F '"' '/^channel/ {print $2}' rust-toolchain.toml)" | tee -a $GITHUB_ENV
+      # Lint dependencies for licensing and auditing issues as per `deny.toml`
+      - name: Cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: ${{ env.RUST_VERSION }}

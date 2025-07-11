@@ -1,11 +1,10 @@
 [package]
-name = "template"
+name = "multi-stark"
 version = "0.1.0"
-edition = "2021"
-authors = ["Lurk Lab Engineering <engineering@lurk-lab.com>"]
+edition = "2024"
+authors = ["Argument Engineering <engineering@argument.xyz>"]
 license = "MIT OR Apache-2.0"
-# EDIT AS NEEDED
-rust-version = "1.70"
+rust-version = "1.85"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -22,3 +21,47 @@ opt-level = 3
 lto = "thin"
 incremental = false
 codegen-units = 16
+
+[lints.clippy]
+cast_lossless = "warn"
+cast_possible_truncation = "warn"
+cast_precision_loss = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"
+ptr_as_ptr = "warn"
+checked_conversions = "warn"
+dbg_macro = "warn"
+derive_partial_eq_without_eq = "warn"
+enum_glob_use = "warn"
+explicit_into_iter_loop = "warn"
+fallible_impl_from = "warn"
+filter_map_next = "warn"
+flat_map_option = "warn"
+from_iter_instead_of_collect = "warn"
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+large_stack_arrays = "warn"
+large_types_passed_by_value = "warn"
+macro_use_imports = "warn"
+manual_assert = "warn"
+map_err_ignore = "warn"
+map_unwrap_or = "warn"
+match_same_arms = "warn"
+match_wild_err_arm = "warn"
+needless_continue = "warn"
+needless_for_each = "warn"
+needless_pass_by_value = "warn"
+option_option = "warn"
+same_functions_in_if_condition = "warn"
+trait_duplication_in_bounds = "warn"
+unnecessary_wraps = "warn"
+unnested_or_patterns = "warn"
+use_self = "warn"
+
+[lints.rust]
+nonstandard_style = "warn"
+rust_2024_compatibility = "warn"
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
+unused_qualifications = "warn"
+unreachable_pub = "warn"
