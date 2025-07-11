@@ -9,9 +9,9 @@ use std::collections::BTreeMap as Map;
 
 pub type Name = String;
 
-/// Each circuit is required to have at least 3 arguments. Namely,
-/// the accumulator, the lookup challenge and the fingerprint challenge.
-pub const MIN_IO_SIZE: usize = 3;
+/// Each circuit is required to have at least 4 arguments. Namely, the lookup challenge,
+/// fingerprint challenge, current accumulator and next accumulator
+pub const MIN_IO_SIZE: usize = 4;
 
 pub struct System<A> {
     pub circuits: Vec<Circuit<A>>,
@@ -50,12 +50,12 @@ pub struct Circuit<A> {
     pub stage_2_width: usize,
 }
 
-pub struct CircuitWitness {
+pub struct CircuitWitness<Val> {
     pub trace: RowMajorMatrix<Val>,
 }
 
-pub struct SystemWitness {
-    pub circuits: Vec<CircuitWitness>,
+pub struct SystemWitness<Val> {
+    pub circuits: Vec<CircuitWitness<Val>>,
 }
 
 impl<A: BaseAirWithPublicValues<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {

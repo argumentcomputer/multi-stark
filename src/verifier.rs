@@ -1,6 +1,6 @@
 use crate::{
     builder::folder::VerifierConstraintFolder,
-    ensure_eq,
+    ensure, ensure_eq,
     prover::{Proof, fingerprint_reverse},
     system::System,
     types::{Challenger, ExtVal, Pcs, PcsError, StarkConfig, Val},
@@ -16,9 +16,11 @@ use std::iter::once;
 #[derive(Debug)]
 pub enum VerificationError<PcsErr> {
     InvalidClaim,
-    InvalidProofShape,
     InvalidOpeningArgument(PcsErr),
+    InvalidProofShape,
+    InvalidSystem,
     OodEvaluationMismatch,
+    UnbalancedChannel,
 }
 
 impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
@@ -28,17 +30,20 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
         proof: &Proof,
     ) -> Result<(), VerificationError<PcsError>> {
         let Proof {
+            claim,
             commitments,
+            intermediate_accumulators,
+            log_degrees,
+            opening_proof,
+            quotient_opened_values,
             stage_1_opened_values,
             stage_2_opened_values,
-            quotient_opened_values,
-            opening_proof,
-            claim,
-            log_degrees,
         } = proof;
+        // The following are proof shape checks
         let num_circuits = self.circuits.len();
-
-        // check the claim and proof shape
+        // there must be at least one circuit
+        ensure!(num_circuits > 0, VerificationError::InvalidSystem);
+        // check the claim
         let circuit_index = Val::from_usize(
             *self
                 .circuit_names
@@ -115,6 +120,18 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
                 VerificationError::InvalidProofShape
             );
         }
+        // there must be as many intermediate accumulators as circuits
+        ensure_eq!(
+            intermediate_accumulators.len(),
+            self.circuits.len(),
+            VerificationError::InvalidProofShape
+        );
+        // the last accumulator should be 0
+        ensure_eq!(
+            *intermediate_accumulators.last().unwrap(),
+            Val::from_u32(0),
+            VerificationError::UnbalancedChannel
+        );
 
         // initialize pcs and challenger
         let pcs = config.pcs();
@@ -139,8 +156,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
 
         // construct the accumulator from the claim
         let claim_iter = claim.args.iter().rev().copied().chain(once(circuit_index));
-        let init_acc = fingerprint_reverse(fingerprint_challenge, claim_iter);
-        let public_values = vec![init_acc, lookup_argument_challenge, fingerprint_challenge];
+        let mut acc = fingerprint_reverse(fingerprint_challenge, claim_iter);
 
         // generate constraint challenge
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();
@@ -219,6 +235,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
             let circuit = &self.circuits[i];
             let degree = 1 << log_degrees[i];
             let quotient_degree = quotient_degrees[i];
+            let next_acc = intermediate_accumulators[i];
             let stage_1_row = &stage_1_opened_values[i][0];
             let stage_1_next_row = &stage_1_opened_values[i][1];
             let stage_2_row = &stage_2_opened_values[i][0];
@@ -246,11 +263,17 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
                 RowMajorMatrixView::new_row(stage_2_row),
                 RowMajorMatrixView::new_row(stage_2_next_row),
             );
+            let public_values = &[
+                lookup_argument_challenge,
+                fingerprint_challenge,
+                acc,
+                next_acc,
+            ];
             let mut folder = VerifierConstraintFolder {
                 preprocessed,
                 stage_1,
                 stage_2,
-                public_values: &public_values,
+                public_values,
                 is_first_row: sels.is_first_row,
                 is_last_row: sels.is_last_row,
                 is_transition: sels.is_transition,
@@ -300,6 +323,8 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
                 quotient,
                 VerificationError::OodEvaluationMismatch
             );
+            // the accumulator must become the next accumulator for the next iteration
+            acc = next_acc;
         }
 
         Ok(())
@@ -377,10 +402,14 @@ mod tests {
             .into_iter(),
         )
     }
-    fn dummy_stage_2_trace(log_heights: &[usize]) -> SystemWitness {
+    fn dummy_stage_2_trace(
+        log_heights: &[usize],
+        accumulators: &mut Vec<Val>,
+    ) -> SystemWitness<Val> {
         let circuits = log_heights
             .iter()
             .map(|log_height| {
+                accumulators.push(Val::from_u32(0));
                 let height = 1 << *log_height;
                 let trace = RowMajorMatrix::new(vec![Val::from_u32(0); height], 1);
                 CircuitWitness { trace }
@@ -425,7 +454,7 @@ mod tests {
             &config,
             dummy_claim,
             witness,
-            Box::new(|_| dummy_stage_2_trace(&[2, 1])),
+            Box::new(|_, accumulators| dummy_stage_2_trace(&[2, 1], accumulators)),
         );
         system.verify(&config, &proof).unwrap();
     }
@@ -471,7 +500,7 @@ mod tests {
                 &config,
                 dummy_claim,
                 witness,
-                Box::new(|_| dummy_stage_2_trace(&[LOG_HEIGHT; 2]))
+                Box::new(|_, accumulators| dummy_stage_2_trace(&[LOG_HEIGHT; 2], accumulators))
             ),
             "proof: "
         );

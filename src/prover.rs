@@ -33,11 +33,12 @@ pub struct Commitments {
 pub struct Proof {
     pub claim: Claim,
     pub commitments: Commitments,
+    pub intermediate_accumulators: Vec<Val>,
     pub log_degrees: Vec<u8>,
     pub opening_proof: PcsProof,
+    pub quotient_opened_values: OpenedValuesForRound<ExtVal>,
     pub stage_1_opened_values: OpenedValuesForRound<ExtVal>,
     pub stage_2_opened_values: OpenedValuesForRound<ExtVal>,
-    pub quotient_opened_values: OpenedValuesForRound<ExtVal>,
 }
 
 impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
@@ -46,8 +47,8 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
         &self,
         config: &StarkConfig,
         claim: Claim,
-        stage_1_witness: SystemWitness,
-        stage_2_witness: Box<dyn FnOnce(&[Val]) -> SystemWitness>,
+        stage_1_witness: SystemWitness<Val>,
+        stage_2_witness: Box<dyn FnOnce(&[Val], &mut Vec<Val>) -> SystemWitness<Val>>,
     ) -> Proof {
         // initialize pcs and challenger
         let pcs = config.pcs();
@@ -85,22 +86,23 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
 
         // construct the accumulator from the claim
         let claim_iter = claim.args.iter().rev().copied().chain(once(circuit_index));
-        let init_acc = fingerprint_reverse(fingerprint_challenge, claim_iter);
-        let public_values = vec![init_acc, lookup_argument_challenge, fingerprint_challenge];
+        let mut acc = fingerprint_reverse(fingerprint_challenge, claim_iter);
 
         // commit to stage 2 traces
-        let evaluations = stage_2_witness(&public_values)
-            .circuits
-            .into_iter()
-            .map(|witness| {
-                let trace = witness.trace;
-                let degree = trace.height();
-                let log_degree = log2_strict_usize(degree);
-                let trace_domain =
-                    <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
-                log_degrees.push(log_degree);
-                (trace_domain, trace)
-            });
+        let mut intermediate_accumulators = vec![];
+        let evaluations = stage_2_witness(
+            &[lookup_argument_challenge, fingerprint_challenge, acc],
+            &mut intermediate_accumulators,
+        )
+        .circuits
+        .into_iter()
+        .map(|witness| {
+            let trace = witness.trace;
+            let degree = trace.height();
+            let trace_domain =
+                <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
+            (trace_domain, trace)
+        });
         let (stage_2_trace_commit, stage_2_trace_data) =
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
         challenger.observe(stage_2_trace_commit);
@@ -109,13 +111,16 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();
 
         // commit to evaluations of the quotient polynomials
+        debug_assert_eq!(intermediate_accumulators.len(), self.circuits.len());
+        debug_assert_eq!(log_degrees.len(), self.circuits.len());
         let mut quotient_degrees = vec![];
         let quotient_evaluations = self
             .circuits
             .iter()
             .zip(log_degrees.iter())
+            .zip(intermediate_accumulators.iter())
             .enumerate()
-            .flat_map(|(idx, (circuit, log_degree))| {
+            .flat_map(|(idx, ((circuit, log_degree), next_acc))| {
                 let air = &circuit.air;
                 // quotient degree is at most 1 less than the max degree, padded to a power of two
                 let quotient_degree =
@@ -142,6 +147,12 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
                         quotient_domain,
                     );
                 // compute the quotient values which are elements of the extension field and flatten it to the base field
+                let public_values = [
+                    lookup_argument_challenge,
+                    fingerprint_challenge,
+                    acc,
+                    *next_acc,
+                ];
                 let quotient_values = quotient_values(
                     air,
                     &public_values,
@@ -161,6 +172,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
                 let quotient_sub_domains = quotient_domain.split_domains(quotient_degree);
                 // need to save the quotient degree for later
                 quotient_degrees.push(quotient_degree);
+                acc = *next_acc;
                 quotient_sub_domains
                     .into_iter()
                     .zip(quotient_sub_evaluations)
@@ -208,11 +220,12 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
         Proof {
             claim,
             commitments,
+            intermediate_accumulators,
+            log_degrees,
+            opening_proof,
+            quotient_opened_values,
             stage_1_opened_values,
             stage_2_opened_values,
-            quotient_opened_values,
-            opening_proof,
-            log_degrees,
         }
     }
 }
@@ -226,7 +239,7 @@ pub(crate) fn fingerprint_reverse<F: Field, Iter: Iterator<Item = F>>(r: F, coef
 #[allow(clippy::too_many_arguments)]
 fn quotient_values<A, Mat>(
     air: &A,
-    public_values: &Vec<Val>,
+    public_values: &[Val],
     trace_domain: Domain,
     quotient_domain: Domain,
     stage_1_on_quotient_domain: Mat,
