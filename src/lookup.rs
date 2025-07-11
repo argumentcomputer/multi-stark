@@ -1,24 +1,95 @@
 use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir};
-use p3_field::{Field, PrimeCharacteristicRing};
-use p3_matrix::Matrix;
+use p3_field::{Algebra, Field};
+use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 use crate::{
     builder::{
         TwoStagedBuilder,
         symbolic::{Entry, SymbolicExpression},
     },
-    system::MIN_IO_SIZE,
+    system::{CircuitWitness, MIN_IO_SIZE, SystemWitness},
     types::Val,
 };
 
-pub struct Lookup {
-    pub multiplicity: SymbolicExpression<Val>,
-    pub args: Vec<SymbolicExpression<Val>>,
+pub struct Lookup<Expr> {
+    pub multiplicity: Expr,
+    pub args: Vec<Expr>,
 }
 
 pub struct LookupAir<A> {
     pub inner_air: A,
-    pub lookups: Vec<Lookup>,
+    pub lookups: Vec<Lookup<SymbolicExpression<Val>>>,
+}
+
+impl Lookup<SymbolicExpression<Val>> {
+    pub fn compute_expr(&self, row: &[Val]) -> Lookup<Val> {
+        let multiplicity = self.multiplicity.interpret(row);
+        let args = self.args.iter().map(|arg| arg.interpret(row)).collect();
+        Lookup { multiplicity, args }
+    }
+}
+
+impl Lookup<Val> {
+    pub fn compute_message(&self, lookup_challenge: Val, fingerprint_challenge: Val) -> Val {
+        let args = fingerprint_reverse::<Val, Val, _>(
+            fingerprint_challenge,
+            self.args.iter().rev().copied(),
+        );
+        lookup_challenge + args
+    }
+}
+
+impl SystemWitness<Val> {
+    pub fn stage_2_from_lookups(
+        &self,
+        lookups: &[Lookup<SymbolicExpression<Val>>],
+    ) -> Box<dyn Fn(&[Val], &mut Vec<Val>) -> SystemWitness<Val>> {
+        let lookups = self
+            .circuits
+            .iter()
+            .map(|circuit| {
+                circuit
+                    .trace
+                    .row_slices()
+                    .map(|row| {
+                        lookups
+                            .iter()
+                            .map(|lookup| lookup.compute_expr(row))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        Box::new(move |values, intermediate_accumulators| {
+            let lookup_challenge = values[0];
+            let fingenprint_challenge = values[1];
+            let mut accumulator = values[2];
+            let circuits = lookups
+                .iter()
+                .map(|lookups_per_circuit| {
+                    let num_lookups = lookups_per_circuit.len();
+                    let vec = lookups_per_circuit
+                        .iter()
+                        .flat_map(|lookups_per_row| {
+                            let mut row = Vec::with_capacity(lookups_per_row.len() + 1);
+                            row.push(accumulator);
+                            row.extend(lookups_per_row.iter().map(|lookup| {
+                                let message =
+                                    lookup.compute_message(lookup_challenge, fingenprint_challenge);
+                                accumulator += message;
+                                message.inverse()
+                            }));
+                            row
+                        })
+                        .collect();
+                    let trace = RowMajorMatrix::new(vec, num_lookups + 1);
+                    intermediate_accumulators.push(accumulator);
+                    CircuitWitness { trace }
+                })
+                .collect();
+            SystemWitness { circuits }
+        })
+    }
 }
 
 impl<A> BaseAir<Val> for LookupAir<A>
@@ -56,14 +127,14 @@ where
         let acc_col = &stage_2_row[1];
         let mut acc_expr: AB::Expr = acc_col.clone().into();
         for (lookup, inverse_of_message) in self.lookups.iter().zip(inverse_of_messages) {
-            let multiplicity = lookup.multiplicity.interpret::<AB>(&row);
-            let args = fingerprint_reverse::<AB, _>(
+            let multiplicity = lookup.multiplicity.interpret::<AB::Expr, AB::Var>(&row);
+            let args = fingerprint_reverse::<Val, AB::Expr, _>(
                 fingerprint_challenge.into(),
                 lookup
                     .args
                     .iter()
                     .rev()
-                    .map(|arg| arg.interpret::<AB>(&row)),
+                    .map(|arg| arg.interpret::<AB::Expr, AB::Var>(&row)),
             );
             let message = lookup_challenge.into() + args;
             builder.assert_one(message.clone() * inverse_of_message.clone());
@@ -79,25 +150,31 @@ where
     }
 }
 
-fn fingerprint_reverse<AB: AirBuilder, Iter: Iterator<Item = AB::Expr>>(
-    r: AB::Expr,
+fn fingerprint_reverse<F: Field, Expr: Algebra<F>, Iter: Iterator<Item = Expr>>(
+    r: Expr,
     coeffs: Iter,
-) -> AB::Expr {
-    coeffs.fold(AB::F::ZERO.into(), |acc, coeff| acc * r.clone() + coeff)
+) -> Expr {
+    coeffs.fold(F::ZERO.into(), |acc, coeff| acc * r.clone() + coeff)
 }
 
 impl<F: Field> SymbolicExpression<F> {
-    fn interpret<AB: AirBuilder<F = F>>(&self, row: &[AB::Var]) -> AB::Expr {
+    pub fn interpret<Expr: Algebra<F>, Var: Into<Expr> + Clone>(&self, row: &[Var]) -> Expr {
         match self {
             SymbolicExpression::Variable(var) => match var.entry {
                 Entry::Main { offset } => row[offset].clone().into(),
                 _ => unimplemented!(),
             },
             SymbolicExpression::Constant(c) => (*c).into(),
-            SymbolicExpression::Add { x, y, .. } => x.interpret::<AB>(row) + y.interpret::<AB>(row),
-            SymbolicExpression::Sub { x, y, .. } => x.interpret::<AB>(row) - y.interpret::<AB>(row),
-            SymbolicExpression::Neg { x, .. } => -x.interpret::<AB>(row),
-            SymbolicExpression::Mul { x, y, .. } => x.interpret::<AB>(row) * y.interpret::<AB>(row),
+            SymbolicExpression::Add { x, y, .. } => {
+                x.interpret::<Expr, Var>(row) + y.interpret::<Expr, Var>(row)
+            }
+            SymbolicExpression::Sub { x, y, .. } => {
+                x.interpret::<Expr, Var>(row) - y.interpret::<Expr, Var>(row)
+            }
+            SymbolicExpression::Neg { x, .. } => -x.interpret::<Expr, Var>(row),
+            SymbolicExpression::Mul { x, y, .. } => {
+                x.interpret::<Expr, Var>(row) * y.interpret::<Expr, Var>(row)
+            }
             _ => unimplemented!(),
         }
     }

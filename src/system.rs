@@ -50,10 +50,12 @@ pub struct Circuit<A> {
     pub stage_2_width: usize,
 }
 
+#[derive(Clone)]
 pub struct CircuitWitness<Val> {
     pub trace: RowMajorMatrix<Val>,
 }
 
+#[derive(Clone)]
 pub struct SystemWitness<Val> {
     pub circuits: Vec<CircuitWitness<Val>>,
 }
