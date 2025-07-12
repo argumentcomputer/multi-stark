@@ -350,8 +350,8 @@ mod tests {
     impl<F> BaseAir<F> for CS {
         fn width(&self) -> usize {
             match self {
-                CS::Pythagorean => 3,
-                CS::Complex => 6,
+                Self::Pythagorean => 3,
+                Self::Complex => 6,
             }
         }
     }
@@ -367,7 +367,7 @@ mod tests {
     {
         fn eval(&self, builder: &mut AB) {
             match self {
-                CS::Pythagorean => {
+                Self::Pythagorean => {
                     let main = builder.main();
                     let local = main.row_slice(0).unwrap();
                     let expr1 = local[0] * local[0] + local[1] * local[1];
@@ -375,7 +375,7 @@ mod tests {
                     // this extra `local[0]` multiplication is there to increase the maximum constraint degree
                     builder.assert_eq(local[0] * expr1, local[0] * expr2);
                 }
-                CS::Complex => {
+                Self::Complex => {
                     let main = builder.main();
                     let local = main.row_slice(0).unwrap();
                     // (a + ib)(c + id) = (ac - bd) + i(ad + bc)
@@ -449,7 +449,7 @@ mod tests {
             num_queries: 64,
             proof_of_work_bits: 0,
         };
-        let config = new_stark_config(fri_parameters);
+        let config = new_stark_config(&fri_parameters);
         let proof = system.prove(
             &config,
             dummy_claim,
@@ -494,7 +494,7 @@ mod tests {
             num_queries: 100,
             proof_of_work_bits: 20,
         };
-        let config = new_stark_config(fri_parameters);
+        let config = new_stark_config(&fri_parameters);
         let proof = benchmark!(
             system.prove(
                 &config,

@@ -158,8 +158,8 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
                     &public_values,
                     trace_domain,
                     quotient_domain,
-                    stage_1_trace_on_quotient_domain,
-                    stage_2_trace_on_quotient_domain,
+                    &stage_1_trace_on_quotient_domain,
+                    &stage_2_trace_on_quotient_domain,
                     constraint_challenge,
                     circuit.constraint_count,
                 );
@@ -216,7 +216,10 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
         let stage_2_opened_values = opened_values_iter.next().unwrap();
         let quotient_opened_values = opened_values_iter.next().unwrap();
         debug_assert!(opened_values_iter.next().is_none());
-        let log_degrees = log_degrees.into_iter().map(|n| n as u8).collect();
+        let log_degrees = log_degrees
+            .into_iter()
+            .map(|n| n.try_into().unwrap())
+            .collect();
         Proof {
             claim,
             commitments,
@@ -242,8 +245,8 @@ fn quotient_values<A, Mat>(
     public_values: &[Val],
     trace_domain: Domain,
     quotient_domain: Domain,
-    stage_1_on_quotient_domain: Mat,
-    stage_2_on_quotient_domain: Mat,
+    stage_1_on_quotient_domain: &Mat,
+    stage_2_on_quotient_domain: &Mat,
     alpha: ExtVal,
     constraint_count: usize,
 ) -> Vec<ExtVal>

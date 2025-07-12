@@ -61,7 +61,7 @@ fn new_mmcs() -> Mmcs {
     Mmcs::new(field_hash, compress)
 }
 
-fn new_pcs(fri_parameters: FriParameters) -> Pcs {
+fn new_pcs(fri_parameters: &FriParameters) -> Pcs {
     let val_mmcs = new_mmcs();
     let mmcs = ExtensionMmcs::new(val_mmcs.clone());
     let inner_parameters = InnerFriParameters {
@@ -75,7 +75,7 @@ fn new_pcs(fri_parameters: FriParameters) -> Pcs {
     Pcs::new(dft, val_mmcs, inner_parameters)
 }
 
-pub fn new_stark_config(fri_parameters: FriParameters) -> StarkConfig {
+pub fn new_stark_config(fri_parameters: &FriParameters) -> StarkConfig {
     let pcs = new_pcs(fri_parameters);
     let challenger = Challenger::from_hasher(vec![], Keccak256Hash {});
     StarkConfig { pcs, challenger }

@@ -32,7 +32,7 @@ impl Lookup<SymbolicExpression<Val>> {
 impl Lookup<Val> {
     pub fn compute_message(&self, lookup_challenge: Val, fingerprint_challenge: Val) -> Val {
         let args = fingerprint_reverse::<Val, Val, _>(
-            fingerprint_challenge,
+            &fingerprint_challenge,
             self.args.iter().rev().copied(),
         );
         lookup_challenge + args
@@ -40,10 +40,11 @@ impl Lookup<Val> {
 }
 
 impl SystemWitness<Val> {
+    #[allow(clippy::type_complexity)]
     pub fn stage_2_from_lookups(
         &self,
         lookups: &[Lookup<SymbolicExpression<Val>>],
-    ) -> Box<dyn Fn(&[Val], &mut Vec<Val>) -> SystemWitness<Val>> {
+    ) -> Box<dyn Fn(&[Val], &mut Vec<Val>) -> Self> {
         let lookups = self
             .circuits
             .iter()
@@ -87,7 +88,7 @@ impl SystemWitness<Val> {
                     CircuitWitness { trace }
                 })
                 .collect();
-            SystemWitness { circuits }
+            Self { circuits }
         })
     }
 }
@@ -129,7 +130,7 @@ where
         for (lookup, inverse_of_message) in self.lookups.iter().zip(inverse_of_messages) {
             let multiplicity = lookup.multiplicity.interpret::<AB::Expr, AB::Var>(&row);
             let args = fingerprint_reverse::<Val, AB::Expr, _>(
-                fingerprint_challenge.into(),
+                &fingerprint_challenge.into(),
                 lookup
                     .args
                     .iter()
@@ -151,7 +152,7 @@ where
 }
 
 fn fingerprint_reverse<F: Field, Expr: Algebra<F>, Iter: Iterator<Item = Expr>>(
-    r: Expr,
+    r: &Expr,
     coeffs: Iter,
 ) -> Expr {
     coeffs.fold(F::ZERO.into(), |acc, coeff| acc * r.clone() + coeff)
@@ -160,21 +161,15 @@ fn fingerprint_reverse<F: Field, Expr: Algebra<F>, Iter: Iterator<Item = Expr>>(
 impl<F: Field> SymbolicExpression<F> {
     pub fn interpret<Expr: Algebra<F>, Var: Into<Expr> + Clone>(&self, row: &[Var]) -> Expr {
         match self {
-            SymbolicExpression::Variable(var) => match var.entry {
+            Self::Variable(var) => match var.entry {
                 Entry::Main { offset } => row[offset].clone().into(),
                 _ => unimplemented!(),
             },
-            SymbolicExpression::Constant(c) => (*c).into(),
-            SymbolicExpression::Add { x, y, .. } => {
-                x.interpret::<Expr, Var>(row) + y.interpret::<Expr, Var>(row)
-            }
-            SymbolicExpression::Sub { x, y, .. } => {
-                x.interpret::<Expr, Var>(row) - y.interpret::<Expr, Var>(row)
-            }
-            SymbolicExpression::Neg { x, .. } => -x.interpret::<Expr, Var>(row),
-            SymbolicExpression::Mul { x, y, .. } => {
-                x.interpret::<Expr, Var>(row) * y.interpret::<Expr, Var>(row)
-            }
+            Self::Constant(c) => (*c).into(),
+            Self::Add { x, y, .. } => x.interpret::<Expr, Var>(row) + y.interpret::<Expr, Var>(row),
+            Self::Sub { x, y, .. } => x.interpret::<Expr, Var>(row) - y.interpret::<Expr, Var>(row),
+            Self::Neg { x, .. } => -x.interpret::<Expr, Var>(row),
+            Self::Mul { x, y, .. } => x.interpret::<Expr, Var>(row) * y.interpret::<Expr, Var>(row),
             _ => unimplemented!(),
         }
     }
