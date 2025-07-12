@@ -86,8 +86,9 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
 
         // construct the accumulator from the claim
         let claim_iter = claim.args.iter().rev().copied().chain(once(circuit_index));
-        let mut acc = fingerprint_reverse(fingerprint_challenge, claim_iter);
-
+        let message =
+            lookup_argument_challenge + fingerprint_reverse(fingerprint_challenge, claim_iter);
+        let mut acc = message.inverse();
         // commit to stage 2 traces
         let mut intermediate_accumulators = vec![];
         let evaluations = stage_2_witness(
