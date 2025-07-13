@@ -1,5 +1,6 @@
 use p3_air::AirBuilder;
 
+pub mod check;
 pub mod folder;
 pub mod symbolic;
 
