@@ -11,6 +11,7 @@ use crate::{
     types::Val,
 };
 
+#[derive(Clone)]
 pub struct Lookup<Expr> {
     pub multiplicity: Expr,
     pub args: Vec<Expr>,
