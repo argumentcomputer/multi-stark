@@ -13,7 +13,6 @@ use p3_util::log2_strict_usize;
 use serde::{Deserialize, Serialize};
 use std::{cmp::min, iter::once};
 
-#[derive(Serialize, Deserialize)]
 pub struct Claim {
     pub circuit_name: Name,
     pub args: Vec<Val>,
@@ -31,7 +30,6 @@ pub struct Commitments {
 
 #[derive(Serialize, Deserialize)]
 pub struct Proof {
-    pub claim: Claim,
     pub commitments: Commitments,
     pub intermediate_accumulators: Vec<Val>,
     pub log_degrees: Vec<u8>,
@@ -46,7 +44,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
     pub fn prove(
         &self,
         config: &StarkConfig,
-        claim: Claim,
+        claim: &Claim,
         stage_1_witness: SystemWitness<Val>,
         stage_2_witness: Box<dyn FnOnce(&[Val], &mut Vec<Val>) -> SystemWitness<Val>>,
     ) -> Proof {
@@ -222,7 +220,6 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
             .map(|n| n.try_into().unwrap())
             .collect();
         Proof {
-            claim,
             commitments,
             intermediate_accumulators,
             log_degrees,

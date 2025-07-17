@@ -1,7 +1,7 @@
 use crate::{
     builder::folder::VerifierConstraintFolder,
     ensure, ensure_eq,
-    prover::{Proof, fingerprint_reverse},
+    prover::{Claim, Proof, fingerprint_reverse},
     system::System,
     types::{Challenger, ExtVal, Pcs, PcsError, StarkConfig, Val},
 };
@@ -27,10 +27,10 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
     pub fn verify(
         &self,
         config: &StarkConfig,
+        claim: &Claim,
         proof: &Proof,
     ) -> Result<(), VerificationError<PcsError>> {
         let Proof {
-            claim,
             commitments,
             intermediate_accumulators,
             log_degrees,
@@ -454,11 +454,11 @@ mod tests {
         let config = new_stark_config(&fri_parameters);
         let proof = system.prove(
             &config,
-            dummy_claim,
+            &dummy_claim,
             witness,
             Box::new(|_, accumulators| dummy_stage_2_trace(&[2, 1], accumulators)),
         );
-        system.verify(&config, &proof).unwrap();
+        system.verify(&config, &dummy_claim, &proof).unwrap();
     }
 
     #[test]
@@ -500,7 +500,7 @@ mod tests {
         let proof = benchmark!(
             system.prove(
                 &config,
-                dummy_claim,
+                &dummy_claim,
                 witness,
                 Box::new(|_, accumulators| dummy_stage_2_trace(&[LOG_HEIGHT; 2], accumulators))
             ),
@@ -512,6 +512,9 @@ mod tests {
         let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode_config)
             .expect("Failed to serialize proof");
         println!("Proof size: {} bytes", proof_bytes.len());
-        benchmark!(system.verify(&config, &proof).unwrap(), "verification: ");
+        benchmark!(
+            system.verify(&config, &dummy_claim, &proof).unwrap(),
+            "verification: "
+        );
     }
 }

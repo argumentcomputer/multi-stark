@@ -349,7 +349,7 @@ mod tests {
         let config = new_stark_config(&fri_parameters);
         let circuit_lookups = [CS::Even.lookups(), CS::Odd.lookups()];
         let stage_2 = witness.stage_2_from_lookups(&circuit_lookups);
-        let proof = system.prove(&config, claim, witness, stage_2);
-        system.verify(&config, &proof).unwrap();
+        let proof = system.prove(&config, &claim, witness, stage_2);
+        system.verify(&config, &claim, &proof).unwrap();
     }
 }
