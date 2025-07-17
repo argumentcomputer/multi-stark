@@ -18,7 +18,13 @@ pub struct Lookup<Expr> {
 }
 
 pub struct LookupAir<A> {
-    pub inner_air: A,
+    inner_air: A,
+}
+
+impl<A> LookupAir<A> {
+    pub fn new(inner_air: A) -> Self {
+        Self { inner_air }
+    }
 }
 
 pub trait AirWithLookup<F>: BaseAir<F> {
