@@ -21,14 +21,14 @@ pub struct LookupAir<A> {
     inner_air: A,
 }
 
+pub trait AirWithLookup<F>: BaseAir<F> {
+    fn lookups(&self) -> Vec<Lookup<SymbolicExpression<F>>>;
+}
+
 impl<A> LookupAir<A> {
     pub fn new(inner_air: A) -> Self {
         Self { inner_air }
     }
-}
-
-pub trait AirWithLookup<F>: BaseAir<F> {
-    fn lookups(&self) -> Vec<Lookup<SymbolicExpression<F>>>;
 }
 
 impl Lookup<SymbolicExpression<Val>> {
@@ -51,7 +51,7 @@ impl Lookup<Val> {
 
 impl SystemWitness<Val> {
     #[allow(clippy::type_complexity)]
-    pub fn stage_2_from_lookups(
+    pub fn stage_2_from_symbolic_lookups(
         &self,
         circuit_lookups: &[Vec<Lookup<SymbolicExpression<Val>>>],
     ) -> Box<dyn Fn(&[Val], &mut Vec<Val>) -> Self> {
@@ -72,6 +72,14 @@ impl SystemWitness<Val> {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
+        self.stage_2_from_lookups(lookups)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn stage_2_from_lookups(
+        &self,
+        lookups: Vec<Vec<Vec<Lookup<Val>>>>,
+    ) -> Box<dyn Fn(&[Val], &mut Vec<Val>) -> Self> {
         Box::new(move |values, intermediate_accumulators| {
             let lookup_challenge = values[0];
             let fingenprint_challenge = values[1];
@@ -355,7 +363,7 @@ mod tests {
         };
         let config = new_stark_config(&fri_parameters);
         let circuit_lookups = [CS::Even.lookups(), CS::Odd.lookups()];
-        let stage_2 = witness.stage_2_from_lookups(&circuit_lookups);
+        let stage_2 = witness.stage_2_from_symbolic_lookups(&circuit_lookups);
         let proof = system.prove(&config, &claim, witness, stage_2);
         system.verify(&config, &claim, &proof).unwrap();
     }
