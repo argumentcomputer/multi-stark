@@ -176,6 +176,8 @@ where
 
     fn add(self, rhs: T) -> Self {
         match (self, rhs.into()) {
+            (Self::Constant(lhs), rhs) if lhs == F::ZERO => rhs,
+            (lhs, Self::Constant(rhs)) if rhs == F::ZERO => lhs,
             (Self::Constant(lhs), Self::Constant(rhs)) => Self::Constant(lhs + rhs),
             (lhs, rhs) => Self::Add {
                 degree_multiple: lhs.degree_multiple().max(rhs.degree_multiple()),
@@ -211,6 +213,8 @@ impl<F: Field, T: Into<Self>> Sub<T> for SymbolicExpression<F> {
 
     fn sub(self, rhs: T) -> Self {
         match (self, rhs.into()) {
+            (Self::Constant(lhs), rhs) if lhs == F::ZERO => -rhs,
+            (lhs, Self::Constant(rhs)) if rhs == F::ZERO => lhs,
             (Self::Constant(lhs), Self::Constant(rhs)) => Self::Constant(lhs - rhs),
             (lhs, rhs) => Self::Sub {
                 degree_multiple: lhs.degree_multiple().max(rhs.degree_multiple()),
@@ -249,6 +253,8 @@ impl<F: Field, T: Into<Self>> Mul<T> for SymbolicExpression<F> {
 
     fn mul(self, rhs: T) -> Self {
         match (self, rhs.into()) {
+            (Self::Constant(lhs), rhs) if lhs == F::ONE => rhs,
+            (lhs, Self::Constant(rhs)) if rhs == F::ONE => lhs,
             (Self::Constant(lhs), Self::Constant(rhs)) => Self::Constant(lhs * rhs),
             (lhs, rhs) => Self::Mul {
                 degree_multiple: lhs.degree_multiple() + rhs.degree_multiple(),
