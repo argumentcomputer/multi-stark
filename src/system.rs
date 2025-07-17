@@ -1,5 +1,8 @@
 use crate::{
-    builder::symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
+    builder::{
+        TwoStagedAir,
+        symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
+    },
     ensure_eq,
     types::Val,
 };
@@ -60,11 +63,14 @@ pub struct SystemWitness<Val> {
     pub circuits: Vec<CircuitWitness<Val>>,
 }
 
-impl<A: BaseAirWithPublicValues<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
-    pub fn from_air(air: A, stage_2_width: usize) -> Result<Self, String> {
+impl<A: BaseAirWithPublicValues<Val> + TwoStagedAir<Val> + Air<SymbolicAirBuilder<Val>>>
+    Circuit<A>
+{
+    pub fn from_air(air: A) -> Result<Self, String> {
         let io_size = air.num_public_values();
         ensure_eq!(io_size, MIN_IO_SIZE, "Incompatible IO size");
         let stage_1_width = air.width();
+        let stage_2_width = air.stage_2_width();
         let preprocessed_width = air.preprocessed_trace().map_or(0, |mat| mat.width());
         let constraint_count = get_symbolic_constraints(
             &air,

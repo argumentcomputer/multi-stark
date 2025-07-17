@@ -338,6 +338,7 @@ mod tests {
     use super::*;
     use crate::{
         benchmark,
+        builder::TwoStagedAir,
         prover::Claim,
         system::{Circuit, CircuitWitness, MIN_IO_SIZE, SystemWitness},
         types::{FriParameters, new_stark_config},
@@ -360,6 +361,11 @@ mod tests {
     impl<F> BaseAirWithPublicValues<F> for CS {
         fn num_public_values(&self) -> usize {
             MIN_IO_SIZE
+        }
+    }
+    impl<F> TwoStagedAir<F> for CS {
+        fn stage_2_width(&self) -> usize {
+            1
         }
     }
     impl<AB> Air<AB> for CS
@@ -392,10 +398,8 @@ mod tests {
         }
     }
     fn system() -> System<CS> {
-        // the prover does not support 0 width traces yet
-        let min_stage_2_width = 1;
-        let pythagorean_circuit = Circuit::from_air(CS::Pythagorean, min_stage_2_width).unwrap();
-        let complex_circuit = Circuit::from_air(CS::Complex, min_stage_2_width).unwrap();
+        let pythagorean_circuit = Circuit::from_air(CS::Pythagorean).unwrap();
+        let complex_circuit = Circuit::from_air(CS::Complex).unwrap();
         System::new(
             [
                 ("pythagorean", pythagorean_circuit),

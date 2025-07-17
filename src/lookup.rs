@@ -4,7 +4,7 @@ use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 use crate::{
     builder::{
-        TwoStagedBuilder,
+        TwoStagedAir, TwoStagedBuilder,
         symbolic::{Entry, SymbolicExpression},
     },
     system::{CircuitWitness, MIN_IO_SIZE, SystemWitness},
@@ -17,17 +17,14 @@ pub struct Lookup<Expr> {
     pub args: Vec<Expr>,
 }
 
-pub struct LookupAir<A> {
-    inner_air: A,
+pub struct LookupAir<A, F> {
+    pub inner_air: A,
+    pub lookups: Vec<Lookup<SymbolicExpression<F>>>,
 }
 
-pub trait AirWithLookup<F>: BaseAir<F> {
-    fn lookups(&self) -> Vec<Lookup<SymbolicExpression<F>>>;
-}
-
-impl<A> LookupAir<A> {
-    pub fn new(inner_air: A) -> Self {
-        Self { inner_air }
+impl<A, F> LookupAir<A, F> {
+    pub fn new(inner_air: A, lookups: Vec<Lookup<SymbolicExpression<F>>>) -> Self {
+        Self { inner_air, lookups }
     }
 }
 
@@ -114,7 +111,7 @@ impl SystemWitness<Val> {
     }
 }
 
-impl<A> BaseAir<Val> for LookupAir<A>
+impl<A> BaseAir<Val> for LookupAir<A, Val>
 where
     A: BaseAir<Val>,
 {
@@ -122,7 +119,8 @@ where
         self.inner_air.width()
     }
 }
-impl<A> BaseAirWithPublicValues<Val> for LookupAir<A>
+
+impl<A> BaseAirWithPublicValues<Val> for LookupAir<A, Val>
 where
     A: BaseAir<Val>,
 {
@@ -131,13 +129,22 @@ where
     }
 }
 
-impl<A, AB> Air<AB> for LookupAir<A>
+impl<A> TwoStagedAir<Val> for LookupAir<A, Val>
 where
-    A: Air<AB> + AirWithLookup<Val>,
+    A: BaseAir<Val>,
+{
+    fn stage_2_width(&self) -> usize {
+        self.lookups.len() + 1
+    }
+}
+
+impl<A, AB> Air<AB> for LookupAir<A, Val>
+where
+    A: Air<AB>,
     AB: AirBuilderWithPublicValues<F = Val> + TwoStagedBuilder,
 {
     fn eval(&self, builder: &mut AB) {
-        let lookups = self.inner_air.lookups();
+        let lookups = &self.lookups;
         self.inner_air.eval(builder);
         let public_values = builder.public_values();
         debug_assert_eq!(public_values.len(), MIN_IO_SIZE);
@@ -225,31 +232,7 @@ mod tests {
             6
         }
     }
-    impl<AB> Air<AB> for CS
-    where
-        AB: AirBuilderWithPublicValues,
-        AB::Var: Copy,
-    {
-        fn eval(&self, builder: &mut AB) {
-            // both even and odd have the same constraints, they only differ on the lookups
-            let main = builder.main();
-            let local = main.row_slice(0).unwrap();
-            let multiplicity = local[0];
-            let input = local[1];
-            let input_inverse = local[2];
-            let input_is_zero = local[3];
-            let input_not_zero = local[4];
-            builder.assert_bools([input_is_zero, input_not_zero]);
-            builder
-                .when(multiplicity)
-                .assert_one(input_is_zero + input_not_zero);
-            builder.when(input_is_zero).assert_zero(input);
-            builder
-                .when(input_not_zero)
-                .assert_one(input * input_inverse);
-        }
-    }
-    impl AirWithLookup<Val> for CS {
+    impl CS {
         fn lookups(&self) -> Vec<Lookup<SymbolicExpression<Val>>> {
             let var = |index| {
                 SymbolicExpression::<Val>::from(SymbolicVariable::new(
@@ -298,17 +281,41 @@ mod tests {
             }
         }
     }
-    fn system() -> System<LookupAir<CS>> {
-        // two lookups and an accumulator
-        let stage_2_width = 3;
-        let even = Circuit::from_air(
-            LookupAir {
-                inner_air: CS::Even,
-            },
-            stage_2_width,
-        )
+    impl<AB> Air<AB> for CS
+    where
+        AB: AirBuilderWithPublicValues,
+        AB::Var: Copy,
+    {
+        fn eval(&self, builder: &mut AB) {
+            // both even and odd have the same constraints, they only differ on the lookups
+            let main = builder.main();
+            let local = main.row_slice(0).unwrap();
+            let multiplicity = local[0];
+            let input = local[1];
+            let input_inverse = local[2];
+            let input_is_zero = local[3];
+            let input_not_zero = local[4];
+            builder.assert_bools([input_is_zero, input_not_zero]);
+            builder
+                .when(multiplicity)
+                .assert_one(input_is_zero + input_not_zero);
+            builder.when(input_is_zero).assert_zero(input);
+            builder
+                .when(input_not_zero)
+                .assert_one(input * input_inverse);
+        }
+    }
+    fn system() -> System<LookupAir<CS, Val>> {
+        let even = Circuit::from_air(LookupAir {
+            inner_air: CS::Even,
+            lookups: CS::Even.lookups(),
+        })
         .unwrap();
-        let odd = Circuit::from_air(LookupAir { inner_air: CS::Odd }, stage_2_width).unwrap();
+        let odd = Circuit::from_air(LookupAir {
+            inner_air: CS::Odd,
+            lookups: CS::Odd.lookups(),
+        })
+        .unwrap();
         System::new([("even", even), ("odd", odd)].into_iter())
     }
 
