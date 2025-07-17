@@ -2,6 +2,7 @@ pub mod builder;
 pub mod lookup;
 pub mod prover;
 pub mod system;
+pub mod test_debug;
 pub mod types;
 pub mod verifier;
 

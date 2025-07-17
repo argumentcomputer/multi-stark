@@ -24,6 +24,10 @@ p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3", rev = "e9ab5a4b3d
 p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "e9ab5a4b3d39c3a03de7d32dabd63dbfb310f74d" }
 p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "e9ab5a4b3d39c3a03de7d32dabd63dbfb310f74d" }
 p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "e9ab5a4b3d39c3a03de7d32dabd63dbfb310f74d" }
+p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3", rev = "e9ab5a4b3d39c3a03de7d32dabd63dbfb310f74d" }
+rand = "0.9.1"
+postcard = { version = "1.0.0", features = ["alloc"]}
+itertools = "0.14.0"
 
 [features]
 parallel = ["p3-maybe-rayon/parallel"]
