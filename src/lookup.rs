@@ -21,7 +21,7 @@ pub struct LookupAir<A> {
     pub inner_air: A,
 }
 
-trait AirWithLookup<F>: BaseAir<F> {
+pub trait AirWithLookup<F>: BaseAir<F> {
     fn lookups(&self) -> Vec<Lookup<SymbolicExpression<F>>>;
 }
 
