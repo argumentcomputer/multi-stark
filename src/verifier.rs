@@ -408,10 +408,8 @@ mod tests {
             .into_iter(),
         )
     }
-    fn dummy_stage_2_trace(
-        log_heights: &[usize],
-        accumulators: &mut Vec<Val>,
-    ) -> SystemWitness<Val> {
+    fn dummy_stage_2_trace(log_heights: &[usize]) -> (SystemWitness<Val>, Vec<Val>) {
+        let mut accumulators = vec![];
         let circuits = log_heights
             .iter()
             .map(|log_height| {
@@ -421,7 +419,7 @@ mod tests {
                 CircuitWitness { trace }
             })
             .collect();
-        SystemWitness { circuits }
+        (SystemWitness { circuits }, accumulators)
     }
 
     #[test]
@@ -460,7 +458,7 @@ mod tests {
             &config,
             &dummy_claim,
             witness,
-            Box::new(|_, accumulators| dummy_stage_2_trace(&[2, 1], accumulators)),
+            Box::new(|_| dummy_stage_2_trace(&[2, 1])),
         );
         system.verify(&config, &dummy_claim, &proof).unwrap();
     }
@@ -506,7 +504,7 @@ mod tests {
                 &config,
                 &dummy_claim,
                 witness,
-                Box::new(|_, accumulators| dummy_stage_2_trace(&[LOG_HEIGHT; 2], accumulators))
+                Box::new(|_| dummy_stage_2_trace(&[LOG_HEIGHT; 2]))
             ),
             "proof: "
         );

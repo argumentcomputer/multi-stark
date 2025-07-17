@@ -46,7 +46,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
         config: &StarkConfig,
         claim: &Claim,
         stage_1_witness: SystemWitness<Val>,
-        stage_2_witness: Box<dyn FnOnce(&[Val], &mut Vec<Val>) -> SystemWitness<Val>>,
+        stage_2_witness: Box<dyn FnOnce(&[Val]) -> (SystemWitness<Val>, Vec<Val>)>,
     ) -> Proof {
         // initialize pcs and challenger
         let pcs = config.pcs();
@@ -88,14 +88,9 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
             lookup_argument_challenge + fingerprint_reverse(fingerprint_challenge, claim_iter);
         let mut acc = message.inverse();
         // commit to stage 2 traces
-        let mut intermediate_accumulators = vec![];
-        let evaluations = stage_2_witness(
-            &[lookup_argument_challenge, fingerprint_challenge, acc],
-            &mut intermediate_accumulators,
-        )
-        .circuits
-        .into_iter()
-        .map(|witness| {
+        let (stage_2_witness, intermediate_accumulators) =
+            stage_2_witness(&[lookup_argument_challenge, fingerprint_challenge, acc]);
+        let evaluations = stage_2_witness.circuits.into_iter().map(|witness| {
             let trace = witness.trace;
             let degree = trace.height();
             let trace_domain =

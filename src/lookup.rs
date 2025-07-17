@@ -51,7 +51,7 @@ impl SystemWitness<Val> {
     pub fn stage_2_from_symbolic_lookups(
         &self,
         circuit_lookups: &[Vec<Lookup<SymbolicExpression<Val>>>],
-    ) -> Box<dyn Fn(&[Val], &mut Vec<Val>) -> Self> {
+    ) -> Box<dyn Fn(&[Val]) -> (Self, Vec<Val>)> {
         let lookups = self
             .circuits
             .iter()
@@ -76,8 +76,9 @@ impl SystemWitness<Val> {
     pub fn stage_2_from_lookups(
         &self,
         lookups: Vec<Vec<Vec<Lookup<Val>>>>,
-    ) -> Box<dyn Fn(&[Val], &mut Vec<Val>) -> Self> {
-        Box::new(move |values, intermediate_accumulators| {
+    ) -> Box<dyn Fn(&[Val]) -> (Self, Vec<Val>)> {
+        Box::new(move |values| {
+            let mut intermediate_accumulators = vec![];
             let lookup_challenge = values[0];
             let fingenprint_challenge = values[1];
             let mut accumulator = values[2];
@@ -106,7 +107,7 @@ impl SystemWitness<Val> {
                     CircuitWitness { trace }
                 })
                 .collect();
-            Self { circuits }
+            (Self { circuits }, intermediate_accumulators)
         })
     }
 }
