@@ -17,13 +17,13 @@ pub struct Lookup<Expr> {
     pub args: Vec<Expr>,
 }
 
-pub struct LookupAir<A, F> {
+pub struct LookupAir<A> {
     pub inner_air: A,
-    pub lookups: Vec<Lookup<SymbolicExpression<F>>>,
+    pub lookups: Vec<Lookup<SymbolicExpression<Val>>>,
 }
 
-impl<A, F> LookupAir<A, F> {
-    pub fn new(inner_air: A, lookups: Vec<Lookup<SymbolicExpression<F>>>) -> Self {
+impl<A> LookupAir<A> {
+    pub fn new(inner_air: A, lookups: Vec<Lookup<SymbolicExpression<Val>>>) -> Self {
         Self { inner_air, lookups }
     }
 }
@@ -112,7 +112,7 @@ impl SystemWitness<Val> {
     }
 }
 
-impl<A> BaseAir<Val> for LookupAir<A, Val>
+impl<A> BaseAir<Val> for LookupAir<A>
 where
     A: BaseAir<Val>,
 {
@@ -121,7 +121,7 @@ where
     }
 }
 
-impl<A> BaseAirWithPublicValues<Val> for LookupAir<A, Val>
+impl<A> BaseAirWithPublicValues<Val> for LookupAir<A>
 where
     A: BaseAir<Val>,
 {
@@ -130,7 +130,7 @@ where
     }
 }
 
-impl<A> TwoStagedAir<Val> for LookupAir<A, Val>
+impl<A> TwoStagedAir<Val> for LookupAir<A>
 where
     A: BaseAir<Val>,
 {
@@ -139,7 +139,7 @@ where
     }
 }
 
-impl<A, AB> Air<AB> for LookupAir<A, Val>
+impl<A, AB> Air<AB> for LookupAir<A>
 where
     A: Air<AB>,
     AB: AirBuilderWithPublicValues<F = Val> + TwoStagedBuilder,
@@ -306,7 +306,7 @@ mod tests {
                 .assert_one(input * input_inverse);
         }
     }
-    fn system() -> System<LookupAir<CS, Val>> {
+    fn system() -> System<LookupAir<CS>> {
         let even = Circuit::from_air(LookupAir {
             inner_air: CS::Even,
             lookups: CS::Even.lookups(),
