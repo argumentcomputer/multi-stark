@@ -4,10 +4,10 @@ use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 use crate::{
     builder::{
-        TwoStagedAir, TwoStagedBuilder,
+        TwoStagedBuilder,
         symbolic::{Entry, SymbolicExpression},
     },
-    system::{CircuitWitness, MIN_IO_SIZE, SystemWitness},
+    system::MIN_IO_SIZE,
     types::Val,
 };
 
@@ -25,6 +25,10 @@ pub struct LookupAir<A> {
 impl<A> LookupAir<A> {
     pub fn new(inner_air: A, lookups: Vec<Lookup<SymbolicExpression<Val>>>) -> Self {
         Self { inner_air, lookups }
+    }
+
+    pub fn stage_2_width(&self) -> usize {
+        self.lookups.len() + 1
     }
 }
 
@@ -44,71 +48,39 @@ impl Lookup<Val> {
         );
         lookup_challenge + args
     }
-}
 
-impl SystemWitness<Val> {
-    #[allow(clippy::type_complexity)]
-    pub fn stage_2_from_symbolic_lookups(
-        &self,
-        circuit_lookups: &[Vec<Lookup<SymbolicExpression<Val>>>],
-    ) -> Box<dyn Fn(&[Val]) -> (Self, Vec<Val>)> {
-        let lookups = self
-            .circuits
-            .iter()
-            .zip(circuit_lookups.iter())
-            .map(|(circuit, lookups)| {
-                circuit
-                    .trace
-                    .row_slices()
-                    .map(|row| {
-                        lookups
-                            .iter()
-                            .map(|lookup| lookup.compute_expr(row))
-                            .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        self.stage_2_from_lookups(lookups)
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub fn stage_2_from_lookups(
-        &self,
-        lookups: Vec<Vec<Vec<Lookup<Val>>>>,
-    ) -> Box<dyn Fn(&[Val]) -> (Self, Vec<Val>)> {
-        Box::new(move |values| {
-            let mut intermediate_accumulators = vec![];
-            let lookup_challenge = values[0];
-            let fingenprint_challenge = values[1];
-            let mut accumulator = values[2];
-            let circuits = lookups
+    pub fn stage_2_traces(
+        lookups: &[Vec<Vec<Self>>],
+        values: &[Val],
+    ) -> (Vec<RowMajorMatrix<Val>>, Vec<Val>) {
+        let mut intermediate_accumulators = vec![];
+        let mut traces = vec![];
+        let lookup_challenge = values[0];
+        let fingenprint_challenge = values[1];
+        let mut accumulator = values[2];
+        for lookups_per_circuit in lookups.iter() {
+            let num_lookups = lookups_per_circuit[0].len();
+            let vec = lookups_per_circuit
                 .iter()
-                .map(|lookups_per_circuit| {
-                    let num_lookups = lookups_per_circuit[0].len();
-                    let vec = lookups_per_circuit
-                        .iter()
-                        .flat_map(|lookups_per_row| {
-                            let mut row = Vec::with_capacity(lookups_per_row.len() + 1);
-                            row.push(accumulator);
-                            row.extend(lookups_per_row.iter().map(|lookup| {
-                                let inverse_of_message = lookup
-                                    .compute_message(lookup_challenge, fingenprint_challenge)
-                                    .inverse();
-                                accumulator += inverse_of_message * lookup.multiplicity;
-                                inverse_of_message
-                            }));
-                            row
-                        })
-                        .collect::<Vec<_>>();
-                    debug_assert_eq!(vec.len() % (num_lookups + 1), 0);
-                    let trace = RowMajorMatrix::new(vec, num_lookups + 1);
-                    intermediate_accumulators.push(accumulator);
-                    CircuitWitness { trace }
+                .flat_map(|lookups_per_row| {
+                    let mut row = Vec::with_capacity(lookups_per_row.len() + 1);
+                    row.push(accumulator);
+                    row.extend(lookups_per_row.iter().map(|lookup| {
+                        let inverse_of_message = lookup
+                            .compute_message(lookup_challenge, fingenprint_challenge)
+                            .inverse();
+                        accumulator += inverse_of_message * lookup.multiplicity;
+                        inverse_of_message
+                    }));
+                    row
                 })
-                .collect();
-            (Self { circuits }, intermediate_accumulators)
-        })
+                .collect::<Vec<_>>();
+            debug_assert_eq!(vec.len() % (num_lookups + 1), 0);
+            let trace = RowMajorMatrix::new(vec, num_lookups + 1);
+            intermediate_accumulators.push(accumulator);
+            traces.push(trace);
+        }
+        (traces, intermediate_accumulators)
     }
 }
 
@@ -127,15 +99,6 @@ where
 {
     fn num_public_values(&self) -> usize {
         MIN_IO_SIZE
-    }
-}
-
-impl<A> TwoStagedAir<Val> for LookupAir<A>
-where
-    A: BaseAir<Val>,
-{
-    fn stage_2_width(&self) -> usize {
-        self.lookups.len() + 1
     }
 }
 
@@ -218,7 +181,7 @@ mod tests {
     use crate::{
         builder::symbolic::SymbolicVariable,
         prover::Claim,
-        system::{Circuit, System},
+        system::{Circuit, System, SystemWitness},
         types::{FriParameters, new_stark_config},
     };
 
@@ -306,7 +269,7 @@ mod tests {
                 .assert_one(input * input_inverse);
         }
     }
-    fn system() -> System<LookupAir<CS>> {
+    fn system() -> System<CS> {
         let even = Circuit::from_air(LookupAir {
             inner_air: CS::Even,
             lookups: CS::Even.lookups(),
@@ -325,40 +288,37 @@ mod tests {
         let system = system();
         let f = Val::from_u32;
         #[rustfmt::skip]
-        let witness = SystemWitness {
-            circuits: vec![
-                CircuitWitness {
-                    trace: RowMajorMatrix::new(
-                        vec![
-                            // row 1
-                            f(1), f(4), f(4).inverse(), f(0), f(1), f(1),
-                            // row 2
-                            f(1), f(2), f(2).inverse(), f(0), f(1), f(1),
-                            // row 3
-                            f(1), f(0), f(0), f(1), f(0), f(0),
-                            // row 4
-                            f(0), f(0), f(0), f(0), f(0), f(0),
-                        ],
-                        6,
-                    ),
-                },
-                CircuitWitness {
-                    trace: RowMajorMatrix::new(
-                        vec![
-                            // row 1
-                            f(1), f(3), f(3).inverse(), f(0), f(1), f(1),
-                            // row 2
-                            f(1), f(1), f(1).inverse(), f(0), f(1), f(1),
-                            // row 3
-                            f(0), f(0), f(0), f(0), f(0), f(0),
-                            // row 4
-                            f(0), f(0), f(0), f(0), f(0), f(0),
-                        ],
-                        6,
-                    ),
-                },
+        let witness = SystemWitness::from_stage_1(
+            vec![
+                RowMajorMatrix::new(
+                    vec![
+                        // row 1
+                        f(1), f(4), f(4).inverse(), f(0), f(1), f(1),
+                        // row 2
+                        f(1), f(2), f(2).inverse(), f(0), f(1), f(1),
+                        // row 3
+                        f(1), f(0), f(0), f(1), f(0), f(0),
+                        // row 4
+                        f(0), f(0), f(0), f(0), f(0), f(0),
+                    ],
+                    6,
+                ),
+                RowMajorMatrix::new(
+                    vec![
+                        // row 1
+                        f(1), f(3), f(3).inverse(), f(0), f(1), f(1),
+                        // row 2
+                        f(1), f(1), f(1).inverse(), f(0), f(1), f(1),
+                        // row 3
+                        f(0), f(0), f(0), f(0), f(0), f(0),
+                        // row 4
+                        f(0), f(0), f(0), f(0), f(0), f(0),
+                    ],
+                    6,
+                ),
             ],
-        };
+            &system,
+        );
         let claim = Claim {
             circuit_idx: 0,
             args: vec![f(4), f(1)],
@@ -370,9 +330,7 @@ mod tests {
             proof_of_work_bits: 0,
         };
         let config = new_stark_config(&fri_parameters);
-        let circuit_lookups = [CS::Even.lookups(), CS::Odd.lookups()];
-        let stage_2 = witness.stage_2_from_symbolic_lookups(&circuit_lookups);
-        let proof = system.prove(&config, &claim, witness, stage_2);
+        let proof = system.prove(&config, &claim, witness);
         system.verify(&config, &claim, &proof).unwrap();
     }
 }

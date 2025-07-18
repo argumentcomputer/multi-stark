@@ -5,7 +5,7 @@ use crate::{
     system::System,
     types::{Challenger, ExtVal, Pcs, PcsError, StarkConfig, Val},
 };
-use p3_air::{Air, BaseAirWithPublicValues};
+use p3_air::{Air, BaseAir};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs as PcsTrait, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
@@ -23,10 +23,21 @@ pub enum VerificationError<PcsErr> {
     UnbalancedChannel,
 }
 
-impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
+impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
     pub fn verify(
         &self,
         config: &StarkConfig,
+        claim: &Claim,
+        proof: &Proof,
+    ) -> Result<(), VerificationError<PcsError>> {
+        let multiplicity = Val::ONE;
+        self.verify_with_claim_multiplicity(config, multiplicity, claim, proof)
+    }
+
+    pub fn verify_with_claim_multiplicity(
+        &self,
+        config: &StarkConfig,
+        multiplicity: Val,
         claim: &Claim,
         proof: &Proof,
     ) -> Result<(), VerificationError<PcsError>> {
@@ -153,7 +164,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
         let claim_iter = claim.args.iter().rev().copied().chain(once(circuit_index));
         let message =
             lookup_argument_challenge + fingerprint_reverse(fingerprint_challenge, claim_iter);
-        let mut acc = message.inverse();
+        let mut acc = multiplicity * message.inverse();
 
         // generate constraint challenge
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();
@@ -333,9 +344,9 @@ mod tests {
     use super::*;
     use crate::{
         benchmark,
-        builder::TwoStagedAir,
+        lookup::LookupAir,
         prover::Claim,
-        system::{Circuit, CircuitWitness, MIN_IO_SIZE, SystemWitness},
+        system::{Circuit, SystemWitness},
         types::{FriParameters, new_stark_config},
     };
     use p3_air::{AirBuilderWithPublicValues, BaseAir};
@@ -351,16 +362,6 @@ mod tests {
                 Self::Pythagorean => 3,
                 Self::Complex => 6,
             }
-        }
-    }
-    impl<F> BaseAirWithPublicValues<F> for CS {
-        fn num_public_values(&self) -> usize {
-            MIN_IO_SIZE
-        }
-    }
-    impl<F> TwoStagedAir<F> for CS {
-        fn stage_2_width(&self) -> usize {
-            1
         }
     }
     impl<AB> Air<AB> for CS
@@ -393,45 +394,28 @@ mod tests {
         }
     }
     fn system() -> System<CS> {
-        let pythagorean_circuit = Circuit::from_air(CS::Pythagorean).unwrap();
-        let complex_circuit = Circuit::from_air(CS::Complex).unwrap();
+        let pythagorean_circuit =
+            Circuit::from_air(LookupAir::new(CS::Pythagorean, vec![])).unwrap();
+        let complex_circuit = Circuit::from_air(LookupAir::new(CS::Complex, vec![])).unwrap();
         System::new([pythagorean_circuit, complex_circuit])
-    }
-    fn dummy_stage_2_trace(log_heights: &[usize]) -> (SystemWitness<Val>, Vec<Val>) {
-        let mut accumulators = vec![];
-        let circuits = log_heights
-            .iter()
-            .map(|log_height| {
-                accumulators.push(Val::from_u32(0));
-                let height = 1 << *log_height;
-                let trace = RowMajorMatrix::new(vec![Val::from_u32(0); height], 1);
-                CircuitWitness { trace }
-            })
-            .collect();
-        (SystemWitness { circuits }, accumulators)
     }
 
     #[test]
     fn multi_stark_test() {
         let system = system();
         let f = Val::from_u32;
-        let witness = SystemWitness {
-            circuits: vec![
-                CircuitWitness {
-                    trace: RowMajorMatrix::new(
-                        [3, 4, 5, 5, 12, 13, 8, 15, 17, 7, 24, 25].map(f).to_vec(),
-                        3,
-                    ),
-                },
-                CircuitWitness {
-                    trace: RowMajorMatrix::new(
-                        [4, 2, 3, 1, 10, 10, 3, 2, 5, 1, 13, 13].map(f).to_vec(),
-                        6,
-                    ),
-                },
+        let witness = SystemWitness::from_stage_1(
+            vec![
+                RowMajorMatrix::new(
+                    [3, 4, 5, 5, 12, 13, 8, 15, 17, 7, 24, 25].map(f).to_vec(),
+                    3,
+                ),
+                RowMajorMatrix::new([4, 2, 3, 1, 10, 10, 3, 2, 5, 1, 13, 13].map(f).to_vec(), 6),
             ],
-        };
-        // there are no lookups
+            &system,
+        );
+        // we will set the multiplicity to 0, so the claim does not matter
+        let multiplicity = Val::ZERO;
         let dummy_claim = Claim::empty();
         let fri_parameters = FriParameters {
             log_blowup: 1,
@@ -440,13 +424,11 @@ mod tests {
             proof_of_work_bits: 0,
         };
         let config = new_stark_config(&fri_parameters);
-        let proof = system.prove(
-            &config,
-            &dummy_claim,
-            witness,
-            Box::new(|_| dummy_stage_2_trace(&[2, 1])),
-        );
-        system.verify(&config, &dummy_claim, &proof).unwrap();
+        let proof =
+            system.prove_with_claim_multiplicy(&config, multiplicity, &dummy_claim, witness);
+        system
+            .verify_with_claim_multiplicity(&config, multiplicity, &dummy_claim, &proof)
+            .unwrap();
     }
 
     #[test]
@@ -463,17 +445,15 @@ mod tests {
             pythagorean_trace.extend(pythagorean_trace.clone());
             complex_trace.extend(complex_trace.clone());
         }
-        let witness = SystemWitness {
-            circuits: vec![
-                CircuitWitness {
-                    trace: RowMajorMatrix::new(pythagorean_trace, 3),
-                },
-                CircuitWitness {
-                    trace: RowMajorMatrix::new(complex_trace, 6),
-                },
+        let witness = SystemWitness::from_stage_1(
+            vec![
+                RowMajorMatrix::new(pythagorean_trace, 3),
+                RowMajorMatrix::new(complex_trace, 6),
             ],
-        };
-        // there are no lookups
+            &system,
+        );
+        // we will set the multiplicity to 0, so the claim does not matter
+        let multiplicity = Val::ZERO;
         let dummy_claim = Claim::empty();
         let fri_parameters = FriParameters {
             log_blowup: 1,
@@ -483,12 +463,7 @@ mod tests {
         };
         let config = new_stark_config(&fri_parameters);
         let proof = benchmark!(
-            system.prove(
-                &config,
-                &dummy_claim,
-                witness,
-                Box::new(|_| dummy_stage_2_trace(&[LOG_HEIGHT; 2]))
-            ),
+            system.prove_with_claim_multiplicy(&config, multiplicity, &dummy_claim, witness),
             "proof: "
         );
         let bincode_config = bincode::config::standard()
@@ -498,7 +473,9 @@ mod tests {
             .expect("Failed to serialize proof");
         println!("Proof size: {} bytes", proof_bytes.len());
         benchmark!(
-            system.verify(&config, &dummy_claim, &proof).unwrap(),
+            system
+                .verify_with_claim_multiplicity(&config, multiplicity, &dummy_claim, &proof)
+                .unwrap(),
             "verification: "
         );
     }

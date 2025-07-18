@@ -1,12 +1,10 @@
 use crate::{
-    builder::{
-        TwoStagedAir,
-        symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
-    },
+    builder::symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
     ensure_eq,
+    lookup::{Lookup, LookupAir},
     types::Val,
 };
-use p3_air::{Air, BaseAirWithPublicValues};
+use p3_air::{Air, BaseAir, BaseAirWithPublicValues};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 /// Each circuit is required to have at least 4 arguments. Namely, the lookup challenge,
@@ -27,7 +25,7 @@ impl<A> System<A> {
 }
 
 pub struct Circuit<A> {
-    pub air: A,
+    pub air: LookupAir<A>,
     pub constraint_count: usize,
     pub max_constraint_degree: usize,
     pub preprocessed_width: usize,
@@ -36,24 +34,44 @@ pub struct Circuit<A> {
 }
 
 #[derive(Clone)]
-pub struct CircuitWitness<Val> {
-    pub trace: RowMajorMatrix<Val>,
+pub struct SystemWitness {
+    pub traces: Vec<RowMajorMatrix<Val>>,
+    pub lookups: Vec<Vec<Vec<Lookup<Val>>>>,
 }
 
-#[derive(Clone)]
-pub struct SystemWitness<Val> {
-    pub circuits: Vec<CircuitWitness<Val>>,
+impl SystemWitness {
+    pub fn from_stage_1<A>(traces: Vec<RowMajorMatrix<Val>>, system: &System<A>) -> Self {
+        let lookups = traces
+            .iter()
+            .zip(system.circuits.iter())
+            .map(|(trace, circuit)| {
+                trace
+                    .row_slices()
+                    .map(|row| {
+                        circuit
+                            .air
+                            .lookups
+                            .iter()
+                            .map(|lookup| lookup.compute_expr(row))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        Self { traces, lookups }
+    }
 }
 
-impl<A: BaseAirWithPublicValues<Val> + TwoStagedAir<Val> + Air<SymbolicAirBuilder<Val>>>
-    Circuit<A>
-{
-    pub fn from_air(air: A) -> Result<Self, String> {
+impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
+    pub fn from_air(air: LookupAir<A>) -> Result<Self, String> {
         let io_size = air.num_public_values();
         ensure_eq!(io_size, MIN_IO_SIZE, "Incompatible IO size");
-        let stage_1_width = air.width();
+        let stage_1_width = air.inner_air.width();
         let stage_2_width = air.stage_2_width();
-        let preprocessed_width = air.preprocessed_trace().map_or(0, |mat| mat.width());
+        let preprocessed_width = air
+            .inner_air
+            .preprocessed_trace()
+            .map_or(0, |mat| mat.width());
         let constraint_count = get_symbolic_constraints(
             &air,
             preprocessed_width,

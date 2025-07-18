@@ -1,9 +1,10 @@
 use crate::{
     builder::folder::ProverConstraintFolder,
+    lookup::Lookup,
     system::{System, SystemWitness},
     types::{Challenger, Domain, ExtVal, PackedExtVal, PackedVal, Pcs, StarkConfig, Val},
 };
-use p3_air::{Air, BaseAirWithPublicValues};
+use p3_air::{Air, BaseAir};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{OpenedValuesForRound, Pcs as PcsTrait, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
@@ -49,14 +50,18 @@ pub struct Proof {
     pub stage_2_opened_values: OpenedValuesForRound<ExtVal>,
 }
 
-impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
-    #[allow(clippy::type_complexity)]
-    pub fn prove(
+impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
+    pub fn prove(&self, config: &StarkConfig, claim: &Claim, witness: SystemWitness) -> Proof {
+        let multiplicity = Val::ONE;
+        self.prove_with_claim_multiplicy(config, multiplicity, claim, witness)
+    }
+
+    pub fn prove_with_claim_multiplicy(
         &self,
         config: &StarkConfig,
+        multiplicity: Val,
         claim: &Claim,
-        stage_1_witness: SystemWitness<Val>,
-        stage_2_witness: Box<dyn FnOnce(&[Val]) -> (SystemWitness<Val>, Vec<Val>)>,
+        witness: SystemWitness,
     ) -> Proof {
         // initialize pcs and challenger
         let pcs = config.pcs();
@@ -64,8 +69,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
 
         // commit to stage 1 traces
         let mut log_degrees = vec![];
-        let evaluations = stage_1_witness.circuits.into_iter().map(|witness| {
-            let trace = witness.trace;
+        let evaluations = witness.traces.into_iter().map(|trace| {
             let degree = trace.height();
             let log_degree = log2_strict_usize(degree);
             let trace_domain =
@@ -96,12 +100,13 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
         let claim_iter = claim.args.iter().rev().copied().chain(once(circuit_index));
         let message =
             lookup_argument_challenge + fingerprint_reverse(fingerprint_challenge, claim_iter);
-        let mut acc = message.inverse();
+        let mut acc = multiplicity * message.inverse();
         // commit to stage 2 traces
-        let (stage_2_witness, intermediate_accumulators) =
-            stage_2_witness(&[lookup_argument_challenge, fingerprint_challenge, acc]);
-        let evaluations = stage_2_witness.circuits.into_iter().map(|witness| {
-            let trace = witness.trace;
+        let (stage_2_traces, intermediate_accumulators) = Lookup::stage_2_traces(
+            &witness.lookups,
+            &[lookup_argument_challenge, fingerprint_challenge, acc],
+        );
+        let evaluations = stage_2_traces.into_iter().map(|trace| {
             let degree = trace.height();
             let trace_domain =
                 <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
