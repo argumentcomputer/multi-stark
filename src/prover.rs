@@ -1,6 +1,6 @@
 use crate::{
     builder::folder::ProverConstraintFolder,
-    system::{Name, System, SystemWitness},
+    system::{System, SystemWitness},
     types::{Challenger, Domain, ExtVal, PackedExtVal, PackedVal, Pcs, StarkConfig, Val},
 };
 use p3_air::{Air, BaseAirWithPublicValues};
@@ -14,8 +14,18 @@ use serde::{Deserialize, Serialize};
 use std::{cmp::min, iter::once};
 
 pub struct Claim {
-    pub circuit_name: Name,
+    pub circuit_idx: usize,
     pub args: Vec<Val>,
+}
+
+impl Claim {
+    #[inline]
+    pub fn empty() -> Self {
+        Self {
+            circuit_idx: 0,
+            args: vec![],
+        }
+    }
 }
 
 type Commitment = <Pcs as PcsTrait<ExtVal, Challenger>>::Commitment;
@@ -71,7 +81,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<ProverConstraintFolder<'a>>> 
         // observe the claim
         // this has to be done before generating the lookup argument challenge
         // otherwise the lookup argument can be attacked
-        let circuit_index = Val::from_usize(*self.circuit_names.get(&claim.circuit_name).unwrap());
+        let circuit_index = Val::from_usize(claim.circuit_idx);
         challenger.observe(circuit_index);
         challenger.observe_slice(&claim.args);
 

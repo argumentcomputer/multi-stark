@@ -317,7 +317,7 @@ mod tests {
             lookups: CS::Odd.lookups(),
         })
         .unwrap();
-        System::new([("even", even), ("odd", odd)].into_iter())
+        System::new([even, odd])
     }
 
     #[test]
@@ -360,7 +360,7 @@ mod tests {
             ],
         };
         let claim = Claim {
-            circuit_name: "even".into(),
+            circuit_idx: 0,
             args: vec![f(4), f(1)],
         };
         let fri_parameters = FriParameters {

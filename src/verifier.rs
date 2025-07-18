@@ -44,12 +44,7 @@ impl<A: BaseAirWithPublicValues<Val> + for<'a> Air<VerifierConstraintFolder<'a>>
         // there must be at least one circuit
         ensure!(num_circuits > 0, VerificationError::InvalidSystem);
         // check the claim
-        let circuit_index = Val::from_usize(
-            *self
-                .circuit_names
-                .get(&claim.circuit_name)
-                .ok_or(VerificationError::InvalidClaim)?,
-        );
+        let circuit_index = Val::from_usize(claim.circuit_idx);
         // stage 1 round
         ensure_eq!(
             stage_1_opened_values.len(),
@@ -400,13 +395,7 @@ mod tests {
     fn system() -> System<CS> {
         let pythagorean_circuit = Circuit::from_air(CS::Pythagorean).unwrap();
         let complex_circuit = Circuit::from_air(CS::Complex).unwrap();
-        System::new(
-            [
-                ("pythagorean", pythagorean_circuit),
-                ("complex", complex_circuit),
-            ]
-            .into_iter(),
-        )
+        System::new([pythagorean_circuit, complex_circuit])
     }
     fn dummy_stage_2_trace(log_heights: &[usize]) -> (SystemWitness<Val>, Vec<Val>) {
         let mut accumulators = vec![];
@@ -442,11 +431,8 @@ mod tests {
                 },
             ],
         };
-        // lookup arguments not yet implemented so the claim doesn't matter
-        let dummy_claim = Claim {
-            circuit_name: "complex".into(),
-            args: vec![],
-        };
+        // there are no lookups
+        let dummy_claim = Claim::empty();
         let fri_parameters = FriParameters {
             log_blowup: 1,
             log_final_poly_len: 0,
@@ -487,11 +473,8 @@ mod tests {
                 },
             ],
         };
-        // lookup arguments not yet implemented so the claim doesn't matter
-        let dummy_claim = Claim {
-            circuit_name: "complex".into(),
-            args: vec![],
-        };
+        // there are no lookups
+        let dummy_claim = Claim::empty();
         let fri_parameters = FriParameters {
             log_blowup: 1,
             log_final_poly_len: 0,
