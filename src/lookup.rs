@@ -150,6 +150,7 @@ where
     }
 }
 
+// Compute a fingerprint of the coefficients in reverse using Horner's method:
 fn fingerprint_reverse<F: Field, Expr: Algebra<F>, Iter: Iterator<Item = Expr>>(
     r: &Expr,
     coeffs: Iter,
@@ -180,7 +181,6 @@ mod tests {
 
     use crate::{
         builder::symbolic::SymbolicVariable,
-        prover::Claim,
         system::{Circuit, System, SystemWitness},
         types::{FriParameters, new_stark_config},
     };
@@ -319,10 +319,7 @@ mod tests {
             ],
             &system,
         );
-        let claim = Claim {
-            circuit_idx: 0,
-            args: vec![f(4), f(1)],
-        };
+        let claim = &[f(0), f(4), f(1)];
         let fri_parameters = FriParameters {
             log_blowup: 1,
             log_final_poly_len: 0,
@@ -330,7 +327,7 @@ mod tests {
             proof_of_work_bits: 0,
         };
         let config = new_stark_config(&fri_parameters);
-        let proof = system.prove(&config, &claim, witness);
-        system.verify(&config, &claim, &proof).unwrap();
+        let proof = system.prove(&config, claim, witness);
+        system.verify(&config, claim, &proof).unwrap();
     }
 }
