@@ -144,9 +144,9 @@ where
         }
         builder
             .when_transition()
-            .assert_eq(acc_expr, next_acc_col.clone());
+            .assert_eq(acc_expr.clone(), next_acc_col.clone());
         builder.when_first_row().assert_eq(acc_col.clone(), acc);
-        builder.when_last_row().assert_eq(acc_col.clone(), next_acc);
+        builder.when_last_row().assert_eq(acc_expr, next_acc);
     }
 }
 
