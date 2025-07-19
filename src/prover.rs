@@ -12,22 +12,7 @@ use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use serde::{Deserialize, Serialize};
-use std::{cmp::min, iter::once};
-
-pub struct Claim {
-    pub circuit_idx: usize,
-    pub args: Vec<Val>,
-}
-
-impl Claim {
-    #[inline]
-    pub fn empty() -> Self {
-        Self {
-            circuit_idx: 0,
-            args: vec![],
-        }
-    }
-}
+use std::cmp::min;
 
 type Commitment = <Pcs as PcsTrait<ExtVal, Challenger>>::Commitment;
 type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
@@ -51,7 +36,7 @@ pub struct Proof {
 }
 
 impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
-    pub fn prove(&self, config: &StarkConfig, claim: &Claim, witness: SystemWitness) -> Proof {
+    pub fn prove(&self, config: &StarkConfig, claim: &[Val], witness: SystemWitness) -> Proof {
         let multiplicity = Val::ONE;
         self.prove_with_claim_multiplicy(config, multiplicity, claim, witness)
     }
@@ -60,7 +45,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         &self,
         config: &StarkConfig,
         multiplicity: Val,
-        claim: &Claim,
+        claim: &[Val],
         witness: SystemWitness,
     ) -> Proof {
         // initialize pcs and challenger
@@ -85,9 +70,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         // observe the claim
         // this has to be done before generating the lookup argument challenge
         // otherwise the lookup argument can be attacked
-        let circuit_index = Val::from_usize(claim.circuit_idx);
-        challenger.observe(circuit_index);
-        challenger.observe_slice(&claim.args);
+        challenger.observe_slice(claim);
 
         // generate lookup challenges
         // TODO use `ExtVal` instead of `Val`
@@ -97,9 +80,11 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         challenger.observe_algebra_element(fingerprint_challenge);
 
         // construct the accumulator from the claim
-        let claim_iter = claim.args.iter().rev().copied().chain(once(circuit_index));
-        let message =
-            lookup_argument_challenge + fingerprint_reverse(fingerprint_challenge, claim_iter);
+        let message = lookup_argument_challenge
+            + claim
+                .iter()
+                .rev()
+                .fold(Val::ZERO, |acc, &coeff| acc * fingerprint_challenge + coeff);
         let mut acc = multiplicity * message.inverse();
         // commit to stage 2 traces
         let (stage_2_traces, intermediate_accumulators) = Lookup::stage_2_traces(
@@ -239,11 +224,6 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             stage_2_opened_values,
         }
     }
-}
-
-// Compute a fingerprint of the coefficients in reverse using Horner's method:
-pub(crate) fn fingerprint_reverse<F: Field, Iter: Iterator<Item = F>>(r: F, coeffs: Iter) -> F {
-    coeffs.fold(F::ZERO, |acc, coeff| acc * r + coeff)
 }
 
 // TODO update the accumulator
