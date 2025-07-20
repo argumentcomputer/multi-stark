@@ -4,6 +4,11 @@ use crate::{
     system::{System, SystemWitness},
     types::{Challenger, Domain, ExtVal, PackedExtVal, PackedVal, Pcs, StarkConfig, Val},
 };
+use bincode::{
+    config::{Configuration, Fixint, LittleEndian, standard},
+    error::{DecodeError, EncodeError},
+    serde::{decode_from_slice, encode_to_vec},
+};
 use p3_air::{Air, BaseAir};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{OpenedValuesForRound, Pcs as PcsTrait, PolynomialSpace};
@@ -33,6 +38,23 @@ pub struct Proof {
     pub quotient_opened_values: OpenedValuesForRound<ExtVal>,
     pub stage_1_opened_values: OpenedValuesForRound<ExtVal>,
     pub stage_2_opened_values: OpenedValuesForRound<ExtVal>,
+}
+
+impl Proof {
+    fn serde_config() -> Configuration<LittleEndian, Fixint> {
+        standard().with_little_endian().with_fixed_int_encoding()
+    }
+
+    #[inline]
+    pub fn to_bytes(&self) -> Result<Vec<u8>, EncodeError> {
+        encode_to_vec(self, Self::serde_config())
+    }
+
+    #[inline]
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let (proof, _num_bytes) = decode_from_slice(bytes, Self::serde_config())?;
+        Ok(proof)
+    }
 }
 
 impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {

@@ -462,11 +462,7 @@ mod tests {
             system.prove_with_claim_multiplicy(&config, multiplicity, dummy_claim, witness),
             "proof: "
         );
-        let bincode_config = bincode::config::standard()
-            .with_little_endian()
-            .with_fixed_int_encoding();
-        let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode_config)
-            .expect("Failed to serialize proof");
+        let proof_bytes = proof.to_bytes().expect("Failed to serialize proof");
         println!("Proof size: {} bytes", proof_bytes.len());
         benchmark!(
             system
