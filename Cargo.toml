@@ -10,7 +10,7 @@ rust-version = "1.85"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-bincode = { version = "2.0.0", features = ["serde"] }
+bincode = { version = "2.0.1", features = ["serde"] }
 p3-air = { git = "https://github.com/Plonky3/Plonky3", rev = "e9ab5a4b3d39c3a03de7d32dabd63dbfb310f74d" }
 p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3", rev = "e9ab5a4b3d39c3a03de7d32dabd63dbfb310f74d" }
 p3-challenger = { git = "https://github.com/Plonky3/Plonky3", rev = "e9ab5a4b3d39c3a03de7d32dabd63dbfb310f74d" }
