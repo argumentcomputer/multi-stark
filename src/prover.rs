@@ -11,8 +11,11 @@ use bincode::{
 };
 use p3_air::{Air, BaseAir};
 use p3_challenger::{CanObserve, FieldChallenger};
-use p3_commit::{OpenedValuesForRound, Pcs as PcsTrait, PolynomialSpace};
-use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
+use p3_commit::{LagrangeSelectors, OpenedValuesForRound, Pcs as PcsTrait, PolynomialSpace};
+use p3_field::{
+    BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing,
+    extension::BinomialExtensionField,
+};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
@@ -290,54 +293,113 @@ where
                 .collect()
         })
         .collect();
-    (0..quotient_size)
-        .into_par_iter()
-        .step_by(PackedVal::WIDTH)
-        .flat_map_iter(|i_start| {
-            let i_range = i_start..i_start + PackedVal::WIDTH;
-
-            let is_first_row = *PackedVal::from_slice(&sels.is_first_row[i_range.clone()]);
-            let is_last_row = *PackedVal::from_slice(&sels.is_last_row[i_range.clone()]);
-            let is_transition = *PackedVal::from_slice(&sels.is_transition[i_range.clone()]);
-            let inv_vanishing = *PackedVal::from_slice(&sels.inv_vanishing[i_range]);
-
-            // TODO fix preprocessed
-            let preprocessed = RowMajorMatrix::new(vec![], 0);
-            let stage_1 = RowMajorMatrix::new(
-                stage_1_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
-                stage_1_width,
-            );
-            let stage_2 = RowMajorMatrix::new(
-                stage_2_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
-                stage_2_width,
-            );
-
-            let accumulator = PackedExtVal::ZERO;
-            let mut folder = ProverConstraintFolder {
-                preprocessed: preprocessed.as_view(),
-                stage_1: stage_1.as_view(),
-                stage_2: stage_2.as_view(),
-                public_values,
-                is_first_row,
-                is_last_row,
-                is_transition,
-                alpha_powers: &alpha_powers,
-                decomposed_alpha_powers: &decomposed_alpha_powers,
-                accumulator,
-                constraint_index: 0,
-            };
-            air.eval(&mut folder);
-
-            let quotient = folder.accumulator * inv_vanishing;
-
-            (0..min(quotient_size, PackedVal::WIDTH)).map(move |idx_in_packing| {
-                ExtVal::from_basis_coefficients_fn(|coeff_idx| {
-                    <PackedExtVal as BasedVectorSpace<PackedVal>>::as_basis_coefficients_slice(
-                        &quotient,
-                    )[coeff_idx]
-                        .as_slice()[idx_in_packing]
-                })
+    #[cfg(feature = "parallel")]
+    {
+        (0..quotient_size)
+            .into_par_iter()
+            .step_by(PackedVal::WIDTH)
+            .flat_map_iter(|i_start| {
+                quotient_values_inner(
+                    air,
+                    public_values,
+                    &sels,
+                    quotient_size,
+                    stage_1_on_quotient_domain,
+                    stage_2_on_quotient_domain,
+                    stage_1_width,
+                    stage_2_width,
+                    &alpha_powers,
+                    &decomposed_alpha_powers,
+                    next_step,
+                    i_start,
+                )
             })
+            .collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        (0..quotient_size)
+            .step_by(PackedVal::WIDTH)
+            .flat_map_iter(|i_start| {
+                quotient_values_inner(
+                    air,
+                    public_values,
+                    &sels,
+                    quotient_size,
+                    stage_1_on_quotient_domain,
+                    stage_2_on_quotient_domain,
+                    stage_1_width,
+                    stage_2_width,
+                    &alpha_powers,
+                    &decomposed_alpha_powers,
+                    next_step,
+                    i_start,
+                )
+            })
+            .collect()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn quotient_values_inner<A, Mat>(
+    air: &A,
+    public_values: &[Val],
+    sels: &LagrangeSelectors<Vec<Val>>,
+    quotient_size: usize,
+    stage_1_on_quotient_domain: &Mat,
+    stage_2_on_quotient_domain: &Mat,
+    stage_1_width: usize,
+    stage_2_width: usize,
+    alpha_powers: &[BinomialExtensionField<Val, 2>],
+    decomposed_alpha_powers: &[Vec<Val>],
+    next_step: usize,
+    i_start: usize,
+) -> impl Iterator<Item = BinomialExtensionField<Val, 2>>
+where
+    A: for<'a> Air<ProverConstraintFolder<'a>>,
+    Mat: Matrix<Val> + Sync,
+{
+    let i_range = i_start..i_start + PackedVal::WIDTH;
+
+    let is_first_row = *PackedVal::from_slice(&sels.is_first_row[i_range.clone()]);
+    let is_last_row = *PackedVal::from_slice(&sels.is_last_row[i_range.clone()]);
+    let is_transition = *PackedVal::from_slice(&sels.is_transition[i_range.clone()]);
+    let inv_vanishing = *PackedVal::from_slice(&sels.inv_vanishing[i_range]);
+
+    // TODO fix preprocessed
+    let preprocessed = RowMajorMatrix::new(vec![], 0);
+    let stage_1 = RowMajorMatrix::new(
+        stage_1_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
+        stage_1_width,
+    );
+    let stage_2 = RowMajorMatrix::new(
+        stage_2_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
+        stage_2_width,
+    );
+
+    let accumulator = PackedExtVal::ZERO;
+    let mut folder = ProverConstraintFolder {
+        preprocessed: preprocessed.as_view(),
+        stage_1: stage_1.as_view(),
+        stage_2: stage_2.as_view(),
+        public_values,
+        is_first_row,
+        is_last_row,
+        is_transition,
+        alpha_powers,
+        decomposed_alpha_powers,
+        accumulator,
+        constraint_index: 0,
+    };
+    air.eval(&mut folder);
+
+    let quotient = folder.accumulator * inv_vanishing;
+
+    (0..min(quotient_size, PackedVal::WIDTH)).map(move |idx_in_packing| {
+        ExtVal::from_basis_coefficients_fn(|coeff_idx| {
+            <PackedExtVal as BasedVectorSpace<PackedVal>>::as_basis_coefficients_slice(&quotient)
+                [coeff_idx]
+                .as_slice()[idx_in_packing]
         })
-        .collect()
+    })
 }
