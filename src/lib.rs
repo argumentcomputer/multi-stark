@@ -5,6 +5,11 @@ pub mod system;
 pub mod types;
 pub mod verifier;
 
+pub use p3_air;
+pub use p3_field;
+pub use p3_goldilocks;
+pub use p3_matrix;
+
 #[macro_export]
 macro_rules! ensure {
     ($condition:expr, $err:expr) => {
