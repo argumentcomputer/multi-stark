@@ -510,6 +510,8 @@ mod tests {
         // we will set the multiplicity to 0, so the claim does not matter
         let multiplicity = Val::ZERO;
         let dummy_claim = &[];
+        // initial accumulator
+        // multiplicity / (lookup_challenge + 0)
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
             num_queries: 100,
