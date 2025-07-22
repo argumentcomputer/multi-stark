@@ -180,13 +180,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "log"
+version = "0.4.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
+
+[[package]]
 name = "multi-stark"
 version = "0.1.0"
 dependencies = [
  "bincode",
  "itertools",
+ "log",
  "p3-air",
- "p3-baby-bear",
  "p3-challenger",
  "p3-commit",
  "p3-dft",
@@ -197,7 +203,6 @@ dependencies = [
  "p3-matrix",
  "p3-maybe-rayon",
  "p3-merkle-tree",
- "p3-monty-31",
  "p3-symmetric",
  "p3-uni-stark",
  "p3-util",
@@ -241,19 +246,6 @@ source = "git+https://github.com/Plonky3/Plonky3?rev=e9ab5a4b3d39c3a03de7d32dabd
 dependencies = [
  "p3-field",
  "p3-matrix",
-]
-
-[[package]]
-name = "p3-baby-bear"
-version = "0.3.0"
-source = "git+https://github.com/Plonky3/Plonky3?rev=e9ab5a4b3d39c3a03de7d32dabd63dbfb310f74d#e9ab5a4b3d39c3a03de7d32dabd63dbfb310f74d"
-dependencies = [
- "p3-field",
- "p3-mds",
- "p3-monty-31",
- "p3-poseidon2",
- "p3-symmetric",
- "rand",
 ]
 
 [[package]]
@@ -418,28 +410,6 @@ dependencies = [
  "rand",
  "serde",
  "tracing",
-]
-
-[[package]]
-name = "p3-monty-31"
-version = "0.3.0"
-source = "git+https://github.com/Plonky3/Plonky3?rev=e9ab5a4b3d39c3a03de7d32dabd63dbfb310f74d#e9ab5a4b3d39c3a03de7d32dabd63dbfb310f74d"
-dependencies = [
- "itertools",
- "num-bigint",
- "p3-dft",
- "p3-field",
- "p3-matrix",
- "p3-maybe-rayon",
- "p3-mds",
- "p3-poseidon2",
- "p3-symmetric",
- "p3-util",
- "paste",
- "rand",
- "serde",
- "tracing",
- "transpose",
 ]
 
 [[package]]

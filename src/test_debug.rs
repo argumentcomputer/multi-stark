@@ -1,5 +1,9 @@
 #[cfg(test)]
 mod tests {
+    use crate::builder::symbolic::{Entry, SymbolicExpression, SymbolicVariable};
+    use crate::lookup::{Lookup, LookupAir};
+    use crate::system::{Circuit, System, SystemWitness};
+    use crate::types::{FriParameters, Val, new_stark_config};
     use itertools::Itertools;
     use p3_air::{Air, AirBuilder, BaseAir};
     use p3_challenger::{HashChallenger, SerializingChallenger64};
@@ -18,6 +22,7 @@ mod tests {
     use rand::distr::{Distribution, StandardUniform};
     use rand::rngs::SmallRng;
     use rand::{Rng, SeedableRng};
+    use std::array;
 
     /// How many `a * b = c` operations to do per row.
     const REPETITIONS: usize = 1; // This should be < 255 so it can fit into a u8
@@ -281,4 +286,434 @@ mod tests {
 
         verify(&stark_config, &air, &proof, &vec![]).expect("verification issue");
     }
+
+    pub enum ByteOperations {
+        RangeU8Chip,
+        ByteXorChip,
+    }
+
+    impl<F> BaseAir<F> for ByteOperations {
+        fn width(&self) -> usize {
+            match self {
+                // multiplicity, byte_value
+                Self::RangeU8Chip => 2,
+                // multiplicity, byte_value_1, byte_value_2, xor_result
+                Self::ByteXorChip => 4,
+            }
+        }
+    }
+
+    impl<AB> Air<AB> for ByteOperations
+    where
+        AB: AirBuilder,
+        AB::Var: Copy,
+    {
+        fn eval(&self, builder: &mut AB) {
+            // TODO: p3 constraints are not speicified yet
+        }
+    }
+
+    type Expr = SymbolicExpression<Val>;
+    impl ByteOperations {
+        fn lookups(&self) -> Vec<Lookup<Expr>> {
+            let var = |index| Expr::from(SymbolicVariable::new(Entry::Main { offset: 0 }, index));
+
+            let range_u8_chip_idx = Expr::from_u32(0);
+
+            let byte_xor_chip_idx = Expr::from_u32(1);
+
+            match self {
+                Self::RangeU8Chip => vec![
+                    // We are receiving one byte (and subtract the multiplicity) while performing range_check
+                    Lookup {
+                        multiplicity: -var(0),
+                        args: vec![range_u8_chip_idx.clone(), var(1)],
+                    },
+                ],
+
+                Self::ByteXorChip => vec![
+                    // we have to send (require) every byte that participates in XOR (left, right and result) to a RangeCheck chip, e.g. setting multiplicity to 1 for every lookup
+                    Lookup {
+                        multiplicity: Expr::ONE,
+                        args: vec![range_u8_chip_idx.clone(), var(1)],
+                    },
+                    Lookup {
+                        multiplicity: Expr::ONE,
+                        args: vec![range_u8_chip_idx.clone(), var(2)],
+                    },
+                    Lookup {
+                        multiplicity: Expr::ONE,
+                        args: vec![range_u8_chip_idx.clone(), var(3)],
+                    },
+                    // we have to receive values of 3 bytes that participate in XOR operation (left, right and result)
+                    Lookup {
+                        multiplicity: -var(0),
+                        args: vec![byte_xor_chip_idx.clone(), var(1), var(2), var(3)],
+                    },
+                ],
+            }
+        }
+
+        fn system() -> System<ByteOperations> {
+            let range_u8 = Circuit::from_air(LookupAir {
+                inner_air: ByteOperations::RangeU8Chip,
+                lookups: ByteOperations::RangeU8Chip.lookups(),
+            })
+            .unwrap();
+            let byte_xor = Circuit::from_air(LookupAir {
+                inner_air: ByteOperations::ByteXorChip,
+                lookups: ByteOperations::ByteXorChip.lookups(),
+            })
+            .unwrap();
+            System::new([range_u8, byte_xor])
+        }
+    }
+
+    #[test]
+    fn test_byte_operations() {
+        let system = ByteOperations::system();
+        let claim = [1, 0x01, 0x02, 0x03].map(Val::from_u32).to_vec();
+
+        let f = Val::from_u8;
+        let mut multiplicities = Val::zero_vec(256);
+        // set multiplicities for the bytes from the claim
+        multiplicities[0x01] = Val::ONE;
+        multiplicities[0x02] = Val::ONE;
+        multiplicities[0x03] = Val::ONE;
+
+        let bytes: [Val; 256] = array::from_fn(|idx| Val::from_usize(idx));
+        let byte_trace_values = multiplicities
+            .iter()
+            .zip(bytes.to_vec())
+            .flat_map(|(x, y)| vec![*x, y])
+            .collect();
+
+        let byte_trace = RowMajorMatrix::<Val>::new(byte_trace_values, 2);
+
+        let bytes: [u8; 256] = array::from_fn(|idx| idx as u8);
+
+        let byte_xor_trace_values: Vec<Val> = bytes
+            .into_iter()
+            .flat_map(|x| {
+                bytes.into_iter().map(move |y| {
+                    vec![
+                        Val::ONE,
+                        Val::from_u8(x),
+                        Val::from_u8(y),
+                        Val::from_u8(x ^ y),
+                    ]
+                })
+            })
+            .flatten()
+            .collect();
+        assert_eq!(byte_xor_trace_values.len(), 256 * 256 * 4);
+
+        let byte_xor_trace = RowMajorMatrix::<Val>::new(byte_xor_trace_values, 4);
+
+        let witness = SystemWitness::from_stage_1(vec![byte_trace, byte_xor_trace], &system);
+
+        let fri_parameters = FriParameters {
+            log_blowup: 1,
+            log_final_poly_len: 0,
+            num_queries: 64,
+            proof_of_work_bits: 0,
+        };
+        let config = new_stark_config(&fri_parameters);
+        let proof = system.prove(&config, &claim, witness);
+        system.verify(&config, &claim, &proof).unwrap();
+    }
+
+    //
+    //
+    // pub enum ByteCS {
+    //     ByteChip,
+    //     U32AddChip,
+    // }
+    //
+    // // ByteChip should have a preprocessed column, but we can't do it yet
+    // // it will have a column for multiplicity and a column for each byte
+    // // Example
+    // // | multiplicity | byte |
+    // // |            9 |    0 |
+    // // |            4 |    1 |
+    // // |            8 |    2 |
+    // // |            0 |    3 |
+    // // |            3 |    4 |
+    // // |            0 |    5 |
+    // // ...
+    //
+    // impl<F> BaseAir<F> for ByteCS {
+    //     fn width(&self) -> usize {
+    //         match self {
+    //             Self::ByteChip => 2,
+    //             // 4 bytes for x, 4 bytes for y, 4 bytes for z, 1 byte for the carry, 1 column for the multiplicity
+    //             Self::U32AddChip => 14,
+    //         }
+    //     }
+    //
+    //     fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
+    //         match self {
+    //             // eventually the byte column will be here
+    //             Self::ByteChip => None,
+    //             Self::U32AddChip => None,
+    //         }
+    //     }
+    // }
+    //
+    // impl<AB> Air<AB> for ByteCS
+    // where
+    //     AB: AirBuilder,
+    //     AB::Var: Copy,
+    // {
+    //     fn eval(&self, builder: &mut AB) {
+    //         match self {
+    //             Self::ByteChip => {
+    //                 let main = builder.main();
+    //                 let local = main.row_slice(0).unwrap();
+    //                 let next = main.row_slice(1).unwrap();
+    //                 let byte = &local[1];
+    //                 let next_byte = &next[1];
+    //                 builder.when_first_row().assert_zero(byte.clone());
+    //                 builder
+    //                     .when_transition()
+    //                     .assert_eq(byte.clone() + AB::Expr::ONE, next_byte.clone());
+    //                 builder
+    //                     .when_last_row()
+    //                     .assert_eq(byte.clone(), AB::Expr::from_u8(255));
+    //             }
+    //             Self::U32AddChip => {
+    //                 let main = builder.main();
+    //                 let local = main.row_slice(0).unwrap();
+    //                 let x0 = &local[0];
+    //                 let x1 = &local[1];
+    //                 let x2 = &local[2];
+    //                 let x3 = &local[3];
+    //                 let y0 = &local[4];
+    //                 let y1 = &local[5];
+    //                 let y2 = &local[6];
+    //                 let y3 = &local[7];
+    //                 let z0 = &local[8];
+    //                 let z1 = &local[9];
+    //                 let z2 = &local[10];
+    //                 let z3 = &local[11];
+    //                 let carry = &local[12];
+    //                 let _multiplicity = &local[13];
+    //                 // the carry must be a boolean
+    //                 builder.assert_bool(carry.clone());
+    //
+    //                 let expr1 = x0.clone()
+    //                     + x1.clone() * AB::Expr::from_u32(256)
+    //                     + x2.clone() * AB::Expr::from_u32(256 * 256)
+    //                     + x3.clone() * AB::Expr::from_u32(256 * 256 * 256)
+    //                     + y0.clone()
+    //                     + y1.clone() * AB::Expr::from_u32(256)
+    //                     + y2.clone() * AB::Expr::from_u32(256 * 256)
+    //                     + y3.clone() * AB::Expr::from_u32(256 * 256 * 256);
+    //                 let expr2 = z0.clone()
+    //                     + z1.clone() * AB::Expr::from_u32(256)
+    //                     + z2.clone() * AB::Expr::from_u32(256 * 256)
+    //                     + z3.clone() * AB::Expr::from_u32(256 * 256 * 256)
+    //                     + carry.clone() * AB::Expr::from_u64(256 * 256 * 256 * 256);
+    //                 builder.assert_eq(expr1, expr2);
+    //             }
+    //         }
+    //     }
+    // }
+    //
+    // impl ByteCS {
+    //     fn lookups(&self) -> Vec<Lookup<Expr>> {
+    //         let var = |index| Expr::from(SymbolicVariable::new(Entry::Main { offset: 0 }, index));
+    //         let byte_index = Expr::from_u8(0);
+    //         let u32_index = Expr::from_u8(1);
+    //         match self {
+    //             Self::ByteChip => vec![
+    //                 // Provide/Receive
+    //                 Lookup {
+    //                     multiplicity: -var(0),
+    //                     args: vec![byte_index, var(1)],
+    //                 },
+    //             ],
+    //             Self::U32AddChip => vec![
+    //                 // Provide/Receive
+    //                 Lookup {
+    //                     multiplicity: -var(13),
+    //                     args: vec![
+    //                         u32_index,
+    //                         var(0)
+    //                             + var(1) * Expr::from_u32(256)
+    //                             + var(2) * Expr::from_u32(256 * 256)
+    //                             + var(3) * Expr::from_u32(256 * 256 * 256),
+    //                         var(4)
+    //                             + var(5) * Expr::from_u32(256)
+    //                             + var(6) * Expr::from_u32(256 * 256)
+    //                             + var(7) * Expr::from_u32(256 * 256 * 256),
+    //                         var(8)
+    //                             + var(9) * Expr::from_u32(256)
+    //                             + var(10) * Expr::from_u32(256 * 256)
+    //                             + var(11) * Expr::from_u32(256 * 256 * 256),
+    //                     ],
+    //                 },
+    //                 // Require/Send
+    //                 Lookup {
+    //                     multiplicity: Expr::ONE,
+    //                     args: vec![byte_index.clone(), var(0)],
+    //                 },
+    //                 Lookup {
+    //                     multiplicity: Expr::ONE,
+    //                     args: vec![byte_index.clone(), var(1)],
+    //                 },
+    //                 Lookup {
+    //                     multiplicity: Expr::ONE,
+    //                     args: vec![byte_index.clone(), var(2)],
+    //                 },
+    //                 Lookup {
+    //                     multiplicity: Expr::ONE,
+    //                     args: vec![byte_index.clone(), var(3)],
+    //                 },
+    //                 Lookup {
+    //                     multiplicity: Expr::ONE,
+    //                     args: vec![byte_index.clone(), var(4)],
+    //                 },
+    //                 Lookup {
+    //                     multiplicity: Expr::ONE,
+    //                     args: vec![byte_index.clone(), var(5)],
+    //                 },
+    //                 Lookup {
+    //                     multiplicity: Expr::ONE,
+    //                     args: vec![byte_index.clone(), var(6)],
+    //                 },
+    //                 Lookup {
+    //                     multiplicity: Expr::ONE,
+    //                     args: vec![byte_index.clone(), var(7)],
+    //                 },
+    //                 Lookup {
+    //                     multiplicity: Expr::ONE,
+    //                     args: vec![byte_index.clone(), var(8)],
+    //                 },
+    //                 Lookup {
+    //                     multiplicity: Expr::ONE,
+    //                     args: vec![byte_index.clone(), var(9)],
+    //                 },
+    //                 Lookup {
+    //                     multiplicity: Expr::ONE,
+    //                     args: vec![byte_index.clone(), var(10)],
+    //                 },
+    //                 Lookup {
+    //                     multiplicity: Expr::ONE,
+    //                     args: vec![byte_index, var(11)],
+    //                 },
+    //             ],
+    //         }
+    //     }
+    // }
+    //
+    // fn byte_system() -> System<ByteCS> {
+    //     let byte_chip = Circuit::from_air(LookupAir {
+    //         inner_air: ByteCS::ByteChip,
+    //         lookups: ByteCS::ByteChip.lookups(),
+    //     })
+    //         .unwrap();
+    //     let u32_add_chip = Circuit::from_air(LookupAir {
+    //         inner_air: ByteCS::U32AddChip,
+    //         lookups: ByteCS::U32AddChip.lookups(),
+    //     })
+    //         .unwrap();
+    //     System::new([byte_chip, u32_add_chip])
+    // }
+    //
+    // pub struct AddCalls {
+    //     pub calls: Vec<(u32, u32)>,
+    // }
+    //
+    // impl AddCalls {
+    //     pub fn witness(&self, system: &System<ByteCS>) -> SystemWitness {
+    //         let byte_width = 2;
+    //         let add_width = 14;
+    //         let mut byte_trace = RowMajorMatrix::new(vec![Val::ZERO; byte_width * 256], byte_width);
+    //         let add_height = add_width * self.calls.len().next_power_of_two();
+    //         let mut add_trace = RowMajorMatrix::new(vec![Val::ZERO; add_height], add_width);
+    //         self.traces(&mut byte_trace, &mut add_trace);
+    //         let traces = vec![byte_trace, add_trace];
+    //         SystemWitness::from_stage_1(traces, system)
+    //     }
+    //
+    //     pub fn traces(
+    //         &self,
+    //         byte_trace: &mut RowMajorMatrix<Val>,
+    //         add_trace: &mut RowMajorMatrix<Val>,
+    //     ) {
+    //         for i in 0..256 {
+    //             byte_trace.row_mut(i)[1] = Val::from_usize(i);
+    //         }
+    //         for (row_index, (x, y)) in self.calls.iter().enumerate() {
+    //             let x_bytes = x.to_le_bytes();
+    //             let y_bytes = y.to_le_bytes();
+    //             let (z, carry) = x.overflowing_add(*y);
+    //             let z_bytes = z.to_le_bytes();
+    //             let add_row = add_trace.row_mut(row_index);
+    //             add_row[0..4]
+    //                 .iter_mut()
+    //                 .zip(x_bytes.iter())
+    //                 .for_each(|(col, val)| *col = Val::from_u8(*val));
+    //             add_row[4..8]
+    //                 .iter_mut()
+    //                 .zip(y_bytes.iter())
+    //                 .for_each(|(col, val)| *col = Val::from_u8(*val));
+    //             add_row[8..12]
+    //                 .iter_mut()
+    //                 .zip(z_bytes.iter())
+    //                 .for_each(|(col, val)| *col = Val::from_u8(*val));
+    //             add_row[12] = Val::from_u8(carry as u8);
+    //             add_row[13] = Val::ONE;
+    //             x_bytes.iter().for_each(|byte| {
+    //                 byte_trace.row_mut(*byte as usize)[0] += Val::ONE;
+    //             });
+    //             y_bytes.iter().for_each(|byte| {
+    //                 byte_trace.row_mut(*byte as usize)[0] += Val::ONE;
+    //             });
+    //             z_bytes.iter().for_each(|byte| {
+    //                 byte_trace.row_mut(*byte as usize)[0] += Val::ONE;
+    //             });
+    //         }
+    //     }
+    // }
+    //
+    // #[test]
+    // fn byte_trace() {
+    //     let system = byte_system();
+    //     let calls = AddCalls {
+    //         calls: vec![(3, 4), (7, 9)],
+    //     };
+    //     let witness = calls.witness(&system);
+    //     println!("BYTE TRACE");
+    //     println!("{:?}", witness.traces[0]);
+    //     println!("ADD TRACE");
+    //     println!("{:?}", witness.traces[1]);
+    // }
+    //
+    // #[test]
+    // fn u32_add_proof() {
+    //     let system = byte_system();
+    //     let calls = AddCalls {
+    //         calls: vec![(8000, 10000)],
+    //     };
+    //     let witness = calls.witness(&system);
+    //
+    //     println!("BYTE TRACE");
+    //     println!("{:?}", witness.traces[0]);
+    //
+    //     println!("ADD TRACE");
+    //     println!("{:?}", witness.traces[1]);
+    //
+    //     let claim = [1, 8000, 10000, 18000].map(Val::from_u32).to_vec();
+    //     let fri_parameters = FriParameters {
+    //         log_blowup: 1,
+    //         log_final_poly_len: 0,
+    //         num_queries: 64,
+    //         proof_of_work_bits: 0,
+    //     };
+    //     let config = new_stark_config(&fri_parameters);
+    //     let proof = system.prove(&config, &claim, witness);
+    //     system.verify(&config, &claim, &proof).unwrap();
+    // }
 }

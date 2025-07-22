@@ -28,6 +28,7 @@ p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3", rev = "e9ab5a4b3d39
 rand = "0.9.1"
 postcard = { version = "1.0.0", features = ["alloc"]}
 itertools = "0.14.0"
+log = "0.4.27"
 
 [features]
 parallel = ["p3-maybe-rayon/parallel"]
