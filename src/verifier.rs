@@ -1,7 +1,7 @@
 use crate::{
     builder::folder::VerifierConstraintFolder,
     ensure, ensure_eq,
-    prover::{Claim, Proof, fingerprint_reverse},
+    prover::Proof,
     system::System,
     types::{Challenger, ExtVal, Pcs, PcsError, StarkConfig, Val},
 };
@@ -11,7 +11,6 @@ use p3_commit::{Pcs as PcsTrait, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 use p3_util::log2_strict_usize;
-use std::iter::once;
 
 #[derive(Debug)]
 pub enum VerificationError<PcsErr> {
@@ -27,7 +26,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
     pub fn verify(
         &self,
         config: &StarkConfig,
-        claim: &Claim,
+        claim: &[Val],
         proof: &Proof,
     ) -> Result<(), VerificationError<PcsError>> {
         let multiplicity = Val::ONE;
@@ -38,7 +37,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         &self,
         config: &StarkConfig,
         multiplicity: Val,
-        claim: &Claim,
+        claim: &[Val],
         proof: &Proof,
     ) -> Result<(), VerificationError<PcsError>> {
         let Proof {
@@ -54,8 +53,6 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         let num_circuits = self.circuits.len();
         // there must be at least one circuit
         ensure!(num_circuits > 0, VerificationError::InvalidSystem);
-        // check the claim
-        let circuit_index = Val::from_usize(claim.circuit_idx);
         // stage 1 round
         ensure_eq!(
             stage_1_opened_values.len(),
@@ -147,8 +144,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         challenger.observe(commitments.stage_1_trace);
 
         // observe the claim
-        challenger.observe(circuit_index);
-        challenger.observe_slice(&claim.args);
+        challenger.observe_slice(claim);
 
         // generate lookup challenges
         // TODO use `ExtVal` instead of `Val`
@@ -161,9 +157,11 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         challenger.observe(commitments.stage_2_trace);
 
         // construct the accumulator from the claim
-        let claim_iter = claim.args.iter().rev().copied().chain(once(circuit_index));
-        let message =
-            lookup_argument_challenge + fingerprint_reverse(fingerprint_challenge, claim_iter);
+        let message = lookup_argument_challenge
+            + claim
+                .iter()
+                .rev()
+                .fold(Val::ZERO, |acc, &coeff| acc * fingerprint_challenge + coeff);
         let mut acc = multiplicity * message.inverse();
 
         // generate constraint challenge
@@ -345,7 +343,6 @@ mod tests {
     use crate::{
         benchmark,
         lookup::LookupAir,
-        prover::Claim,
         system::{Circuit, SystemWitness},
         types::{FriParameters, new_stark_config},
     };
@@ -416,7 +413,7 @@ mod tests {
         );
         // we will set the multiplicity to 0, so the claim does not matter
         let multiplicity = Val::ZERO;
-        let dummy_claim = Claim::empty();
+        let dummy_claim = &[];
         let fri_parameters = FriParameters {
             log_blowup: 1,
             log_final_poly_len: 0,
@@ -424,10 +421,9 @@ mod tests {
             proof_of_work_bits: 0,
         };
         let config = new_stark_config(&fri_parameters);
-        let proof =
-            system.prove_with_claim_multiplicy(&config, multiplicity, &dummy_claim, witness);
+        let proof = system.prove_with_claim_multiplicy(&config, multiplicity, dummy_claim, witness);
         system
-            .verify_with_claim_multiplicity(&config, multiplicity, &dummy_claim, &proof)
+            .verify_with_claim_multiplicity(&config, multiplicity, dummy_claim, &proof)
             .unwrap();
     }
 
@@ -454,7 +450,7 @@ mod tests {
         );
         // we will set the multiplicity to 0, so the claim does not matter
         let multiplicity = Val::ZERO;
-        let dummy_claim = Claim::empty();
+        let dummy_claim = &[];
         let fri_parameters = FriParameters {
             log_blowup: 1,
             log_final_poly_len: 0,
@@ -463,18 +459,14 @@ mod tests {
         };
         let config = new_stark_config(&fri_parameters);
         let proof = benchmark!(
-            system.prove_with_claim_multiplicy(&config, multiplicity, &dummy_claim, witness),
+            system.prove_with_claim_multiplicy(&config, multiplicity, dummy_claim, witness),
             "proof: "
         );
-        let bincode_config = bincode::config::standard()
-            .with_little_endian()
-            .with_fixed_int_encoding();
-        let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode_config)
-            .expect("Failed to serialize proof");
+        let proof_bytes = proof.to_bytes().expect("Failed to serialize proof");
         println!("Proof size: {} bytes", proof_bytes.len());
         benchmark!(
             system
-                .verify_with_claim_multiplicity(&config, multiplicity, &dummy_claim, &proof)
+                .verify_with_claim_multiplicity(&config, multiplicity, dummy_claim, &proof)
                 .unwrap(),
             "verification: "
         );

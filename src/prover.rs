@@ -4,30 +4,23 @@ use crate::{
     system::{System, SystemWitness},
     types::{Challenger, Domain, ExtVal, PackedExtVal, PackedVal, Pcs, StarkConfig, Val},
 };
+use bincode::{
+    config::{Configuration, Fixint, LittleEndian, standard},
+    error::{DecodeError, EncodeError},
+    serde::{decode_from_slice, encode_to_vec},
+};
 use p3_air::{Air, BaseAir};
 use p3_challenger::{CanObserve, FieldChallenger};
-use p3_commit::{OpenedValuesForRound, Pcs as PcsTrait, PolynomialSpace};
-use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
+use p3_commit::{LagrangeSelectors, OpenedValuesForRound, Pcs as PcsTrait, PolynomialSpace};
+use p3_field::{
+    BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing,
+    extension::BinomialExtensionField,
+};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use serde::{Deserialize, Serialize};
-use std::{cmp::min, iter::once};
-
-pub struct Claim {
-    pub circuit_idx: usize,
-    pub args: Vec<Val>,
-}
-
-impl Claim {
-    #[inline]
-    pub fn empty() -> Self {
-        Self {
-            circuit_idx: 0,
-            args: vec![],
-        }
-    }
-}
+use std::cmp::min;
 
 type Commitment = <Pcs as PcsTrait<ExtVal, Challenger>>::Commitment;
 type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
@@ -50,8 +43,25 @@ pub struct Proof {
     pub stage_2_opened_values: OpenedValuesForRound<ExtVal>,
 }
 
+impl Proof {
+    fn serde_config() -> Configuration<LittleEndian, Fixint> {
+        standard().with_little_endian().with_fixed_int_encoding()
+    }
+
+    #[inline]
+    pub fn to_bytes(&self) -> Result<Vec<u8>, EncodeError> {
+        encode_to_vec(self, Self::serde_config())
+    }
+
+    #[inline]
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let (proof, _num_bytes) = decode_from_slice(bytes, Self::serde_config())?;
+        Ok(proof)
+    }
+}
+
 impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
-    pub fn prove(&self, config: &StarkConfig, claim: &Claim, witness: SystemWitness) -> Proof {
+    pub fn prove(&self, config: &StarkConfig, claim: &[Val], witness: SystemWitness) -> Proof {
         let multiplicity = Val::ONE;
         self.prove_with_claim_multiplicy(config, multiplicity, claim, witness)
     }
@@ -60,7 +70,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         &self,
         config: &StarkConfig,
         multiplicity: Val,
-        claim: &Claim,
+        claim: &[Val],
         witness: SystemWitness,
     ) -> Proof {
         // initialize pcs and challenger
@@ -85,9 +95,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         // observe the claim
         // this has to be done before generating the lookup argument challenge
         // otherwise the lookup argument can be attacked
-        let circuit_index = Val::from_usize(claim.circuit_idx);
-        challenger.observe(circuit_index);
-        challenger.observe_slice(&claim.args);
+        challenger.observe_slice(claim);
 
         // generate lookup challenges
         // TODO use `ExtVal` instead of `Val`
@@ -97,9 +105,11 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         challenger.observe_algebra_element(fingerprint_challenge);
 
         // construct the accumulator from the claim
-        let claim_iter = claim.args.iter().rev().copied().chain(once(circuit_index));
-        let message =
-            lookup_argument_challenge + fingerprint_reverse(fingerprint_challenge, claim_iter);
+        let message = lookup_argument_challenge
+            + claim
+                .iter()
+                .rev()
+                .fold(Val::ZERO, |acc, &coeff| acc * fingerprint_challenge + coeff);
         let mut acc = multiplicity * message.inverse();
         // commit to stage 2 traces
         let (stage_2_traces, intermediate_accumulators) = Lookup::stage_2_traces(
@@ -241,11 +251,6 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
     }
 }
 
-// Compute a fingerprint of the coefficients in reverse using Horner's method:
-pub(crate) fn fingerprint_reverse<F: Field, Iter: Iterator<Item = F>>(r: F, coeffs: Iter) -> F {
-    coeffs.fold(F::ZERO, |acc, coeff| acc * r + coeff)
-}
-
 // TODO update the accumulator
 #[allow(clippy::too_many_arguments)]
 fn quotient_values<A, Mat>(
@@ -288,54 +293,113 @@ where
                 .collect()
         })
         .collect();
-    (0..quotient_size)
-        .into_par_iter()
-        .step_by(PackedVal::WIDTH)
-        .flat_map_iter(|i_start| {
-            let i_range = i_start..i_start + PackedVal::WIDTH;
-
-            let is_first_row = *PackedVal::from_slice(&sels.is_first_row[i_range.clone()]);
-            let is_last_row = *PackedVal::from_slice(&sels.is_last_row[i_range.clone()]);
-            let is_transition = *PackedVal::from_slice(&sels.is_transition[i_range.clone()]);
-            let inv_vanishing = *PackedVal::from_slice(&sels.inv_vanishing[i_range]);
-
-            // TODO fix preprocessed
-            let preprocessed = RowMajorMatrix::new(vec![], 0);
-            let stage_1 = RowMajorMatrix::new(
-                stage_1_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
-                stage_1_width,
-            );
-            let stage_2 = RowMajorMatrix::new(
-                stage_2_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
-                stage_2_width,
-            );
-
-            let accumulator = PackedExtVal::ZERO;
-            let mut folder = ProverConstraintFolder {
-                preprocessed: preprocessed.as_view(),
-                stage_1: stage_1.as_view(),
-                stage_2: stage_2.as_view(),
-                public_values,
-                is_first_row,
-                is_last_row,
-                is_transition,
-                alpha_powers: &alpha_powers,
-                decomposed_alpha_powers: &decomposed_alpha_powers,
-                accumulator,
-                constraint_index: 0,
-            };
-            air.eval(&mut folder);
-
-            let quotient = folder.accumulator * inv_vanishing;
-
-            (0..min(quotient_size, PackedVal::WIDTH)).map(move |idx_in_packing| {
-                ExtVal::from_basis_coefficients_fn(|coeff_idx| {
-                    <PackedExtVal as BasedVectorSpace<PackedVal>>::as_basis_coefficients_slice(
-                        &quotient,
-                    )[coeff_idx]
-                        .as_slice()[idx_in_packing]
-                })
+    #[cfg(feature = "parallel")]
+    {
+        (0..quotient_size)
+            .into_par_iter()
+            .step_by(PackedVal::WIDTH)
+            .flat_map_iter(|i_start| {
+                quotient_values_inner(
+                    air,
+                    public_values,
+                    &sels,
+                    quotient_size,
+                    stage_1_on_quotient_domain,
+                    stage_2_on_quotient_domain,
+                    stage_1_width,
+                    stage_2_width,
+                    &alpha_powers,
+                    &decomposed_alpha_powers,
+                    next_step,
+                    i_start,
+                )
             })
+            .collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        (0..quotient_size)
+            .step_by(PackedVal::WIDTH)
+            .flat_map_iter(|i_start| {
+                quotient_values_inner(
+                    air,
+                    public_values,
+                    &sels,
+                    quotient_size,
+                    stage_1_on_quotient_domain,
+                    stage_2_on_quotient_domain,
+                    stage_1_width,
+                    stage_2_width,
+                    &alpha_powers,
+                    &decomposed_alpha_powers,
+                    next_step,
+                    i_start,
+                )
+            })
+            .collect()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn quotient_values_inner<A, Mat>(
+    air: &A,
+    public_values: &[Val],
+    sels: &LagrangeSelectors<Vec<Val>>,
+    quotient_size: usize,
+    stage_1_on_quotient_domain: &Mat,
+    stage_2_on_quotient_domain: &Mat,
+    stage_1_width: usize,
+    stage_2_width: usize,
+    alpha_powers: &[BinomialExtensionField<Val, 2>],
+    decomposed_alpha_powers: &[Vec<Val>],
+    next_step: usize,
+    i_start: usize,
+) -> impl Iterator<Item = BinomialExtensionField<Val, 2>>
+where
+    A: for<'a> Air<ProverConstraintFolder<'a>>,
+    Mat: Matrix<Val> + Sync,
+{
+    let i_range = i_start..i_start + PackedVal::WIDTH;
+
+    let is_first_row = *PackedVal::from_slice(&sels.is_first_row[i_range.clone()]);
+    let is_last_row = *PackedVal::from_slice(&sels.is_last_row[i_range.clone()]);
+    let is_transition = *PackedVal::from_slice(&sels.is_transition[i_range.clone()]);
+    let inv_vanishing = *PackedVal::from_slice(&sels.inv_vanishing[i_range]);
+
+    // TODO fix preprocessed
+    let preprocessed = RowMajorMatrix::new(vec![], 0);
+    let stage_1 = RowMajorMatrix::new(
+        stage_1_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
+        stage_1_width,
+    );
+    let stage_2 = RowMajorMatrix::new(
+        stage_2_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
+        stage_2_width,
+    );
+
+    let accumulator = PackedExtVal::ZERO;
+    let mut folder = ProverConstraintFolder {
+        preprocessed: preprocessed.as_view(),
+        stage_1: stage_1.as_view(),
+        stage_2: stage_2.as_view(),
+        public_values,
+        is_first_row,
+        is_last_row,
+        is_transition,
+        alpha_powers,
+        decomposed_alpha_powers,
+        accumulator,
+        constraint_index: 0,
+    };
+    air.eval(&mut folder);
+
+    let quotient = folder.accumulator * inv_vanishing;
+
+    (0..min(quotient_size, PackedVal::WIDTH)).map(move |idx_in_packing| {
+        ExtVal::from_basis_coefficients_fn(|coeff_idx| {
+            <PackedExtVal as BasedVectorSpace<PackedVal>>::as_basis_coefficients_slice(&quotient)
+                [coeff_idx]
+                .as_slice()[idx_in_packing]
         })
-        .collect()
+    })
 }
