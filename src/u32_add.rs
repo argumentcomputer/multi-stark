@@ -127,16 +127,16 @@ impl ByteCS {
                         u32_index,
                         var(0)
                             + var(1) * Expr::from_u32(256)
-                            + var(2) * Expr::from_u32(256 + 256)
-                            + var(3) * Expr::from_u32(256 + 256 + 256),
+                            + var(2) * Expr::from_u32(256 * 256)
+                            + var(3) * Expr::from_u32(256 * 256 * 256),
                         var(4)
                             + var(5) * Expr::from_u32(256)
-                            + var(6) * Expr::from_u32(256 + 256)
-                            + var(7) * Expr::from_u32(256 + 256 + 256),
+                            + var(6) * Expr::from_u32(256 * 256)
+                            + var(7) * Expr::from_u32(256 * 256 * 256),
                         var(8)
                             + var(9) * Expr::from_u32(256)
-                            + var(10) * Expr::from_u32(256 + 256)
-                            + var(11) * Expr::from_u32(256 + 256 + 256),
+                            + var(10) * Expr::from_u32(256 * 256)
+                            + var(11) * Expr::from_u32(256 * 256 * 256),
                     ],
                 },
                 // Require/Send
