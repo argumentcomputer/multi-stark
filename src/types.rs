@@ -31,8 +31,10 @@ pub struct StarkConfig {
     challenger: Challenger,
 }
 
+pub type Commitment = <Pcs as PcsTrait<ExtVal, Challenger>>::Commitment;
 pub type Domain = <Pcs as PcsTrait<ExtVal, Challenger>>::Domain;
 pub type PcsError = <Pcs as PcsTrait<ExtVal, Challenger>>::Error;
+pub type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
 
 impl StarkConfig {
     pub fn pcs(&self) -> &Pcs {

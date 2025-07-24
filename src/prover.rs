@@ -2,7 +2,10 @@ use crate::{
     builder::folder::ProverConstraintFolder,
     lookup::Lookup,
     system::{System, SystemWitness},
-    types::{Challenger, Domain, ExtVal, PackedExtVal, PackedVal, Pcs, StarkConfig, Val},
+    types::{
+        Challenger, Commitment, Domain, ExtVal, PackedExtVal, PackedVal, Pcs, PcsProof,
+        StarkConfig, Val,
+    },
 };
 use bincode::{
     config::{Configuration, Fixint, LittleEndian, standard},
@@ -21,9 +24,6 @@ use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
-
-type Commitment = <Pcs as PcsTrait<ExtVal, Challenger>>::Commitment;
-type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
 
 #[derive(Serialize, Deserialize)]
 pub struct Commitments {
@@ -251,7 +251,6 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
     }
 }
 
-// TODO update the accumulator
 #[allow(clippy::too_many_arguments)]
 fn quotient_values<A, Mat>(
     air: &A,
