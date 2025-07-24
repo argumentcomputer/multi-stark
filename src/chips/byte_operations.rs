@@ -10,13 +10,14 @@ mod tests {
     use p3_matrix::dense::RowMajorMatrix;
     use std::array;
 
-    // Columns are: [multiplicity, A, B, A xor B, A and B, A or B], where A and B are bytes
-    const TRACE_WIDTH: usize = 6;
+    // Columns are: [multiplicity, A, B, A xor B, A and B, A or B, row_index, row_index / 256], where A and B are bytes
+    const TRACE_WIDTH: usize = 8;
+    const BYTE_VALUES_NUM: usize = 256;
 
     enum ByteOperations {
-        XOR,
-        AND,
-        OR,
+        Xor,
+        And,
+        Or,
     }
 
     impl<F> BaseAir<F> for ByteOperations {
@@ -35,26 +36,40 @@ mod tests {
             let current = main.row_slice(0).unwrap();
             let next = main.row_slice(1).unwrap();
 
-            // zero column is multiplicity. We don't need it here
             let a_curr = current[1].into();
             let b_curr = current[2].into();
-            let a_next = next[1].into();
-            let b_next = next[2].into();
+
+            let row_index = current[6].into();
+            let row_index_next = next[6].into();
+            let row_index_div_256 = current[7].into();
 
             // we start from zero bytes
             builder.when_first_row().assert_zero(a_curr.clone());
             builder.when_first_row().assert_zero(b_curr.clone());
 
-            // TODO: constrain a to be [0, 0, 0, 0,.... 1, 1, 1, 1... 2, 2, 2, 2...]
-            // TODO: constrain b to be [0, 1, 2, ... 255, 0, 1, 2, ... 255, 0, 1, 2... 255]
-
             // we end with 0xff bytes
             builder
                 .when_last_row()
-                .assert_eq(a_curr.clone(), AB::Expr::from_u8(0xff));
+                .assert_eq(a_curr.clone(), AB::Expr::from_u8(u8::MAX));
             builder
                 .when_last_row()
-                .assert_eq(b_curr.clone(), AB::Expr::from_u8(0xff));
+                .assert_eq(b_curr.clone(), AB::Expr::from_u8(u8::MAX));
+
+            // we check that row index increments by one with each new row
+            builder
+                .when_transition()
+                .assert_eq(row_index.clone() + AB::Expr::ONE, row_index_next);
+
+            // we check that A is [0,0,0,0 ... , 1,1,1,1 ... , 2,2,2,2 ... , ... 255, 255, 255]
+            builder.assert_eq(a_curr.clone(), row_index_div_256.clone());
+
+            // we check that B is [0, 1, 2, ... 255, 0, 1, 2, ... 255, 0, 1, 2... 255]
+            builder.assert_eq(
+                b_curr.clone(),
+                row_index.clone()
+                    - (AB::Expr::from_u32(u32::try_from(BYTE_VALUES_NUM).unwrap())
+                        * row_index_div_256),
+            );
         }
     }
 
@@ -68,27 +83,29 @@ mod tests {
 
             // we have to provide exactly one lookup: [A, B, A op B], depending on the required operation in order to balance the claim
             match self {
-                Self::XOR => vec![Lookup {
+                Self::Xor => vec![Lookup {
                     multiplicity: -var(0),
                     args: vec![xor_idx, var(1), var(2), var(3)], // XOR result is stored in var(3)
                 }],
-                Self::AND => vec![Lookup {
+                Self::And => vec![Lookup {
                     multiplicity: -var(0),
                     args: vec![and_idx, var(1), var(2), var(4)], // AND result is stored in var(4)
                 }],
-                Self::OR => vec![Lookup {
+                Self::Or => vec![Lookup {
                     multiplicity: -var(0),
                     args: vec![or_idx, var(1), var(2), var(5)], // OR result is stored in var(5)
                 }],
             }
         }
         fn traces(&self, a: u8, b: u8, a_op_b: u8) -> RowMajorMatrix<Val> {
-            let bytes: [u8; 256] = array::from_fn(|idx| idx as u8);
-            let mut trace_values = Vec::with_capacity(256 * 256 * TRACE_WIDTH);
+            let bytes: [u8; BYTE_VALUES_NUM] = array::from_fn(|idx| u8::try_from(idx).unwrap());
+            let mut trace_values =
+                Vec::with_capacity(BYTE_VALUES_NUM * BYTE_VALUES_NUM * TRACE_WIDTH);
+            let mut row_index = 0;
             for i in 0..256 {
                 for j in 0..256 {
                     let multiplicity = match self {
-                        Self::XOR => {
+                        Self::Xor => {
                             if (a as usize) == i && (b as usize) == j && (a_op_b as usize) == i ^ j
                             {
                                 Val::ONE
@@ -96,7 +113,7 @@ mod tests {
                                 Val::ZERO
                             }
                         }
-                        Self::AND => {
+                        Self::And => {
                             if (a as usize) == i && (b as usize) == j && (a_op_b as usize) == i & j
                             {
                                 Val::ONE
@@ -104,7 +121,7 @@ mod tests {
                                 Val::ZERO
                             }
                         }
-                        Self::OR => {
+                        Self::Or => {
                             if (a as usize) == i && (b as usize) == j && (a_op_b as usize) == i | j
                             {
                                 Val::ONE
@@ -120,8 +137,15 @@ mod tests {
                     trace_values.push(Val::from_u8(bytes[i] ^ bytes[j]));
                     trace_values.push(Val::from_u8(bytes[i] & bytes[j]));
                     trace_values.push(Val::from_u8(bytes[i] | bytes[j]));
+                    trace_values.push(Val::from_u32(row_index));
+                    trace_values.push(Val::from_u32(
+                        row_index / u32::try_from(BYTE_VALUES_NUM).unwrap(),
+                    ));
+
+                    row_index += 1;
                 }
             }
+
             RowMajorMatrix::new(trace_values, TRACE_WIDTH)
         }
     }
@@ -129,8 +153,8 @@ mod tests {
     #[test]
     fn xor() {
         let circuit = Circuit::from_air(LookupAir {
-            inner_air: ByteOperations::XOR,
-            lookups: ByteOperations::XOR.lookups(),
+            inner_air: ByteOperations::Xor,
+            lookups: ByteOperations::Xor.lookups(),
         })
         .unwrap();
 
@@ -142,7 +166,7 @@ mod tests {
         let claim = [xor_chip_idx, a, b, a_xor_b].map(Val::from_u8).to_vec();
 
         let witness =
-            SystemWitness::from_stage_1(vec![ByteOperations::XOR.traces(a, b, a_xor_b)], &system);
+            SystemWitness::from_stage_1(vec![ByteOperations::Xor.traces(a, b, a_xor_b)], &system);
 
         let fri_parameters = FriParameters {
             log_blowup: 1,
@@ -161,8 +185,8 @@ mod tests {
     #[test]
     fn and() {
         let circuit = Circuit::from_air(LookupAir {
-            inner_air: ByteOperations::AND,
-            lookups: ByteOperations::AND.lookups(),
+            inner_air: ByteOperations::And,
+            lookups: ByteOperations::And.lookups(),
         })
         .unwrap();
 
@@ -174,7 +198,7 @@ mod tests {
         let claim = [and_chip_idx, a, b, a_and_b].map(Val::from_u8).to_vec();
 
         let witness =
-            SystemWitness::from_stage_1(vec![ByteOperations::AND.traces(a, b, a_and_b)], &system);
+            SystemWitness::from_stage_1(vec![ByteOperations::And.traces(a, b, a_and_b)], &system);
 
         let fri_parameters = FriParameters {
             log_blowup: 1,
@@ -192,8 +216,8 @@ mod tests {
     #[test]
     fn or() {
         let circuit = Circuit::from_air(LookupAir {
-            inner_air: ByteOperations::OR,
-            lookups: ByteOperations::OR.lookups(),
+            inner_air: ByteOperations::Or,
+            lookups: ByteOperations::Or.lookups(),
         })
         .unwrap();
 
@@ -205,7 +229,7 @@ mod tests {
         let claim = [or_chip_idx, a, b, a_or_b].map(Val::from_u8).to_vec();
 
         let witness =
-            SystemWitness::from_stage_1(vec![ByteOperations::OR.traces(a, b, a_or_b)], &system);
+            SystemWitness::from_stage_1(vec![ByteOperations::Or.traces(a, b, a_or_b)], &system);
 
         let fri_parameters = FriParameters {
             log_blowup: 1,
