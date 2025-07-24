@@ -182,7 +182,7 @@ mod tests {
     use crate::{
         builder::symbolic::SymbolicVariable,
         system::{Circuit, System, SystemWitness},
-        types::{FriParameters, new_stark_config},
+        types::{CommitmentParameters, FriParameters, new_stark_config},
     };
 
     use super::*;
@@ -269,23 +269,30 @@ mod tests {
                 .assert_one(input * input_inverse);
         }
     }
-    fn system() -> System<CS> {
-        let even = Circuit::from_air(LookupAir {
-            inner_air: CS::Even,
-            lookups: CS::Even.lookups(),
-        })
+    fn system(commitment_parameters: &CommitmentParameters) -> System<CS> {
+        let even = Circuit::from_air(
+            commitment_parameters,
+            LookupAir {
+                inner_air: CS::Even,
+                lookups: CS::Even.lookups(),
+            },
+        )
         .unwrap();
-        let odd = Circuit::from_air(LookupAir {
-            inner_air: CS::Odd,
-            lookups: CS::Odd.lookups(),
-        })
+        let odd = Circuit::from_air(
+            commitment_parameters,
+            LookupAir {
+                inner_air: CS::Odd,
+                lookups: CS::Odd.lookups(),
+            },
+        )
         .unwrap();
         System::new([even, odd])
     }
 
     #[test]
     fn lookup_test() {
-        let system = system();
+        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
+        let system = system(&commitment_parameters);
         let f = Val::from_u32;
         #[rustfmt::skip]
         let witness = SystemWitness::from_stage_1(
@@ -321,12 +328,11 @@ mod tests {
         );
         let claim = &[f(0), f(4), f(1)];
         let fri_parameters = FriParameters {
-            log_blowup: 1,
             log_final_poly_len: 0,
             num_queries: 64,
             proof_of_work_bits: 0,
         };
-        let config = new_stark_config(&fri_parameters);
+        let config = new_stark_config(&commitment_parameters, &fri_parameters);
         let proof = system.prove(&config, claim, witness);
         system.verify(&config, claim, &proof).unwrap();
     }

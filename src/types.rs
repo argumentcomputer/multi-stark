@@ -45,8 +45,11 @@ impl StarkConfig {
     }
 }
 
-pub struct FriParameters {
+pub struct CommitmentParameters {
     pub log_blowup: usize,
+}
+
+pub struct FriParameters {
     pub log_final_poly_len: usize,
     pub num_queries: usize,
     pub proof_of_work_bits: usize,
@@ -63,11 +66,11 @@ fn new_mmcs() -> Mmcs {
     Mmcs::new(field_hash, compress)
 }
 
-fn new_pcs(fri_parameters: &FriParameters) -> Pcs {
+fn new_pcs(commitment_parameters: &CommitmentParameters, fri_parameters: &FriParameters) -> Pcs {
     let val_mmcs = new_mmcs();
     let mmcs = ExtensionMmcs::new(val_mmcs.clone());
     let inner_parameters = InnerFriParameters {
-        log_blowup: fri_parameters.log_blowup,
+        log_blowup: commitment_parameters.log_blowup,
         log_final_poly_len: fri_parameters.log_final_poly_len,
         num_queries: fri_parameters.num_queries,
         proof_of_work_bits: fri_parameters.proof_of_work_bits,
@@ -77,8 +80,11 @@ fn new_pcs(fri_parameters: &FriParameters) -> Pcs {
     Pcs::new(dft, val_mmcs, inner_parameters)
 }
 
-pub fn new_stark_config(fri_parameters: &FriParameters) -> StarkConfig {
-    let pcs = new_pcs(fri_parameters);
+pub fn new_stark_config(
+    commitment_parameters: &CommitmentParameters,
+    fri_parameters: &FriParameters,
+) -> StarkConfig {
+    let pcs = new_pcs(commitment_parameters, fri_parameters);
     let challenger = Challenger::from_hasher(vec![], Keccak256Hash {});
     StarkConfig { pcs, challenger }
 }
