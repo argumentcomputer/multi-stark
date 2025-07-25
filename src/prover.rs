@@ -39,6 +39,7 @@ pub struct Proof {
     pub log_degrees: Vec<u8>,
     pub opening_proof: PcsProof,
     pub quotient_opened_values: OpenedValuesForRound<ExtVal>,
+    pub preprocessed_opened_values: Option<OpenedValuesForRound<ExtVal>>,
     pub stage_1_opened_values: OpenedValuesForRound<ExtVal>,
     pub stage_2_opened_values: OpenedValuesForRound<ExtVal>,
 }
@@ -229,31 +230,39 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
 
         // generate the out of domain point and prove polynomial evaluations
         let zeta: ExtVal = challenger.sample_algebra_element();
+        let mut round0_openings = vec![];
         let mut round1_openings = vec![];
         let mut round2_openings = vec![];
         let mut round3_openings = vec![];
-        log_degrees.iter().zip(quotient_degrees.iter()).for_each(
-            |(log_degree, quotient_degree)| {
-                let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
-                    pcs,
-                    1 << log_degree,
-                );
-                let zeta_next = trace_domain.next_point(zeta).unwrap();
-                round1_openings.push(vec![zeta, zeta_next]);
-                round2_openings.push(vec![zeta, zeta_next]);
-                round3_openings.extend(vec![vec![zeta]; *quotient_degree]);
-            },
-        );
-        let rounds = vec![
+        for i in 0..self.circuits.len() {
+            let log_degree = log_degrees[i];
+            let quotient_degree = quotient_degrees[i];
+            let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
+                pcs,
+                1 << log_degree,
+            );
+            let zeta_next = trace_domain.next_point(zeta).unwrap();
+            round1_openings.push(vec![zeta, zeta_next]);
+            round2_openings.push(vec![zeta, zeta_next]);
+            round3_openings.extend(vec![vec![zeta]; quotient_degree]);
+            if self.preprocessed_indices[i].is_some() {
+                round0_openings.push(vec![zeta, zeta_next]);
+            }
+        }
+        let mut rounds = vec![
             (&stage_1_trace_data, round1_openings),
             (&stage_2_trace_data, round2_openings),
             (&quotient_data, round3_openings),
         ];
+        if self.preprocessed_commit.is_some() {
+            rounds.push((key.preprocessed_data.as_ref().unwrap(), round0_openings));
+        }
         let (opened_values, opening_proof) = pcs.open(rounds, &mut challenger);
         let mut opened_values_iter = opened_values.into_iter();
         let stage_1_opened_values = opened_values_iter.next().unwrap();
         let stage_2_opened_values = opened_values_iter.next().unwrap();
         let quotient_opened_values = opened_values_iter.next().unwrap();
+        let preprocessed_opened_values = opened_values_iter.next();
         debug_assert!(opened_values_iter.next().is_none());
         let log_degrees = log_degrees
             .into_iter()
@@ -265,6 +274,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             log_degrees,
             opening_proof,
             quotient_opened_values,
+            preprocessed_opened_values,
             stage_1_opened_values,
             stage_2_opened_values,
         }
