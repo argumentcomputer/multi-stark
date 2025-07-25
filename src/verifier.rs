@@ -293,7 +293,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         let num_preprocessed = self
             .preprocessed_indices
             .iter()
-            .map(|i| i.is_some() as usize)
+            .map(|i| usize::from(i.is_some()))
             .sum::<usize>();
         ensure_eq!(
             self.preprocessed_commit.is_none(),

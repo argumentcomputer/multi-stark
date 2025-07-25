@@ -31,7 +31,7 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> System<A> {
         let mut circuits = vec![];
         let mut preprocessed_traces = vec![];
         let mut preprocessed_indices = vec![];
-        for air in airs.into_iter() {
+        for air in airs {
             let (circuit, maybe_preprocessed_trace) = Circuit::from_air(air).unwrap();
             circuits.push(circuit);
             if let Some(preprocessed_trace) = maybe_preprocessed_trace {
