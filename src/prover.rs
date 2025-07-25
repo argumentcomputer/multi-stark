@@ -3,8 +3,8 @@ use crate::{
     lookup::Lookup,
     system::{ProverKey, System, SystemWitness},
     types::{
-        Challenger, Commitment, Domain, ExtVal, PackedExtVal, PackedVal, Pcs, PcsProof,
-        StarkConfig, Val,
+        Challenger, Commitment, Domain, EvaluationsOnDomain, ExtVal, PackedExtVal, PackedVal, Pcs,
+        PcsProof, StarkConfig, Val,
     },
 };
 use bincode::{
@@ -158,6 +158,17 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
                 );
                 let quotient_domain =
                     trace_domain.create_disjoint_domain(1 << (log_degree + log_quotient_degree));
+                let preprocessed_trace_on_quotient_domain =
+                    key.preprocessed_data
+                        .as_ref()
+                        .map(|preprocessed_trace_data| {
+                            <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
+                                pcs,
+                                preprocessed_trace_data,
+                                idx,
+                                quotient_domain,
+                            )
+                        });
                 let stage_1_trace_on_quotient_domain =
                     <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
                         pcs,
@@ -184,6 +195,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
                     &public_values,
                     trace_domain,
                     quotient_domain,
+                    &preprocessed_trace_on_quotient_domain,
                     &stage_1_trace_on_quotient_domain,
                     &stage_2_trace_on_quotient_domain,
                     constraint_challenge,
@@ -259,19 +271,19 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn quotient_values<A, Mat>(
+fn quotient_values<A>(
     air: &A,
     public_values: &[Val],
     trace_domain: Domain,
     quotient_domain: Domain,
-    stage_1_on_quotient_domain: &Mat,
-    stage_2_on_quotient_domain: &Mat,
+    preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_>>,
+    stage_1_on_quotient_domain: &EvaluationsOnDomain<'_>,
+    stage_2_on_quotient_domain: &EvaluationsOnDomain<'_>,
     alpha: ExtVal,
     constraint_count: usize,
 ) -> Vec<ExtVal>
 where
     A: for<'a> Air<ProverConstraintFolder<'a>>,
-    Mat: Matrix<Val> + Sync,
 {
     let quotient_size = quotient_domain.size();
     let stage_1_width = stage_1_on_quotient_domain.width();
@@ -310,6 +322,7 @@ where
                     public_values,
                     &sels,
                     quotient_size,
+                    preprocessed_on_quotient_domain,
                     stage_1_on_quotient_domain,
                     stage_2_on_quotient_domain,
                     stage_1_width,
@@ -332,6 +345,7 @@ where
                     public_values,
                     &sels,
                     quotient_size,
+                    preprocessed_on_quotient_domain,
                     stage_1_on_quotient_domain,
                     stage_2_on_quotient_domain,
                     stage_1_width,
@@ -347,13 +361,14 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn quotient_values_inner<A, Mat>(
+fn quotient_values_inner<A>(
     air: &A,
     public_values: &[Val],
     sels: &LagrangeSelectors<Vec<Val>>,
     quotient_size: usize,
-    stage_1_on_quotient_domain: &Mat,
-    stage_2_on_quotient_domain: &Mat,
+    preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_>>,
+    stage_1_on_quotient_domain: &EvaluationsOnDomain<'_>,
+    stage_2_on_quotient_domain: &EvaluationsOnDomain<'_>,
     stage_1_width: usize,
     stage_2_width: usize,
     alpha_powers: &[BinomialExtensionField<Val, 2>],
@@ -363,7 +378,6 @@ fn quotient_values_inner<A, Mat>(
 ) -> impl Iterator<Item = BinomialExtensionField<Val, 2>>
 where
     A: for<'a> Air<ProverConstraintFolder<'a>>,
-    Mat: Matrix<Val> + Sync,
 {
     let i_range = i_start..i_start + PackedVal::WIDTH;
 
@@ -372,8 +386,6 @@ where
     let is_transition = *PackedVal::from_slice(&sels.is_transition[i_range.clone()]);
     let inv_vanishing = *PackedVal::from_slice(&sels.inv_vanishing[i_range]);
 
-    // TODO fix preprocessed
-    let preprocessed = RowMajorMatrix::new(vec![], 0);
     let stage_1 = RowMajorMatrix::new(
         stage_1_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
         stage_1_width,
@@ -385,7 +397,7 @@ where
 
     let accumulator = PackedExtVal::ZERO;
     let mut folder = ProverConstraintFolder {
-        preprocessed: preprocessed.as_view(),
+        preprocessed: None,
         stage_1: stage_1.as_view(),
         stage_2: stage_2.as_view(),
         public_values,

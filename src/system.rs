@@ -59,6 +59,7 @@ pub struct Circuit<A> {
     pub air: LookupAir<A>,
     pub constraint_count: usize,
     pub max_constraint_degree: usize,
+    pub preprocessed_height: usize,
     pub preprocessed_width: usize,
     pub stage_1_width: usize,
     pub stage_2_width: usize,
@@ -100,6 +101,7 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
         let stage_1_width = air.inner_air.width();
         let stage_2_width = air.stage_2_width();
         let preprocessed_trace = air.preprocessed_trace();
+        let preprocessed_height = preprocessed_trace.as_ref().map_or(0, |mat| mat.height());
         let preprocessed_width = preprocessed_trace.as_ref().map_or(0, |mat| mat.width());
         let constraint_count = get_symbolic_constraints(
             &air,
@@ -119,6 +121,7 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
         let circuit = Self {
             air,
             max_constraint_degree,
+            preprocessed_height,
             preprocessed_width,
             constraint_count,
             stage_1_width,

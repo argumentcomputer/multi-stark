@@ -35,6 +35,7 @@ pub struct StarkConfig {
 pub type Commitment = <Pcs as PcsTrait<ExtVal, Challenger>>::Commitment;
 pub type Domain = <Pcs as PcsTrait<ExtVal, Challenger>>::Domain;
 pub type ProverData = <Pcs as PcsTrait<ExtVal, Challenger>>::ProverData;
+pub type EvaluationsOnDomain<'a> = <Pcs as PcsTrait<ExtVal, Challenger>>::EvaluationsOnDomain<'a>;
 pub type PcsError = <Pcs as PcsTrait<ExtVal, Challenger>>::Error;
 pub type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
 

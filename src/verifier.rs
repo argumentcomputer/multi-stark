@@ -179,11 +179,6 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
             let trace_domain =
                 <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
             let sels = trace_domain.selectors_at_point(zeta);
-            // TODO fix preprocessed
-            let preprocessed = VerticalPair::new(
-                RowMajorMatrixView::new(&[], 0),
-                RowMajorMatrixView::new(&[], 0),
-            );
             let stage_1 = VerticalPair::new(
                 RowMajorMatrixView::new_row(stage_1_row),
                 RowMajorMatrixView::new_row(stage_1_next_row),
@@ -199,7 +194,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                 next_acc,
             ];
             let mut folder = VerifierConstraintFolder {
-                preprocessed,
+                preprocessed: None,
                 stage_1,
                 stage_2,
                 public_values,

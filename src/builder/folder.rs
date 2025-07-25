@@ -10,7 +10,7 @@ use super::TwoStagedBuilder;
 
 #[derive(Debug)]
 pub struct ProverConstraintFolder<'a> {
-    pub preprocessed: RowMajorMatrixView<'a, PackedVal>,
+    pub preprocessed: Option<RowMajorMatrixView<'a, PackedVal>>,
     pub stage_1: RowMajorMatrixView<'a, PackedVal>,
     pub stage_2: RowMajorMatrixView<'a, PackedVal>,
     pub public_values: &'a [Val],
@@ -27,7 +27,7 @@ type ViewPair<'a, T> = VerticalPair<RowMajorMatrixView<'a, T>, RowMajorMatrixVie
 
 #[derive(Debug)]
 pub struct VerifierConstraintFolder<'a> {
-    pub preprocessed: ViewPair<'a, ExtVal>,
+    pub preprocessed: Option<ViewPair<'a, ExtVal>>,
     pub stage_1: ViewPair<'a, ExtVal>,
     pub stage_2: ViewPair<'a, ExtVal>,
     pub public_values: &'a [Val],
@@ -101,7 +101,7 @@ impl AirBuilderWithPublicValues for ProverConstraintFolder<'_> {
 
 impl<'a> PairBuilder for ProverConstraintFolder<'a> {
     fn preprocessed(&self) -> Self::M {
-        self.preprocessed
+        self.preprocessed.unwrap()
     }
 }
 
@@ -156,7 +156,7 @@ impl AirBuilderWithPublicValues for VerifierConstraintFolder<'_> {
 
 impl<'a> PairBuilder for VerifierConstraintFolder<'a> {
     fn preprocessed(&self) -> Self::M {
-        self.preprocessed
+        self.preprocessed.unwrap()
     }
 }
 
