@@ -1,7 +1,7 @@
 use crate::{
     builder::folder::ProverConstraintFolder,
     lookup::Lookup,
-    system::{System, SystemWitness},
+    system::{ProverKey, System, SystemWitness},
     types::{
         Challenger, Commitment, Domain, ExtVal, PackedExtVal, PackedVal, Pcs, PcsProof,
         StarkConfig, Val,
@@ -61,14 +61,21 @@ impl Proof {
 }
 
 impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
-    pub fn prove(&self, config: &StarkConfig, claim: &[Val], witness: SystemWitness) -> Proof {
+    pub fn prove(
+        &self,
+        config: &StarkConfig,
+        key: ProverKey,
+        claim: &[Val],
+        witness: SystemWitness,
+    ) -> Proof {
         let multiplicity = Val::ONE;
-        self.prove_with_claim_multiplicy(config, multiplicity, claim, witness)
+        self.prove_with_claim_multiplicy(config, key, multiplicity, claim, witness)
     }
 
     pub fn prove_with_claim_multiplicy(
         &self,
         config: &StarkConfig,
+        key: ProverKey,
         multiplicity: Val,
         claim: &[Val],
         witness: SystemWitness,

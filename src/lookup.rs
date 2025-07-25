@@ -91,6 +91,10 @@ where
     fn width(&self) -> usize {
         self.inner_air.width()
     }
+
+    fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Val>> {
+        self.inner_air.preprocessed_trace()
+    }
 }
 
 impl<A> BaseAirWithPublicValues<Val> for LookupAir<A>
@@ -181,8 +185,8 @@ mod tests {
 
     use crate::{
         builder::symbolic::SymbolicVariable,
-        system::{Circuit, System, SystemWitness},
-        types::{CommitmentParameters, FriParameters, new_stark_config},
+        system::{ProverKey, System, SystemWitness},
+        types::{CommitmentParameters, FriParameters, StarkConfig},
     };
 
     use super::*;
@@ -269,30 +273,22 @@ mod tests {
                 .assert_one(input * input_inverse);
         }
     }
-    fn system(commitment_parameters: &CommitmentParameters) -> System<CS> {
-        let even = Circuit::from_air(
-            commitment_parameters,
-            LookupAir {
-                inner_air: CS::Even,
-                lookups: CS::Even.lookups(),
-            },
-        )
-        .unwrap();
-        let odd = Circuit::from_air(
-            commitment_parameters,
-            LookupAir {
-                inner_air: CS::Odd,
-                lookups: CS::Odd.lookups(),
-            },
-        )
-        .unwrap();
-        System::new([even, odd])
+    fn system(commitment_parameters: &CommitmentParameters) -> (System<CS>, ProverKey) {
+        let even = LookupAir {
+            inner_air: CS::Even,
+            lookups: CS::Even.lookups(),
+        };
+        let odd = LookupAir {
+            inner_air: CS::Odd,
+            lookups: CS::Odd.lookups(),
+        };
+        System::new(commitment_parameters, [even, odd])
     }
 
     #[test]
     fn lookup_test() {
         let commitment_parameters = CommitmentParameters { log_blowup: 1 };
-        let system = system(&commitment_parameters);
+        let (system, key) = system(&commitment_parameters);
         let f = Val::from_u32;
         #[rustfmt::skip]
         let witness = SystemWitness::from_stage_1(
@@ -332,8 +328,8 @@ mod tests {
             num_queries: 64,
             proof_of_work_bits: 0,
         };
-        let config = new_stark_config(&commitment_parameters, &fri_parameters);
-        let proof = system.prove(&config, claim, witness);
+        let config = StarkConfig::new(&commitment_parameters, &fri_parameters);
+        let proof = system.prove(&config, key, claim, witness);
         system.verify(&config, claim, &proof).unwrap();
     }
 }

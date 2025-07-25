@@ -5,6 +5,7 @@ use p3_field::{ExtensionField, Field, extension::BinomialExtensionField};
 use p3_fri::{FriParameters as InnerFriParameters, TwoAdicFriPcs};
 use p3_goldilocks::Goldilocks;
 use p3_keccak::{Keccak256Hash, KeccakF};
+use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher};
 
@@ -33,6 +34,7 @@ pub struct StarkConfig {
 
 pub type Commitment = <Pcs as PcsTrait<ExtVal, Challenger>>::Commitment;
 pub type Domain = <Pcs as PcsTrait<ExtVal, Challenger>>::Domain;
+pub type ProverData = <Pcs as PcsTrait<ExtVal, Challenger>>::ProverData;
 pub type PcsError = <Pcs as PcsTrait<ExtVal, Challenger>>::Error;
 pub type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
 
@@ -42,6 +44,44 @@ impl StarkConfig {
     }
     pub fn initialise_challenger(&self) -> Challenger {
         self.challenger.clone()
+    }
+
+    pub fn new(
+        commitment_parameters: &CommitmentParameters,
+        fri_parameters: &FriParameters,
+    ) -> Self {
+        let pcs = new_pcs(commitment_parameters, fri_parameters);
+        let challenger = Challenger::from_hasher(vec![], Keccak256Hash {});
+        Self { pcs, challenger }
+    }
+}
+
+/// The committer is able to commit to polynomials but not open them.
+/// This is used for preprocessed traces.
+pub struct Committer {
+    pcs: Pcs,
+}
+
+impl Committer {
+    pub fn new(commitment_parameters: &CommitmentParameters) -> Self {
+        let dummy_parameters = &FriParameters {
+            log_final_poly_len: 0,
+            num_queries: 0,
+            proof_of_work_bits: 0,
+        };
+        let pcs = new_pcs(commitment_parameters, dummy_parameters);
+        Self { pcs }
+    }
+
+    pub fn natural_domain_for_degree(&self, degree: usize) -> Domain {
+        <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(&self.pcs, degree)
+    }
+
+    pub fn commit(
+        &self,
+        evaluations: impl IntoIterator<Item = (Domain, RowMajorMatrix<Val>)>,
+    ) -> (Commitment, ProverData) {
+        <Pcs as PcsTrait<ExtVal, Challenger>>::commit(&self.pcs, evaluations)
     }
 }
 
@@ -78,13 +118,4 @@ fn new_pcs(commitment_parameters: &CommitmentParameters, fri_parameters: &FriPar
     };
     let dft = Dft::default();
     Pcs::new(dft, val_mmcs, inner_parameters)
-}
-
-pub fn new_stark_config(
-    commitment_parameters: &CommitmentParameters,
-    fri_parameters: &FriParameters,
-) -> StarkConfig {
-    let pcs = new_pcs(commitment_parameters, fri_parameters);
-    let challenger = Challenger::from_hasher(vec![], Keccak256Hash {});
-    StarkConfig { pcs, challenger }
 }

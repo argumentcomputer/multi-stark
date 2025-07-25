@@ -343,8 +343,8 @@ mod tests {
     use crate::{
         benchmark,
         lookup::LookupAir,
-        system::{Circuit, SystemWitness},
-        types::{CommitmentParameters, FriParameters, new_stark_config},
+        system::{ProverKey, SystemWitness},
+        types::{CommitmentParameters, FriParameters},
     };
     use p3_air::{AirBuilderWithPublicValues, BaseAir};
     use p3_matrix::{Matrix, dense::RowMajorMatrix};
@@ -390,21 +390,19 @@ mod tests {
             }
         }
     }
-    fn system(commitment_parameters: &CommitmentParameters) -> System<CS> {
-        let pythagorean_circuit = Circuit::from_air(
+    fn system(commitment_parameters: &CommitmentParameters) -> (System<CS>, ProverKey) {
+        let pythagorean_circuit = LookupAir::new(CS::Pythagorean, vec![]);
+        let complex_circuit = LookupAir::new(CS::Complex, vec![]);
+        System::new(
             commitment_parameters,
-            LookupAir::new(CS::Pythagorean, vec![]),
+            [pythagorean_circuit, complex_circuit],
         )
-        .unwrap();
-        let complex_circuit =
-            Circuit::from_air(commitment_parameters, LookupAir::new(CS::Complex, vec![])).unwrap();
-        System::new([pythagorean_circuit, complex_circuit])
     }
 
     #[test]
     fn multi_stark_test() {
         let commitment_parameters = CommitmentParameters { log_blowup: 1 };
-        let system = system(&commitment_parameters);
+        let (system, key) = system(&commitment_parameters);
         let f = Val::from_u32;
         let witness = SystemWitness::from_stage_1(
             vec![
@@ -425,8 +423,9 @@ mod tests {
             num_queries: 64,
             proof_of_work_bits: 0,
         };
-        let config = new_stark_config(&commitment_parameters, &fri_parameters);
-        let proof = system.prove_with_claim_multiplicy(&config, multiplicity, dummy_claim, witness);
+        let config = StarkConfig::new(&commitment_parameters, &fri_parameters);
+        let proof =
+            system.prove_with_claim_multiplicy(&config, key, multiplicity, dummy_claim, witness);
         system
             .verify_with_claim_multiplicity(&config, multiplicity, dummy_claim, &proof)
             .unwrap();
@@ -439,7 +438,7 @@ mod tests {
         // RUSTFLAGS="-Ctarget-cpu=native" cargo test multi_stark_benchmark_test --release --features parallel -- --include-ignored --nocapture
         const LOG_HEIGHT: usize = 20;
         let commitment_parameters = CommitmentParameters { log_blowup: 1 };
-        let system = system(&commitment_parameters);
+        let (system, key) = system(&commitment_parameters);
         let f = Val::from_u32;
         let mut pythagorean_trace = [3, 4, 5].map(f).to_vec();
         let mut complex_trace = [4, 2, 3, 1, 10, 10].map(f).to_vec();
@@ -462,9 +461,9 @@ mod tests {
             num_queries: 100,
             proof_of_work_bits: 20,
         };
-        let config = new_stark_config(&commitment_parameters, &fri_parameters);
+        let config = StarkConfig::new(&commitment_parameters, &fri_parameters);
         let proof = benchmark!(
-            system.prove_with_claim_multiplicy(&config, multiplicity, dummy_claim, witness),
+            system.prove_with_claim_multiplicy(&config, key, multiplicity, dummy_claim, witness),
             "proof: "
         );
         let proof_bytes = proof.to_bytes().expect("Failed to serialize proof");

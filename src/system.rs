@@ -2,7 +2,7 @@ use crate::{
     builder::symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
     ensure_eq,
     lookup::{Lookup, LookupAir},
-    types::{Commitment, CommitmentParameters, Val},
+    types::{Commitment, CommitmentParameters, Committer, ProverData, Val},
 };
 use p3_air::{Air, BaseAir, BaseAirWithPublicValues};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
@@ -13,14 +13,45 @@ pub const MIN_IO_SIZE: usize = 4;
 
 pub struct System<A> {
     pub circuits: Vec<Circuit<A>>,
+    pub preprocessed_commit: Option<Commitment>,
 }
 
-impl<A> System<A> {
+pub struct ProverKey {
+    pub preprocessed_data: Option<ProverData>,
+}
+
+impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> System<A> {
     #[inline]
-    pub fn new(circuits: impl IntoIterator<Item = Circuit<A>>) -> Self {
-        Self {
-            circuits: circuits.into_iter().collect(),
-        }
+    pub fn new(
+        commitment_parameters: &CommitmentParameters,
+        circuits: impl IntoIterator<Item = LookupAir<A>>,
+    ) -> (Self, ProverKey) {
+        let (circuits, maybe_preprocessed_traces): (Vec<_>, Vec<_>) = circuits
+            .into_iter()
+            .map(|air| Circuit::from_air(air).unwrap())
+            .unzip();
+        let committer = Committer::new(commitment_parameters);
+        let preprocessed_traces = maybe_preprocessed_traces
+            .into_iter()
+            .filter_map(|maybe_trace| {
+                maybe_trace.map(|trace| {
+                    let domain = committer.natural_domain_for_degree(trace.height());
+                    (domain, trace)
+                })
+            })
+            .collect::<Vec<_>>();
+        let (preprocessed_commit, preprocessed_data) = if !preprocessed_traces.is_empty() {
+            let (commit, data) = committer.commit(preprocessed_traces);
+            (Some(commit), Some(data))
+        } else {
+            (None, None)
+        };
+        let system = Self {
+            circuits,
+            preprocessed_commit,
+        };
+        let key = ProverKey { preprocessed_data };
+        (system, key)
     }
 }
 
@@ -29,7 +60,6 @@ pub struct Circuit<A> {
     pub constraint_count: usize,
     pub max_constraint_degree: usize,
     pub preprocessed_width: usize,
-    pub preprocessed_commitment: Option<Commitment>,
     pub stage_1_width: usize,
     pub stage_2_width: usize,
 }
@@ -64,19 +94,13 @@ impl SystemWitness {
 }
 
 impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
-    pub fn from_air(
-        commitment_parameters: &CommitmentParameters,
-        air: LookupAir<A>,
-    ) -> Result<Self, String> {
+    pub fn from_air(air: LookupAir<A>) -> Result<(Self, Option<RowMajorMatrix<Val>>), String> {
         let io_size = air.num_public_values();
         ensure_eq!(io_size, MIN_IO_SIZE, "Incompatible IO size");
         let stage_1_width = air.inner_air.width();
         let stage_2_width = air.stage_2_width();
-        let preprocessed_commitment = None;
-        let preprocessed_width = air
-            .inner_air
-            .preprocessed_trace()
-            .map_or(0, |mat| mat.width());
+        let preprocessed_trace = air.preprocessed_trace();
+        let preprocessed_width = preprocessed_trace.as_ref().map_or(0, |mat| mat.width());
         let constraint_count = get_symbolic_constraints(
             &air,
             preprocessed_width,
@@ -92,14 +116,14 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
             stage_2_width,
             io_size,
         );
-        Ok(Self {
+        let circuit = Self {
             air,
             max_constraint_degree,
             preprocessed_width,
-            preprocessed_commitment,
             constraint_count,
             stage_1_width,
             stage_2_width,
-        })
+        };
+        Ok((circuit, preprocessed_trace))
     }
 }
