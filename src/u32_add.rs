@@ -5,8 +5,8 @@ use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use crate::{
     builder::symbolic::{Entry, SymbolicExpression, SymbolicVariable},
     lookup::{Lookup, LookupAir},
-    system::{Circuit, System, SystemWitness},
-    types::Val,
+    system::{ProverKey, System, SystemWitness},
+    types::{CommitmentParameters, Val},
 };
 
 pub enum ByteCS {
@@ -107,7 +107,7 @@ where
 type Expr = SymbolicExpression<Val>;
 
 impl ByteCS {
-    fn lookups(&self) -> Vec<Lookup<Expr>> {
+    pub fn lookups(&self) -> Vec<Lookup<Expr>> {
         let var = |index| Expr::from(SymbolicVariable::new(Entry::Main { offset: 0 }, index));
         let byte_index = Expr::from_u8(0);
         let u32_index = Expr::from_u8(1);
@@ -193,18 +193,16 @@ impl ByteCS {
     }
 }
 
-fn byte_system() -> System<ByteCS> {
-    let byte_chip = Circuit::from_air(LookupAir {
+pub fn byte_system(commitment_parameters: &CommitmentParameters) -> (System<ByteCS>, ProverKey) {
+    let byte_chip = LookupAir {
         inner_air: ByteCS::ByteChip,
         lookups: ByteCS::ByteChip.lookups(),
-    })
-    .unwrap();
-    let u32_add_chip = Circuit::from_air(LookupAir {
+    };
+    let u32_add_chip = LookupAir {
         inner_air: ByteCS::U32AddChip,
         lookups: ByteCS::U32AddChip.lookups(),
-    })
-    .unwrap();
-    System::new([byte_chip, u32_add_chip])
+    };
+    System::new(commitment_parameters, [byte_chip, u32_add_chip])
 }
 
 pub struct AddCalls {
@@ -266,13 +264,14 @@ impl AddCalls {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::{FriParameters, new_stark_config};
+    use crate::types::{FriParameters, StarkConfig};
 
     use super::*;
 
     #[test]
     fn byte_trace() {
-        let system = byte_system();
+        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
+        let (system, _key) = byte_system(&commitment_parameters);
         let calls = AddCalls {
             calls: vec![(3, 4), (7, 9), (2, 9)],
         };
@@ -285,20 +284,20 @@ mod tests {
 
     #[test]
     fn u32_add_proof() {
-        let system = byte_system();
+        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
+        let (system, key) = byte_system(&commitment_parameters);
         let calls = AddCalls {
             calls: vec![(8000, 10000)],
         };
         let witness = calls.witness(&system);
         let claim = [1, 8000, 10000, 18000].map(Val::from_u32).to_vec();
         let fri_parameters = FriParameters {
-            log_blowup: 1,
             log_final_poly_len: 0,
             num_queries: 64,
             proof_of_work_bits: 0,
         };
-        let config = new_stark_config(&fri_parameters);
-        let proof = system.prove(&config, &claim, witness);
+        let config = StarkConfig::new(&commitment_parameters, &fri_parameters);
+        let proof = system.prove(&config, &key, &claim, witness);
         system.verify(&config, &claim, &proof).unwrap();
     }
 }
