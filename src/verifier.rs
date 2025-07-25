@@ -49,86 +49,9 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
             stage_1_opened_values,
             stage_2_opened_values,
         } = proof;
-        // The following are proof shape checks
-        let num_circuits = self.circuits.len();
-        // there must be at least one circuit
-        ensure!(num_circuits > 0, VerificationError::InvalidSystem);
-        // stage 1 round
-        ensure_eq!(
-            stage_1_opened_values.len(),
-            num_circuits,
-            VerificationError::InvalidProofShape
-        );
-        for (i, circuit) in self.circuits.iter().enumerate() {
-            // zeta and zeta_next
-            let num_openings = 2;
-            ensure_eq!(
-                stage_1_opened_values[i].len(),
-                num_openings,
-                VerificationError::InvalidProofShape
-            );
-            for j in 0..num_openings {
-                ensure_eq!(
-                    stage_1_opened_values[i][j].len(),
-                    circuit.stage_1_width,
-                    VerificationError::InvalidProofShape
-                );
-            }
-        }
-        // stage 2 round
-        ensure_eq!(
-            stage_2_opened_values.len(),
-            num_circuits,
-            VerificationError::InvalidProofShape
-        );
-        for (i, circuit) in self.circuits.iter().enumerate() {
-            // zeta and zeta_next
-            let num_openings = 2;
-            ensure_eq!(
-                stage_2_opened_values[i].len(),
-                num_openings,
-                VerificationError::InvalidProofShape
-            );
-            for j in 0..num_openings {
-                ensure_eq!(
-                    stage_2_opened_values[i][j].len(),
-                    circuit.stage_2_width,
-                    VerificationError::InvalidProofShape
-                );
-            }
-        } // quotient round
-        let mut quotient_degrees = vec![];
-        for circuit in self.circuits.iter() {
-            let quotient_degree = (circuit.max_constraint_degree.max(2) - 1).next_power_of_two();
-            quotient_degrees.push(quotient_degree);
-        }
-        let quotient_size: usize = quotient_degrees.iter().sum();
-        ensure_eq!(
-            quotient_opened_values.len(),
-            quotient_size,
-            VerificationError::InvalidProofShape
-        );
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..quotient_size {
-            // zeta
-            let num_openings = 1;
-            ensure_eq!(
-                quotient_opened_values[i].len(),
-                num_openings,
-                VerificationError::InvalidProofShape
-            );
-            ensure_eq!(
-                quotient_opened_values[i][0].len(),
-                <ExtVal as BasedVectorSpace<Val>>::DIMENSION,
-                VerificationError::InvalidProofShape
-            );
-        }
-        // there must be as many intermediate accumulators as circuits
-        ensure_eq!(
-            intermediate_accumulators.len(),
-            self.circuits.len(),
-            VerificationError::InvalidProofShape
-        );
+        // first, verify the proof shape
+        let quotient_degrees = self.verify_shape(proof)?;
+
         // the last accumulator should be 0
         ensure_eq!(
             *intermediate_accumulators.last().unwrap(),
@@ -237,7 +160,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         // and check that the evaluation of the composition polynomial equals the
         // product of the zerofier with the quotient
         let mut last_quotient_i = 0;
-        for i in 0..num_circuits {
+        for i in 0..self.circuits.len() {
             let circuit = &self.circuits[i];
             let degree = 1 << log_degrees[i];
             let quotient_degree = quotient_degrees[i];
@@ -334,6 +257,97 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         }
 
         Ok(())
+    }
+
+    pub fn verify_shape(&self, proof: &Proof) -> Result<Vec<usize>, VerificationError<PcsError>> {
+        let Proof {
+            intermediate_accumulators,
+            quotient_opened_values,
+            stage_1_opened_values,
+            stage_2_opened_values,
+            ..
+        } = proof;
+        // The following are proof shape checks
+        let num_circuits = self.circuits.len();
+        // there must be at least one circuit
+        ensure!(num_circuits > 0, VerificationError::InvalidSystem);
+        // stage 1 round
+        ensure_eq!(
+            stage_1_opened_values.len(),
+            num_circuits,
+            VerificationError::InvalidProofShape
+        );
+        for (i, circuit) in self.circuits.iter().enumerate() {
+            // zeta and zeta_next
+            let num_openings = 2;
+            ensure_eq!(
+                stage_1_opened_values[i].len(),
+                num_openings,
+                VerificationError::InvalidProofShape
+            );
+            for j in 0..num_openings {
+                ensure_eq!(
+                    stage_1_opened_values[i][j].len(),
+                    circuit.stage_1_width,
+                    VerificationError::InvalidProofShape
+                );
+            }
+        }
+        // stage 2 round
+        ensure_eq!(
+            stage_2_opened_values.len(),
+            num_circuits,
+            VerificationError::InvalidProofShape
+        );
+        for (i, circuit) in self.circuits.iter().enumerate() {
+            // zeta and zeta_next
+            let num_openings = 2;
+            ensure_eq!(
+                stage_2_opened_values[i].len(),
+                num_openings,
+                VerificationError::InvalidProofShape
+            );
+            for j in 0..num_openings {
+                ensure_eq!(
+                    stage_2_opened_values[i][j].len(),
+                    circuit.stage_2_width,
+                    VerificationError::InvalidProofShape
+                );
+            }
+        } // quotient round
+        let mut quotient_degrees = vec![];
+        for circuit in self.circuits.iter() {
+            let quotient_degree = (circuit.max_constraint_degree.max(2) - 1).next_power_of_two();
+            quotient_degrees.push(quotient_degree);
+        }
+        let quotient_size: usize = quotient_degrees.iter().sum();
+        ensure_eq!(
+            quotient_opened_values.len(),
+            quotient_size,
+            VerificationError::InvalidProofShape
+        );
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..quotient_size {
+            // zeta
+            let num_openings = 1;
+            ensure_eq!(
+                quotient_opened_values[i].len(),
+                num_openings,
+                VerificationError::InvalidProofShape
+            );
+            ensure_eq!(
+                quotient_opened_values[i][0].len(),
+                <ExtVal as BasedVectorSpace<Val>>::DIMENSION,
+                VerificationError::InvalidProofShape
+            );
+        }
+        // there must be as many intermediate accumulators as circuits
+        ensure_eq!(
+            intermediate_accumulators.len(),
+            self.circuits.len(),
+            VerificationError::InvalidProofShape
+        );
+        Ok(quotient_degrees)
     }
 }
 
