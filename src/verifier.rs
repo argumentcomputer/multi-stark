@@ -434,7 +434,7 @@ mod tests {
         };
         let config = StarkConfig::new(&commitment_parameters, &fri_parameters);
         let proof =
-            system.prove_with_claim_multiplicy(&config, key, multiplicity, dummy_claim, witness);
+            system.prove_with_claim_multiplicy(&config, &key, multiplicity, dummy_claim, witness);
         system
             .verify_with_claim_multiplicity(&config, multiplicity, dummy_claim, &proof)
             .unwrap();
@@ -472,7 +472,7 @@ mod tests {
         };
         let config = StarkConfig::new(&commitment_parameters, &fri_parameters);
         let proof = benchmark!(
-            system.prove_with_claim_multiplicy(&config, key, multiplicity, dummy_claim, witness),
+            system.prove_with_claim_multiplicy(&config, &key, multiplicity, dummy_claim, witness),
             "proof: "
         );
         let proof_bytes = proof.to_bytes().expect("Failed to serialize proof");

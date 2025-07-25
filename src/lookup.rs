@@ -329,7 +329,7 @@ mod tests {
             proof_of_work_bits: 0,
         };
         let config = StarkConfig::new(&commitment_parameters, &fri_parameters);
-        let proof = system.prove(&config, key, claim, witness);
+        let proof = system.prove(&config, &key, claim, witness);
         system.verify(&config, claim, &proof).unwrap();
     }
 }

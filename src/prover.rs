@@ -64,7 +64,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
     pub fn prove(
         &self,
         config: &StarkConfig,
-        key: ProverKey,
+        key: &ProverKey,
         claim: &[Val],
         witness: SystemWitness,
     ) -> Proof {
@@ -75,7 +75,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
     pub fn prove_with_claim_multiplicy(
         &self,
         config: &StarkConfig,
-        key: ProverKey,
+        key: &ProverKey,
         multiplicity: Val,
         claim: &[Val],
         witness: SystemWitness,
@@ -158,17 +158,18 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
                 );
                 let quotient_domain =
                     trace_domain.create_disjoint_domain(1 << (log_degree + log_quotient_degree));
-                let preprocessed_trace_on_quotient_domain =
-                    key.preprocessed_data
-                        .as_ref()
-                        .map(|preprocessed_trace_data| {
-                            <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
-                                pcs,
-                                preprocessed_trace_data,
-                                idx,
-                                quotient_domain,
-                            )
-                        });
+                let preprocessed_trace_on_quotient_domain = key
+                    .preprocessed_data
+                    .as_ref()
+                    .zip(self.preprocessed_indices[idx])
+                    .map(|(preprocessed_trace_data, preprocessed_idx)| {
+                        <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
+                            pcs,
+                            preprocessed_trace_data,
+                            preprocessed_idx,
+                            quotient_domain,
+                        )
+                    });
                 let stage_1_trace_on_quotient_domain =
                     <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
                         pcs,
@@ -288,6 +289,9 @@ where
     let quotient_size = quotient_domain.size();
     let stage_1_width = stage_1_on_quotient_domain.width();
     let stage_2_width = stage_2_on_quotient_domain.width();
+    let preprocessed_width = preprocessed_on_quotient_domain
+        .as_ref()
+        .map_or(0, |mat| mat.width());
     let mut sels = trace_domain.selectors_on_coset(quotient_domain);
 
     let qdb = log2_strict_usize(quotient_domain.size()) - log2_strict_usize(trace_domain.size());
@@ -327,6 +331,7 @@ where
                     stage_2_on_quotient_domain,
                     stage_1_width,
                     stage_2_width,
+                    preprocessed_width,
                     &alpha_powers,
                     &decomposed_alpha_powers,
                     next_step,
@@ -350,6 +355,7 @@ where
                     stage_2_on_quotient_domain,
                     stage_1_width,
                     stage_2_width,
+                    preprocessed_width,
                     &alpha_powers,
                     &decomposed_alpha_powers,
                     next_step,
@@ -371,6 +377,7 @@ fn quotient_values_inner<A>(
     stage_2_on_quotient_domain: &EvaluationsOnDomain<'_>,
     stage_1_width: usize,
     stage_2_width: usize,
+    preprocessed_width: usize,
     alpha_powers: &[BinomialExtensionField<Val, 2>],
     decomposed_alpha_powers: &[Vec<Val>],
     next_step: usize,
@@ -386,6 +393,14 @@ where
     let is_transition = *PackedVal::from_slice(&sels.is_transition[i_range.clone()]);
     let inv_vanishing = *PackedVal::from_slice(&sels.inv_vanishing[i_range]);
 
+    let preprocessed = preprocessed_on_quotient_domain
+        .as_ref()
+        .map(|on_quotient_domain| {
+            RowMajorMatrix::new(
+                on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
+                preprocessed_width,
+            )
+        });
     let stage_1 = RowMajorMatrix::new(
         stage_1_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
         stage_1_width,
@@ -397,7 +412,7 @@ where
 
     let accumulator = PackedExtVal::ZERO;
     let mut folder = ProverConstraintFolder {
-        preprocessed: None,
+        preprocessed: preprocessed.as_ref().map(|mat| mat.as_view()),
         stage_1: stage_1.as_view(),
         stage_2: stage_2.as_view(),
         public_values,

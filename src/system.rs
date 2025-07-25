@@ -14,6 +14,7 @@ pub const MIN_IO_SIZE: usize = 4;
 pub struct System<A> {
     pub circuits: Vec<Circuit<A>>,
     pub preprocessed_commit: Option<Commitment>,
+    pub preprocessed_indices: Vec<Option<usize>>,
 }
 
 pub struct ProverKey {
@@ -24,22 +25,23 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> System<A> {
     #[inline]
     pub fn new(
         commitment_parameters: &CommitmentParameters,
-        circuits: impl IntoIterator<Item = LookupAir<A>>,
+        airs: impl IntoIterator<Item = LookupAir<A>>,
     ) -> (Self, ProverKey) {
-        let (circuits, maybe_preprocessed_traces): (Vec<_>, Vec<_>) = circuits
-            .into_iter()
-            .map(|air| Circuit::from_air(air).unwrap())
-            .unzip();
         let committer = Committer::new(commitment_parameters);
-        let preprocessed_traces = maybe_preprocessed_traces
-            .into_iter()
-            .filter_map(|maybe_trace| {
-                maybe_trace.map(|trace| {
-                    let domain = committer.natural_domain_for_degree(trace.height());
-                    (domain, trace)
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut circuits = vec![];
+        let mut preprocessed_traces = vec![];
+        let mut preprocessed_indices = vec![];
+        for air in airs.into_iter() {
+            let (circuit, maybe_preprocessed_trace) = Circuit::from_air(air).unwrap();
+            circuits.push(circuit);
+            if let Some(preprocessed_trace) = maybe_preprocessed_trace {
+                preprocessed_indices.push(Some(preprocessed_traces.len()));
+                let domain = committer.natural_domain_for_degree(preprocessed_trace.height());
+                preprocessed_traces.push((domain, preprocessed_trace));
+            } else {
+                preprocessed_indices.push(None);
+            }
+        }
         let (preprocessed_commit, preprocessed_data) = if !preprocessed_traces.is_empty() {
             let (commit, data) = committer.commit(preprocessed_traces);
             (Some(commit), Some(data))
@@ -49,6 +51,7 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> System<A> {
         let system = Self {
             circuits,
             preprocessed_commit,
+            preprocessed_indices,
         };
         let key = ProverKey { preprocessed_data };
         (system, key)
