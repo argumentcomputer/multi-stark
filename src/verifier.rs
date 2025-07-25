@@ -96,64 +96,74 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
 
         // generate out of domain points and verify the PCS opening
         let zeta: ExtVal = challenger.sample_algebra_element();
+        let mut preprocessed_trace_evaluations = vec![];
         let mut stage_1_trace_evaluations = vec![];
         let mut stage_2_trace_evaluations = vec![];
         let mut quotient_chunks_evaluations = vec![];
         let mut last_quotient_i = 0;
-        log_degrees
-            .iter()
-            .zip(quotient_degrees.iter())
-            .enumerate()
-            .for_each(|(i, (log_degree, quotient_degree))| {
-                let log_quotient_degree = log2_strict_usize(*quotient_degree);
-                let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
-                    pcs,
-                    1 << log_degree,
-                );
-                let quotient_domain =
-                    trace_domain.create_disjoint_domain((1 << log_degree) << log_quotient_degree);
-                let quotient_chunks_domains = quotient_domain.split_domains(*quotient_degree);
-                let unshifted_quotient_chunks_domains = quotient_chunks_domains
-                    .iter()
-                    .map(|domain| {
-                        <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
-                            pcs,
-                            domain.size(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let zeta_next = trace_domain.next_point(zeta).unwrap();
-                stage_1_trace_evaluations.push((
-                    trace_domain,
-                    vec![
-                        (zeta, stage_1_opened_values[i][0].clone()),
-                        (zeta_next, stage_1_opened_values[i][1].clone()),
-                    ],
-                ));
-                stage_2_trace_evaluations.push((
-                    trace_domain,
-                    vec![
-                        (zeta, stage_2_opened_values[i][0].clone()),
-                        (zeta_next, stage_2_opened_values[i][1].clone()),
-                    ],
-                ));
-                let iter = unshifted_quotient_chunks_domains
-                    .into_iter()
-                    .zip(
-                        quotient_opened_values[last_quotient_i..last_quotient_i + quotient_degree]
-                            .iter(),
+        for i in 0..self.circuits.len() {
+            let log_degree = log_degrees[i];
+            let quotient_degree = quotient_degrees[i];
+            let log_quotient_degree = log2_strict_usize(quotient_degree);
+            let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
+                pcs,
+                1 << log_degree,
+            );
+            let quotient_domain =
+                trace_domain.create_disjoint_domain((1 << log_degree) << log_quotient_degree);
+            let quotient_chunks_domains = quotient_domain.split_domains(quotient_degree);
+            let unshifted_quotient_chunks_domains = quotient_chunks_domains
+                .iter()
+                .map(|domain| {
+                    <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
+                        pcs,
+                        domain.size(),
                     )
-                    .map(|(domain, opened_values)| {
-                        (domain, vec![(zeta, opened_values[0].clone())])
-                    });
-                quotient_chunks_evaluations.extend(iter);
-                last_quotient_i += quotient_degree;
-            });
-        let coms_to_verify = vec![
+                })
+                .collect::<Vec<_>>();
+            let zeta_next = trace_domain.next_point(zeta).unwrap();
+            if let Some(i) = self.preprocessed_indices[i] {
+                let preprocessed_opened_values = preprocessed_opened_values.as_ref().unwrap();
+                preprocessed_trace_evaluations.push((
+                    trace_domain,
+                    vec![
+                        (zeta, preprocessed_opened_values[i][0].clone()),
+                        (zeta_next, preprocessed_opened_values[i][1].clone()),
+                    ],
+                ));
+            }
+            stage_1_trace_evaluations.push((
+                trace_domain,
+                vec![
+                    (zeta, stage_1_opened_values[i][0].clone()),
+                    (zeta_next, stage_1_opened_values[i][1].clone()),
+                ],
+            ));
+            stage_2_trace_evaluations.push((
+                trace_domain,
+                vec![
+                    (zeta, stage_2_opened_values[i][0].clone()),
+                    (zeta_next, stage_2_opened_values[i][1].clone()),
+                ],
+            ));
+            let iter = unshifted_quotient_chunks_domains
+                .into_iter()
+                .zip(
+                    quotient_opened_values[last_quotient_i..last_quotient_i + quotient_degree]
+                        .iter(),
+                )
+                .map(|(domain, opened_values)| (domain, vec![(zeta, opened_values[0].clone())]));
+            quotient_chunks_evaluations.extend(iter);
+            last_quotient_i += quotient_degree;
+        }
+        let mut coms_to_verify = vec![
             (commitments.stage_1_trace, stage_1_trace_evaluations),
             (commitments.stage_2_trace, stage_2_trace_evaluations),
             (commitments.quotient_chunks, quotient_chunks_evaluations),
         ];
+        if let Some(preprocessed_commitment) = self.preprocessed_commit {
+            coms_to_verify.extend([(preprocessed_commitment, preprocessed_trace_evaluations)])
+        }
         pcs.verify(coms_to_verify, opening_proof, &mut challenger)
             .map_err(VerificationError::InvalidOpeningArgument)?;
 
@@ -180,6 +190,17 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
             let trace_domain =
                 <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
             let sels = trace_domain.selectors_at_point(zeta);
+            let preprocessed = if let Some(i) = self.preprocessed_indices[i] {
+                let preprocessed_opened_values = preprocessed_opened_values.as_ref().unwrap();
+                let preprocessed_row = &preprocessed_opened_values[i][0];
+                let preprocessed_next_row = &preprocessed_opened_values[i][1];
+                Some(VerticalPair::new(
+                    RowMajorMatrixView::new_row(preprocessed_row),
+                    RowMajorMatrixView::new_row(preprocessed_next_row),
+                ))
+            } else {
+                None
+            };
             let stage_1 = VerticalPair::new(
                 RowMajorMatrixView::new_row(stage_1_row),
                 RowMajorMatrixView::new_row(stage_1_next_row),
@@ -195,7 +216,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                 next_acc,
             ];
             let mut folder = VerifierConstraintFolder {
-                preprocessed: None,
+                preprocessed,
                 stage_1,
                 stage_2,
                 public_values,
