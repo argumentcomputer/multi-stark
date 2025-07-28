@@ -4,7 +4,7 @@ use p3_matrix::Matrix;
 use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixView};
 use p3_matrix::stack::VerticalPair;
 
-use super::TwoStagedBuilder;
+use super::{PreprocessedBuilder, TwoStagedBuilder};
 
 /// Runs constraint checks using a given AIR definition and trace matrix.
 ///
@@ -18,6 +18,7 @@ use super::TwoStagedBuilder;
 /// - `public_values`: Public values provided to the builder
 pub fn check_constraints<F, A>(
     air: &A,
+    preprocessed: Option<&RowMajorMatrix<F>>,
     stage_1: &RowMajorMatrix<F>,
     stage_2: &RowMajorMatrix<F>,
     public_values: &[F],
@@ -43,9 +44,9 @@ pub fn check_constraints<F, A>(
             RowMajorMatrixView::new_row(&*stage_2_local),
             RowMajorMatrixView::new_row(&*stage_2_next),
         );
-
         let mut builder = DebugConstraintBuilder {
             row_index: i,
+            preprocessed: None,
             stage_1,
             stage_2,
             public_values,
@@ -53,8 +54,20 @@ pub fn check_constraints<F, A>(
             is_last_row: F::from_bool(i == height - 1),
             is_transition: F::from_bool(i != height - 1),
         };
-
-        air.eval(&mut builder);
+        // We must call `eval` on the same block as the `preprocessed` matrix view, otherwise the borrow checker will complain.
+        // Mutation is used to remove code duplication.
+        if let Some(preprocessed) = preprocessed {
+            let preprocessed_local = preprocessed.row_slice(i).unwrap(); // i < height so unwrap should never fail.
+            let preprocessed_next = preprocessed.row_slice(i_next).unwrap(); // i_next < height so unwrap should never fail.
+            let preprocessed = Some(VerticalPair::new(
+                RowMajorMatrixView::new_row(&*preprocessed_local),
+                RowMajorMatrixView::new_row(&*preprocessed_next),
+            ));
+            builder.preprocessed = preprocessed;
+            air.eval(&mut builder);
+        } else {
+            air.eval(&mut builder);
+        }
     });
 }
 
@@ -67,6 +80,7 @@ pub struct DebugConstraintBuilder<'a, F: Field> {
     /// The index of the row currently being evaluated.
     row_index: usize,
     /// A view of the current and next row as a vertical pair.
+    preprocessed: Option<VerticalPair<RowMajorMatrixView<'a, F>, RowMajorMatrixView<'a, F>>>,
     stage_1: VerticalPair<RowMajorMatrixView<'a, F>, RowMajorMatrixView<'a, F>>,
     stage_2: VerticalPair<RowMajorMatrixView<'a, F>, RowMajorMatrixView<'a, F>>,
     /// The public values provided for constraint validation (e.g. inputs or outputs).
@@ -141,5 +155,11 @@ impl<F: Field> AirBuilderWithPublicValues for DebugConstraintBuilder<'_, F> {
 impl<F: Field> TwoStagedBuilder for DebugConstraintBuilder<'_, F> {
     fn stage_2(&self) -> Self::M {
         self.stage_2
+    }
+}
+
+impl<F: Field> PreprocessedBuilder for DebugConstraintBuilder<'_, F> {
+    fn preprocessed(&self) -> Option<Self::M> {
+        self.preprocessed
     }
 }

@@ -80,17 +80,32 @@ impl SystemWitness {
             .iter()
             .zip(system.circuits.iter())
             .map(|(trace, circuit)| {
-                trace
-                    .row_slices()
-                    .map(|row| {
-                        circuit
-                            .air
-                            .lookups
-                            .iter()
-                            .map(|lookup| lookup.compute_expr(row))
-                            .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<_>>()
+                if let Some(preprocessed) = &circuit.air.preprocessed {
+                    trace
+                        .row_slices()
+                        .zip(preprocessed.row_slices())
+                        .map(|(row, preprocessed_row)| {
+                            circuit
+                                .air
+                                .lookups
+                                .iter()
+                                .map(|lookup| lookup.compute_expr(row, Some(preprocessed_row)))
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    trace
+                        .row_slices()
+                        .map(|row| {
+                            circuit
+                                .air
+                                .lookups
+                                .iter()
+                                .map(|lookup| lookup.compute_expr(row, None))
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>()
+                }
             })
             .collect::<Vec<_>>();
         Self { traces, lookups }

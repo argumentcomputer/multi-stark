@@ -3,10 +3,7 @@ use p3_field::{Algebra, Field};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 use crate::{
-    builder::{
-        TwoStagedBuilder,
-        symbolic::{Entry, SymbolicExpression},
-    },
+    builder::{PreprocessedBuilder, TwoStagedBuilder, symbolic::SymbolicExpression},
     system::MIN_IO_SIZE,
     types::Val,
 };
@@ -20,11 +17,17 @@ pub struct Lookup<Expr> {
 pub struct LookupAir<A> {
     pub inner_air: A,
     pub lookups: Vec<Lookup<SymbolicExpression<Val>>>,
+    pub preprocessed: Option<RowMajorMatrix<Val>>,
 }
 
-impl<A> LookupAir<A> {
+impl<A: BaseAir<Val>> LookupAir<A> {
     pub fn new(inner_air: A, lookups: Vec<Lookup<SymbolicExpression<Val>>>) -> Self {
-        Self { inner_air, lookups }
+        let preprocessed = inner_air.preprocessed_trace();
+        Self {
+            inner_air,
+            lookups,
+            preprocessed,
+        }
     }
 
     pub fn stage_2_width(&self) -> usize {
@@ -33,9 +36,13 @@ impl<A> LookupAir<A> {
 }
 
 impl Lookup<SymbolicExpression<Val>> {
-    pub fn compute_expr(&self, row: &[Val]) -> Lookup<Val> {
-        let multiplicity = self.multiplicity.interpret(row);
-        let args = self.args.iter().map(|arg| arg.interpret(row)).collect();
+    pub fn compute_expr(&self, row: &[Val], preprocessed: Option<&[Val]>) -> Lookup<Val> {
+        let multiplicity = self.multiplicity.interpret(row, preprocessed);
+        let args = self
+            .args
+            .iter()
+            .map(|arg| arg.interpret(row, preprocessed))
+            .collect();
         Lookup { multiplicity, args }
     }
 }
@@ -109,9 +116,25 @@ where
 impl<A, AB> Air<AB> for LookupAir<A>
 where
     A: Air<AB>,
-    AB: AirBuilderWithPublicValues<F = Val> + TwoStagedBuilder,
+    AB: AirBuilderWithPublicValues<F = Val> + TwoStagedBuilder + PreprocessedBuilder,
 {
     fn eval(&self, builder: &mut AB) {
+        if let Some(preprocessed) = builder.preprocessed() {
+            let preprocessed_row = preprocessed.row_slice(0);
+            debug_assert!(preprocessed_row.is_some());
+            self.eval_with_preprocessed_row(builder, preprocessed_row.as_deref())
+        } else {
+            self.eval_with_preprocessed_row(builder, None)
+        }
+    }
+}
+
+impl<A> LookupAir<A> {
+    fn eval_with_preprocessed_row<AB>(&self, builder: &mut AB, preprocessed_row: Option<&[AB::Var]>)
+    where
+        A: Air<AB>,
+        AB: AirBuilderWithPublicValues<F = Val> + TwoStagedBuilder + PreprocessedBuilder,
+    {
         let lookups = &self.lookups;
         self.inner_air.eval(builder);
         let public_values = builder.public_values();
@@ -133,14 +156,16 @@ where
         let acc_col = &stage_2_row[0];
         let mut acc_expr: AB::Expr = acc_col.clone().into();
         for (lookup, inverse_of_message) in lookups.iter().zip(inverse_of_messages) {
-            let multiplicity = lookup.multiplicity.interpret::<AB::Expr, AB::Var>(&row);
+            let multiplicity = lookup
+                .multiplicity
+                .interpret::<AB::Expr, AB::Var>(&row, preprocessed_row);
             let args = fingerprint_reverse::<Val, AB::Expr, _>(
                 &fingerprint_challenge.into(),
                 lookup
                     .args
                     .iter()
                     .rev()
-                    .map(|arg| arg.interpret::<AB::Expr, AB::Var>(&row)),
+                    .map(|arg| arg.interpret::<AB::Expr, AB::Var>(&row, preprocessed_row)),
             );
             let message = lookup_challenge.into() + args;
             builder.assert_one(message.clone() * inverse_of_message.clone());
@@ -162,29 +187,12 @@ fn fingerprint_reverse<F: Field, Expr: Algebra<F>, Iter: Iterator<Item = Expr>>(
     coeffs.fold(F::ZERO.into(), |acc, coeff| acc * r.clone() + coeff)
 }
 
-impl<F: Field> SymbolicExpression<F> {
-    pub fn interpret<Expr: Algebra<F>, Var: Into<Expr> + Clone>(&self, row: &[Var]) -> Expr {
-        match self {
-            Self::Variable(var) => match var.entry {
-                Entry::Main { offset: 0 } => row[var.index].clone().into(),
-                _ => unimplemented!(),
-            },
-            Self::Constant(c) => (*c).into(),
-            Self::Add { x, y, .. } => x.interpret::<Expr, Var>(row) + y.interpret::<Expr, Var>(row),
-            Self::Sub { x, y, .. } => x.interpret::<Expr, Var>(row) - y.interpret::<Expr, Var>(row),
-            Self::Neg { x, .. } => -x.interpret::<Expr, Var>(row),
-            Self::Mul { x, y, .. } => x.interpret::<Expr, Var>(row) * y.interpret::<Expr, Var>(row),
-            _ => unimplemented!(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use p3_field::PrimeCharacteristicRing;
 
     use crate::{
-        builder::symbolic::SymbolicVariable,
+        builder::symbolic::{Entry, SymbolicVariable},
         system::{ProverKey, System, SystemWitness},
         types::{CommitmentParameters, FriParameters, StarkConfig},
     };
@@ -274,14 +282,8 @@ mod tests {
         }
     }
     fn system(commitment_parameters: &CommitmentParameters) -> (System<CS>, ProverKey) {
-        let even = LookupAir {
-            inner_air: CS::Even,
-            lookups: CS::Even.lookups(),
-        };
-        let odd = LookupAir {
-            inner_air: CS::Odd,
-            lookups: CS::Odd.lookups(),
-        };
+        let even = LookupAir::new(CS::Even, CS::Even.lookups());
+        let odd = LookupAir::new(CS::Odd, CS::Odd.lookups());
         System::new(commitment_parameters, [even, odd])
     }
 
