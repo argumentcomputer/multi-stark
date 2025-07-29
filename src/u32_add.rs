@@ -103,18 +103,12 @@ impl ByteCS {
         let byte_index = Expr::from_u8(0);
         let u32_index = Expr::from_u8(1);
         match self {
-            Self::ByteChip => vec![
-                // Provide/Receive
-                Lookup {
-                    multiplicity: -var(0),
-                    args: vec![byte_index, preprocessed_var(0)],
-                },
-            ],
+            Self::ByteChip => vec![Lookup::pull(var(0), vec![byte_index, preprocessed_var(0)])],
             Self::U32AddChip => vec![
-                // Provide/Receive
-                Lookup {
-                    multiplicity: -var(13),
-                    args: vec![
+                // Pull
+                Lookup::pull(
+                    var(13),
+                    vec![
                         u32_index,
                         var(0)
                             + var(1) * Expr::from_u32(256)
@@ -129,56 +123,20 @@ impl ByteCS {
                             + var(10) * Expr::from_u32(256 * 256)
                             + var(11) * Expr::from_u32(256 * 256 * 256),
                     ],
-                },
-                // Require/Send
-                Lookup {
-                    multiplicity: Expr::ONE,
-                    args: vec![byte_index.clone(), var(0)],
-                },
-                Lookup {
-                    multiplicity: Expr::ONE,
-                    args: vec![byte_index.clone(), var(1)],
-                },
-                Lookup {
-                    multiplicity: Expr::ONE,
-                    args: vec![byte_index.clone(), var(2)],
-                },
-                Lookup {
-                    multiplicity: Expr::ONE,
-                    args: vec![byte_index.clone(), var(3)],
-                },
-                Lookup {
-                    multiplicity: Expr::ONE,
-                    args: vec![byte_index.clone(), var(4)],
-                },
-                Lookup {
-                    multiplicity: Expr::ONE,
-                    args: vec![byte_index.clone(), var(5)],
-                },
-                Lookup {
-                    multiplicity: Expr::ONE,
-                    args: vec![byte_index.clone(), var(6)],
-                },
-                Lookup {
-                    multiplicity: Expr::ONE,
-                    args: vec![byte_index.clone(), var(7)],
-                },
-                Lookup {
-                    multiplicity: Expr::ONE,
-                    args: vec![byte_index.clone(), var(8)],
-                },
-                Lookup {
-                    multiplicity: Expr::ONE,
-                    args: vec![byte_index.clone(), var(9)],
-                },
-                Lookup {
-                    multiplicity: Expr::ONE,
-                    args: vec![byte_index.clone(), var(10)],
-                },
-                Lookup {
-                    multiplicity: Expr::ONE,
-                    args: vec![byte_index, var(11)],
-                },
+                ),
+                // Pushes
+                Lookup::push(Expr::ONE, vec![byte_index.clone(), var(0)]),
+                Lookup::push(Expr::ONE, vec![byte_index.clone(), var(1)]),
+                Lookup::push(Expr::ONE, vec![byte_index.clone(), var(2)]),
+                Lookup::push(Expr::ONE, vec![byte_index.clone(), var(3)]),
+                Lookup::push(Expr::ONE, vec![byte_index.clone(), var(4)]),
+                Lookup::push(Expr::ONE, vec![byte_index.clone(), var(5)]),
+                Lookup::push(Expr::ONE, vec![byte_index.clone(), var(6)]),
+                Lookup::push(Expr::ONE, vec![byte_index.clone(), var(7)]),
+                Lookup::push(Expr::ONE, vec![byte_index.clone(), var(8)]),
+                Lookup::push(Expr::ONE, vec![byte_index.clone(), var(9)]),
+                Lookup::push(Expr::ONE, vec![byte_index.clone(), var(10)]),
+                Lookup::push(Expr::ONE, vec![byte_index, var(11)]),
             ],
         }
     }
