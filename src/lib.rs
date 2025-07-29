@@ -4,7 +4,6 @@ pub mod lookup;
 pub mod prover;
 pub mod system;
 pub mod types;
-pub mod u32_add;
 pub mod verifier;
 
 pub use p3_air;

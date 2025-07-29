@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::builder::symbolic::{Entry, SymbolicExpression, SymbolicVariable};
+    use crate::chips::Expr;
     use crate::lookup::{Lookup, LookupAir};
     use crate::system::{System, SystemWitness};
     use crate::types::{CommitmentParameters, FriParameters, Val};
@@ -50,7 +51,7 @@ mod tests {
     }
 
     impl ByteOperations {
-        fn lookups(&self) -> Vec<Lookup<SymbolicExpression<Val>>> {
+        fn lookups(&self) -> Vec<Lookup<Expr>> {
             let var =
                 |i| SymbolicExpression::from(SymbolicVariable::new(Entry::Main { offset: 0 }, i));
 
@@ -61,9 +62,9 @@ mod tests {
                 ))
             };
 
-            let xor_idx = SymbolicExpression::<Val>::from_u8(0u8);
-            let and_idx = SymbolicExpression::<Val>::from_u8(1u8);
-            let or_idx = SymbolicExpression::<Val>::from_u8(2u8);
+            let xor_idx = Expr::from_u8(0u8);
+            let and_idx = Expr::from_u8(1u8);
+            let or_idx = Expr::from_u8(2u8);
 
             // we have to provide exactly one lookup: [A, B, A op B], depending on the required operation in order to balance the claim
             match self {
@@ -83,7 +84,7 @@ mod tests {
                         preprocessed_var(0),
                         preprocessed_var(1),
                         preprocessed_var(3),
-                    ], // AND result is stored in var(4)
+                    ], // AND result is stored in var(3)
                 }],
                 Self::Or => vec![Lookup {
                     multiplicity: -var(0),
@@ -92,7 +93,7 @@ mod tests {
                         preprocessed_var(0),
                         preprocessed_var(1),
                         preprocessed_var(4),
-                    ], // OR result is stored in var(5)
+                    ], // OR result is stored in var(4)
                 }],
             }
         }
