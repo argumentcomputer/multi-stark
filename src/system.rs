@@ -7,9 +7,12 @@ use crate::{
 use p3_air::{Air, BaseAir, BaseAirWithPublicValues};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
-/// Each circuit is required to have at least 4 arguments. Namely, the lookup challenge,
-/// fingerprint challenge, current accumulator and next accumulator
-pub const MIN_IO_SIZE: usize = 4;
+/// Each circuit is required to have 4 arguments:
+/// 1. Lookup challenge
+/// 2. Fingerprint challenge
+/// 3. Current accumulator
+/// 4. Next accumulator
+pub const MIN_IO_SIZE: usize = 8;
 
 pub struct System<A> {
     pub commitment_parameters: CommitmentParameters,

@@ -5,7 +5,7 @@ use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use crate::{
     builder::{PreprocessedBuilder, TwoStagedBuilder, symbolic::SymbolicExpression},
     system::MIN_IO_SIZE,
-    types::Val,
+    types::{ExtVal, Val},
 };
 
 #[derive(Clone)]
@@ -80,14 +80,22 @@ impl Lookup<SymbolicExpression<Val>> {
 }
 
 impl Lookup<Val> {
-    pub fn compute_message(&self, lookup_challenge: Val, fingerprint_challenge: &Val) -> Val {
-        lookup_challenge + fingerprint(fingerprint_challenge, self.args.iter().copied())
+    pub fn compute_message(
+        &self,
+        lookup_challenge: ExtVal,
+        fingerprint_challenge: &ExtVal,
+    ) -> ExtVal {
+        let args = fingerprint::<ExtVal, _>(
+            fingerprint_challenge,
+            self.args.iter().map(|v| ExtVal::from(*v)),
+        );
+        lookup_challenge + args
     }
 
     pub fn stage_2_traces(
         lookups: &[Vec<Vec<Self>>],
-        values: &[Val],
-    ) -> (Vec<RowMajorMatrix<Val>>, Vec<Val>) {
+        values: &[ExtVal],
+    ) -> (Vec<RowMajorMatrix<ExtVal>>, Vec<ExtVal>) {
         let lookup_challenge = values[0];
         let fingerprint_challenge = &values[1];
         let mut accumulator = values[2];
@@ -134,7 +142,7 @@ impl Lookup<Val> {
                         row.push(accumulator);
                         row.extend(row_lookups.iter().zip(row_messages_inverses).map(
                             |(lookup, &message_inverse)| {
-                                accumulator += lookup.multiplicity * message_inverse;
+                                accumulator += ExtVal::from(lookup.multiplicity) * message_inverse;
                                 message_inverse
                             },
                         ));

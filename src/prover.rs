@@ -23,7 +23,6 @@ use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use serde::{Deserialize, Serialize};
-use std::cmp::min;
 
 #[derive(Serialize, Deserialize)]
 pub struct Commitments {
@@ -35,7 +34,7 @@ pub struct Commitments {
 #[derive(Serialize, Deserialize)]
 pub struct Proof {
     pub commitments: Commitments,
-    pub intermediate_accumulators: Vec<Val>,
+    pub intermediate_accumulators: Vec<ExtVal>,
     pub log_degrees: Vec<u8>,
     pub opening_proof: PcsProof,
     pub quotient_opened_values: OpenedValuesForRound<ExtVal>,
@@ -115,20 +114,18 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         }
 
         // generate lookup challenges
-        // TODO use `ExtVal` instead of `Val`
-        let lookup_argument_challenge: Val = challenger.sample_algebra_element();
+        let lookup_argument_challenge: ExtVal = challenger.sample_algebra_element();
         challenger.observe_algebra_element(lookup_argument_challenge);
-        let fingerprint_challenge: Val = challenger.sample_algebra_element();
+        let fingerprint_challenge: ExtVal = challenger.sample_algebra_element();
         challenger.observe_algebra_element(fingerprint_challenge);
 
         // construct the accumulator from the claims
-        let mut acc = Val::ZERO;
+        let mut acc = ExtVal::ZERO;
         for claim in claims {
             let message = lookup_argument_challenge
-                + claim
-                    .iter()
-                    .rev()
-                    .fold(Val::ZERO, |acc, &coeff| acc * fingerprint_challenge + coeff);
+                + claim.iter().rev().fold(ExtVal::ZERO, |acc, &coeff| {
+                    acc * fingerprint_challenge + coeff
+                });
             acc += message.inverse();
         }
 
@@ -297,7 +294,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
 #[allow(clippy::too_many_arguments)]
 fn quotient_values<A>(
     air: &A,
-    public_values: &[Val],
+    public_values: &[ExtVal],
     trace_domain: Domain,
     quotient_domain: Domain,
     preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_>>,
@@ -392,7 +389,7 @@ where
 #[allow(clippy::too_many_arguments)]
 fn quotient_values_inner<A>(
     air: &A,
-    public_values: &[Val],
+    public_values: &[ExtVal],
     sels: &LagrangeSelectors<Vec<Val>>,
     quotient_size: usize,
     preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_>>,
@@ -451,7 +448,7 @@ where
 
     let quotient = folder.accumulator * inv_vanishing;
 
-    (0..min(quotient_size, PackedVal::WIDTH)).map(move |idx_in_packing| {
+    (0..quotient_size.min(PackedVal::WIDTH)).map(move |idx_in_packing| {
         ExtVal::from_basis_coefficients_fn(|coeff_idx| {
             <PackedExtVal as BasedVectorSpace<PackedVal>>::as_basis_coefficients_slice(&quotient)
                 [coeff_idx]

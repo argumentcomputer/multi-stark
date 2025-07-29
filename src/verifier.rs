@@ -54,7 +54,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         // the last accumulator should be 0
         ensure_eq!(
             intermediate_accumulators.last(),
-            Some(&Val::ZERO),
+            Some(&ExtVal::ZERO),
             VerificationError::UnbalancedChannel
         );
 
@@ -80,23 +80,21 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         }
 
         // generate lookup challenges
-        // TODO use `ExtVal` instead of `Val`
-        let lookup_argument_challenge: Val = challenger.sample_algebra_element();
+        let lookup_argument_challenge: ExtVal = challenger.sample_algebra_element();
         challenger.observe_algebra_element(lookup_argument_challenge);
-        let fingerprint_challenge: Val = challenger.sample_algebra_element();
+        let fingerprint_challenge: ExtVal = challenger.sample_algebra_element();
         challenger.observe_algebra_element(fingerprint_challenge);
 
         // observe stage_2 commitment
         challenger.observe(commitments.stage_2_trace);
 
         // construct the accumulator from the claims
-        let mut acc = Val::ZERO;
+        let mut acc = ExtVal::ZERO;
         for claim in claims {
             let message = lookup_argument_challenge
-                + claim
-                    .iter()
-                    .rev()
-                    .fold(Val::ZERO, |acc, &coeff| acc * fingerprint_challenge + coeff);
+                + claim.iter().rev().fold(ExtVal::ZERO, |acc, &coeff| {
+                    acc * fingerprint_challenge + coeff
+                });
             acc += message.inverse();
         }
 
