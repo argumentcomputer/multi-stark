@@ -1,5 +1,5 @@
 use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, BaseAirWithPublicValues};
-use p3_field::{Algebra, Field};
+use p3_field::{Algebra, Field, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 use crate::{
@@ -12,6 +12,38 @@ use crate::{
 pub struct Lookup<Expr> {
     pub multiplicity: Expr,
     pub args: Vec<Expr>,
+}
+
+impl<Expr> Lookup<Expr> {
+    /// Returns a [`Lookup`] with multiplicity zero and no arguments.
+    #[inline]
+    pub fn empty() -> Self
+    where
+        Expr: PrimeCharacteristicRing,
+    {
+        Self {
+            multiplicity: Expr::ZERO,
+            args: vec![],
+        }
+    }
+
+    /// "Pushing" has the semantics of adding a claim to the claim set.
+    #[inline]
+    pub fn push(multiplicity: Expr, args: Vec<Expr>) -> Self {
+        Self { multiplicity, args }
+    }
+
+    /// "Pulling" has the semantics of removing a claim from the claim set.
+    #[inline]
+    pub fn pull(multiplicity: Expr, args: Vec<Expr>) -> Self
+    where
+        Expr: std::ops::Neg<Output = Expr>,
+    {
+        Self {
+            multiplicity: -multiplicity,
+            args,
+        }
+    }
 }
 
 pub struct LookupAir<A> {
@@ -217,7 +249,7 @@ mod tests {
                 ))
             };
             // provide removes multiplicity
-            let multiplicity = -var(0);
+            let multiplicity = var(0);
             let input = var(1);
             let input_is_zero = var(3);
             let input_not_zero = var(4);
@@ -227,32 +259,32 @@ mod tests {
             let one: SymbolicExpression<_> = Val::from_u32(1).into();
             match self {
                 Self::Even => vec![
-                    Lookup {
+                    Lookup::pull(
                         multiplicity,
-                        args: vec![
+                        vec![
                             even_index,
                             input.clone(),
                             input_not_zero.clone() * recursion_output.clone() + input_is_zero,
                         ],
-                    },
-                    Lookup {
-                        multiplicity: input_not_zero,
-                        args: vec![odd_index, input - one, recursion_output],
-                    },
+                    ),
+                    Lookup::push(
+                        input_not_zero,
+                        vec![odd_index, input - one, recursion_output],
+                    ),
                 ],
                 Self::Odd => vec![
-                    Lookup {
+                    Lookup::pull(
                         multiplicity,
-                        args: vec![
+                        vec![
                             odd_index,
                             input.clone(),
                             input_not_zero.clone() * recursion_output.clone(),
                         ],
-                    },
-                    Lookup {
-                        multiplicity: input_not_zero,
-                        args: vec![even_index, input - one, recursion_output],
-                    },
+                    ),
+                    Lookup::push(
+                        input_not_zero,
+                        vec![even_index, input - one, recursion_output],
+                    ),
                 ],
             }
         }
