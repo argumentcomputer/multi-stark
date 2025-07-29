@@ -29,15 +29,13 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         claim: &[Val],
         proof: &Proof,
     ) -> Result<(), VerificationError<PcsError>> {
-        let multiplicity = Val::ONE;
-        self.verify_with_claim_multiplicity(fri_parameters, multiplicity, claim, proof)
+        self.verify_multiple_claims(fri_parameters, &[claim], proof)
     }
 
-    pub fn verify_with_claim_multiplicity(
+    pub fn verify_multiple_claims(
         &self,
         fri_parameters: FriParameters,
-        multiplicity: Val,
-        claim: &[Val],
+        claims: &[&[Val]],
         proof: &Proof,
     ) -> Result<(), VerificationError<PcsError>> {
         let Proof {
@@ -65,11 +63,16 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         let pcs = config.pcs();
         let mut challenger = config.initialise_challenger();
 
-        // observe stage_1 commitment
+        // observe preprocessed and stage_1 commitment
+        if let Some(commit) = self.preprocessed_commit {
+            challenger.observe(commit);
+        }
         challenger.observe(commitments.stage_1_trace);
 
-        // observe the claim
-        challenger.observe_slice(claim);
+        // observe the claims
+        for claim in claims {
+            challenger.observe_slice(claim);
+        }
 
         // generate lookup challenges
         // TODO use `ExtVal` instead of `Val`
@@ -81,13 +84,16 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         // observe stage_2 commitment
         challenger.observe(commitments.stage_2_trace);
 
-        // construct the accumulator from the claim
-        let message = lookup_argument_challenge
-            + claim
-                .iter()
-                .rev()
-                .fold(Val::ZERO, |acc, &coeff| acc * fingerprint_challenge + coeff);
-        let mut acc = multiplicity * message.inverse();
+        // construct the accumulator from the claims
+        let mut acc = Val::ZERO;
+        for claim in claims {
+            let message = lookup_argument_challenge
+                + claim
+                    .iter()
+                    .rev()
+                    .fold(Val::ZERO, |acc, &coeff| acc * fingerprint_challenge + coeff);
+            acc += message.inverse();
+        }
 
         // generate constraint challenge
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();
@@ -469,23 +475,15 @@ mod tests {
             ],
             &system,
         );
-        // we will set the multiplicity to 0, so the claim does not matter
-        let multiplicity = Val::ZERO;
-        let dummy_claim = &[];
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
             num_queries: 64,
             proof_of_work_bits: 0,
         };
-        let proof = system.prove_with_claim_multiplicy(
-            fri_parameters,
-            &key,
-            multiplicity,
-            dummy_claim,
-            witness,
-        );
+        let no_claims = &[];
+        let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
         system
-            .verify_with_claim_multiplicity(fri_parameters, multiplicity, dummy_claim, &proof)
+            .verify_multiple_claims(fri_parameters, no_claims, &proof)
             .unwrap();
     }
 
@@ -511,31 +509,21 @@ mod tests {
             ],
             &system,
         );
-        // we will set the multiplicity to 0, so the claim does not matter
-        let multiplicity = Val::ZERO;
-        let dummy_claim = &[];
-        // initial accumulator
-        // multiplicity / (lookup_challenge + 0)
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
             num_queries: 100,
             proof_of_work_bits: 20,
         };
+        let no_claims = &[];
         let proof = benchmark!(
-            system.prove_with_claim_multiplicy(
-                fri_parameters,
-                &key,
-                multiplicity,
-                dummy_claim,
-                witness
-            ),
+            system.prove_multiple_claims(fri_parameters, &key, no_claims, witness),
             "proof: "
         );
         let proof_bytes = proof.to_bytes().expect("Failed to serialize proof");
         println!("Proof size: {} bytes", proof_bytes.len());
         benchmark!(
             system
-                .verify_with_claim_multiplicity(fri_parameters, multiplicity, dummy_claim, &proof)
+                .verify_multiple_claims(fri_parameters, no_claims, &proof)
                 .unwrap(),
             "verification: "
         );
