@@ -194,7 +194,7 @@ mod tests {
     use crate::{
         builder::symbolic::{Entry, SymbolicVariable},
         system::{ProverKey, System, SystemWitness},
-        types::{CommitmentParameters, FriParameters, StarkConfig},
+        types::{CommitmentParameters, FriParameters},
     };
 
     use super::*;
@@ -281,7 +281,7 @@ mod tests {
                 .assert_one(input * input_inverse);
         }
     }
-    fn system(commitment_parameters: &CommitmentParameters) -> (System<CS>, ProverKey) {
+    fn system(commitment_parameters: CommitmentParameters) -> (System<CS>, ProverKey) {
         let even = LookupAir::new(CS::Even, CS::Even.lookups());
         let odd = LookupAir::new(CS::Odd, CS::Odd.lookups());
         System::new(commitment_parameters, [even, odd])
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn lookup_test() {
         let commitment_parameters = CommitmentParameters { log_blowup: 1 };
-        let (system, key) = system(&commitment_parameters);
+        let (system, key) = system(commitment_parameters);
         let f = Val::from_u32;
         #[rustfmt::skip]
         let witness = SystemWitness::from_stage_1(
@@ -330,8 +330,7 @@ mod tests {
             num_queries: 64,
             proof_of_work_bits: 0,
         };
-        let config = StarkConfig::new(&commitment_parameters, &fri_parameters);
-        let proof = system.prove(&config, &key, claim, witness);
-        system.verify(&config, claim, &proof).unwrap();
+        let proof = system.prove(fri_parameters, &key, claim, witness);
+        system.verify(fri_parameters, claim, &proof).unwrap();
     }
 }

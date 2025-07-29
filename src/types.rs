@@ -47,10 +47,7 @@ impl StarkConfig {
         self.challenger.clone()
     }
 
-    pub fn new(
-        commitment_parameters: &CommitmentParameters,
-        fri_parameters: &FriParameters,
-    ) -> Self {
+    pub fn new(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Self {
         let pcs = new_pcs(commitment_parameters, fri_parameters);
         let challenger = Challenger::from_hasher(vec![], Keccak256Hash {});
         Self { pcs, challenger }
@@ -64,8 +61,8 @@ pub struct Committer {
 }
 
 impl Committer {
-    pub fn new(commitment_parameters: &CommitmentParameters) -> Self {
-        let dummy_parameters = &FriParameters {
+    pub fn new(commitment_parameters: CommitmentParameters) -> Self {
+        let dummy_parameters = FriParameters {
             log_final_poly_len: 0,
             num_queries: 0,
             proof_of_work_bits: 0,
@@ -86,10 +83,12 @@ impl Committer {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct CommitmentParameters {
     pub log_blowup: usize,
 }
 
+#[derive(Clone, Copy)]
 pub struct FriParameters {
     pub log_final_poly_len: usize,
     pub num_queries: usize,
@@ -107,7 +106,7 @@ fn new_mmcs() -> Mmcs {
     Mmcs::new(field_hash, compress)
 }
 
-fn new_pcs(commitment_parameters: &CommitmentParameters, fri_parameters: &FriParameters) -> Pcs {
+fn new_pcs(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Pcs {
     let val_mmcs = new_mmcs();
     let mmcs = ExtensionMmcs::new(val_mmcs.clone());
     let inner_parameters = InnerFriParameters {

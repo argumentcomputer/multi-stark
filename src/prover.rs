@@ -3,8 +3,8 @@ use crate::{
     lookup::Lookup,
     system::{ProverKey, System, SystemWitness},
     types::{
-        Challenger, Commitment, Domain, EvaluationsOnDomain, ExtVal, PackedExtVal, PackedVal, Pcs,
-        PcsProof, StarkConfig, Val,
+        Challenger, Commitment, Domain, EvaluationsOnDomain, ExtVal, FriParameters, PackedExtVal,
+        PackedVal, Pcs, PcsProof, StarkConfig, Val,
     },
 };
 use bincode::{
@@ -64,24 +64,25 @@ impl Proof {
 impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
     pub fn prove(
         &self,
-        config: &StarkConfig,
+        fri_parameters: FriParameters,
         key: &ProverKey,
         claim: &[Val],
         witness: SystemWitness,
     ) -> Proof {
         let multiplicity = Val::ONE;
-        self.prove_with_claim_multiplicy(config, key, multiplicity, claim, witness)
+        self.prove_with_claim_multiplicy(fri_parameters, key, multiplicity, claim, witness)
     }
 
     pub fn prove_with_claim_multiplicy(
         &self,
-        config: &StarkConfig,
+        fri_parameters: FriParameters,
         key: &ProverKey,
         multiplicity: Val,
         claim: &[Val],
         witness: SystemWitness,
     ) -> Proof {
         // initialize pcs and challenger
+        let config = StarkConfig::new(self.commitment_parameters, fri_parameters);
         let pcs = config.pcs();
         let mut challenger = config.initialise_challenger();
 

@@ -12,6 +12,7 @@ use p3_matrix::{Matrix, dense::RowMajorMatrix};
 pub const MIN_IO_SIZE: usize = 4;
 
 pub struct System<A> {
+    pub commitment_parameters: CommitmentParameters,
     pub circuits: Vec<Circuit<A>>,
     pub preprocessed_commit: Option<Commitment>,
     pub preprocessed_indices: Vec<Option<usize>>,
@@ -24,7 +25,7 @@ pub struct ProverKey {
 impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> System<A> {
     #[inline]
     pub fn new(
-        commitment_parameters: &CommitmentParameters,
+        commitment_parameters: CommitmentParameters,
         airs: impl IntoIterator<Item = LookupAir<A>>,
     ) -> (Self, ProverKey) {
         let committer = Committer::new(commitment_parameters);
@@ -49,6 +50,7 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> System<A> {
             (None, None)
         };
         let system = Self {
+            commitment_parameters,
             circuits,
             preprocessed_commit,
             preprocessed_indices,

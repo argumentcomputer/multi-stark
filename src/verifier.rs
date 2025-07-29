@@ -3,7 +3,7 @@ use crate::{
     ensure, ensure_eq,
     prover::Proof,
     system::System,
-    types::{Challenger, ExtVal, Pcs, PcsError, StarkConfig, Val},
+    types::{Challenger, ExtVal, FriParameters, Pcs, PcsError, StarkConfig, Val},
 };
 use p3_air::{Air, BaseAir};
 use p3_challenger::{CanObserve, FieldChallenger};
@@ -25,17 +25,17 @@ pub enum VerificationError<PcsErr> {
 impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
     pub fn verify(
         &self,
-        config: &StarkConfig,
+        fri_parameters: FriParameters,
         claim: &[Val],
         proof: &Proof,
     ) -> Result<(), VerificationError<PcsError>> {
         let multiplicity = Val::ONE;
-        self.verify_with_claim_multiplicity(config, multiplicity, claim, proof)
+        self.verify_with_claim_multiplicity(fri_parameters, multiplicity, claim, proof)
     }
 
     pub fn verify_with_claim_multiplicity(
         &self,
-        config: &StarkConfig,
+        fri_parameters: FriParameters,
         multiplicity: Val,
         claim: &[Val],
         proof: &Proof,
@@ -61,6 +61,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         );
 
         // initialize pcs and challenger
+        let config = StarkConfig::new(self.commitment_parameters, fri_parameters);
         let pcs = config.pcs();
         let mut challenger = config.initialise_challenger();
 
@@ -444,7 +445,7 @@ mod tests {
             }
         }
     }
-    fn system(commitment_parameters: &CommitmentParameters) -> (System<CS>, ProverKey) {
+    fn system(commitment_parameters: CommitmentParameters) -> (System<CS>, ProverKey) {
         let pythagorean_circuit = LookupAir::new(CS::Pythagorean, vec![]);
         let complex_circuit = LookupAir::new(CS::Complex, vec![]);
         System::new(
@@ -456,7 +457,7 @@ mod tests {
     #[test]
     fn multi_stark_test() {
         let commitment_parameters = CommitmentParameters { log_blowup: 1 };
-        let (system, key) = system(&commitment_parameters);
+        let (system, key) = system(commitment_parameters);
         let f = Val::from_u32;
         let witness = SystemWitness::from_stage_1(
             vec![
@@ -471,17 +472,20 @@ mod tests {
         // we will set the multiplicity to 0, so the claim does not matter
         let multiplicity = Val::ZERO;
         let dummy_claim = &[];
-        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
             num_queries: 64,
             proof_of_work_bits: 0,
         };
-        let config = StarkConfig::new(&commitment_parameters, &fri_parameters);
-        let proof =
-            system.prove_with_claim_multiplicy(&config, &key, multiplicity, dummy_claim, witness);
+        let proof = system.prove_with_claim_multiplicy(
+            fri_parameters,
+            &key,
+            multiplicity,
+            dummy_claim,
+            witness,
+        );
         system
-            .verify_with_claim_multiplicity(&config, multiplicity, dummy_claim, &proof)
+            .verify_with_claim_multiplicity(fri_parameters, multiplicity, dummy_claim, &proof)
             .unwrap();
     }
 
@@ -492,7 +496,7 @@ mod tests {
         // RUSTFLAGS="-Ctarget-cpu=native" cargo test multi_stark_benchmark_test --release --features parallel -- --include-ignored --nocapture
         const LOG_HEIGHT: usize = 20;
         let commitment_parameters = CommitmentParameters { log_blowup: 1 };
-        let (system, key) = system(&commitment_parameters);
+        let (system, key) = system(commitment_parameters);
         let f = Val::from_u32;
         let mut pythagorean_trace = [3, 4, 5].map(f).to_vec();
         let mut complex_trace = [4, 2, 3, 1, 10, 10].map(f).to_vec();
@@ -517,16 +521,21 @@ mod tests {
             num_queries: 100,
             proof_of_work_bits: 20,
         };
-        let config = StarkConfig::new(&commitment_parameters, &fri_parameters);
         let proof = benchmark!(
-            system.prove_with_claim_multiplicy(&config, &key, multiplicity, dummy_claim, witness),
+            system.prove_with_claim_multiplicy(
+                fri_parameters,
+                &key,
+                multiplicity,
+                dummy_claim,
+                witness
+            ),
             "proof: "
         );
         let proof_bytes = proof.to_bytes().expect("Failed to serialize proof");
         println!("Proof size: {} bytes", proof_bytes.len());
         benchmark!(
             system
-                .verify_with_claim_multiplicity(&config, multiplicity, dummy_claim, &proof)
+                .verify_with_claim_multiplicity(fri_parameters, multiplicity, dummy_claim, &proof)
                 .unwrap(),
             "verification: "
         );

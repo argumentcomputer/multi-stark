@@ -184,7 +184,7 @@ impl ByteCS {
     }
 }
 
-pub fn byte_system(commitment_parameters: &CommitmentParameters) -> (System<ByteCS>, ProverKey) {
+pub fn byte_system(commitment_parameters: CommitmentParameters) -> (System<ByteCS>, ProverKey) {
     let byte_chip = LookupAir::new(ByteCS::ByteChip, ByteCS::ByteChip.lookups());
     let u32_add_chip = LookupAir::new(ByteCS::U32AddChip, ByteCS::U32AddChip.lookups());
     System::new(commitment_parameters, [byte_chip, u32_add_chip])
@@ -246,14 +246,14 @@ impl AddCalls {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::{FriParameters, StarkConfig};
+    use crate::types::FriParameters;
 
     use super::*;
 
     #[test]
     fn u32_add_proof() {
         let commitment_parameters = CommitmentParameters { log_blowup: 1 };
-        let (system, key) = byte_system(&commitment_parameters);
+        let (system, key) = byte_system(commitment_parameters);
         let calls = AddCalls {
             calls: vec![(8000, 10000)],
         };
@@ -264,8 +264,7 @@ mod tests {
             num_queries: 64,
             proof_of_work_bits: 0,
         };
-        let config = StarkConfig::new(&commitment_parameters, &fri_parameters);
-        let proof = system.prove(&config, &key, &claim, witness);
-        system.verify(&config, &claim, &proof).unwrap();
+        let proof = system.prove(fri_parameters, &key, &claim, witness);
+        system.verify(fri_parameters, &claim, &proof).unwrap();
     }
 }
