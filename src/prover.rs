@@ -69,16 +69,14 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         claim: &[Val],
         witness: SystemWitness,
     ) -> Proof {
-        let multiplicity = Val::ONE;
-        self.prove_with_claim_multiplicy(fri_parameters, key, multiplicity, claim, witness)
+        self.prove_multiple_claims(fri_parameters, key, &[claim], witness)
     }
 
-    pub fn prove_with_claim_multiplicy(
+    pub fn prove_multiple_claims(
         &self,
         fri_parameters: FriParameters,
         key: &ProverKey,
-        multiplicity: Val,
-        claim: &[Val],
+        claims: &[&[Val]],
         witness: SystemWitness,
     ) -> Proof {
         // initialize pcs and challenger
@@ -99,12 +97,17 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         let (stage_1_trace_commit, stage_1_trace_data) =
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
         // TODO: do we have to observe the log_degrees?
+        if let Some(commit) = self.preprocessed_commit {
+            challenger.observe(commit);
+        }
         challenger.observe(stage_1_trace_commit);
 
-        // observe the claim
+        // observe the claims
         // this has to be done before generating the lookup argument challenge
         // otherwise the lookup argument can be attacked
-        challenger.observe_slice(claim);
+        for claim in claims {
+            challenger.observe_slice(claim);
+        }
 
         // generate lookup challenges
         // TODO use `ExtVal` instead of `Val`
@@ -113,13 +116,17 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         let fingerprint_challenge: Val = challenger.sample_algebra_element();
         challenger.observe_algebra_element(fingerprint_challenge);
 
-        // construct the accumulator from the claim
-        let message = lookup_argument_challenge
-            + claim
-                .iter()
-                .rev()
-                .fold(Val::ZERO, |acc, &coeff| acc * fingerprint_challenge + coeff);
-        let mut acc = multiplicity * message.inverse();
+        // construct the accumulator from the claims
+        let mut acc = Val::ZERO;
+        for claim in claims {
+            let message = lookup_argument_challenge
+                + claim
+                    .iter()
+                    .rev()
+                    .fold(Val::ZERO, |acc, &coeff| acc * fingerprint_challenge + coeff);
+            acc += message.inverse();
+        }
+
         // commit to stage 2 traces
         let (stage_2_traces, intermediate_accumulators) = Lookup::stage_2_traces(
             &witness.lookups,
