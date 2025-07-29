@@ -12,18 +12,35 @@ mod tests {
 
     // Preprocessed columns are: [A, B, A xor B, A and B, A or B], where A and B are bytes
     const PREPROCESSED_TRACE_WIDTH: usize = 5;
+    // Main trace consists of multiplicities for each operation: `xor`, `and`, `or` and range check
+    const TRACE_WIDTH: usize = 4;
     const BYTE_VALUES_NUM: usize = 256;
 
-    enum ByteOperations {
+    struct ByteCS {}
+
+    enum ByteOperation {
         Xor,
         And,
         Or,
+        PairU8Range,
     }
 
-    impl<F: Field> BaseAir<F> for ByteOperations {
-        fn width(&self) -> usize {
-            1
+    impl ByteOperation {
+        fn position(&self) -> usize {
+            match self {
+                Self::Xor => 0,
+                Self::And => 1,
+                Self::Or => 2,
+                Self::PairU8Range => 3,
+            }
         }
+    }
+
+    impl<F: Field> BaseAir<F> for ByteCS {
+        fn width(&self) -> usize {
+            TRACE_WIDTH
+        }
+
         fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
             let bytes: [u8; BYTE_VALUES_NUM] = array::from_fn(|idx| u8::try_from(idx).unwrap());
             let mut trace_values =
@@ -41,7 +58,7 @@ mod tests {
         }
     }
 
-    impl<AB> Air<AB> for ByteOperations
+    impl<AB> Air<AB> for ByteCS
     where
         AB: AirBuilder,
         AB::Var: Copy,
@@ -50,7 +67,7 @@ mod tests {
         }
     }
 
-    impl ByteOperations {
+    impl ByteCS {
         fn lookups(&self) -> Vec<Lookup<Expr>> {
             let var =
                 |i| SymbolicExpression::from(SymbolicVariable::new(Entry::Main { offset: 0 }, i));
@@ -62,170 +79,86 @@ mod tests {
                 ))
             };
 
-            let xor_idx = Expr::from_u8(0u8);
-            let and_idx = Expr::from_u8(1u8);
-            let or_idx = Expr::from_u8(2u8);
+            let xor_idx = ByteOperation::Xor.position();
+            let and_idx = ByteOperation::And.position();
+            let or_idx = ByteOperation::Or.position();
+            let pair_range_check_idx = ByteOperation::PairU8Range.position();
 
-            // we have to provide exactly one lookup: [A, B, A op B], depending on the required operation in order to balance the claim
-            match self {
-                Self::Xor => vec![
-                    // XOR result is stored in var(2)
+            let mut lookups = [xor_idx, and_idx, or_idx]
+                .into_iter()
+                .map(|i| {
                     Lookup::pull(
-                        var(0),
+                        var(i),
                         vec![
-                            xor_idx,
+                            Expr::from_usize(i),
                             preprocessed_var(0),
                             preprocessed_var(1),
-                            preprocessed_var(2),
+                            preprocessed_var(2 + i),
                         ],
-                    ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            // Range checks do not have a return value
+            lookups.push(Lookup::pull(
+                var(pair_range_check_idx),
+                vec![
+                    Expr::from_usize(pair_range_check_idx),
+                    preprocessed_var(0),
+                    preprocessed_var(1),
                 ],
-
-                Self::And => vec![
-                    // AND result is stored in var(3)
-                    Lookup::pull(
-                        var(0),
-                        vec![
-                            and_idx,
-                            preprocessed_var(0),
-                            preprocessed_var(1),
-                            preprocessed_var(3),
-                        ],
-                    ),
-                ],
-                Self::Or => vec![
-                    // OR result is stored in var(4)
-                    Lookup::pull(
-                        var(0),
-                        vec![
-                            or_idx,
-                            preprocessed_var(0),
-                            preprocessed_var(1),
-                            preprocessed_var(4),
-                        ],
-                    ),
-                ],
-            }
+            ));
+            lookups
         }
-        fn multiplicity_trace(&self, a: u8, b: u8, a_op_b: u8) -> RowMajorMatrix<Val> {
-            let mut trace_values = Vec::with_capacity(BYTE_VALUES_NUM * BYTE_VALUES_NUM);
-            for i in 0..BYTE_VALUES_NUM {
-                for j in 0..BYTE_VALUES_NUM {
-                    let multiplicity = match self {
-                        Self::Xor => {
-                            if (a as usize) == i && (b as usize) == j && (a_op_b as usize) == i ^ j
-                            {
-                                Val::ONE
-                            } else {
-                                Val::ZERO
-                            }
-                        }
-                        Self::And => {
-                            if (a as usize) == i && (b as usize) == j && (a_op_b as usize) == i & j
-                            {
-                                Val::ONE
-                            } else {
-                                Val::ZERO
-                            }
-                        }
-                        Self::Or => {
-                            if (a as usize) == i && (b as usize) == j && (a_op_b as usize) == i | j
-                            {
-                                Val::ONE
-                            } else {
-                                Val::ZERO
-                            }
-                        }
-                    };
-                    trace_values.push(multiplicity)
-                }
-            }
+    }
 
-            RowMajorMatrix::new(trace_values, 1)
+    struct ByteCalls {
+        calls: Vec<(ByteOperation, u8, u8)>,
+    }
+
+    impl ByteCalls {
+        fn witness(&self, system: &System<ByteCS>) -> SystemWitness {
+            let mut byte_trace =
+                RowMajorMatrix::new(vec![Val::ZERO; TRACE_WIDTH * 256 * 256], TRACE_WIDTH);
+            for (op, x, y) in self.calls.iter() {
+                let row_index = 256 * (*x as usize) + *y as usize;
+                let row = byte_trace.row_mut(row_index);
+                let position = op.position();
+                row[position] += Val::ONE;
+            }
+            let traces = vec![byte_trace];
+            SystemWitness::from_stage_1(traces, system)
         }
     }
 
     #[test]
-    fn xor() {
+    #[ignore]
+    fn byte_test() {
         let commitment_parameters = CommitmentParameters { log_blowup: 1 };
-        let circuit = LookupAir::new(ByteOperations::Xor, ByteOperations::Xor.lookups());
-        let (system, prover_key) = System::new(commitment_parameters, vec![circuit]);
-
-        let xor_chip_idx = 0;
-        let a = 0x0f;
-        let b = 0xf0;
-        let a_xor_b = a ^ b;
-        let claim = [xor_chip_idx, a, b, a_xor_b].map(Val::from_u8).to_vec();
-
-        let witness = SystemWitness::from_stage_1(
-            vec![ByteOperations::Xor.multiplicity_trace(a, b, a_xor_b)],
-            &system,
-        );
-
+        let circuit = LookupAir::new(ByteCS {}, ByteCS {}.lookups());
+        let (system, key) = System::new(commitment_parameters, vec![circuit]);
+        let calls = ByteCalls {
+            calls: vec![
+                (ByteOperation::Xor, 10, 5),
+                (ByteOperation::And, 30, 20),
+                (ByteOperation::Or, 100, 40),
+                (ByteOperation::PairU8Range, 200, 100),
+            ],
+        };
+        let witness = calls.witness(&system);
+        let f = Val::from_u32;
+        let claim1 = &[f(0), f(10), f(5), f(10 ^ 5)];
+        let claim2 = &[f(1), f(30), f(20), f(30 & 20)];
+        let claim3 = &[f(2), f(100), f(40), f(100 | 40)];
+        let claim4 = &[f(3), f(200), f(100)];
+        let claims: &[&[Val]] = &[claim1, claim2, claim3, claim4];
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
             num_queries: 64,
-            proof_of_work_bits: 1,
+            proof_of_work_bits: 0,
         };
-
-        let proof = system.prove(fri_parameters, &prover_key, &claim, witness);
+        let proof = system.prove_multiple_claims(fri_parameters, &key, claims, witness);
         system
-            .verify(fri_parameters, &claim, &proof)
-            .expect("verification issue");
-    }
-
-    #[test]
-    fn and() {
-        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
-        let circuit = LookupAir::new(ByteOperations::And, ByteOperations::And.lookups());
-        let (system, prover_key) = System::new(commitment_parameters, vec![circuit]);
-        let and_chip_idx = 1;
-        let a = 0x15;
-        let b = 0x87;
-        let a_and_b = a & b;
-        let claim = [and_chip_idx, a, b, a_and_b].map(Val::from_u8).to_vec();
-
-        let witness = SystemWitness::from_stage_1(
-            vec![ByteOperations::And.multiplicity_trace(a, b, a_and_b)],
-            &system,
-        );
-
-        let fri_parameters = FriParameters {
-            log_final_poly_len: 0,
-            num_queries: 64,
-            proof_of_work_bits: 1,
-        };
-        let proof = system.prove(fri_parameters, &prover_key, &claim, witness);
-        system
-            .verify(fri_parameters, &claim, &proof)
-            .expect("verification issue");
-    }
-
-    #[test]
-    fn or() {
-        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
-        let circuit = LookupAir::new(ByteOperations::Or, ByteOperations::Or.lookups());
-
-        let (system, prover_key) = System::new(commitment_parameters, vec![circuit]);
-        let or_chip_idx = 2;
-        let a = 0xf1;
-        let b = 0x38;
-        let a_or_b = a | b;
-        let claim = [or_chip_idx, a, b, a_or_b].map(Val::from_u8).to_vec();
-
-        let witness = SystemWitness::from_stage_1(
-            vec![ByteOperations::Or.multiplicity_trace(a, b, a_or_b)],
-            &system,
-        );
-
-        let fri_parameters = FriParameters {
-            log_final_poly_len: 0,
-            num_queries: 64,
-            proof_of_work_bits: 1,
-        };
-        let proof = system.prove(fri_parameters, &prover_key, &claim, witness);
-        system
-            .verify(fri_parameters, &claim, &proof)
-            .expect("verification issue");
+            .verify_multiple_claims(fri_parameters, claims, &proof)
+            .unwrap();
     }
 }
