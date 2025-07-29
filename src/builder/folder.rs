@@ -1,16 +1,16 @@
 /// Adapted from Plonky3's `https://github.com/Plonky3/Plonky3/blob/main/uni-stark/src/folder.rs`
-use p3_air::{AirBuilder, AirBuilderWithPublicValues, PairBuilder};
+use p3_air::{AirBuilder, AirBuilderWithPublicValues};
 use p3_field::{BasedVectorSpace, PackedField};
 use p3_matrix::dense::RowMajorMatrixView;
 use p3_matrix::stack::VerticalPair;
 
 use crate::types::{ExtVal, PackedExtVal, PackedVal, Val};
 
-use super::TwoStagedBuilder;
+use super::{PreprocessedBuilder, TwoStagedBuilder};
 
 #[derive(Debug)]
 pub struct ProverConstraintFolder<'a> {
-    pub preprocessed: RowMajorMatrixView<'a, PackedVal>,
+    pub preprocessed: Option<RowMajorMatrixView<'a, PackedVal>>,
     pub stage_1: RowMajorMatrixView<'a, PackedVal>,
     pub stage_2: RowMajorMatrixView<'a, PackedVal>,
     pub public_values: &'a [Val],
@@ -27,7 +27,7 @@ type ViewPair<'a, T> = VerticalPair<RowMajorMatrixView<'a, T>, RowMajorMatrixVie
 
 #[derive(Debug)]
 pub struct VerifierConstraintFolder<'a> {
-    pub preprocessed: ViewPair<'a, ExtVal>,
+    pub preprocessed: Option<ViewPair<'a, ExtVal>>,
     pub stage_1: ViewPair<'a, ExtVal>,
     pub stage_2: ViewPair<'a, ExtVal>,
     pub public_values: &'a [Val],
@@ -99,8 +99,8 @@ impl AirBuilderWithPublicValues for ProverConstraintFolder<'_> {
     }
 }
 
-impl<'a> PairBuilder for ProverConstraintFolder<'a> {
-    fn preprocessed(&self) -> Self::M {
+impl<'a> PreprocessedBuilder for ProverConstraintFolder<'a> {
+    fn preprocessed(&self) -> Option<Self::M> {
         self.preprocessed
     }
 }
@@ -154,8 +154,8 @@ impl AirBuilderWithPublicValues for VerifierConstraintFolder<'_> {
     }
 }
 
-impl<'a> PairBuilder for VerifierConstraintFolder<'a> {
-    fn preprocessed(&self) -> Self::M {
+impl<'a> PreprocessedBuilder for VerifierConstraintFolder<'a> {
+    fn preprocessed(&self) -> Option<Self::M> {
         self.preprocessed
     }
 }

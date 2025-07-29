@@ -46,89 +46,13 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
             log_degrees,
             opening_proof,
             quotient_opened_values,
+            preprocessed_opened_values,
             stage_1_opened_values,
             stage_2_opened_values,
         } = proof;
-        // The following are proof shape checks
-        let num_circuits = self.circuits.len();
-        // there must be at least one circuit
-        ensure!(num_circuits > 0, VerificationError::InvalidSystem);
-        // stage 1 round
-        ensure_eq!(
-            stage_1_opened_values.len(),
-            num_circuits,
-            VerificationError::InvalidProofShape
-        );
-        for (i, circuit) in self.circuits.iter().enumerate() {
-            // zeta and zeta_next
-            let num_openings = 2;
-            ensure_eq!(
-                stage_1_opened_values[i].len(),
-                num_openings,
-                VerificationError::InvalidProofShape
-            );
-            for j in 0..num_openings {
-                ensure_eq!(
-                    stage_1_opened_values[i][j].len(),
-                    circuit.stage_1_width,
-                    VerificationError::InvalidProofShape
-                );
-            }
-        }
-        // stage 2 round
-        ensure_eq!(
-            stage_2_opened_values.len(),
-            num_circuits,
-            VerificationError::InvalidProofShape
-        );
-        for (i, circuit) in self.circuits.iter().enumerate() {
-            // zeta and zeta_next
-            let num_openings = 2;
-            ensure_eq!(
-                stage_2_opened_values[i].len(),
-                num_openings,
-                VerificationError::InvalidProofShape
-            );
-            for j in 0..num_openings {
-                ensure_eq!(
-                    stage_2_opened_values[i][j].len(),
-                    circuit.stage_2_width,
-                    VerificationError::InvalidProofShape
-                );
-            }
-        } // quotient round
-        let mut quotient_degrees = vec![];
-        for circuit in self.circuits.iter() {
-            let quotient_degree = (circuit.max_constraint_degree.max(2) - 1).next_power_of_two();
-            quotient_degrees.push(quotient_degree);
-        }
-        let quotient_size: usize = quotient_degrees.iter().sum();
-        ensure_eq!(
-            quotient_opened_values.len(),
-            quotient_size,
-            VerificationError::InvalidProofShape
-        );
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..quotient_size {
-            // zeta
-            let num_openings = 1;
-            ensure_eq!(
-                quotient_opened_values[i].len(),
-                num_openings,
-                VerificationError::InvalidProofShape
-            );
-            ensure_eq!(
-                quotient_opened_values[i][0].len(),
-                <ExtVal as BasedVectorSpace<Val>>::DIMENSION,
-                VerificationError::InvalidProofShape
-            );
-        }
-        // there must be as many intermediate accumulators as circuits
-        ensure_eq!(
-            intermediate_accumulators.len(),
-            self.circuits.len(),
-            VerificationError::InvalidProofShape
-        );
+        // first, verify the proof shape
+        let quotient_degrees = self.verify_shape(proof)?;
+
         // the last accumulator should be 0
         ensure_eq!(
             *intermediate_accumulators.last().unwrap(),
@@ -172,64 +96,74 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
 
         // generate out of domain points and verify the PCS opening
         let zeta: ExtVal = challenger.sample_algebra_element();
+        let mut preprocessed_trace_evaluations = vec![];
         let mut stage_1_trace_evaluations = vec![];
         let mut stage_2_trace_evaluations = vec![];
         let mut quotient_chunks_evaluations = vec![];
         let mut last_quotient_i = 0;
-        log_degrees
-            .iter()
-            .zip(quotient_degrees.iter())
-            .enumerate()
-            .for_each(|(i, (log_degree, quotient_degree))| {
-                let log_quotient_degree = log2_strict_usize(*quotient_degree);
-                let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
-                    pcs,
-                    1 << log_degree,
-                );
-                let quotient_domain =
-                    trace_domain.create_disjoint_domain((1 << log_degree) << log_quotient_degree);
-                let quotient_chunks_domains = quotient_domain.split_domains(*quotient_degree);
-                let unshifted_quotient_chunks_domains = quotient_chunks_domains
-                    .iter()
-                    .map(|domain| {
-                        <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
-                            pcs,
-                            domain.size(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let zeta_next = trace_domain.next_point(zeta).unwrap();
-                stage_1_trace_evaluations.push((
-                    trace_domain,
-                    vec![
-                        (zeta, stage_1_opened_values[i][0].clone()),
-                        (zeta_next, stage_1_opened_values[i][1].clone()),
-                    ],
-                ));
-                stage_2_trace_evaluations.push((
-                    trace_domain,
-                    vec![
-                        (zeta, stage_2_opened_values[i][0].clone()),
-                        (zeta_next, stage_2_opened_values[i][1].clone()),
-                    ],
-                ));
-                let iter = unshifted_quotient_chunks_domains
-                    .into_iter()
-                    .zip(
-                        quotient_opened_values[last_quotient_i..last_quotient_i + quotient_degree]
-                            .iter(),
+        for i in 0..self.circuits.len() {
+            let log_degree = log_degrees[i];
+            let quotient_degree = quotient_degrees[i];
+            let log_quotient_degree = log2_strict_usize(quotient_degree);
+            let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
+                pcs,
+                1 << log_degree,
+            );
+            let quotient_domain =
+                trace_domain.create_disjoint_domain((1 << log_degree) << log_quotient_degree);
+            let quotient_chunks_domains = quotient_domain.split_domains(quotient_degree);
+            let unshifted_quotient_chunks_domains = quotient_chunks_domains
+                .iter()
+                .map(|domain| {
+                    <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
+                        pcs,
+                        domain.size(),
                     )
-                    .map(|(domain, opened_values)| {
-                        (domain, vec![(zeta, opened_values[0].clone())])
-                    });
-                quotient_chunks_evaluations.extend(iter);
-                last_quotient_i += quotient_degree;
-            });
-        let coms_to_verify = vec![
+                })
+                .collect::<Vec<_>>();
+            let zeta_next = trace_domain.next_point(zeta).unwrap();
+            if let Some(i) = self.preprocessed_indices[i] {
+                let preprocessed_opened_values = preprocessed_opened_values.as_ref().unwrap();
+                preprocessed_trace_evaluations.push((
+                    trace_domain,
+                    vec![
+                        (zeta, preprocessed_opened_values[i][0].clone()),
+                        (zeta_next, preprocessed_opened_values[i][1].clone()),
+                    ],
+                ));
+            }
+            stage_1_trace_evaluations.push((
+                trace_domain,
+                vec![
+                    (zeta, stage_1_opened_values[i][0].clone()),
+                    (zeta_next, stage_1_opened_values[i][1].clone()),
+                ],
+            ));
+            stage_2_trace_evaluations.push((
+                trace_domain,
+                vec![
+                    (zeta, stage_2_opened_values[i][0].clone()),
+                    (zeta_next, stage_2_opened_values[i][1].clone()),
+                ],
+            ));
+            let iter = unshifted_quotient_chunks_domains
+                .into_iter()
+                .zip(
+                    quotient_opened_values[last_quotient_i..last_quotient_i + quotient_degree]
+                        .iter(),
+                )
+                .map(|(domain, opened_values)| (domain, vec![(zeta, opened_values[0].clone())]));
+            quotient_chunks_evaluations.extend(iter);
+            last_quotient_i += quotient_degree;
+        }
+        let mut coms_to_verify = vec![
             (commitments.stage_1_trace, stage_1_trace_evaluations),
             (commitments.stage_2_trace, stage_2_trace_evaluations),
             (commitments.quotient_chunks, quotient_chunks_evaluations),
         ];
+        if let Some(preprocessed_commitment) = self.preprocessed_commit {
+            coms_to_verify.extend([(preprocessed_commitment, preprocessed_trace_evaluations)])
+        }
         pcs.verify(coms_to_verify, opening_proof, &mut challenger)
             .map_err(VerificationError::InvalidOpeningArgument)?;
 
@@ -237,7 +171,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         // and check that the evaluation of the composition polynomial equals the
         // product of the zerofier with the quotient
         let mut last_quotient_i = 0;
-        for i in 0..num_circuits {
+        for i in 0..self.circuits.len() {
             let circuit = &self.circuits[i];
             let degree = 1 << log_degrees[i];
             let quotient_degree = quotient_degrees[i];
@@ -256,11 +190,17 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
             let trace_domain =
                 <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
             let sels = trace_domain.selectors_at_point(zeta);
-            // TODO fix preprocessed
-            let preprocessed = VerticalPair::new(
-                RowMajorMatrixView::new(&[], 0),
-                RowMajorMatrixView::new(&[], 0),
-            );
+            let preprocessed = if let Some(i) = self.preprocessed_indices[i] {
+                let preprocessed_opened_values = preprocessed_opened_values.as_ref().unwrap();
+                let preprocessed_row = &preprocessed_opened_values[i][0];
+                let preprocessed_next_row = &preprocessed_opened_values[i][1];
+                Some(VerticalPair::new(
+                    RowMajorMatrixView::new_row(preprocessed_row),
+                    RowMajorMatrixView::new_row(preprocessed_next_row),
+                ))
+            } else {
+                None
+            };
             let stage_1 = VerticalPair::new(
                 RowMajorMatrixView::new_row(stage_1_row),
                 RowMajorMatrixView::new_row(stage_1_next_row),
@@ -335,6 +275,120 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
 
         Ok(())
     }
+
+    pub fn verify_shape(&self, proof: &Proof) -> Result<Vec<usize>, VerificationError<PcsError>> {
+        let Proof {
+            intermediate_accumulators,
+            quotient_opened_values,
+            preprocessed_opened_values,
+            stage_1_opened_values,
+            stage_2_opened_values,
+            ..
+        } = proof;
+        // The following are proof shape checks
+        let num_circuits = self.circuits.len();
+        // there must be at least one circuit
+        ensure!(num_circuits > 0, VerificationError::InvalidSystem);
+        // the preprocessed commitment is empty if and only if there are zero preprocessed chips
+        let num_preprocessed = self
+            .preprocessed_indices
+            .iter()
+            .map(|i| usize::from(i.is_some()))
+            .sum::<usize>();
+        ensure_eq!(
+            self.preprocessed_commit.is_none(),
+            num_preprocessed == 0,
+            VerificationError::InvalidSystem
+        );
+        // stage 0 round
+        ensure_eq!(
+            preprocessed_opened_values
+                .as_ref()
+                .map_or(0, |values| values.len()),
+            num_preprocessed,
+            VerificationError::InvalidProofShape
+        );
+        // stage 1 round
+        ensure_eq!(
+            stage_1_opened_values.len(),
+            num_circuits,
+            VerificationError::InvalidProofShape
+        );
+        // stage 2 round
+        ensure_eq!(
+            stage_2_opened_values.len(),
+            num_circuits,
+            VerificationError::InvalidProofShape
+        );
+        for (i, circuit) in self.circuits.iter().enumerate() {
+            let preprocessed_i = self.preprocessed_indices[i];
+            // zeta and zeta_next
+            let num_openings = 2;
+            ensure_eq!(
+                stage_1_opened_values[i].len(),
+                num_openings,
+                VerificationError::InvalidProofShape
+            );
+            ensure_eq!(
+                stage_2_opened_values[i].len(),
+                num_openings,
+                VerificationError::InvalidProofShape
+            );
+            for j in 0..num_openings {
+                if let Some(i) = preprocessed_i {
+                    ensure_eq!(
+                        preprocessed_opened_values.as_ref().unwrap()[i][j].len(),
+                        circuit.preprocessed_width,
+                        VerificationError::InvalidProofShape
+                    );
+                }
+                ensure_eq!(
+                    stage_1_opened_values[i][j].len(),
+                    circuit.stage_1_width,
+                    VerificationError::InvalidProofShape
+                );
+                ensure_eq!(
+                    stage_2_opened_values[i][j].len(),
+                    circuit.stage_2_width,
+                    VerificationError::InvalidProofShape
+                );
+            }
+        }
+        // quotient round
+        let mut quotient_degrees = vec![];
+        for circuit in self.circuits.iter() {
+            let quotient_degree = (circuit.max_constraint_degree.max(2) - 1).next_power_of_two();
+            quotient_degrees.push(quotient_degree);
+        }
+        let quotient_size: usize = quotient_degrees.iter().sum();
+        ensure_eq!(
+            quotient_opened_values.len(),
+            quotient_size,
+            VerificationError::InvalidProofShape
+        );
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..quotient_size {
+            // zeta
+            let num_openings = 1;
+            ensure_eq!(
+                quotient_opened_values[i].len(),
+                num_openings,
+                VerificationError::InvalidProofShape
+            );
+            ensure_eq!(
+                quotient_opened_values[i][0].len(),
+                <ExtVal as BasedVectorSpace<Val>>::DIMENSION,
+                VerificationError::InvalidProofShape
+            );
+        }
+        // there must be as many intermediate accumulators as circuits
+        ensure_eq!(
+            intermediate_accumulators.len(),
+            self.circuits.len(),
+            VerificationError::InvalidProofShape
+        );
+        Ok(quotient_degrees)
+    }
 }
 
 #[cfg(test)]
@@ -343,8 +397,8 @@ mod tests {
     use crate::{
         benchmark,
         lookup::LookupAir,
-        system::{Circuit, SystemWitness},
-        types::{FriParameters, new_stark_config},
+        system::{ProverKey, SystemWitness},
+        types::{CommitmentParameters, FriParameters},
     };
     use p3_air::{AirBuilderWithPublicValues, BaseAir};
     use p3_matrix::{Matrix, dense::RowMajorMatrix};
@@ -390,16 +444,19 @@ mod tests {
             }
         }
     }
-    fn system() -> System<CS> {
-        let pythagorean_circuit =
-            Circuit::from_air(LookupAir::new(CS::Pythagorean, vec![])).unwrap();
-        let complex_circuit = Circuit::from_air(LookupAir::new(CS::Complex, vec![])).unwrap();
-        System::new([pythagorean_circuit, complex_circuit])
+    fn system(commitment_parameters: &CommitmentParameters) -> (System<CS>, ProverKey) {
+        let pythagorean_circuit = LookupAir::new(CS::Pythagorean, vec![]);
+        let complex_circuit = LookupAir::new(CS::Complex, vec![]);
+        System::new(
+            commitment_parameters,
+            [pythagorean_circuit, complex_circuit],
+        )
     }
 
     #[test]
     fn multi_stark_test() {
-        let system = system();
+        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
+        let (system, key) = system(&commitment_parameters);
         let f = Val::from_u32;
         let witness = SystemWitness::from_stage_1(
             vec![
@@ -414,14 +471,15 @@ mod tests {
         // we will set the multiplicity to 0, so the claim does not matter
         let multiplicity = Val::ZERO;
         let dummy_claim = &[];
+        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
         let fri_parameters = FriParameters {
-            log_blowup: 1,
             log_final_poly_len: 0,
             num_queries: 64,
             proof_of_work_bits: 0,
         };
-        let config = new_stark_config(&fri_parameters);
-        let proof = system.prove_with_claim_multiplicy(&config, multiplicity, dummy_claim, witness);
+        let config = StarkConfig::new(&commitment_parameters, &fri_parameters);
+        let proof =
+            system.prove_with_claim_multiplicy(&config, &key, multiplicity, dummy_claim, witness);
         system
             .verify_with_claim_multiplicity(&config, multiplicity, dummy_claim, &proof)
             .unwrap();
@@ -433,7 +491,8 @@ mod tests {
         // To run this benchmark effectively, run the following command
         // RUSTFLAGS="-Ctarget-cpu=native" cargo test multi_stark_benchmark_test --release --features parallel -- --include-ignored --nocapture
         const LOG_HEIGHT: usize = 20;
-        let system = system();
+        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
+        let (system, key) = system(&commitment_parameters);
         let f = Val::from_u32;
         let mut pythagorean_trace = [3, 4, 5].map(f).to_vec();
         let mut complex_trace = [4, 2, 3, 1, 10, 10].map(f).to_vec();
@@ -451,15 +510,16 @@ mod tests {
         // we will set the multiplicity to 0, so the claim does not matter
         let multiplicity = Val::ZERO;
         let dummy_claim = &[];
+        // initial accumulator
+        // multiplicity / (lookup_challenge + 0)
         let fri_parameters = FriParameters {
-            log_blowup: 1,
             log_final_poly_len: 0,
             num_queries: 100,
             proof_of_work_bits: 20,
         };
-        let config = new_stark_config(&fri_parameters);
+        let config = StarkConfig::new(&commitment_parameters, &fri_parameters);
         let proof = benchmark!(
-            system.prove_with_claim_multiplicy(&config, multiplicity, dummy_claim, witness),
+            system.prove_with_claim_multiplicy(&config, &key, multiplicity, dummy_claim, witness),
             "proof: "
         );
         let proof_bytes = proof.to_bytes().expect("Failed to serialize proof");

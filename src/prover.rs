@@ -1,8 +1,11 @@
 use crate::{
     builder::folder::ProverConstraintFolder,
     lookup::Lookup,
-    system::{System, SystemWitness},
-    types::{Challenger, Domain, ExtVal, PackedExtVal, PackedVal, Pcs, StarkConfig, Val},
+    system::{ProverKey, System, SystemWitness},
+    types::{
+        Challenger, Commitment, Domain, EvaluationsOnDomain, ExtVal, PackedExtVal, PackedVal, Pcs,
+        PcsProof, StarkConfig, Val,
+    },
 };
 use bincode::{
     config::{Configuration, Fixint, LittleEndian, standard},
@@ -22,9 +25,6 @@ use p3_util::log2_strict_usize;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 
-type Commitment = <Pcs as PcsTrait<ExtVal, Challenger>>::Commitment;
-type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
-
 #[derive(Serialize, Deserialize)]
 pub struct Commitments {
     pub stage_1_trace: Commitment,
@@ -39,6 +39,7 @@ pub struct Proof {
     pub log_degrees: Vec<u8>,
     pub opening_proof: PcsProof,
     pub quotient_opened_values: OpenedValuesForRound<ExtVal>,
+    pub preprocessed_opened_values: Option<OpenedValuesForRound<ExtVal>>,
     pub stage_1_opened_values: OpenedValuesForRound<ExtVal>,
     pub stage_2_opened_values: OpenedValuesForRound<ExtVal>,
 }
@@ -61,14 +62,21 @@ impl Proof {
 }
 
 impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
-    pub fn prove(&self, config: &StarkConfig, claim: &[Val], witness: SystemWitness) -> Proof {
+    pub fn prove(
+        &self,
+        config: &StarkConfig,
+        key: &ProverKey,
+        claim: &[Val],
+        witness: SystemWitness,
+    ) -> Proof {
         let multiplicity = Val::ONE;
-        self.prove_with_claim_multiplicy(config, multiplicity, claim, witness)
+        self.prove_with_claim_multiplicy(config, key, multiplicity, claim, witness)
     }
 
     pub fn prove_with_claim_multiplicy(
         &self,
         config: &StarkConfig,
+        key: &ProverKey,
         multiplicity: Val,
         claim: &[Val],
         witness: SystemWitness,
@@ -151,6 +159,18 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
                 );
                 let quotient_domain =
                     trace_domain.create_disjoint_domain(1 << (log_degree + log_quotient_degree));
+                let preprocessed_trace_on_quotient_domain = key
+                    .preprocessed_data
+                    .as_ref()
+                    .zip(self.preprocessed_indices[idx])
+                    .map(|(preprocessed_trace_data, preprocessed_idx)| {
+                        <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
+                            pcs,
+                            preprocessed_trace_data,
+                            preprocessed_idx,
+                            quotient_domain,
+                        )
+                    });
                 let stage_1_trace_on_quotient_domain =
                     <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
                         pcs,
@@ -177,6 +197,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
                     &public_values,
                     trace_domain,
                     quotient_domain,
+                    &preprocessed_trace_on_quotient_domain,
                     &stage_1_trace_on_quotient_domain,
                     &stage_2_trace_on_quotient_domain,
                     constraint_challenge,
@@ -209,31 +230,39 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
 
         // generate the out of domain point and prove polynomial evaluations
         let zeta: ExtVal = challenger.sample_algebra_element();
+        let mut round0_openings = vec![];
         let mut round1_openings = vec![];
         let mut round2_openings = vec![];
         let mut round3_openings = vec![];
-        log_degrees.iter().zip(quotient_degrees.iter()).for_each(
-            |(log_degree, quotient_degree)| {
-                let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
-                    pcs,
-                    1 << log_degree,
-                );
-                let zeta_next = trace_domain.next_point(zeta).unwrap();
-                round1_openings.push(vec![zeta, zeta_next]);
-                round2_openings.push(vec![zeta, zeta_next]);
-                round3_openings.extend(vec![vec![zeta]; *quotient_degree]);
-            },
-        );
-        let rounds = vec![
+        for i in 0..self.circuits.len() {
+            let log_degree = log_degrees[i];
+            let quotient_degree = quotient_degrees[i];
+            let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
+                pcs,
+                1 << log_degree,
+            );
+            let zeta_next = trace_domain.next_point(zeta).unwrap();
+            round1_openings.push(vec![zeta, zeta_next]);
+            round2_openings.push(vec![zeta, zeta_next]);
+            round3_openings.extend(vec![vec![zeta]; quotient_degree]);
+            if self.preprocessed_indices[i].is_some() {
+                round0_openings.push(vec![zeta, zeta_next]);
+            }
+        }
+        let mut rounds = vec![
             (&stage_1_trace_data, round1_openings),
             (&stage_2_trace_data, round2_openings),
             (&quotient_data, round3_openings),
         ];
+        if self.preprocessed_commit.is_some() {
+            rounds.push((key.preprocessed_data.as_ref().unwrap(), round0_openings));
+        }
         let (opened_values, opening_proof) = pcs.open(rounds, &mut challenger);
         let mut opened_values_iter = opened_values.into_iter();
         let stage_1_opened_values = opened_values_iter.next().unwrap();
         let stage_2_opened_values = opened_values_iter.next().unwrap();
         let quotient_opened_values = opened_values_iter.next().unwrap();
+        let preprocessed_opened_values = opened_values_iter.next();
         debug_assert!(opened_values_iter.next().is_none());
         let log_degrees = log_degrees
             .into_iter()
@@ -245,31 +274,34 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             log_degrees,
             opening_proof,
             quotient_opened_values,
+            preprocessed_opened_values,
             stage_1_opened_values,
             stage_2_opened_values,
         }
     }
 }
 
-// TODO update the accumulator
 #[allow(clippy::too_many_arguments)]
-fn quotient_values<A, Mat>(
+fn quotient_values<A>(
     air: &A,
     public_values: &[Val],
     trace_domain: Domain,
     quotient_domain: Domain,
-    stage_1_on_quotient_domain: &Mat,
-    stage_2_on_quotient_domain: &Mat,
+    preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_>>,
+    stage_1_on_quotient_domain: &EvaluationsOnDomain<'_>,
+    stage_2_on_quotient_domain: &EvaluationsOnDomain<'_>,
     alpha: ExtVal,
     constraint_count: usize,
 ) -> Vec<ExtVal>
 where
     A: for<'a> Air<ProverConstraintFolder<'a>>,
-    Mat: Matrix<Val> + Sync,
 {
     let quotient_size = quotient_domain.size();
     let stage_1_width = stage_1_on_quotient_domain.width();
     let stage_2_width = stage_2_on_quotient_domain.width();
+    let preprocessed_width = preprocessed_on_quotient_domain
+        .as_ref()
+        .map_or(0, |mat| mat.width());
     let mut sels = trace_domain.selectors_on_coset(quotient_domain);
 
     let qdb = log2_strict_usize(quotient_domain.size()) - log2_strict_usize(trace_domain.size());
@@ -304,10 +336,12 @@ where
                     public_values,
                     &sels,
                     quotient_size,
+                    preprocessed_on_quotient_domain,
                     stage_1_on_quotient_domain,
                     stage_2_on_quotient_domain,
                     stage_1_width,
                     stage_2_width,
+                    preprocessed_width,
                     &alpha_powers,
                     &decomposed_alpha_powers,
                     next_step,
@@ -326,10 +360,12 @@ where
                     public_values,
                     &sels,
                     quotient_size,
+                    preprocessed_on_quotient_domain,
                     stage_1_on_quotient_domain,
                     stage_2_on_quotient_domain,
                     stage_1_width,
                     stage_2_width,
+                    preprocessed_width,
                     &alpha_powers,
                     &decomposed_alpha_powers,
                     next_step,
@@ -341,15 +377,17 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn quotient_values_inner<A, Mat>(
+fn quotient_values_inner<A>(
     air: &A,
     public_values: &[Val],
     sels: &LagrangeSelectors<Vec<Val>>,
     quotient_size: usize,
-    stage_1_on_quotient_domain: &Mat,
-    stage_2_on_quotient_domain: &Mat,
+    preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_>>,
+    stage_1_on_quotient_domain: &EvaluationsOnDomain<'_>,
+    stage_2_on_quotient_domain: &EvaluationsOnDomain<'_>,
     stage_1_width: usize,
     stage_2_width: usize,
+    preprocessed_width: usize,
     alpha_powers: &[BinomialExtensionField<Val, 2>],
     decomposed_alpha_powers: &[Vec<Val>],
     next_step: usize,
@@ -357,7 +395,6 @@ fn quotient_values_inner<A, Mat>(
 ) -> impl Iterator<Item = BinomialExtensionField<Val, 2>>
 where
     A: for<'a> Air<ProverConstraintFolder<'a>>,
-    Mat: Matrix<Val> + Sync,
 {
     let i_range = i_start..i_start + PackedVal::WIDTH;
 
@@ -366,8 +403,14 @@ where
     let is_transition = *PackedVal::from_slice(&sels.is_transition[i_range.clone()]);
     let inv_vanishing = *PackedVal::from_slice(&sels.inv_vanishing[i_range]);
 
-    // TODO fix preprocessed
-    let preprocessed = RowMajorMatrix::new(vec![], 0);
+    let preprocessed = preprocessed_on_quotient_domain
+        .as_ref()
+        .map(|on_quotient_domain| {
+            RowMajorMatrix::new(
+                on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
+                preprocessed_width,
+            )
+        });
     let stage_1 = RowMajorMatrix::new(
         stage_1_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
         stage_1_width,
@@ -379,7 +422,7 @@ where
 
     let accumulator = PackedExtVal::ZERO;
     let mut folder = ProverConstraintFolder {
-        preprocessed: preprocessed.as_view(),
+        preprocessed: preprocessed.as_ref().map(|mat| mat.as_view()),
         stage_1: stage_1.as_view(),
         stage_2: stage_2.as_view(),
         public_values,

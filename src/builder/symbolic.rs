@@ -1,5 +1,5 @@
 /// Adapted from Plonky3's `https://github.com/Plonky3/Plonky3/blob/main/uni-stark/src/symbolic_builder.rs`
-use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, PairBuilder};
+use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues};
 use p3_field::{Algebra, Field, InjectiveMonomial, PrimeCharacteristicRing};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_util::log2_ceil_usize;
@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use std::sync::Arc;
 
-use super::TwoStagedBuilder;
+use super::{PreprocessedBuilder, TwoStagedBuilder};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Entry {
@@ -113,7 +113,38 @@ pub enum SymbolicExpression<F> {
     },
 }
 
-impl<F> SymbolicExpression<F> {
+impl<F: Field> SymbolicExpression<F> {
+    pub fn interpret<Expr: Algebra<F>, Var: Into<Expr> + Clone>(
+        &self,
+        row: &[Var],
+        preprocessed: Option<&[Var]>,
+    ) -> Expr {
+        match self {
+            Self::Variable(var) => match var.entry {
+                Entry::Main { offset: 0 } => row[var.index].clone().into(),
+                Entry::Preprocessed { offset: 0 } => {
+                    preprocessed.unwrap()[var.index].clone().into()
+                }
+                _ => unimplemented!(),
+            },
+            Self::Constant(c) => (*c).into(),
+            Self::Add { x, y, .. } => {
+                x.interpret::<Expr, Var>(row, preprocessed)
+                    + y.interpret::<Expr, Var>(row, preprocessed)
+            }
+            Self::Sub { x, y, .. } => {
+                x.interpret::<Expr, Var>(row, preprocessed)
+                    - y.interpret::<Expr, Var>(row, preprocessed)
+            }
+            Self::Neg { x, .. } => -x.interpret::<Expr, Var>(row, preprocessed),
+            Self::Mul { x, y, .. } => {
+                x.interpret::<Expr, Var>(row, preprocessed)
+                    * y.interpret::<Expr, Var>(row, preprocessed)
+            }
+            _ => unimplemented!(),
+        }
+    }
+
     /// Returns the multiple of `n` (the trace length) in this expression's degree.
     pub const fn degree_multiple(&self) -> usize {
         match self {
@@ -359,7 +390,7 @@ where
 /// An `AirBuilder` for evaluating constraints symbolically, and recording them for later use.
 #[derive(Debug)]
 pub struct SymbolicAirBuilder<F: Field> {
-    preprocessed: RowMajorMatrix<SymbolicVariable<F>>,
+    preprocessed: Option<RowMajorMatrix<SymbolicVariable<F>>>,
     stage_1: RowMajorMatrix<SymbolicVariable<F>>,
     stage_2: RowMajorMatrix<SymbolicVariable<F>>,
     public_values: Vec<SymbolicVariable<F>>,
@@ -398,7 +429,11 @@ impl<F: Field> SymbolicAirBuilder<F> {
             .map(move |index| SymbolicVariable::new(Entry::Public, index))
             .collect();
         Self {
-            preprocessed: RowMajorMatrix::new(prep_values, preprocessed_width),
+            preprocessed: if preprocessed_width == 0 {
+                None
+            } else {
+                Some(RowMajorMatrix::new(prep_values, preprocessed_width))
+            },
             stage_1: RowMajorMatrix::new(stage_1_values, stage_1_width),
             stage_2: RowMajorMatrix::new(stage_2_values, stage_2_width),
             public_values,
@@ -451,8 +486,8 @@ impl<F: Field> AirBuilderWithPublicValues for SymbolicAirBuilder<F> {
     }
 }
 
-impl<F: Field> PairBuilder for SymbolicAirBuilder<F> {
-    fn preprocessed(&self) -> Self::M {
+impl<F: Field> PreprocessedBuilder for SymbolicAirBuilder<F> {
+    fn preprocessed(&self) -> Option<Self::M> {
         self.preprocessed.clone()
     }
 }

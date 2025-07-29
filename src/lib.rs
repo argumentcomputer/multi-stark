@@ -3,6 +3,7 @@ pub mod lookup;
 pub mod prover;
 pub mod system;
 pub mod types;
+pub mod u32_add;
 pub mod verifier;
 
 pub use p3_air;
@@ -23,7 +24,7 @@ macro_rules! ensure {
 #[macro_export]
 macro_rules! ensure_eq {
     ($a:expr, $b:expr, $err:expr) => {
-        $crate::ensure!($a == $b, $err);
+        $crate::ensure!(($a) == ($b), $err);
     };
 }
 
