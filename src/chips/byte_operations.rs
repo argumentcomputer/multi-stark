@@ -68,33 +68,43 @@ mod tests {
 
             // we have to provide exactly one lookup: [A, B, A op B], depending on the required operation in order to balance the claim
             match self {
-                Self::Xor => vec![Lookup {
-                    multiplicity: -var(0),
-                    args: vec![
-                        xor_idx,
-                        preprocessed_var(0),
-                        preprocessed_var(1),
-                        preprocessed_var(2),
-                    ], // XOR result is stored in var(2)
-                }],
-                Self::And => vec![Lookup {
-                    multiplicity: -var(0),
-                    args: vec![
-                        and_idx,
-                        preprocessed_var(0),
-                        preprocessed_var(1),
-                        preprocessed_var(3),
-                    ], // AND result is stored in var(3)
-                }],
-                Self::Or => vec![Lookup {
-                    multiplicity: -var(0),
-                    args: vec![
-                        or_idx,
-                        preprocessed_var(0),
-                        preprocessed_var(1),
-                        preprocessed_var(4),
-                    ], // OR result is stored in var(4)
-                }],
+                Self::Xor => vec![
+                    // XOR result is stored in var(2)
+                    Lookup::pull(
+                        var(0),
+                        vec![
+                            xor_idx,
+                            preprocessed_var(0),
+                            preprocessed_var(1),
+                            preprocessed_var(2),
+                        ],
+                    ),
+                ],
+
+                Self::And => vec![
+                    // AND result is stored in var(3)
+                    Lookup::pull(
+                        var(0),
+                        vec![
+                            and_idx,
+                            preprocessed_var(0),
+                            preprocessed_var(1),
+                            preprocessed_var(3),
+                        ],
+                    ),
+                ],
+                Self::Or => vec![
+                    // OR result is stored in var(4)
+                    Lookup::pull(
+                        var(0),
+                        vec![
+                            or_idx,
+                            preprocessed_var(0),
+                            preprocessed_var(1),
+                            preprocessed_var(4),
+                        ],
+                    ),
+                ],
             }
         }
         fn multiplicity_trace(&self, a: u8, b: u8, a_op_b: u8) -> RowMajorMatrix<Val> {
