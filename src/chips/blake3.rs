@@ -16,8 +16,8 @@ mod tests {
     // Preprocessed columns are: [A, B, A xor B], where A and B are bytes
     const PREPROCESSED_TRACE_WIDTH: usize = 3;
 
-    // Main trace consists of multiplicity for `xor` operation
-    const U8_XOR_TRACE_WIDTH: usize = 1;
+    // Main trace consists of multiplicities for 'xor' and 'range_check' operations
+    const U8_XOR_PAIR_RANGE_CHECK_TRACE_WIDTH: usize = 2;
 
     // multiplicity, a0, a1, a2, a3, b0, b1, b2, b3, a0^b0, a1^b1, a2^b2, a3^b3
     const U32_XOR_TRACE_WIDTH: usize = 13;
@@ -39,16 +39,15 @@ mod tests {
     const U32_RIGHT_ROTATE_10_TRACE_WIDTH: usize = 25;
     const U32_RIGHT_ROTATE_12_TRACE_WIDTH: usize = U32_RIGHT_ROTATE_10_TRACE_WIDTH;
 
-    // FIXME: add u8 range checking and use it while U32Add / RightRotate chips invocation
     enum Blake3CompressionChips {
         U8Xor,
         U32Xor,
         U32Add,
         U32RightRotate8,
         U32RightRotate16,
-        U32RightRotate12,
-        U32RightRotate10,
-        // U8PairRangeCheck,
+        U32RightRotate12, // FIXME: currently underconstrained. Needs rewriting using Gabriel's advice
+        U32RightRotate10, // FIXME: currently underconstrained. Needs rewriting using Gabriel's advice
+        U8PairRangeCheck,
     }
 
     impl Blake3CompressionChips {
@@ -61,7 +60,7 @@ mod tests {
                 Blake3CompressionChips::U32RightRotate16 => 4,
                 Blake3CompressionChips::U32RightRotate12 => 5,
                 Blake3CompressionChips::U32RightRotate10 => 6,
-                // Blake3CompressionChips::U8PairRangeCheck => 7,
+                Blake3CompressionChips::U8PairRangeCheck => 7,
             }
         }
     }
@@ -69,7 +68,7 @@ mod tests {
     impl<F: Field> BaseAir<F> for Blake3CompressionChips {
         fn width(&self) -> usize {
             match self {
-                Self::U8Xor => U8_XOR_TRACE_WIDTH,
+                Self::U8Xor | Self::U8PairRangeCheck => U8_XOR_PAIR_RANGE_CHECK_TRACE_WIDTH,
                 Self::U32Xor => U32_XOR_TRACE_WIDTH,
                 Self::U32Add => U32_ADD_TRACE_WIDTH,
                 Self::U32RightRotate8 => U32_RIGHT_ROTATE_8_TRACE_WIDTH,
@@ -81,7 +80,7 @@ mod tests {
 
         fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
             match self {
-                Self::U8Xor => {
+                Self::U8Xor | Self::U8PairRangeCheck => {
                     let bytes: [u8; BYTE_VALUES_NUM] =
                         array::from_fn(|idx| u8::try_from(idx).unwrap());
                     let mut trace_values = Vec::with_capacity(
@@ -113,7 +112,7 @@ mod tests {
     {
         fn eval(&self, builder: &mut AB) {
             match self {
-                Self::U8Xor => {}
+                Self::U8Xor | Self::U8PairRangeCheck => {}
                 Self::U32Xor => {}
                 Self::U32Add => {
                     let main = builder.main();
@@ -205,17 +204,28 @@ mod tests {
             let u32_right_rotate_16_idx = Blake3CompressionChips::U32RightRotate16.position();
             let u32_right_rotate_12_idx = Blake3CompressionChips::U32RightRotate12.position();
             let u32_right_rotate_10_idx = Blake3CompressionChips::U32RightRotate10.position();
+            let u8_pair_range_check_idx = Blake3CompressionChips::U8PairRangeCheck.position();
             match self {
-                Self::U8Xor => {
-                    vec![Lookup::pull(
-                        var(0),
-                        vec![
-                            SymbExpr::from_usize(u8_xor_idx),
-                            preprocessed_var(0),
-                            preprocessed_var(1),
-                            preprocessed_var(2),
-                        ],
-                    )]
+                Self::U8Xor | Self::U8PairRangeCheck => {
+                    vec![
+                        Lookup::pull(
+                            var(0),
+                            vec![
+                                SymbExpr::from_usize(u8_xor_idx),
+                                preprocessed_var(0),
+                                preprocessed_var(1),
+                                preprocessed_var(2),
+                            ],
+                        ),
+                        Lookup::pull(
+                            var(1),
+                            vec![
+                                SymbExpr::from_usize(u8_pair_range_check_idx),
+                                preprocessed_var(0),
+                                preprocessed_var(1),
+                            ],
+                        ),
+                    ]
                 }
 
                 Self::U32Xor => {
@@ -274,14 +284,33 @@ mod tests {
                         ],
                     )];
                     // push (A, B) tuples to U8PairRangeCheck chip for verification
-                    // lookups.extend(
-                    //     (0..6).map(|i| Lookup::push(SymbExpr::ONE, vec![SymbExpr::from_usize(u8_pair_range_check_idx).clone(), var(i), var(i + 6)])),
-                    // );
+                    lookups.extend((0..4).map(|i| {
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u8_pair_range_check_idx).clone(),
+                                var(i),
+                                var(i + 4),
+                            ],
+                        )
+                    }));
+
+                    // push (A + B, 0) tuples to U8PairRangeCheck chip for verification. 0 is used just as a stub
+                    lookups.extend((0..4).map(|i| {
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u8_pair_range_check_idx).clone(),
+                                var(i + 8),
+                                SymbExpr::ZERO,
+                            ],
+                        )
+                    }));
                     lookups
                 }
 
                 Self::U32RightRotate8 => {
-                    vec![Lookup::pull(
+                    let mut lookups = vec![Lookup::pull(
                         var(0),
                         vec![
                             SymbExpr::from_usize(u32_right_rotate_8_idx),
@@ -295,11 +324,25 @@ mod tests {
                                 + var(4) * SymbExpr::from_u32(256 * 256)
                                 + var(1) * SymbExpr::from_u32(256 * 256 * 256),
                         ],
-                    )]
+                    )];
+
+                    // range check only input u32 word (since output is constructed exactly from the same bytes)
+                    lookups.extend((0..2).map(|i| {
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u8_pair_range_check_idx).clone(),
+                                var(i + 1),
+                                var(i + 3),
+                            ],
+                        )
+                    }));
+
+                    lookups
                 }
 
                 Self::U32RightRotate16 => {
-                    vec![Lookup::pull(
+                    let mut lookups = vec![Lookup::pull(
                         var(0),
                         vec![
                             SymbExpr::from_usize(u32_right_rotate_16_idx),
@@ -313,7 +356,21 @@ mod tests {
                                 + var(1) * SymbExpr::from_u32(256 * 256)
                                 + var(2) * SymbExpr::from_u32(256 * 256 * 256),
                         ],
-                    )]
+                    )];
+
+                    // range check only input u32 word (since output is constructed exactly from the same 4 bytes)
+                    lookups.extend((0..2).map(|i| {
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u8_pair_range_check_idx).clone(),
+                                var(i + 1),
+                                var(i + 3),
+                            ],
+                        )
+                    }));
+
+                    lookups
                 }
 
                 Self::U32RightRotate12 => {
@@ -368,7 +425,9 @@ mod tests {
 
             let mut u32_add_values_from_claims = vec![];
 
-            let mut byte_values_from_claims = vec![];
+            let mut byte_xor_values_from_claims = vec![];
+
+            let mut byte_range_check_values_from_claims = vec![];
 
             let mut u32_rotate_right_8_values_from_claims = vec![];
             let mut u32_rotate_right_16_values_from_claims = vec![];
@@ -382,7 +441,7 @@ mod tests {
                     0u64 => {
                         // This is our U8Xor claim. We should have chip_idx, A, B, A xor B (where A, B are bytes)
                         assert!(claim.len() == 4, "[U8Xor] wrong claim format");
-                        byte_values_from_claims.push((claim[1], claim[2]));
+                        byte_xor_values_from_claims.push((claim[1], claim[2], claim[3]));
                     }
                     1u64 => {
                         /* This is our U32Xor claim. We should have chip_idx, A, B, A xor B (where A, B are u32) */
@@ -398,15 +457,28 @@ mod tests {
 
                         let a_bytes: [u8; 4] = a_u32.to_le_bytes();
                         let b_bytes: [u8; 4] = b_u32.to_le_bytes();
+                        let xor_bytes: [u8; 4] = xor_u32.to_le_bytes();
 
-                        byte_values_from_claims
-                            .push((Val::from_u8(a_bytes[0]), Val::from_u8(b_bytes[0])));
-                        byte_values_from_claims
-                            .push((Val::from_u8(a_bytes[1]), Val::from_u8(b_bytes[1])));
-                        byte_values_from_claims
-                            .push((Val::from_u8(a_bytes[2]), Val::from_u8(b_bytes[2])));
-                        byte_values_from_claims
-                            .push((Val::from_u8(a_bytes[3]), Val::from_u8(b_bytes[3])));
+                        byte_xor_values_from_claims.push((
+                            Val::from_u8(a_bytes[0]),
+                            Val::from_u8(b_bytes[0]),
+                            Val::from_u8(xor_bytes[0]),
+                        ));
+                        byte_xor_values_from_claims.push((
+                            Val::from_u8(a_bytes[1]),
+                            Val::from_u8(b_bytes[1]),
+                            Val::from_u8(xor_bytes[1]),
+                        ));
+                        byte_xor_values_from_claims.push((
+                            Val::from_u8(a_bytes[2]),
+                            Val::from_u8(b_bytes[2]),
+                            Val::from_u8(xor_bytes[2]),
+                        ));
+                        byte_xor_values_from_claims.push((
+                            Val::from_u8(a_bytes[3]),
+                            Val::from_u8(b_bytes[3]),
+                            Val::from_u8(xor_bytes[3]),
+                        ));
                     }
 
                     2u64 => {
@@ -419,29 +491,29 @@ mod tests {
 
                         u32_add_values_from_claims.push((a_u32, b_u32, add_u32));
 
-                        // /* we decompose our input u32 words (A, B) and send their bytes to U8Xor chip, relying on lookup constraining */
-                        //
-                        // let a_bytes: [u8; 4] = a_u32.to_le_bytes();
-                        // let b_bytes: [u8; 4] = b_u32.to_le_bytes();
-                        // let add_bytes: [u8; 4] = add_u32.to_le_bytes();
-                        //
-                        // byte_values_from_claims
-                        //     .push((Val::from_u8(a_bytes[0]), Val::from_u8(b_bytes[0])));
-                        // byte_values_from_claims
-                        //     .push((Val::from_u8(a_bytes[1]), Val::from_u8(b_bytes[1])));
-                        // byte_values_from_claims
-                        //     .push((Val::from_u8(a_bytes[2]), Val::from_u8(b_bytes[2])));
-                        // byte_values_from_claims
-                        //     .push((Val::from_u8(a_bytes[3]), Val::from_u8(b_bytes[3])));
-                        //
-                        // byte_values_from_claims
-                        //     .push((Val::from_u8(add_bytes[0]), Val::ZERO));
-                        // byte_values_from_claims
-                        //     .push((Val::from_u8(add_bytes[1]), Val::ZERO));
-                        // byte_values_from_claims
-                        //     .push((Val::from_u8(add_bytes[2]), Val::ZERO));
-                        // byte_values_from_claims
-                        //     .push((Val::from_u8(add_bytes[3]), Val::ZERO));
+                        /* we decompose our input u32 words (A, B) and send their bytes to U8Xor chip, relying on lookup constraining */
+
+                        let a_bytes: [u8; 4] = a_u32.to_le_bytes();
+                        let b_bytes: [u8; 4] = b_u32.to_le_bytes();
+                        let add_bytes: [u8; 4] = add_u32.to_le_bytes();
+
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(a_bytes[0]), Val::from_u8(b_bytes[0])));
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(a_bytes[1]), Val::from_u8(b_bytes[1])));
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(a_bytes[2]), Val::from_u8(b_bytes[2])));
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(a_bytes[3]), Val::from_u8(b_bytes[3])));
+
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(add_bytes[0]), Val::ZERO));
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(add_bytes[1]), Val::ZERO));
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(add_bytes[2]), Val::ZERO));
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(add_bytes[3]), Val::ZERO));
                     }
                     3u64 => {
                         /* This is our U32RotateRight8 claim. We should have chip_idx, A, A_rot */
@@ -451,6 +523,13 @@ mod tests {
                         let rot_u32 = u32::try_from(claim[2].as_canonical_u64()).unwrap();
 
                         u32_rotate_right_8_values_from_claims.push((a_u32, rot_u32));
+
+                        let a_bytes: [u8; 4] = a_u32.to_le_bytes();
+
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(a_bytes[0]), Val::from_u8(a_bytes[2])));
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(a_bytes[1]), Val::from_u8(a_bytes[3])));
                     }
                     4u64 => {
                         /* This is our U32RotateRight16 claim. We should have chip_idx, A, A_rot */
@@ -460,6 +539,13 @@ mod tests {
                         let rot_u32 = u32::try_from(claim[2].as_canonical_u64()).unwrap();
 
                         u32_rotate_right_16_values_from_claims.push((a_u32, rot_u32));
+
+                        let a_bytes: [u8; 4] = a_u32.to_le_bytes();
+
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(a_bytes[0]), Val::from_u8(a_bytes[2])));
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(a_bytes[1]), Val::from_u8(a_bytes[3])));
                     }
                     5u64 => {
                         /* This is our U32RotateRight12 claim. We should have chip_idx, A, A_rot */
@@ -479,22 +565,43 @@ mod tests {
 
                         u32_rotate_right_10_values_from_claims.push((a_u32, rot_u32));
                     }
+
+                    7u64 => {
+                        /* This is our U8PairRangeCheck claim. We should have chip_idx, A, B */
+
+                        assert!(claim.len() == 3, "[U8Xor] wrong claim format");
+                        byte_range_check_values_from_claims.push((claim[1], claim[2]));
+                    }
                     _ => panic!("unsupported chip"),
                 }
             }
 
-            // build U8Xor / U8PairRangeCheck trace (columns: multiplicity)
-            let mut u8xor_trace_values =
-                Vec::<Val>::with_capacity(BYTE_VALUES_NUM * BYTE_VALUES_NUM);
+            // build U8Xor / U8PairRangeCheck trace (columns: multiplicity_u8_xor, multiplicity_pair_range_check)
+            let mut u8_xor_range_check_trace_values = Vec::<Val>::with_capacity(
+                BYTE_VALUES_NUM * BYTE_VALUES_NUM * U8_XOR_PAIR_RANGE_CHECK_TRACE_WIDTH,
+            );
             for i in 0..BYTE_VALUES_NUM {
                 for j in 0..BYTE_VALUES_NUM {
-                    let mut multiplicity = Val::ZERO;
-                    for vals in byte_values_from_claims.clone() {
-                        if vals.0 == Val::from_usize(i) && vals.1 == Val::from_usize(j) {
-                            multiplicity += Val::ONE;
+                    let mut multiplicity_u8_xor = Val::ZERO;
+                    let mut multiplicity_u8_pair_range_check = Val::ZERO;
+
+                    for vals in byte_xor_values_from_claims.clone() {
+                        if vals.0 == Val::from_usize(i)
+                            && vals.1 == Val::from_usize(j)
+                            && vals.2 == Val::from_usize(i ^ j)
+                        {
+                            multiplicity_u8_xor += Val::ONE;
                         }
                     }
-                    u8xor_trace_values.push(multiplicity);
+
+                    for vals in byte_range_check_values_from_claims.clone() {
+                        if vals.0 == Val::from_usize(i) && vals.1 == Val::from_usize(j) {
+                            multiplicity_u8_pair_range_check += Val::ONE;
+                        }
+                    }
+
+                    u8_xor_range_check_trace_values.push(multiplicity_u8_xor);
+                    u8_xor_range_check_trace_values.push(multiplicity_u8_pair_range_check);
                 }
             }
 
@@ -617,7 +724,10 @@ mod tests {
                 rot_10_12_trace_values(10, u32_rotate_right_10_values_from_claims);
 
             let traces = vec![
-                RowMajorMatrix::new(u8xor_trace_values, U8_XOR_TRACE_WIDTH),
+                RowMajorMatrix::new(
+                    u8_xor_range_check_trace_values,
+                    U8_XOR_PAIR_RANGE_CHECK_TRACE_WIDTH,
+                ),
                 RowMajorMatrix::new(u32xor_trace_values, U32_XOR_TRACE_WIDTH),
                 RowMajorMatrix::new(u32_add_trace_values, U32_ADD_TRACE_WIDTH),
                 RowMajorMatrix::new(
