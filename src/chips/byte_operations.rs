@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::builder::symbolic::{Entry, SymbolicExpression, SymbolicVariable};
-    use crate::chips::Expr;
+    use crate::chips::SymbExpr;
     use crate::lookup::{Lookup, LookupAir};
     use crate::system::{System, SystemWitness};
     use crate::types::{CommitmentParameters, FriParameters, Val};
@@ -68,7 +68,7 @@ mod tests {
     }
 
     impl ByteCS {
-        fn lookups(&self) -> Vec<Lookup<Expr>> {
+        fn lookups(&self) -> Vec<Lookup<SymbExpr>> {
             let var =
                 |i| SymbolicExpression::from(SymbolicVariable::new(Entry::Main { offset: 0 }, i));
 
@@ -90,7 +90,7 @@ mod tests {
                     Lookup::pull(
                         var(i),
                         vec![
-                            Expr::from_usize(i),
+                            SymbExpr::from_usize(i),
                             preprocessed_var(0),
                             preprocessed_var(1),
                             preprocessed_var(2 + i),
@@ -102,7 +102,7 @@ mod tests {
             lookups.push(Lookup::pull(
                 var(pair_range_check_idx),
                 vec![
-                    Expr::from_usize(pair_range_check_idx),
+                    SymbExpr::from_usize(pair_range_check_idx),
                     preprocessed_var(0),
                     preprocessed_var(1),
                 ],

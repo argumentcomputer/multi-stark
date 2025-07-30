@@ -4,7 +4,7 @@ mod tests {
     use p3_field::{Field, PrimeCharacteristicRing};
     use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
-    use crate::chips::Expr;
+    use crate::chips::SymbExpr;
     use crate::{
         builder::symbolic::{Entry, SymbolicVariable},
         lookup::{Lookup, LookupAir},
@@ -84,16 +84,17 @@ mod tests {
     }
 
     impl U32CS {
-        fn lookups(&self) -> Vec<Lookup<Expr>> {
-            let var = |index| Expr::from(SymbolicVariable::new(Entry::Main { offset: 0 }, index));
+        fn lookups(&self) -> Vec<Lookup<SymbExpr>> {
+            let var =
+                |index| SymbExpr::from(SymbolicVariable::new(Entry::Main { offset: 0 }, index));
             let preprocessed_var = |index| {
-                Expr::from(SymbolicVariable::new(
+                SymbExpr::from(SymbolicVariable::new(
                     Entry::Preprocessed { offset: 0 },
                     index,
                 ))
             };
-            let byte_index = Expr::from_u8(0);
-            let u32_index = Expr::from_u8(1);
+            let byte_index = SymbExpr::from_u8(0);
+            let u32_index = SymbExpr::from_u8(1);
             match self {
                 Self::ByteChip => vec![Lookup::pull(var(0), vec![byte_index, preprocessed_var(0)])],
                 Self::U32AddChip => {
@@ -103,23 +104,24 @@ mod tests {
                         vec![
                             u32_index,
                             var(0)
-                                + var(1) * Expr::from_u32(256)
-                                + var(2) * Expr::from_u32(256 * 256)
-                                + var(3) * Expr::from_u32(256 * 256 * 256),
+                                + var(1) * SymbExpr::from_u32(256)
+                                + var(2) * SymbExpr::from_u32(256 * 256)
+                                + var(3) * SymbExpr::from_u32(256 * 256 * 256),
                             var(4)
-                                + var(5) * Expr::from_u32(256)
-                                + var(6) * Expr::from_u32(256 * 256)
-                                + var(7) * Expr::from_u32(256 * 256 * 256),
+                                + var(5) * SymbExpr::from_u32(256)
+                                + var(6) * SymbExpr::from_u32(256 * 256)
+                                + var(7) * SymbExpr::from_u32(256 * 256 * 256),
                             var(8)
-                                + var(9) * Expr::from_u32(256)
-                                + var(10) * Expr::from_u32(256 * 256)
-                                + var(11) * Expr::from_u32(256 * 256 * 256),
+                                + var(9) * SymbExpr::from_u32(256)
+                                + var(10) * SymbExpr::from_u32(256 * 256)
+                                + var(11) * SymbExpr::from_u32(256 * 256 * 256),
                         ],
                     )];
                     // Push
-                    lookups.extend(
-                        (0..12).map(|i| Lookup::push(Expr::ONE, vec![byte_index.clone(), var(i)])),
-                    );
+                    lookups
+                        .extend((0..12).map(|i| {
+                            Lookup::push(SymbExpr::ONE, vec![byte_index.clone(), var(i)])
+                        }));
                     lookups
                 }
             }
