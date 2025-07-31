@@ -1,5 +1,5 @@
 use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, BaseAirWithPublicValues};
-use p3_field::{Algebra, Field, PrimeCharacteristicRing};
+use p3_field::{Algebra, Field, PrimeCharacteristicRing, batch_multiplicative_inverse};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 use crate::{
@@ -92,30 +92,58 @@ impl Lookup<Val> {
         lookups: &[Vec<Vec<Self>>],
         values: &[Val],
     ) -> (Vec<RowMajorMatrix<Val>>, Vec<Val>) {
-        let mut intermediate_accumulators = vec![];
-        let mut traces = vec![];
         let lookup_challenge = values[0];
-        let fingenprint_challenge = values[1];
+        let fingerprint_challenge = values[1];
         let mut accumulator = values[2];
-        for lookups_per_circuit in lookups.iter() {
-            let num_lookups = lookups_per_circuit[0].len();
-            let vec = lookups_per_circuit
+
+        // Compute and collect all messages.
+        let mut messages = vec![];
+        let mut num_messages = vec![];
+        for lookups_per_circuit in lookups {
+            num_messages.push(lookups_per_circuit.len() * lookups_per_circuit[0].len());
+            let circuit_messages = lookups_per_circuit
                 .iter()
-                .flat_map(|lookups_per_row| {
-                    let mut row = Vec::with_capacity(lookups_per_row.len() + 1);
-                    row.push(accumulator);
-                    row.extend(lookups_per_row.iter().map(|lookup| {
-                        let inverse_of_message = lookup
-                            .compute_message(lookup_challenge, fingenprint_challenge)
-                            .inverse();
-                        accumulator += inverse_of_message * lookup.multiplicity;
-                        inverse_of_message
-                    }));
-                    row
-                })
-                .collect::<Vec<_>>();
-            debug_assert_eq!(vec.len() % (num_lookups + 1), 0);
-            let trace = RowMajorMatrix::new(vec, num_lookups + 1);
+                .flatten()
+                .map(|lookup| lookup.compute_message(lookup_challenge, fingerprint_challenge));
+            messages.extend(circuit_messages);
+        }
+
+        // Compute the inverses of all messages in batch.
+        let messages_inverses = batch_multiplicative_inverse(&messages);
+
+        // Compute and collect intermediate accumulators and traces.
+        let mut intermediate_accumulators = Vec::with_capacity(lookups.len());
+        let mut traces = Vec::with_capacity(lookups.len());
+        let mut offset = 0;
+        for (circuit_lookups, num_circuit_messages) in lookups.iter().zip(num_messages) {
+            // Get the slice containing the messages inverses for the current circuit.
+            let circuit_messages_inverses =
+                &messages_inverses[offset..offset + num_circuit_messages];
+            offset += num_circuit_messages;
+
+            let num_row_lookups = circuit_lookups[0].len();
+            let vec = if num_row_lookups == 0 {
+                // No row lookup. Just repeat the accumulator.
+                vec![accumulator; circuit_lookups.len()]
+            } else {
+                circuit_lookups
+                    .iter()
+                    .zip(circuit_messages_inverses.chunks_exact(num_row_lookups))
+                    .flat_map(|(row_lookups, row_messages_inverses)| {
+                        let mut row = Vec::with_capacity(row_lookups.len() + 1);
+                        row.push(accumulator);
+                        row.extend(row_lookups.iter().zip(row_messages_inverses).map(
+                            |(lookup, &message_inverse)| {
+                                accumulator += lookup.multiplicity * message_inverse;
+                                message_inverse
+                            },
+                        ));
+                        row
+                    })
+                    .collect()
+            };
+            debug_assert_eq!(vec.len() % (num_row_lookups + 1), 0);
+            let trace = RowMajorMatrix::new(vec, num_row_lookups + 1);
             intermediate_accumulators.push(accumulator);
             traces.push(trace);
         }
