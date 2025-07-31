@@ -96,11 +96,15 @@ impl Lookup<Val> {
         let fingerprint_challenge = values[1];
         let mut accumulator = values[2];
 
-        // Compute and collect all messages.
-        let mut messages = vec![];
-        let mut num_messages = vec![];
+        // Collect the number of lookups per circuit.
+        let mut num_lookups = Vec::with_capacity(lookups.len());
         for lookups_per_circuit in lookups {
-            num_messages.push(lookups_per_circuit.len() * lookups_per_circuit[0].len());
+            num_lookups.push(lookups_per_circuit.len() * lookups_per_circuit[0].len());
+        }
+
+        // Compute and collect all messages.
+        let mut messages = Vec::with_capacity(num_lookups.iter().sum());
+        for lookups_per_circuit in lookups {
             let circuit_messages = lookups_per_circuit
                 .iter()
                 .flatten()
@@ -115,7 +119,7 @@ impl Lookup<Val> {
         let mut intermediate_accumulators = Vec::with_capacity(lookups.len());
         let mut traces = Vec::with_capacity(lookups.len());
         let mut offset = 0;
-        for (circuit_lookups, num_circuit_messages) in lookups.iter().zip(num_messages) {
+        for (circuit_lookups, num_circuit_messages) in lookups.iter().zip(num_lookups) {
             // Get the slice containing the messages inverses for the current circuit.
             let circuit_messages_inverses =
                 &messages_inverses[offset..offset + num_circuit_messages];
