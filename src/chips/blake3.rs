@@ -39,7 +39,6 @@ mod tests {
     const U32_RIGHT_ROTATE_7_TRACE_WIDTH: usize = 25;
     const U32_RIGHT_ROTATE_12_TRACE_WIDTH: usize = U32_RIGHT_ROTATE_7_TRACE_WIDTH;
 
-
     // Totally 81 byte columns:
     // multiplicity, a_in(4), b_in(4), c_in(4), d_in(4), mx_in(4), my_in(4),
     // a_0_tmp(4), a_0(4), d_0_tmp(4), d_0(4), c_0(4), b_0_tmp(4), b_0(4),
@@ -193,7 +192,7 @@ mod tests {
                     );
                     builder.assert_eq(output, input_div + input_rem * two_pow_32_minus_k);
                 }
-                Self::GFunction => { /* TODO: constrain operations */ },
+                Self::GFunction => { /* TODO: constrain operations */ }
             }
         }
     }
@@ -426,96 +425,93 @@ mod tests {
                 // multiplicity, a_in(4), b_in(4), c_in(4), d_in(4), mx_in(4), my_in(4),
                 // a_0_tmp(4), a_0(4), d_0_tmp(4), d_0(4), c_0(4), b_0_tmp(4), b_0(4),
                 // a_1_tmp(4), a_1(4), d_1_tmp(4), d_1(4), c_1(4), b_1_tmp(4), b_1(4)
-
                 Self::GFunction => {
-                    vec![
-                        Lookup::pull(
-                            var(0),
-                            vec![
-                                SymbExpr::from_usize(g_function_idx),
-                                var(1) // a_in
+                    vec![Lookup::pull(
+                        var(0),
+                        vec![
+                            SymbExpr::from_usize(g_function_idx),
+                            var(1) // a_in
                                     + var(2) * SymbExpr::from_u32(256)
                                     + var(3) * SymbExpr::from_u32(256 * 256)
                                     + var(4) * SymbExpr::from_u32(256 * 256 * 256),
-                                var(5) // b_in
+                            var(5) // b_in
                                     + var(6) * SymbExpr::from_u32(256)
                                     + var(7) * SymbExpr::from_u32(256 * 256)
                                     + var(8) * SymbExpr::from_u32(256 * 256 * 256),
-                                var(9) // c_in
+                            var(9) // c_in
                                     + var(10) * SymbExpr::from_u32(256)
                                     + var(11) * SymbExpr::from_u32(256 * 256)
                                     + var(12) * SymbExpr::from_u32(256 * 256 * 256),
-                                var(13) // d_in
+                            var(13) // d_in
                                     + var(14) * SymbExpr::from_u32(256)
                                     + var(15) * SymbExpr::from_u32(256 * 256)
                                     + var(16) * SymbExpr::from_u32(256 * 256 * 256),
-                                var(17) // mx_in
+                            var(17) // mx_in
                                     + var(18) * SymbExpr::from_u32(256)
                                     + var(19) * SymbExpr::from_u32(256 * 256)
                                     + var(20) * SymbExpr::from_u32(256 * 256 * 256),
-                                var(21) // my_in
+                            var(21) // my_in
                                     + var(22) * SymbExpr::from_u32(256)
                                     + var(23) * SymbExpr::from_u32(256 * 256)
                                     + var(24) * SymbExpr::from_u32(256 * 256 * 256),
-                                // var(25) // a_0_tmp
-                                //     + var(26) * SymbExpr::from_u32(256)
-                                //     + var(27) * SymbExpr::from_u32(256 * 256)
-                                //     + var(28) * SymbExpr::from_u32(256 * 256 * 256),
-                                // var(29) // a_0
-                                //     + var(30) * SymbExpr::from_u32(256)
-                                //     + var(31) * SymbExpr::from_u32(256 * 256)
-                                //     + var(32) * SymbExpr::from_u32(256 * 256 * 256),
-                                // var(33) // d_0_tmp
-                                //     + var(34) * SymbExpr::from_u32(256)
-                                //     + var(35) * SymbExpr::from_u32(256 * 256)
-                                //     + var(36) * SymbExpr::from_u32(256 * 256 * 256),
-                                // var(37) // d_0
-                                //     + var(38) * SymbExpr::from_u32(256)
-                                //     + var(39) * SymbExpr::from_u32(256 * 256)
-                                //     + var(40) * SymbExpr::from_u32(256 * 256 * 256),
-                                // var(41) // c_0
-                                //     + var(42) * SymbExpr::from_u32(256)
-                                //     + var(43) * SymbExpr::from_u32(256 * 256)
-                                //     + var(44) * SymbExpr::from_u32(256 * 256 * 256),
-                                // var(45) // b_0_tmp
-                                //     + var(46) * SymbExpr::from_u32(256)
-                                //     + var(47) * SymbExpr::from_u32(256 * 256)
-                                //     + var(48) * SymbExpr::from_u32(256 * 256 * 256),
-                                // var(49) // b_0
-                                //     + var(50) * SymbExpr::from_u32(256)
-                                //     + var(51) * SymbExpr::from_u32(256 * 256)
-                                //     + var(52) * SymbExpr::from_u32(256 * 256 * 256),
-                                // var(53) // a_1_tmp
-                                //     + var(54) * SymbExpr::from_u32(256)
-                                //     + var(55) * SymbExpr::from_u32(256 * 256)
-                                //     + var(56) * SymbExpr::from_u32(256 * 256 * 256),
-                                var(57) // a_1
+                            // var(25) // a_0_tmp
+                            //     + var(26) * SymbExpr::from_u32(256)
+                            //     + var(27) * SymbExpr::from_u32(256 * 256)
+                            //     + var(28) * SymbExpr::from_u32(256 * 256 * 256),
+                            // var(29) // a_0
+                            //     + var(30) * SymbExpr::from_u32(256)
+                            //     + var(31) * SymbExpr::from_u32(256 * 256)
+                            //     + var(32) * SymbExpr::from_u32(256 * 256 * 256),
+                            // var(33) // d_0_tmp
+                            //     + var(34) * SymbExpr::from_u32(256)
+                            //     + var(35) * SymbExpr::from_u32(256 * 256)
+                            //     + var(36) * SymbExpr::from_u32(256 * 256 * 256),
+                            // var(37) // d_0
+                            //     + var(38) * SymbExpr::from_u32(256)
+                            //     + var(39) * SymbExpr::from_u32(256 * 256)
+                            //     + var(40) * SymbExpr::from_u32(256 * 256 * 256),
+                            // var(41) // c_0
+                            //     + var(42) * SymbExpr::from_u32(256)
+                            //     + var(43) * SymbExpr::from_u32(256 * 256)
+                            //     + var(44) * SymbExpr::from_u32(256 * 256 * 256),
+                            // var(45) // b_0_tmp
+                            //     + var(46) * SymbExpr::from_u32(256)
+                            //     + var(47) * SymbExpr::from_u32(256 * 256)
+                            //     + var(48) * SymbExpr::from_u32(256 * 256 * 256),
+                            // var(49) // b_0
+                            //     + var(50) * SymbExpr::from_u32(256)
+                            //     + var(51) * SymbExpr::from_u32(256 * 256)
+                            //     + var(52) * SymbExpr::from_u32(256 * 256 * 256),
+                            // var(53) // a_1_tmp
+                            //     + var(54) * SymbExpr::from_u32(256)
+                            //     + var(55) * SymbExpr::from_u32(256 * 256)
+                            //     + var(56) * SymbExpr::from_u32(256 * 256 * 256),
+                            var(57) // a_1
                                     + var(58) * SymbExpr::from_u32(256)
                                     + var(59) * SymbExpr::from_u32(256 * 256)
                                     + var(60) * SymbExpr::from_u32(256 * 256 * 256),
-                                // var(61) // d_1_tmp
-                                //     + var(62) * SymbExpr::from_u32(256)
-                                //     + var(63) * SymbExpr::from_u32(256 * 256)
-                                //     + var(64) * SymbExpr::from_u32(256 * 256 * 256),
-                                var(65) // d_1
+                            // var(61) // d_1_tmp
+                            //     + var(62) * SymbExpr::from_u32(256)
+                            //     + var(63) * SymbExpr::from_u32(256 * 256)
+                            //     + var(64) * SymbExpr::from_u32(256 * 256 * 256),
+                            var(65) // d_1
                                     + var(66) * SymbExpr::from_u32(256)
                                     + var(67) * SymbExpr::from_u32(256 * 256)
                                     + var(68) * SymbExpr::from_u32(256 * 256 * 256),
-                                var(69) // c_1
+                            var(69) // c_1
                                     + var(70) * SymbExpr::from_u32(256)
                                     + var(71) * SymbExpr::from_u32(256 * 256)
                                     + var(72) * SymbExpr::from_u32(256 * 256 * 256),
-                                // var(73) // b_1_tmp
-                                //     + var(74) * SymbExpr::from_u32(256)
-                                //     + var(75) * SymbExpr::from_u32(256 * 256)
-                                //     + var(76) * SymbExpr::from_u32(256 * 256 * 256),
-                                var(77) // b_1
+                            // var(73) // b_1_tmp
+                            //     + var(74) * SymbExpr::from_u32(256)
+                            //     + var(75) * SymbExpr::from_u32(256 * 256)
+                            //     + var(76) * SymbExpr::from_u32(256 * 256 * 256),
+                            var(77) // b_1
                                     + var(78) * SymbExpr::from_u32(256)
                                     + var(79) * SymbExpr::from_u32(256 * 256)
                                     + var(80) * SymbExpr::from_u32(256 * 256 * 256),
-                            ]
-                        )
-                    ]
+                        ],
+                    )]
                 }
             }
         }
@@ -639,7 +635,8 @@ mod tests {
                         let c_1 = u32::try_from(claim[9].as_canonical_u64()).unwrap();
                         let b_1 = u32::try_from(claim[10].as_canonical_u64()).unwrap();
 
-                        g_function_values_from_claims.push((a_in, b_in, c_in, d_in, mx_in, my_in, a_1, b_1, c_1, d_1));
+                        g_function_values_from_claims
+                            .push((a_in, b_in, c_in, d_in, mx_in, my_in, a_1, b_1, c_1, d_1));
                     }
 
                     _ => panic!("unsupported chip"),
@@ -658,7 +655,9 @@ mod tests {
             if g_function_values_from_claims.is_empty() {
                 g_function_trace_values = Val::zero_vec(G_FUNCTION_TRACE_WIDHT);
             } else {
-                for (a_in, b_in, c_in, d_in, mx_in, my_in, a1, b1, c1, d1) in g_function_values_from_claims.into_iter() {
+                for (a_in, b_in, c_in, d_in, mx_in, my_in, a1, b1, c1, d1) in
+                    g_function_values_from_claims.into_iter()
+                {
                     // TODO: constrain operations
 
                     let a_0_tmp = a_in.wrapping_add(b_in);
@@ -708,7 +707,6 @@ mod tests {
                     debug_assert_eq!(c_1, c1);
                     debug_assert_eq!(d_1, d1);
 
-
                     let a_in_bytes: [u8; 4] = a_in.to_le_bytes();
                     let b_in_bytes: [u8; 4] = b_in.to_le_bytes();
                     let c_in_bytes: [u8; 4] = c_in.to_le_bytes();
@@ -731,32 +729,52 @@ mod tests {
                     let b_1_bytes: [u8; 4] = b_1.to_le_bytes();
 
                     g_function_trace_values.push(Val::ONE); // multiplicity
-                    g_function_trace_values.extend_from_slice(a_in_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(b_in_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(c_in_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(d_in_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(mx_in_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(my_in_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(a_0_tmp_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(a_0_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(d_0_tmp_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(d_0_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(c_0_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(b_0_tmp_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(b_0_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(a_1_tmp_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(a_1_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(d_1_tmp_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(d_1_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(c_1_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(b_1_tmp_bytes.map(Val::from_u8).as_slice());
-                    g_function_trace_values.extend_from_slice(b_1_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(a_in_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(b_in_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(c_in_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(d_in_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(mx_in_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(my_in_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(a_0_tmp_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(a_0_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(d_0_tmp_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(d_0_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(c_0_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(b_0_tmp_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(b_0_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(a_1_tmp_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(a_1_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(d_1_tmp_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(d_1_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(c_1_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(b_1_tmp_bytes.map(Val::from_u8).as_slice());
+                    g_function_trace_values
+                        .extend_from_slice(b_1_bytes.map(Val::from_u8).as_slice());
                 }
             }
-            let mut g_function_trace = RowMajorMatrix::new(g_function_trace_values, G_FUNCTION_TRACE_WIDHT);
+            let mut g_function_trace =
+                RowMajorMatrix::new(g_function_trace_values, G_FUNCTION_TRACE_WIDHT);
             let height = g_function_trace.height().next_power_of_two();
             g_function_trace.pad_to_height(height, Val::ZERO);
-
 
             // build U32Xor trace (columns: multiplicity, A0, A1, A2, A3, B0, B1, B2, B3, A0^B0, A1^B1, A2^B2, A3^B3)
             let mut u32_xor_trace_values =
@@ -766,27 +784,10 @@ mod tests {
 
                 // we also need to balance the U8Xor chip lookups using zeroes
 
-                byte_xor_values_from_claims.push((
-                    Val::ZERO,
-                    Val::ZERO,
-                    Val::ZERO,
-                ));
-                byte_xor_values_from_claims.push((
-                    Val::ZERO,
-                    Val::ZERO,
-                    Val::ZERO,
-                ));
-                byte_xor_values_from_claims.push((
-                    Val::ZERO,
-                    Val::ZERO,
-                    Val::ZERO,
-                ));
-                byte_xor_values_from_claims.push((
-                    Val::ZERO,
-                    Val::ZERO,
-                    Val::ZERO,
-                ));
-
+                byte_xor_values_from_claims.push((Val::ZERO, Val::ZERO, Val::ZERO));
+                byte_xor_values_from_claims.push((Val::ZERO, Val::ZERO, Val::ZERO));
+                byte_xor_values_from_claims.push((Val::ZERO, Val::ZERO, Val::ZERO));
+                byte_xor_values_from_claims.push((Val::ZERO, Val::ZERO, Val::ZERO));
             } else {
                 for (a, b, a_xor_b) in u32_xor_values_from_claims.into_iter() {
                     debug_assert_eq!(a ^ b, a_xor_b);
@@ -799,7 +800,8 @@ mod tests {
 
                     u32_xor_trace_values.extend_from_slice(a_bytes.map(Val::from_u8).as_slice());
                     u32_xor_trace_values.extend_from_slice(b_bytes.map(Val::from_u8).as_slice());
-                    u32_xor_trace_values.extend_from_slice(a_xor_b_bytes.map(Val::from_u8).as_slice());
+                    u32_xor_trace_values
+                        .extend_from_slice(a_xor_b_bytes.map(Val::from_u8).as_slice());
 
                     /* we send bytes to U8Xor chip, relying on lookup constraining */
 
@@ -829,31 +831,21 @@ mod tests {
             let height = u32_xor_trace.height().next_power_of_two();
             u32_xor_trace.pad_to_height(height, Val::ZERO);
 
-
             // build U32Add trace (columns: A0, A1, A2, A3, B0, B1, B2, B3, C0, C1, C2, C3, carry, multiplicity)
             let mut u32_add_trace_values = vec![];
             if u32_add_values_from_claims.is_empty() {
                 u32_add_trace_values = Val::zero_vec(U32_ADD_TRACE_WIDTH);
 
                 // we also need to balance the lookups using zeroes
-                byte_range_check_values_from_claims
-                    .push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims
-                    .push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims
-                    .push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims
-                    .push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
 
-                byte_range_check_values_from_claims
-                    .push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims
-                    .push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims
-                    .push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims
-                    .push((Val::ZERO, Val::ZERO));
-
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
             } else {
                 for (a, b, c) in u32_add_values_from_claims {
                     let (z, carry) = a.overflowing_add(b);
@@ -882,20 +874,15 @@ mod tests {
                     byte_range_check_values_from_claims
                         .push((Val::from_u8(a_bytes[3]), Val::from_u8(b_bytes[3])));
 
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(c_bytes[0]), Val::ZERO));
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(c_bytes[1]), Val::ZERO));
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(c_bytes[2]), Val::ZERO));
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(c_bytes[3]), Val::ZERO));
+                    byte_range_check_values_from_claims.push((Val::from_u8(c_bytes[0]), Val::ZERO));
+                    byte_range_check_values_from_claims.push((Val::from_u8(c_bytes[1]), Val::ZERO));
+                    byte_range_check_values_from_claims.push((Val::from_u8(c_bytes[2]), Val::ZERO));
+                    byte_range_check_values_from_claims.push((Val::from_u8(c_bytes[3]), Val::ZERO));
                 }
             }
             let mut u32_add_trace = RowMajorMatrix::new(u32_add_trace_values, U32_ADD_TRACE_WIDTH);
             let height = u32_add_trace.height().next_power_of_two();
             u32_add_trace.pad_to_height(height, Val::ZERO);
-
 
             // build U32RotateRight8 trace (columns: multiplicity, a0, a1, a2, a3, rot0, rot1, rot2, rot3)
             let mut u32_rotate_right_8_trace_values = vec![];
@@ -904,11 +891,8 @@ mod tests {
 
                 // we also need to balance U8PairRangeCheck chip lookups using zeroes
 
-                byte_range_check_values_from_claims
-                    .push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims
-                    .push((Val::ZERO, Val::ZERO));
-
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
             } else {
                 for (a, rot) in u32_rotate_right_8_values_from_claims {
                     u32_rotate_right_8_trace_values.push(Val::ONE); // multiplicity
@@ -932,11 +916,12 @@ mod tests {
                         .push((Val::from_u8(a_bytes[1]), Val::from_u8(a_bytes[3])));
                 }
             }
-            let mut u32_rotate_right_8_trace = RowMajorMatrix::new(u32_rotate_right_8_trace_values, U32_RIGHT_ROTATE_8_TRACE_WIDTH);
+            let mut u32_rotate_right_8_trace = RowMajorMatrix::new(
+                u32_rotate_right_8_trace_values,
+                U32_RIGHT_ROTATE_8_TRACE_WIDTH,
+            );
             let height = u32_rotate_right_8_trace.height().next_power_of_two();
             u32_rotate_right_8_trace.pad_to_height(height, Val::ZERO);
-
-
 
             // build U32RotateRight16 trace (columns: multiplicity, a0, a1, a2, a3, rot0, rot1, rot2, rot3)
             let mut u32_rotate_right_16_trace_values = vec![];
@@ -945,11 +930,8 @@ mod tests {
 
                 // we also need to balance the lookups using zeroes
 
-                byte_range_check_values_from_claims
-                    .push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims
-                    .push((Val::ZERO, Val::ZERO));
-
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
             } else {
                 for (a, rot) in u32_rotate_right_16_values_from_claims {
                     u32_rotate_right_16_trace_values.push(Val::ONE); // multiplicity
@@ -973,17 +955,21 @@ mod tests {
                         .push((Val::from_u8(a_bytes[1]), Val::from_u8(a_bytes[3])));
                 }
             }
-            let mut u32_rotate_right_16_trace = RowMajorMatrix::new(u32_rotate_right_16_trace_values, U32_RIGHT_ROTATE_16_TRACE_WIDTH);
+            let mut u32_rotate_right_16_trace = RowMajorMatrix::new(
+                u32_rotate_right_16_trace_values,
+                U32_RIGHT_ROTATE_16_TRACE_WIDTH,
+            );
             let height = u32_rotate_right_16_trace.height().next_power_of_two();
             u32_rotate_right_16_trace.pad_to_height(height, Val::ZERO);
 
-
-
-            fn rot_7_12_trace_values(k: u32, vals_from_claim: Vec<(u32, u32)>) -> RowMajorMatrix<Val> {
+            fn rot_7_12_trace_values(
+                k: u32,
+                vals_from_claim: Vec<(u32, u32)>,
+            ) -> RowMajorMatrix<Val> {
                 let width = match k {
                     7 => U32_RIGHT_ROTATE_7_TRACE_WIDTH,
                     12 => U32_RIGHT_ROTATE_12_TRACE_WIDTH,
-                    _ => panic!("unexpected k")
+                    _ => panic!("unexpected k"),
                 };
 
                 let mut values = vec![];
@@ -1013,7 +999,9 @@ mod tests {
                         values.extend_from_slice(a_bytes.map(Val::from_u8).as_slice());
                         values.extend_from_slice(rot_bytes.map(Val::from_u8).as_slice());
                         values.extend_from_slice(two_pow_k_bytes.map(Val::from_u8).as_slice());
-                        values.extend_from_slice(two_pow_32_minus_k_bytes.map(Val::from_u8).as_slice());
+                        values.extend_from_slice(
+                            two_pow_32_minus_k_bytes.map(Val::from_u8).as_slice(),
+                        );
                         values.extend_from_slice(input_div_bytes.map(Val::from_u8).as_slice());
                         values.extend_from_slice(input_rem_bytes.map(Val::from_u8).as_slice());
                     }
@@ -1041,7 +1029,6 @@ mod tests {
             // build U32RotateRight7 trace (columns same as for U32RotateRight12)
             let u32_rotate_right_7_trace =
                 rot_7_12_trace_values(7, u32_rotate_right_7_values_from_claims);
-
 
             // finally build U8Xor / U8PairRangeCheck trace (columns: multiplicity_u8_xor, multiplicity_pair_range_check)
             // since this it "lowest-level" trace, its multiplicities could be updated by other chips previously
@@ -1074,14 +1061,17 @@ mod tests {
             }
 
             let traces = vec![
-                RowMajorMatrix::new(u8_xor_range_check_trace_values, U8_XOR_PAIR_RANGE_CHECK_TRACE_WIDTH),
+                RowMajorMatrix::new(
+                    u8_xor_range_check_trace_values,
+                    U8_XOR_PAIR_RANGE_CHECK_TRACE_WIDTH,
+                ),
                 u32_xor_trace,
                 u32_add_trace,
                 u32_rotate_right_8_trace,
                 u32_rotate_right_16_trace,
                 u32_rotate_right_12_trace,
                 u32_rotate_right_7_trace,
-                g_function_trace
+                g_function_trace,
             ];
 
             (traces.clone(), SystemWitness::from_stage_1(traces, system))
@@ -1161,7 +1151,6 @@ mod tests {
         let f = Val::from_u8;
         let f32 = Val::from_u32;
 
-
         let a_in = 0x11111111u32;
         let b_in = 0x22222222u32;
         let c_in = 0x33333333u32;
@@ -1234,8 +1223,16 @@ mod tests {
                 ],
                 vec![
                     Val::from_usize(Blake3CompressionChips::GFunction.position()),
-                    f32(a_in), f32(b_in), f32(c_in), f32(d_in), f32(mx_in), f32(my_in),
-                    f32(a_1), f32(d_1), f32(c_1), f32(b_1)
+                    f32(a_in),
+                    f32(b_in),
+                    f32(c_in),
+                    f32(d_in),
+                    f32(mx_in),
+                    f32(my_in),
+                    f32(a_1),
+                    f32(d_1),
+                    f32(c_1),
+                    f32(b_1),
                 ],
             ],
         };
