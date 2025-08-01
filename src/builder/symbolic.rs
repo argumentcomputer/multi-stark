@@ -120,7 +120,7 @@ impl<F: Field> SymbolicExpression<F> {
         preprocessed: Option<&[Var]>,
     ) -> Expr {
         match self {
-            Self::Variable(var) => match var.entry {
+            Self::Variable(var) => match &var.entry {
                 Entry::Main { offset: 0 } => row[var.index].clone().into(),
                 Entry::Preprocessed { offset: 0 } => {
                     preprocessed.unwrap()[var.index].clone().into()
@@ -129,17 +129,14 @@ impl<F: Field> SymbolicExpression<F> {
             },
             Self::Constant(c) => (*c).into(),
             Self::Add { x, y, .. } => {
-                x.interpret::<Expr, Var>(row, preprocessed)
-                    + y.interpret::<Expr, Var>(row, preprocessed)
+                x.interpret(row, preprocessed) + y.interpret(row, preprocessed)
             }
             Self::Sub { x, y, .. } => {
-                x.interpret::<Expr, Var>(row, preprocessed)
-                    - y.interpret::<Expr, Var>(row, preprocessed)
+                x.interpret(row, preprocessed) - y.interpret(row, preprocessed)
             }
-            Self::Neg { x, .. } => -x.interpret::<Expr, Var>(row, preprocessed),
+            Self::Neg { x, .. } => -x.interpret(row, preprocessed),
             Self::Mul { x, y, .. } => {
-                x.interpret::<Expr, Var>(row, preprocessed)
-                    * y.interpret::<Expr, Var>(row, preprocessed)
+                x.interpret(row, preprocessed) * y.interpret(row, preprocessed)
             }
             _ => unimplemented!(),
         }

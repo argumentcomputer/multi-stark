@@ -249,7 +249,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
                 pcs,
                 1 << log_degree,
             );
-            let zeta_next = trace_domain.next_point(zeta).unwrap();
+            let zeta_next = zeta * trace_domain.subgroup_generator();
             round1_openings.push(vec![zeta, zeta_next]);
             round2_openings.push(vec![zeta, zeta_next]);
             round3_openings.extend(vec![vec![zeta]; quotient_degree]);
