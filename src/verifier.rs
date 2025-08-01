@@ -53,8 +53,8 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
 
         // the last accumulator should be 0
         ensure_eq!(
-            *intermediate_accumulators.last().unwrap(),
-            Val::from_u32(0),
+            intermediate_accumulators.last(),
+            Some(&Val::ZERO),
             VerificationError::UnbalancedChannel
         );
 
@@ -128,7 +128,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                     )
                 })
                 .collect::<Vec<_>>();
-            let zeta_next = trace_domain.next_point(zeta).unwrap();
+            let zeta_next = zeta * trace_domain.subgroup_generator();
             if let Some(i) = self.preprocessed_indices[i] {
                 let preprocessed_opened_values = preprocessed_opened_values.as_ref().unwrap();
                 preprocessed_trace_evaluations.push((

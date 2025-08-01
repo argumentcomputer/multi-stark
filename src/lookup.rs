@@ -80,12 +80,8 @@ impl Lookup<SymbolicExpression<Val>> {
 }
 
 impl Lookup<Val> {
-    pub fn compute_message(&self, lookup_challenge: Val, fingerprint_challenge: Val) -> Val {
-        let args = fingerprint_reverse::<Val, Val, _>(
-            &fingerprint_challenge,
-            self.args.iter().rev().copied(),
-        );
-        lookup_challenge + args
+    pub fn compute_message(&self, lookup_challenge: Val, fingerprint_challenge: &Val) -> Val {
+        lookup_challenge + fingerprint(fingerprint_challenge, self.args.iter().copied())
     }
 
     pub fn stage_2_traces(
@@ -93,7 +89,7 @@ impl Lookup<Val> {
         values: &[Val],
     ) -> (Vec<RowMajorMatrix<Val>>, Vec<Val>) {
         let lookup_challenge = values[0];
-        let fingerprint_challenge = values[1];
+        let fingerprint_challenge = &values[1];
         let mut accumulator = values[2];
 
         // Collect the number of lookups per circuit.
@@ -220,18 +216,15 @@ impl<A> LookupAir<A> {
         let acc_col = &stage_2_row[0];
         let mut acc_expr: AB::Expr = acc_col.clone().into();
         for (lookup, inverse_of_message) in lookups.iter().zip(inverse_of_messages) {
-            let multiplicity = lookup
-                .multiplicity
-                .interpret::<AB::Expr, AB::Var>(&row, preprocessed_row);
-            let args = fingerprint_reverse::<Val, AB::Expr, _>(
+            let multiplicity = lookup.multiplicity.interpret(&row, preprocessed_row);
+            let fingerprint = fingerprint::<Val, _>(
                 &fingerprint_challenge.into(),
                 lookup
                     .args
                     .iter()
-                    .rev()
-                    .map(|arg| arg.interpret::<AB::Expr, AB::Var>(&row, preprocessed_row)),
+                    .map(|arg| arg.interpret(&row, preprocessed_row)),
             );
-            let message = lookup_challenge.into() + args;
+            let message = lookup_challenge.into() + fingerprint;
             builder.assert_one(message.clone() * inverse_of_message.clone());
             acc_expr += multiplicity * inverse_of_message.clone();
         }
@@ -243,12 +236,14 @@ impl<A> LookupAir<A> {
     }
 }
 
-// Compute a fingerprint of the coefficients in reverse using Horner's method:
-fn fingerprint_reverse<F: Field, Expr: Algebra<F>, Iter: Iterator<Item = Expr>>(
+/// Computes a fingerprint of the coefficients using Horner's method.
+fn fingerprint<F: Field, Expr: Algebra<F>>(
     r: &Expr,
-    coeffs: Iter,
+    coeffs: impl DoubleEndedIterator<Item = Expr>,
 ) -> Expr {
-    coeffs.fold(F::ZERO.into(), |acc, coeff| acc * r.clone() + coeff)
+    coeffs
+        .rev()
+        .fold(F::ZERO.into(), |acc, coeff| acc * r.clone() + coeff)
 }
 
 #[cfg(test)]
@@ -286,9 +281,9 @@ mod tests {
             let input_is_zero = var(3);
             let input_not_zero = var(4);
             let recursion_output = var(5);
-            let even_index = Val::from_u32(0).into();
-            let odd_index = Val::from_u32(1).into();
-            let one: SymbolicExpression<_> = Val::from_u32(1).into();
+            let even_index = Val::ZERO.into();
+            let odd_index = Val::ONE.into();
+            let one: SymbolicExpression<_> = Val::ONE.into();
             match self {
                 Self::Even => vec![
                     Lookup::pull(
