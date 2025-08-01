@@ -95,8 +95,8 @@ mod tests {
                     let mut trace_values = Vec::with_capacity(
                         BYTE_VALUES_NUM * BYTE_VALUES_NUM * PREPROCESSED_TRACE_WIDTH,
                     );
-                    for i in 0..256 {
-                        for j in 0..256 {
+                    for i in 0..BYTE_VALUES_NUM {
+                        for j in 0..BYTE_VALUES_NUM {
                             trace_values.push(F::from_u8(bytes[i]));
                             trace_values.push(F::from_u8(bytes[j]));
                             trace_values.push(F::from_u8(bytes[i] ^ bytes[j]));
@@ -191,7 +191,7 @@ mod tests {
                     );
                     builder.assert_eq(output, input_div + input_rem * two_pow_32_minus_k);
                 }
-                Self::GFunction => { /* TODO: constrain operations */ }
+                Self::GFunction => { }
             }
         }
     }
@@ -241,6 +241,7 @@ mod tests {
                     ]
                 }
 
+                // (4 push lookups to u8_xor_chip)
                 Self::U32Xor => {
                     let mut lookups = vec![Lookup::pull(
                         var(0),
@@ -276,6 +277,7 @@ mod tests {
                     lookups
                 }
 
+                // (8 push lookups to pair_range_check)
                 Self::U32Add => {
                     // Pull
                     let mut lookups = vec![Lookup::pull(
@@ -322,6 +324,7 @@ mod tests {
                     lookups
                 }
 
+                // (2 push lookups to pair_range_check)
                 Self::U32RightRotate8 => {
                     let mut lookups = vec![Lookup::pull(
                         var(0),
@@ -354,6 +357,7 @@ mod tests {
                     lookups
                 }
 
+                // (2 push lookups to pair_range_check)
                 Self::U32RightRotate16 => {
                     let mut lookups = vec![Lookup::pull(
                         var(0),
@@ -513,28 +517,27 @@ mod tests {
                                     + var(80) * SymbExpr::from_u32(256 * 256 * 256),
                             ],
                         ),
-                        // balancing lower-level chips used in G function
+                        // interacting with lower-level chips that constrain operations used in G function
 
                         // a_in + b_in = a_0_tmp
-                        // Lookup::push(
-                        //     SymbExpr::ONE,
-                        //     vec![
-                        //         SymbExpr::from_usize(u32_add_idx),
-                        //         var(1) // a_in
-                        //             + var(2) * SymbExpr::from_u32(256)
-                        //             + var(3) * SymbExpr::from_u32(256 * 256)
-                        //             + var(4) * SymbExpr::from_u32(256 * 256 * 256),
-                        //         var(5) // b_in
-                        //             + var(6) * SymbExpr::from_u32(256)
-                        //             + var(7) * SymbExpr::from_u32(256 * 256)
-                        //             + var(8) * SymbExpr::from_u32(256 * 256 * 256),
-                        //         var(25) // a_0_tmp
-                        //             + var(26) * SymbExpr::from_u32(256)
-                        //             + var(27) * SymbExpr::from_u32(256 * 256)
-                        //             + var(28) * SymbExpr::from_u32(256 * 256 * 256),
-                        //     ],
-                        // ),
-
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_add_idx),
+                                var(1) // a_in
+                                    + var(2) * SymbExpr::from_u32(256)
+                                    + var(3) * SymbExpr::from_u32(256 * 256)
+                                    + var(4) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(5) // b_in
+                                    + var(6) * SymbExpr::from_u32(256)
+                                    + var(7) * SymbExpr::from_u32(256 * 256)
+                                    + var(8) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(25) // a_0_tmp
+                                    + var(26) * SymbExpr::from_u32(256)
+                                    + var(27) * SymbExpr::from_u32(256 * 256)
+                                    + var(28) * SymbExpr::from_u32(256 * 256 * 256),
+                            ],
+                        ),
                         // a_0_tmp + mx_in = a_0
                         Lookup::push(
                             SymbExpr::ONE,
@@ -642,65 +645,62 @@ mod tests {
                             ],
                         ),
                         // a_0 + b_0 = a_1_tmp
-                        // Lookup::push(
-                        //     SymbExpr::ONE,
-                        //     vec![
-                        //         SymbExpr::from_usize(u32_add_idx),
-                        //         var(29) // a_0
-                        //             + var(30) * SymbExpr::from_u32(256)
-                        //             + var(31) * SymbExpr::from_u32(256 * 256)
-                        //             + var(32) * SymbExpr::from_u32(256 * 256 * 256),
-                        //         var(49) // b_0
-                        //             + var(50) * SymbExpr::from_u32(256)
-                        //             + var(51) * SymbExpr::from_u32(256 * 256)
-                        //             + var(52) * SymbExpr::from_u32(256 * 256 * 256),
-                        //         var(53) // a_1_tmp
-                        //             + var(54) * SymbExpr::from_u32(256)
-                        //             + var(55) * SymbExpr::from_u32(256 * 256)
-                        //             + var(56) * SymbExpr::from_u32(256 * 256 * 256),
-                        //     ],
-                        // ),
-
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_add_idx),
+                                var(29) // a_0
+                                    + var(30) * SymbExpr::from_u32(256)
+                                    + var(31) * SymbExpr::from_u32(256 * 256)
+                                    + var(32) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(49) // b_0
+                                    + var(50) * SymbExpr::from_u32(256)
+                                    + var(51) * SymbExpr::from_u32(256 * 256)
+                                    + var(52) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(53) // a_1_tmp
+                                    + var(54) * SymbExpr::from_u32(256)
+                                    + var(55) * SymbExpr::from_u32(256 * 256)
+                                    + var(56) * SymbExpr::from_u32(256 * 256 * 256),
+                            ],
+                        ),
                         // a_1_tmp, my_in, a_1
-                        // Lookup::push(
-                        //     SymbExpr::ONE,
-                        //     vec![
-                        //         SymbExpr::from_usize(u32_add_idx),
-                        //         var(53) // a_1_tmp
-                        //             + var(54) * SymbExpr::from_u32(256)
-                        //             + var(55) * SymbExpr::from_u32(256 * 256)
-                        //             + var(56) * SymbExpr::from_u32(256 * 256 * 256),
-                        //         var(21) // my_in
-                        //             + var(22) * SymbExpr::from_u32(256)
-                        //             + var(23) * SymbExpr::from_u32(256 * 256)
-                        //             + var(24) * SymbExpr::from_u32(256 * 256 * 256),
-                        //         var(57) // a_1
-                        //             + var(58) * SymbExpr::from_u32(256)
-                        //             + var(59) * SymbExpr::from_u32(256 * 256)
-                        //             + var(60) * SymbExpr::from_u32(256 * 256 * 256),
-                        //     ],
-                        // ),
-
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_add_idx),
+                                var(53) // a_1_tmp
+                                    + var(54) * SymbExpr::from_u32(256)
+                                    + var(55) * SymbExpr::from_u32(256 * 256)
+                                    + var(56) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(21) // my_in
+                                    + var(22) * SymbExpr::from_u32(256)
+                                    + var(23) * SymbExpr::from_u32(256 * 256)
+                                    + var(24) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(57) // a_1
+                                    + var(58) * SymbExpr::from_u32(256)
+                                    + var(59) * SymbExpr::from_u32(256 * 256)
+                                    + var(60) * SymbExpr::from_u32(256 * 256 * 256),
+                            ],
+                        ),
                         // d_0 ^ a_1 = d_1_tmp
-                        // Lookup::push(
-                        //     SymbExpr::ONE,
-                        //     vec![
-                        //         SymbExpr::from_usize(u32_xor_idx),
-                        //         var(37) // d_0
-                        //             + var(38) * SymbExpr::from_u32(256)
-                        //             + var(39) * SymbExpr::from_u32(256 * 256)
-                        //             + var(40) * SymbExpr::from_u32(256 * 256 * 256),
-                        //         var(57) // a_1
-                        //             + var(58) * SymbExpr::from_u32(256)
-                        //             + var(59) * SymbExpr::from_u32(256 * 256)
-                        //             + var(60) * SymbExpr::from_u32(256 * 256 * 256),
-                        //         var(61) // d_1_tmp
-                        //             + var(62) * SymbExpr::from_u32(256)
-                        //             + var(63) * SymbExpr::from_u32(256 * 256)
-                        //             + var(64) * SymbExpr::from_u32(256 * 256 * 256),
-                        //     ],
-                        // ),
-
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(37) // d_0
+                                    + var(38) * SymbExpr::from_u32(256)
+                                    + var(39) * SymbExpr::from_u32(256 * 256)
+                                    + var(40) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(57) // a_1
+                                    + var(58) * SymbExpr::from_u32(256)
+                                    + var(59) * SymbExpr::from_u32(256 * 256)
+                                    + var(60) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(61) // d_1_tmp
+                                    + var(62) * SymbExpr::from_u32(256)
+                                    + var(63) * SymbExpr::from_u32(256 * 256)
+                                    + var(64) * SymbExpr::from_u32(256 * 256 * 256),
+                            ],
+                        ),
                         // d_1_tmp >> 8 = d_1
                         Lookup::push(
                             SymbExpr::ONE,
@@ -717,45 +717,43 @@ mod tests {
                             ],
                         ),
                         // c_0 + d_1 = c_1
-                        // Lookup::push(
-                        //     SymbExpr::ONE,
-                        //     vec![
-                        //         SymbExpr::from_usize(u32_add_idx),
-                        //         var(41) // c_0
-                        //             + var(42) * SymbExpr::from_u32(256)
-                        //             + var(43) * SymbExpr::from_u32(256 * 256)
-                        //             + var(44) * SymbExpr::from_u32(256 * 256 * 256),
-                        //         var(65) // d_1
-                        //             + var(66) * SymbExpr::from_u32(256)
-                        //             + var(67) * SymbExpr::from_u32(256 * 256)
-                        //             + var(68) * SymbExpr::from_u32(256 * 256 * 256),
-                        //         var(69) // c_1
-                        //             + var(70) * SymbExpr::from_u32(256)
-                        //             + var(71) * SymbExpr::from_u32(256 * 256)
-                        //             + var(72) * SymbExpr::from_u32(256 * 256 * 256),
-                        //     ],
-                        // ),
-
-                        // b_0 ^ c_1 = b_1_tmp
-                        // Lookup::push(
-                        //     SymbExpr::ONE,
-                        //     vec![
-                        //         SymbExpr::from_usize(u32_xor_idx),
-                        //         var(49) // b_0
-                        //             + var(50) * SymbExpr::from_u32(256)
-                        //             + var(51) * SymbExpr::from_u32(256 * 256)
-                        //             + var(52) * SymbExpr::from_u32(256 * 256 * 256),
-                        //         var(69) // c_1
-                        //             + var(70) * SymbExpr::from_u32(256)
-                        //             + var(71) * SymbExpr::from_u32(256 * 256)
-                        //             + var(72) * SymbExpr::from_u32(256 * 256 * 256),
-                        //         var(73) // b_1_tmp
-                        //             + var(74) * SymbExpr::from_u32(256)
-                        //             + var(75) * SymbExpr::from_u32(256 * 256)
-                        //             + var(76) * SymbExpr::from_u32(256 * 256 * 256),
-                        //     ],
-                        // ),
-
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_add_idx),
+                                var(41) // c_0
+                                    + var(42) * SymbExpr::from_u32(256)
+                                    + var(43) * SymbExpr::from_u32(256 * 256)
+                                    + var(44) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(65) // d_1
+                                    + var(66) * SymbExpr::from_u32(256)
+                                    + var(67) * SymbExpr::from_u32(256 * 256)
+                                    + var(68) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(69) // c_1
+                                    + var(70) * SymbExpr::from_u32(256)
+                                    + var(71) * SymbExpr::from_u32(256 * 256)
+                                    + var(72) * SymbExpr::from_u32(256 * 256 * 256),
+                            ],
+                        ),
+                        //b_0 ^ c_1 = b_1_tmp
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(49) // b_0
+                                    + var(50) * SymbExpr::from_u32(256)
+                                    + var(51) * SymbExpr::from_u32(256 * 256)
+                                    + var(52) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(69) // c_1
+                                    + var(70) * SymbExpr::from_u32(256)
+                                    + var(71) * SymbExpr::from_u32(256 * 256)
+                                    + var(72) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(73) // b_1_tmp
+                                    + var(74) * SymbExpr::from_u32(256)
+                                    + var(75) * SymbExpr::from_u32(256 * 256)
+                                    + var(76) * SymbExpr::from_u32(256 * 256 * 256),
+                            ],
+                        ),
                         // b_1_tmp >> 7 = b_1
                         Lookup::push(
                             SymbExpr::ONE,
@@ -914,12 +912,35 @@ mod tests {
                 Vec::<Val>::with_capacity(g_function_values_from_claims.len());
             if g_function_values_from_claims.is_empty() {
                 g_function_trace_values = Val::zero_vec(G_FUNCTION_TRACE_WIDHT);
+
+                // 1 rot7
+                u32_rotate_right_7_values_from_claims.push((0u32, 0u32));
+                // 1 rot8
+                u32_rotate_right_8_values_from_claims.push((0u32, 0u32));
+                // 1 rot16
+                u32_rotate_right_16_values_from_claims.push((0u32, 0u32));
+                // 1 rot12
+                u32_rotate_right_12_values_from_claims.push((0u32, 0u32));
+
+                // 4 u32_xor
+                u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
+
+                // 6 u32_add
+                u32_add_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_add_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_add_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_add_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_add_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_add_values_from_claims.push((0u32, 0u32, 0u32));
             } else {
                 for (a_in, b_in, c_in, d_in, mx_in, my_in, a1, b1, c1, d1) in
                     g_function_values_from_claims.into_iter()
                 {
                     let a_0_tmp = a_in.wrapping_add(b_in);
-                    // u32_add_values_from_claims.push((a_in, b_in, a_0_tmp)); // send data to U32Add chip TODO
+                    u32_add_values_from_claims.push((a_in, b_in, a_0_tmp)); // send data to U32Add chip TODO
 
                     let a_0 = a_0_tmp.wrapping_add(mx_in);
                     u32_add_values_from_claims.push((a_0_tmp, mx_in, a_0)); // send data to U32Add chip
@@ -940,22 +961,22 @@ mod tests {
                     u32_rotate_right_12_values_from_claims.push((b_0_tmp, b_0)); // send data to U32RightRotate12 chip
 
                     let a_1_tmp = a_0.wrapping_add(b_0);
-                    // u32_add_values_from_claims.push((a_0, b_0, a_1_tmp)); // send data to U32Add chip TODO
+                    u32_add_values_from_claims.push((a_0, b_0, a_1_tmp)); // send data to U32Add chip TODO
 
                     let a_1 = a_1_tmp.wrapping_add(my_in);
-                    // u32_add_values_from_claims.push((a_1_tmp, my_in, a_1)); // send data to U32Add chip TODO
+                    u32_add_values_from_claims.push((a_1_tmp, my_in, a_1)); // send data to U32Add chip TODO
 
                     let d_1_tmp = d_0 ^ a_1;
-                    // u32_xor_values_from_claims.push((d_0, a_1, d_1_tmp)); // send data to U32Xor chip TODO
+                    u32_xor_values_from_claims.push((d_0, a_1, d_1_tmp)); // send data to U32Xor chip TODO
 
                     let d_1 = d_1_tmp.rotate_right(8);
                     u32_rotate_right_8_values_from_claims.push((d_1_tmp, d_1));
 
                     let c_1 = c_0.wrapping_add(d_1);
-                    // u32_add_values_from_claims.push((c_0, d_1, c_1)); // send data to U32Add chip TODO
+                    u32_add_values_from_claims.push((c_0, d_1, c_1)); // send data to U32Add chip TODO
 
                     let b_1_tmp = b_0 ^ c_1;
-                    // u32_xor_values_from_claims.push((b_0, c_1, b_1_tmp)); // send data to U32Xor chip TODO
+                    u32_xor_values_from_claims.push((b_0, c_1, b_1_tmp)); // send data to U32Xor chip TODO
 
                     let b_1 = b_1_tmp.rotate_right(7);
                     u32_rotate_right_7_values_from_claims.push((b_1_tmp, b_1));
@@ -1032,6 +1053,26 @@ mod tests {
             let mut g_function_trace =
                 RowMajorMatrix::new(g_function_trace_values, G_FUNCTION_TRACE_WIDHT);
             let height = g_function_trace.height().next_power_of_two();
+            let zero_rows_added = height - g_function_trace.height();
+            for _ in 0..zero_rows_added {
+                // TODO: add empty claims for balancing lookups
+                u32_rotate_right_7_values_from_claims.push((0u32, 0u32));
+                u32_rotate_right_8_values_from_claims.push((0u32, 0u32));
+                u32_rotate_right_16_values_from_claims.push((0u32, 0u32));
+                u32_rotate_right_12_values_from_claims.push((0u32, 0u32));
+
+                u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
+
+                u32_add_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_add_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_add_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_add_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_add_values_from_claims.push((0u32, 0u32, 0u32));
+                u32_add_values_from_claims.push((0u32, 0u32, 0u32));
+            }
             g_function_trace.pad_to_height(height, Val::ZERO);
 
             // build U32Xor trace (columns: multiplicity, A0, A1, A2, A3, B0, B1, B2, B3, A0^B0, A1^B1, A2^B2, A3^B3)
@@ -1087,6 +1128,14 @@ mod tests {
             }
             let mut u32_xor_trace = RowMajorMatrix::new(u32_xor_trace_values, U32_XOR_TRACE_WIDTH);
             let height = u32_xor_trace.height().next_power_of_two();
+            let zero_rows = height - u32_xor_trace.height();
+            for _ in 0..zero_rows {
+                // we also need to balance the U8Xor chip lookups using zeroes for every padded row
+                byte_xor_values_from_claims.push((Val::ZERO, Val::ZERO, Val::ZERO));
+                byte_xor_values_from_claims.push((Val::ZERO, Val::ZERO, Val::ZERO));
+                byte_xor_values_from_claims.push((Val::ZERO, Val::ZERO, Val::ZERO));
+                byte_xor_values_from_claims.push((Val::ZERO, Val::ZERO, Val::ZERO));
+            }
             u32_xor_trace.pad_to_height(height, Val::ZERO);
 
             // build U32Add trace (columns: A0, A1, A2, A3, B0, B1, B2, B3, C0, C1, C2, C3, carry, multiplicity)
@@ -1140,6 +1189,19 @@ mod tests {
             }
             let mut u32_add_trace = RowMajorMatrix::new(u32_add_trace_values, U32_ADD_TRACE_WIDTH);
             let height = u32_add_trace.height().next_power_of_two();
+            let zero_rows = height - u32_add_trace.height();
+            for _ in 0..zero_rows {
+                // we also need to balance the lookups using zeroes for every padded row
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+            }
             u32_add_trace.pad_to_height(height, Val::ZERO);
 
             // build U32RotateRight8 trace (columns: multiplicity, a0, a1, a2, a3, rot0, rot1, rot2, rot3)
@@ -1179,6 +1241,12 @@ mod tests {
                 U32_RIGHT_ROTATE_8_TRACE_WIDTH,
             );
             let height = u32_rotate_right_8_trace.height().next_power_of_two();
+            let zero_rows = height - u32_rotate_right_8_trace.height();
+            for _ in 0..zero_rows {
+                // we also need to balance the lookups using zeroes for every padded row
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+            }
             u32_rotate_right_8_trace.pad_to_height(height, Val::ZERO);
 
             // build U32RotateRight16 trace (columns: multiplicity, a0, a1, a2, a3, rot0, rot1, rot2, rot3)
@@ -1218,6 +1286,12 @@ mod tests {
                 U32_RIGHT_ROTATE_16_TRACE_WIDTH,
             );
             let height = u32_rotate_right_16_trace.height().next_power_of_two();
+            let zero_rows = height - u32_rotate_right_16_trace.height();
+            for _ in 0..zero_rows {
+                // we also need to balance the lookups using zeroes for every padded row
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+            }
             u32_rotate_right_16_trace.pad_to_height(height, Val::ZERO);
 
             fn rot_7_12_trace_values(
@@ -1434,6 +1508,7 @@ mod tests {
 
         let claims = Blake3CompressionClaims {
             claims: vec![
+                // 3 u8 xor claims
                 vec![
                     Val::from_usize(Blake3CompressionChips::U8Xor.position()),
                     f(a_u8),
@@ -1446,23 +1521,84 @@ mod tests {
                     f(b1_u8),
                     f(xor1_u8),
                 ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U8Xor.position()),
+                    f(a1_u8),
+                    f(b1_u8),
+                    f(xor1_u8),
+                ],
                 // TODO: figure out why multiple invocation of U32Xor and U32Add chips causes UnbalancedChannel
-                // vec![
-                //     Val::from_usize(Blake3CompressionChips::U32Xor.position()),
-                //     f32(a_u32),
-                //     f32(b_u32),
-                //     f32(xor_u32),
-                // ],
-                // vec![
-                //     Val::from_usize(Blake3CompressionChips::U32Add.position()),
-                //     f32(a_u32),
-                //     f32(b_u32),
-                //     f32(add_u32),
-                // ],
+                // 5 u32 xor claims
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U32Xor.position()),
+                    f32(a_u32),
+                    f32(b_u32),
+                    f32(xor_u32),
+                ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U32Xor.position()),
+                    f32(a_u32),
+                    f32(b_u32),
+                    f32(xor_u32),
+                ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U32Xor.position()),
+                    f32(a_u32),
+                    f32(b_u32),
+                    f32(xor_u32),
+                ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U32Xor.position()),
+                    f32(a_u32),
+                    f32(b_u32),
+                    f32(xor_u32),
+                ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U32Xor.position()),
+                    f32(a_u32),
+                    f32(b_u32),
+                    f32(xor_u32),
+                ],
+                // 3 u32 addition claims
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U32Add.position()),
+                    f32(a_u32),
+                    f32(b_u32),
+                    f32(add_u32),
+                ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U32Add.position()),
+                    f32(a_u32),
+                    f32(b_u32),
+                    f32(add_u32),
+                ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U32Add.position()),
+                    f32(a_u32),
+                    f32(b_u32),
+                    f32(add_u32),
+                ],
+                // 3 u32 right rotate to 8 claims
                 vec![
                     Val::from_usize(Blake3CompressionChips::U32RightRotate8.position()),
                     f32(a_u32),
                     f32(a_rot_8),
+                ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U32RightRotate8.position()),
+                    f32(a_u32),
+                    f32(a_rot_8),
+                ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U32RightRotate8.position()),
+                    f32(a_u32),
+                    f32(a_rot_8),
+                ],
+                // 3 u32 right rotate to 16 claims
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U32RightRotate16.position()),
+                    f32(a_u32),
+                    f32(a_rot_16),
                 ],
                 vec![
                     Val::from_usize(Blake3CompressionChips::U32RightRotate16.position()),
@@ -1470,14 +1606,94 @@ mod tests {
                     f32(a_rot_16),
                 ],
                 vec![
+                    Val::from_usize(Blake3CompressionChips::U32RightRotate16.position()),
+                    f32(a_u32),
+                    f32(a_rot_16),
+                ],
+                // 3 u32 right rotate to 12 claims
+                vec![
                     Val::from_usize(Blake3CompressionChips::U32RightRotate12.position()),
                     f32(a_u32),
                     f32(a_rot_12),
                 ],
                 vec![
+                    Val::from_usize(Blake3CompressionChips::U32RightRotate12.position()),
+                    f32(a_u32),
+                    f32(a_rot_12),
+                ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U32RightRotate12.position()),
+                    f32(a_u32),
+                    f32(a_rot_12),
+                ],
+                // 3 u32 right rotate to 7 claims
+                vec![
                     Val::from_usize(Blake3CompressionChips::U32RightRotate7.position()),
                     f32(a_u32),
                     f32(a_rot_7),
+                ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U32RightRotate7.position()),
+                    f32(a_u32),
+                    f32(a_rot_7),
+                ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::U32RightRotate7.position()),
+                    f32(a_u32),
+                    f32(a_rot_7),
+                ],
+                // 5 G_function claims
+                vec![
+                    Val::from_usize(Blake3CompressionChips::GFunction.position()),
+                    f32(a_in),
+                    f32(b_in),
+                    f32(c_in),
+                    f32(d_in),
+                    f32(mx_in),
+                    f32(my_in),
+                    f32(a_1),
+                    f32(d_1),
+                    f32(c_1),
+                    f32(b_1),
+                ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::GFunction.position()),
+                    f32(a_in),
+                    f32(b_in),
+                    f32(c_in),
+                    f32(d_in),
+                    f32(mx_in),
+                    f32(my_in),
+                    f32(a_1),
+                    f32(d_1),
+                    f32(c_1),
+                    f32(b_1),
+                ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::GFunction.position()),
+                    f32(a_in),
+                    f32(b_in),
+                    f32(c_in),
+                    f32(d_in),
+                    f32(mx_in),
+                    f32(my_in),
+                    f32(a_1),
+                    f32(d_1),
+                    f32(c_1),
+                    f32(b_1),
+                ],
+                vec![
+                    Val::from_usize(Blake3CompressionChips::GFunction.position()),
+                    f32(a_in),
+                    f32(b_in),
+                    f32(c_in),
+                    f32(d_in),
+                    f32(mx_in),
+                    f32(my_in),
+                    f32(a_1),
+                    f32(d_1),
+                    f32(c_1),
+                    f32(b_1),
                 ],
                 vec![
                     Val::from_usize(Blake3CompressionChips::GFunction.position()),
@@ -1495,7 +1711,39 @@ mod tests {
             ],
         };
 
-        let (_traces, witness) = claims.witness(&system);
+        let (traces, witness) = claims.witness(&system);
+
+        // // byte chip trace
+        // println!("BYTE CHIP");
+        // print_trace(&traces[0], U8_XOR_PAIR_RANGE_CHECK_TRACE_WIDTH, true);
+        //
+        // // u32 xor trace
+        // println!("U32 XOR");
+        // print_trace(&traces[1], U32_XOR_TRACE_WIDTH, false);
+        //
+        // // u32 add trace
+        // println!("U32 ADD");
+        // print_trace(&traces[2], U32_ADD_TRACE_WIDTH, false);
+        //
+        // // u32 rotate right 8 trace
+        // println!("U32 RIGHT_ROTATE 8");
+        // print_trace(&traces[3], U32_RIGHT_ROTATE_8_TRACE_WIDTH, false);
+        //
+        // // u32 rotate right 16 trace
+        // println!("U32 RIGHT_ROTATE 16");
+        // print_trace(&traces[4], U32_RIGHT_ROTATE_16_TRACE_WIDTH, false);
+        //
+        // // u32 rotate right 12 trace
+        // println!("U32 RIGHT_ROTATE 12");
+        // print_trace(&traces[5], U32_RIGHT_ROTATE_12_TRACE_WIDTH, false);
+        //
+        // // u32 rotate right 7 trace
+        // println!("U32 RIGHT_ROTATE 7");
+        // print_trace(&traces[6], U32_RIGHT_ROTATE_7_TRACE_WIDTH, false);
+        //
+        // // g function trace
+        // println!("G_FUNCTION");
+        // print_trace(&traces[7], G_FUNCTION_TRACE_WIDHT, false);
 
         let claims_slice: Vec<&[Val]> = claims.claims.iter().map(|v| v.as_slice()).collect();
         let claims_slice: &[&[Val]] = &claims_slice;
@@ -1542,5 +1790,21 @@ mod tests {
         assert_eq!(b_1, 0x45b64444);
         assert_eq!(c_1, 0x06ffffff);
         assert_eq!(d_1, 0x07000000);
+    }
+
+    // useful for debugging
+    fn print_trace(trace: &RowMajorMatrix<Val>, width: usize, ignore_zeroes: bool) {
+        println!();
+        for row in trace.values.chunks(width) {
+            if ignore_zeroes {
+                if row.iter().all(|&x| x == Val::ZERO) {
+                } else {
+                    println!("{:?}", row);
+                }
+            } else {
+                println!("{:?}", row);
+            }
+        }
+        println!();
     }
 }
