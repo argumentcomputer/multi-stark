@@ -4580,6 +4580,9 @@ mod tests {
                             .as_slice(),
                     );
 
+                    const MSG_PERMUTATION: [usize; 16] =
+                        [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+
                     let a = [0, 1, 2, 3, 0, 1, 2, 3];
                     let b = [4, 5, 6, 7, 5, 6, 7, 4];
                     let c = [8, 9, 10, 11, 10, 11, 8, 9];
@@ -4588,7 +4591,7 @@ mod tests {
                     let my = [17, 19, 21, 23, 25, 27, 29, 31];
 
                     let mut state = state_in_io;
-                    for _round_idx in 0..7 {
+                    for round_idx in 0..7 {
                         for j in 0..8 {
                             let a_in = state[a[j]];
                             let b_in = state[b[j]];
@@ -4646,6 +4649,17 @@ mod tests {
                                 .extend_from_slice(c_1_bytes.map(Val::from_u8).as_slice());
                             state_transition_trace_values
                                 .extend_from_slice(b_1_bytes.map(Val::from_u8).as_slice());
+                        }
+
+                        // execute permutation for the 6 first rounds
+                        if round_idx < 6 {
+                            let mut permuted = [0; 16];
+                            for i in 0..16 {
+                                permuted[i] = state[16 + MSG_PERMUTATION[i]];
+                            }
+                            for i in 0..16 {
+                                state[i + 16] = permuted[i];
+                            }
                         }
                     }
                     debug_assert_eq!(state_out_io, state);
@@ -5317,39 +5331,75 @@ mod tests {
         ];
 
         // full 56 iterations
+        // let state_out = vec![
+        //     0xf1569e4cu32,
+        //     0x1679374bu32,
+        //     0x1651a035u32,
+        //     0x2122875fu32,
+        //     0x98fa291cu32,
+        //     0xade9b522u32,
+        //     0x64dcd090u32,
+        //     0x3c0f0fecu32,
+        //     0x6404f194u32,
+        //     0xe4face19u32,
+        //     0x0ae8c308u32,
+        //     0xa1e77038u32,
+        //     0x8df0fa3eu32,
+        //     0x2154a283u32,
+        //     0x28036063u32,
+        //     0x9b732eccu32,
+        //     0x00000000u32,
+        //     0x11110000u32,
+        //     0x22220000u32,
+        //     0x33330000u32,
+        //     0x44440000u32,
+        //     0x55550000u32,
+        //     0x66660000u32,
+        //     0x77770000u32,
+        //     0x88880000u32,
+        //     0x99990000u32,
+        //     0xaaaa0000u32,
+        //     0xbbbb0000u32,
+        //     0xcccc0000u32,
+        //     0xdddd0000u32,
+        //     0xeeee0000u32,
+        //     0xffff0000u32,
+        // ];
+
+        // full 56 rounds + permutation
         let state_out = vec![
-            0xf1569e4cu32,
-            0x1679374bu32,
-            0x1651a035u32,
-            0x2122875fu32,
-            0x98fa291cu32,
-            0xade9b522u32,
-            0x64dcd090u32,
-            0x3c0f0fecu32,
-            0x6404f194u32,
-            0xe4face19u32,
-            0x0ae8c308u32,
-            0xa1e77038u32,
-            0x8df0fa3eu32,
-            0x2154a283u32,
-            0x28036063u32,
-            0x9b732eccu32,
+            0x7e9b3096u32,
+            0xca46c2aau32,
+            0x94ebf8a4u32,
+            0xe94281fcu32,
+            0xacd39a3bu32,
+            0x224dc354u32,
+            0x0f4db96bu32,
+            0x206f9d1du32,
+            0xad9fd58au32,
+            0x0899f60au32,
+            0xca5187bbu32,
+            0xc3fbe4f3u32,
+            0x751d6b62u32,
+            0x6cd0f93eu32,
+            0xc58f5a7bu32,
+            0xe6d62363u32,
+            0xbbbb0000u32,
+            0xffff0000u32,
+            0x55550000u32,
             0x00000000u32,
             0x11110000u32,
+            0x99990000u32,
+            0x88880000u32,
+            0x66660000u32,
+            0xeeee0000u32,
+            0xaaaa0000u32,
             0x22220000u32,
+            0xcccc0000u32,
             0x33330000u32,
             0x44440000u32,
-            0x55550000u32,
-            0x66660000u32,
             0x77770000u32,
-            0x88880000u32,
-            0x99990000u32,
-            0xaaaa0000u32,
-            0xbbbb0000u32,
-            0xcccc0000u32,
             0xdddd0000u32,
-            0xeeee0000u32,
-            0xffff0000u32,
         ];
 
         let claims = Blake3CompressionClaims {
@@ -5699,6 +5749,8 @@ mod tests {
             0xffff0000u32,
         ];
 
+        const MSG_PERMUTATION: [usize; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+
         let a = [0, 1, 2, 3, 0, 1, 2, 3];
         let b = [4, 5, 6, 7, 5, 6, 7, 4];
         let c = [8, 9, 10, 11, 10, 11, 8, 9];
@@ -5707,7 +5759,7 @@ mod tests {
         let my = [17, 19, 21, 23, 25, 27, 29, 31];
 
         let mut state = state_in;
-        for _round_idx in 0..7 {
+        for round_idx in 0..7 {
             for j in 0..8 {
                 let a_in = state[a[j]];
                 let b_in = state[b[j]];
@@ -5731,47 +5783,62 @@ mod tests {
                 state[c[j]] = c_1;
                 state[d[j]] = d_1;
             }
+
+            // execute permutation for the 6 first rounds
+            if round_idx < 6 {
+                let mut permuted = [0; 16];
+                for i in 0..16 {
+                    permuted[i] = state[16 + MSG_PERMUTATION[i]];
+                }
+                for i in 0..16 {
+                    state[i + 16] = permuted[i];
+                }
+            }
         }
 
         let state_out = state;
 
-        // full rounds
+        // full rounds + permutation
         let state_out_expected = vec![
-            0xf1569e4cu32,
-            0x1679374bu32,
-            0x1651a035u32,
-            0x2122875fu32,
-            0x98fa291cu32,
-            0xade9b522u32,
-            0x64dcd090u32,
-            0x3c0f0fecu32,
-            0x6404f194u32,
-            0xe4face19u32,
-            0x0ae8c308u32,
-            0xa1e77038u32,
-            0x8df0fa3eu32,
-            0x2154a283u32,
-            0x28036063u32,
-            0x9b732eccu32,
+            0x7e9b3096u32,
+            0xca46c2aau32,
+            0x94ebf8a4u32,
+            0xe94281fcu32,
+            0xacd39a3bu32,
+            0x224dc354u32,
+            0x0f4db96bu32,
+            0x206f9d1du32,
+            0xad9fd58au32,
+            0x0899f60au32,
+            0xca5187bbu32,
+            0xc3fbe4f3u32,
+            0x751d6b62u32,
+            0x6cd0f93eu32,
+            0xc58f5a7bu32,
+            0xe6d62363u32,
+            0xbbbb0000u32,
+            0xffff0000u32,
+            0x55550000u32,
             0x00000000u32,
             0x11110000u32,
+            0x99990000u32,
+            0x88880000u32,
+            0x66660000u32,
+            0xeeee0000u32,
+            0xaaaa0000u32,
             0x22220000u32,
+            0xcccc0000u32,
             0x33330000u32,
             0x44440000u32,
-            0x55550000u32,
-            0x66660000u32,
             0x77770000u32,
-            0x88880000u32,
-            0x99990000u32,
-            0xaaaa0000u32,
-            0xbbbb0000u32,
-            0xcccc0000u32,
             0xdddd0000u32,
-            0xeeee0000u32,
-            0xffff0000u32,
         ];
 
         assert_eq!(state_out, state_out_expected);
+
+        // for item in state_out {
+        //     println!("{:02x?},", item);
+        // }
     }
 
     // useful for debugging
