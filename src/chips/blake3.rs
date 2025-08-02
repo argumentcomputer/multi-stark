@@ -45,8 +45,8 @@ mod tests {
     // a_1_tmp(4), a_1(4), d_1_tmp(4), d_1(4), c_1(4), b_1_tmp(4), b_1(4)
     const G_FUNCTION_TRACE_WIDHT: usize = 81;
 
-    // multiplicity, [state_in_0 (4), ... state_in_31 (4), [a_in (4), b_in (4), c_in (4), d_in (4), mx_in (4), my_in (4), a_1 (4), b_1 (4), c_1 (4), d_1 (4)] (x56), state_out_0 (4), ... state_out_31 (4)]
-    const STATE_TRANSITION_TRACE_WIDTH: usize = 1 + 32 * 4 * 2 + 40 * 56;
+    // multiplicity, [state_in_0 (4), ... state_in_31 (4), [a_in (4), b_in (4), c_in (4), d_in (4), mx_in (4), my_in (4), a_1 (4), b_1 (4), c_1 (4), d_1 (4)] (x56), [state_i (4), state_i_8 (4), i_i8_xor (4)] (x8), [state_i (4), chaining_value_i (4), i_cv_xor (4)] (x8), state_out_0 (4), ... state_out_31 (4)]
+    const STATE_TRANSITION_TRACE_WIDTH: usize = 1 + 32 * 4 * 2 + 40 * 56 + 12 * 8 * 2;
 
     enum Blake3CompressionChips {
         U8Xor,
@@ -1645,135 +1645,329 @@ mod tests {
                                 // var(2361) + var(2362) * SymbExpr::from_u32(256) + var(2363) * SymbExpr::from_u32(65536) + var(2364) * SymbExpr::from_u32(16777216),
                                 // var(2365) + var(2366) * SymbExpr::from_u32(256) + var(2367) * SymbExpr::from_u32(65536) + var(2368) * SymbExpr::from_u32(16777216),
 
-                                // state_out
-                                var(2369)
-                                    + var(2370) * SymbExpr::from_u32(256)
-                                    + var(2371) * SymbExpr::from_u32(65536)
-                                    + var(2372) * SymbExpr::from_u32(16777216),
-                                var(2373)
-                                    + var(2374) * SymbExpr::from_u32(256)
-                                    + var(2375) * SymbExpr::from_u32(65536)
-                                    + var(2376) * SymbExpr::from_u32(16777216),
-                                var(2377)
-                                    + var(2378) * SymbExpr::from_u32(256)
-                                    + var(2379) * SymbExpr::from_u32(65536)
-                                    + var(2380) * SymbExpr::from_u32(16777216),
-                                var(2381)
-                                    + var(2382) * SymbExpr::from_u32(256)
-                                    + var(2383) * SymbExpr::from_u32(65536)
-                                    + var(2384) * SymbExpr::from_u32(16777216),
-                                var(2385)
-                                    + var(2386) * SymbExpr::from_u32(256)
-                                    + var(2387) * SymbExpr::from_u32(65536)
-                                    + var(2388) * SymbExpr::from_u32(16777216),
-                                var(2389)
-                                    + var(2390) * SymbExpr::from_u32(256)
-                                    + var(2391) * SymbExpr::from_u32(65536)
-                                    + var(2392) * SymbExpr::from_u32(16777216),
-                                var(2393)
-                                    + var(2394) * SymbExpr::from_u32(256)
-                                    + var(2395) * SymbExpr::from_u32(65536)
-                                    + var(2396) * SymbExpr::from_u32(16777216),
-                                var(2397)
-                                    + var(2398) * SymbExpr::from_u32(256)
-                                    + var(2399) * SymbExpr::from_u32(65536)
-                                    + var(2400) * SymbExpr::from_u32(16777216),
-                                var(2401)
-                                    + var(2402) * SymbExpr::from_u32(256)
-                                    + var(2403) * SymbExpr::from_u32(65536)
-                                    + var(2404) * SymbExpr::from_u32(16777216),
-                                var(2405)
-                                    + var(2406) * SymbExpr::from_u32(256)
-                                    + var(2407) * SymbExpr::from_u32(65536)
-                                    + var(2408) * SymbExpr::from_u32(16777216),
-                                var(2409)
-                                    + var(2410) * SymbExpr::from_u32(256)
-                                    + var(2411) * SymbExpr::from_u32(65536)
-                                    + var(2412) * SymbExpr::from_u32(16777216),
-                                var(2413)
-                                    + var(2414) * SymbExpr::from_u32(256)
-                                    + var(2415) * SymbExpr::from_u32(65536)
-                                    + var(2416) * SymbExpr::from_u32(16777216),
-                                var(2417)
-                                    + var(2418) * SymbExpr::from_u32(256)
-                                    + var(2419) * SymbExpr::from_u32(65536)
-                                    + var(2420) * SymbExpr::from_u32(16777216),
-                                var(2421)
-                                    + var(2422) * SymbExpr::from_u32(256)
-                                    + var(2423) * SymbExpr::from_u32(65536)
-                                    + var(2424) * SymbExpr::from_u32(16777216),
-                                var(2425)
-                                    + var(2426) * SymbExpr::from_u32(256)
-                                    + var(2427) * SymbExpr::from_u32(65536)
-                                    + var(2428) * SymbExpr::from_u32(16777216),
-                                var(2429)
-                                    + var(2430) * SymbExpr::from_u32(256)
-                                    + var(2431) * SymbExpr::from_u32(65536)
-                                    + var(2432) * SymbExpr::from_u32(16777216),
-                                var(2433)
-                                    + var(2434) * SymbExpr::from_u32(256)
-                                    + var(2435) * SymbExpr::from_u32(65536)
-                                    + var(2436) * SymbExpr::from_u32(16777216),
-                                var(2437)
-                                    + var(2438) * SymbExpr::from_u32(256)
-                                    + var(2439) * SymbExpr::from_u32(65536)
-                                    + var(2440) * SymbExpr::from_u32(16777216),
-                                var(2441)
-                                    + var(2442) * SymbExpr::from_u32(256)
-                                    + var(2443) * SymbExpr::from_u32(65536)
-                                    + var(2444) * SymbExpr::from_u32(16777216),
-                                var(2445)
-                                    + var(2446) * SymbExpr::from_u32(256)
-                                    + var(2447) * SymbExpr::from_u32(65536)
-                                    + var(2448) * SymbExpr::from_u32(16777216),
-                                var(2449)
-                                    + var(2450) * SymbExpr::from_u32(256)
-                                    + var(2451) * SymbExpr::from_u32(65536)
-                                    + var(2452) * SymbExpr::from_u32(16777216),
-                                var(2453)
-                                    + var(2454) * SymbExpr::from_u32(256)
-                                    + var(2455) * SymbExpr::from_u32(65536)
-                                    + var(2456) * SymbExpr::from_u32(16777216),
-                                var(2457)
-                                    + var(2458) * SymbExpr::from_u32(256)
-                                    + var(2459) * SymbExpr::from_u32(65536)
-                                    + var(2460) * SymbExpr::from_u32(16777216),
-                                var(2461)
-                                    + var(2462) * SymbExpr::from_u32(256)
-                                    + var(2463) * SymbExpr::from_u32(65536)
-                                    + var(2464) * SymbExpr::from_u32(16777216),
-                                var(2465)
-                                    + var(2466) * SymbExpr::from_u32(256)
-                                    + var(2467) * SymbExpr::from_u32(65536)
-                                    + var(2468) * SymbExpr::from_u32(16777216),
-                                var(2469)
-                                    + var(2470) * SymbExpr::from_u32(256)
-                                    + var(2471) * SymbExpr::from_u32(65536)
-                                    + var(2472) * SymbExpr::from_u32(16777216),
-                                var(2473)
-                                    + var(2474) * SymbExpr::from_u32(256)
-                                    + var(2475) * SymbExpr::from_u32(65536)
-                                    + var(2476) * SymbExpr::from_u32(16777216),
-                                var(2477)
-                                    + var(2478) * SymbExpr::from_u32(256)
-                                    + var(2479) * SymbExpr::from_u32(65536)
-                                    + var(2480) * SymbExpr::from_u32(16777216),
-                                var(2481)
-                                    + var(2482) * SymbExpr::from_u32(256)
-                                    + var(2483) * SymbExpr::from_u32(65536)
-                                    + var(2484) * SymbExpr::from_u32(16777216),
-                                var(2485)
-                                    + var(2486) * SymbExpr::from_u32(256)
-                                    + var(2487) * SymbExpr::from_u32(65536)
-                                    + var(2488) * SymbExpr::from_u32(16777216),
-                                var(2489)
-                                    + var(2490) * SymbExpr::from_u32(256)
-                                    + var(2491) * SymbExpr::from_u32(65536)
-                                    + var(2492) * SymbExpr::from_u32(16777216),
-                                var(2493)
-                                    + var(2494) * SymbExpr::from_u32(256)
-                                    + var(2495) * SymbExpr::from_u32(65536)
-                                    + var(2496) * SymbExpr::from_u32(16777216),
+                                // state[i] ^= state[i + 8] x8
+                                // var(2369)
+                                //     + var(2370) * SymbExpr::from_u32(256)
+                                //     + var(2371) * SymbExpr::from_u32(65536)
+                                //     + var(2372) * SymbExpr::from_u32(16777216),
+                                // var(2373)
+                                //     + var(2374) * SymbExpr::from_u32(256)
+                                //     + var(2375) * SymbExpr::from_u32(65536)
+                                //     + var(2376) * SymbExpr::from_u32(16777216),
+                                // var(2377)
+                                //     + var(2378) * SymbExpr::from_u32(256)
+                                //     + var(2379) * SymbExpr::from_u32(65536)
+                                //     + var(2380) * SymbExpr::from_u32(16777216),
+                                // var(2381)
+                                //     + var(2382) * SymbExpr::from_u32(256)
+                                //     + var(2383) * SymbExpr::from_u32(65536)
+                                //     + var(2384) * SymbExpr::from_u32(16777216),
+                                // var(2385)
+                                //     + var(2386) * SymbExpr::from_u32(256)
+                                //     + var(2387) * SymbExpr::from_u32(65536)
+                                //     + var(2388) * SymbExpr::from_u32(16777216),
+                                // var(2389)
+                                //     + var(2390) * SymbExpr::from_u32(256)
+                                //     + var(2391) * SymbExpr::from_u32(65536)
+                                //     + var(2392) * SymbExpr::from_u32(16777216),
+                                // var(2393)
+                                //     + var(2394) * SymbExpr::from_u32(256)
+                                //     + var(2395) * SymbExpr::from_u32(65536)
+                                //     + var(2396) * SymbExpr::from_u32(16777216),
+                                // var(2397)
+                                //     + var(2398) * SymbExpr::from_u32(256)
+                                //     + var(2399) * SymbExpr::from_u32(65536)
+                                //     + var(2400) * SymbExpr::from_u32(16777216),
+                                // var(2401)
+                                //     + var(2402) * SymbExpr::from_u32(256)
+                                //     + var(2403) * SymbExpr::from_u32(65536)
+                                //     + var(2404) * SymbExpr::from_u32(16777216),
+                                // var(2405)
+                                //     + var(2406) * SymbExpr::from_u32(256)
+                                //     + var(2407) * SymbExpr::from_u32(65536)
+                                //     + var(2408) * SymbExpr::from_u32(16777216),
+                                // var(2409)
+                                //     + var(2410) * SymbExpr::from_u32(256)
+                                //     + var(2411) * SymbExpr::from_u32(65536)
+                                //     + var(2412) * SymbExpr::from_u32(16777216),
+                                // var(2413)
+                                //     + var(2414) * SymbExpr::from_u32(256)
+                                //     + var(2415) * SymbExpr::from_u32(65536)
+                                //     + var(2416) * SymbExpr::from_u32(16777216),
+                                // var(2417)
+                                //     + var(2418) * SymbExpr::from_u32(256)
+                                //     + var(2419) * SymbExpr::from_u32(65536)
+                                //     + var(2420) * SymbExpr::from_u32(16777216),
+                                // var(2421)
+                                //     + var(2422) * SymbExpr::from_u32(256)
+                                //     + var(2423) * SymbExpr::from_u32(65536)
+                                //     + var(2424) * SymbExpr::from_u32(16777216),
+                                // var(2425)
+                                //     + var(2426) * SymbExpr::from_u32(256)
+                                //     + var(2427) * SymbExpr::from_u32(65536)
+                                //     + var(2428) * SymbExpr::from_u32(16777216),
+                                // var(2429)
+                                //     + var(2430) * SymbExpr::from_u32(256)
+                                //     + var(2431) * SymbExpr::from_u32(65536)
+                                //     + var(2432) * SymbExpr::from_u32(16777216),
+                                // var(2433)
+                                //     + var(2434) * SymbExpr::from_u32(256)
+                                //     + var(2435) * SymbExpr::from_u32(65536)
+                                //     + var(2436) * SymbExpr::from_u32(16777216),
+                                // var(2437)
+                                //     + var(2438) * SymbExpr::from_u32(256)
+                                //     + var(2439) * SymbExpr::from_u32(65536)
+                                //     + var(2440) * SymbExpr::from_u32(16777216),
+                                // var(2441)
+                                //     + var(2442) * SymbExpr::from_u32(256)
+                                //     + var(2443) * SymbExpr::from_u32(65536)
+                                //     + var(2444) * SymbExpr::from_u32(16777216),
+                                // var(2445)
+                                //     + var(2446) * SymbExpr::from_u32(256)
+                                //     + var(2447) * SymbExpr::from_u32(65536)
+                                //     + var(2448) * SymbExpr::from_u32(16777216),
+                                // var(2449)
+                                //     + var(2450) * SymbExpr::from_u32(256)
+                                //     + var(2451) * SymbExpr::from_u32(65536)
+                                //     + var(2452) * SymbExpr::from_u32(16777216),
+                                // var(2453)
+                                //     + var(2454) * SymbExpr::from_u32(256)
+                                //     + var(2455) * SymbExpr::from_u32(65536)
+                                //     + var(2456) * SymbExpr::from_u32(16777216),
+                                // var(2457)
+                                //     + var(2458) * SymbExpr::from_u32(256)
+                                //     + var(2459) * SymbExpr::from_u32(65536)
+                                //     + var(2460) * SymbExpr::from_u32(16777216),
+                                // var(2461)
+                                //     + var(2462) * SymbExpr::from_u32(256)
+                                //     + var(2463) * SymbExpr::from_u32(65536)
+                                //     + var(2464) * SymbExpr::from_u32(16777216),
+
+                                // state[i + 8] ^= chaining_value[i]
+                                // var(2465)
+                                //     + var(2466) * SymbExpr::from_u32(256)
+                                //     + var(2467) * SymbExpr::from_u32(65536)
+                                //     + var(2468) * SymbExpr::from_u32(16777216),
+                                // var(2469)
+                                //     + var(2470) * SymbExpr::from_u32(256)
+                                //     + var(2471) * SymbExpr::from_u32(65536)
+                                //     + var(2472) * SymbExpr::from_u32(16777216),
+                                // var(2473)
+                                //     + var(2474) * SymbExpr::from_u32(256)
+                                //     + var(2475) * SymbExpr::from_u32(65536)
+                                //     + var(2476) * SymbExpr::from_u32(16777216),
+                                // var(2477)
+                                //     + var(2478) * SymbExpr::from_u32(256)
+                                //     + var(2479) * SymbExpr::from_u32(65536)
+                                //     + var(2480) * SymbExpr::from_u32(16777216),
+                                // var(2481)
+                                //     + var(2482) * SymbExpr::from_u32(256)
+                                //     + var(2483) * SymbExpr::from_u32(65536)
+                                //     + var(2484) * SymbExpr::from_u32(16777216),
+                                // var(2485)
+                                //     + var(2486) * SymbExpr::from_u32(256)
+                                //     + var(2487) * SymbExpr::from_u32(65536)
+                                //     + var(2488) * SymbExpr::from_u32(16777216),
+                                // var(2489)
+                                //     + var(2490) * SymbExpr::from_u32(256)
+                                //     + var(2491) * SymbExpr::from_u32(65536)
+                                //     + var(2492) * SymbExpr::from_u32(16777216),
+                                // var(2493)
+                                //     + var(2494) * SymbExpr::from_u32(256)
+                                //     + var(2495) * SymbExpr::from_u32(65536)
+                                //     + var(2496) * SymbExpr::from_u32(16777216),
+                                // var(2497)
+                                //     + var(2498) * SymbExpr::from_u32(256)
+                                //     + var(2499) * SymbExpr::from_u32(65536)
+                                //     + var(2500) * SymbExpr::from_u32(16777216),
+                                // var(2501)
+                                //     + var(2502) * SymbExpr::from_u32(256)
+                                //     + var(2503) * SymbExpr::from_u32(65536)
+                                //     + var(2504) * SymbExpr::from_u32(16777216),
+                                // var(2505)
+                                //     + var(2506) * SymbExpr::from_u32(256)
+                                //     + var(2507) * SymbExpr::from_u32(65536)
+                                //     + var(2508) * SymbExpr::from_u32(16777216),
+                                // var(2509)
+                                //     + var(2510) * SymbExpr::from_u32(256)
+                                //     + var(2511) * SymbExpr::from_u32(65536)
+                                //     + var(2512) * SymbExpr::from_u32(16777216),
+                                // var(2513)
+                                //     + var(2514) * SymbExpr::from_u32(256)
+                                //     + var(2515) * SymbExpr::from_u32(65536)
+                                //     + var(2516) * SymbExpr::from_u32(16777216),
+                                // var(2517)
+                                //     + var(2518) * SymbExpr::from_u32(256)
+                                //     + var(2519) * SymbExpr::from_u32(65536)
+                                //     + var(2520) * SymbExpr::from_u32(16777216),
+                                // var(2521)
+                                //     + var(2522) * SymbExpr::from_u32(256)
+                                //     + var(2523) * SymbExpr::from_u32(65536)
+                                //     + var(2524) * SymbExpr::from_u32(16777216),
+                                // var(2525)
+                                //     + var(2526) * SymbExpr::from_u32(256)
+                                //     + var(2527) * SymbExpr::from_u32(65536)
+                                //     + var(2528) * SymbExpr::from_u32(16777216),
+                                // var(2529)
+                                //     + var(2530) * SymbExpr::from_u32(256)
+                                //     + var(2531) * SymbExpr::from_u32(65536)
+                                //     + var(2532) * SymbExpr::from_u32(16777216),
+                                // var(2533)
+                                //     + var(2534) * SymbExpr::from_u32(256)
+                                //     + var(2535) * SymbExpr::from_u32(65536)
+                                //     + var(2536) * SymbExpr::from_u32(16777216),
+                                // var(2537)
+                                //     + var(2538) * SymbExpr::from_u32(256)
+                                //     + var(2539) * SymbExpr::from_u32(65536)
+                                //     + var(2540) * SymbExpr::from_u32(16777216),
+                                // var(2541)
+                                //     + var(2542) * SymbExpr::from_u32(256)
+                                //     + var(2543) * SymbExpr::from_u32(65536)
+                                //     + var(2544) * SymbExpr::from_u32(16777216),
+                                // var(2545)
+                                //     + var(2546) * SymbExpr::from_u32(256)
+                                //     + var(2547) * SymbExpr::from_u32(65536)
+                                //     + var(2548) * SymbExpr::from_u32(16777216),
+                                // var(2549)
+                                //     + var(2550) * SymbExpr::from_u32(256)
+                                //     + var(2551) * SymbExpr::from_u32(65536)
+                                //     + var(2552) * SymbExpr::from_u32(16777216),
+                                // var(2553)
+                                //     + var(2554) * SymbExpr::from_u32(256)
+                                //     + var(2555) * SymbExpr::from_u32(65536)
+                                //     + var(2556) * SymbExpr::from_u32(16777216),
+                                // var(2557)
+                                //     + var(2558) * SymbExpr::from_u32(256)
+                                //     + var(2559) * SymbExpr::from_u32(65536)
+                                //     + var(2560) * SymbExpr::from_u32(16777216),
+                                var(2561)
+                                    + var(2562) * SymbExpr::from_u32(256)
+                                    + var(2563) * SymbExpr::from_u32(65536)
+                                    + var(2564) * SymbExpr::from_u32(16777216),
+                                var(2565)
+                                    + var(2566) * SymbExpr::from_u32(256)
+                                    + var(2567) * SymbExpr::from_u32(65536)
+                                    + var(2568) * SymbExpr::from_u32(16777216),
+                                var(2569)
+                                    + var(2570) * SymbExpr::from_u32(256)
+                                    + var(2571) * SymbExpr::from_u32(65536)
+                                    + var(2572) * SymbExpr::from_u32(16777216),
+                                var(2573)
+                                    + var(2574) * SymbExpr::from_u32(256)
+                                    + var(2575) * SymbExpr::from_u32(65536)
+                                    + var(2576) * SymbExpr::from_u32(16777216),
+                                var(2577)
+                                    + var(2578) * SymbExpr::from_u32(256)
+                                    + var(2579) * SymbExpr::from_u32(65536)
+                                    + var(2580) * SymbExpr::from_u32(16777216),
+                                var(2581)
+                                    + var(2582) * SymbExpr::from_u32(256)
+                                    + var(2583) * SymbExpr::from_u32(65536)
+                                    + var(2584) * SymbExpr::from_u32(16777216),
+                                var(2585)
+                                    + var(2586) * SymbExpr::from_u32(256)
+                                    + var(2587) * SymbExpr::from_u32(65536)
+                                    + var(2588) * SymbExpr::from_u32(16777216),
+                                var(2589)
+                                    + var(2590) * SymbExpr::from_u32(256)
+                                    + var(2591) * SymbExpr::from_u32(65536)
+                                    + var(2592) * SymbExpr::from_u32(16777216),
+                                var(2593)
+                                    + var(2594) * SymbExpr::from_u32(256)
+                                    + var(2595) * SymbExpr::from_u32(65536)
+                                    + var(2596) * SymbExpr::from_u32(16777216),
+                                var(2597)
+                                    + var(2598) * SymbExpr::from_u32(256)
+                                    + var(2599) * SymbExpr::from_u32(65536)
+                                    + var(2600) * SymbExpr::from_u32(16777216),
+                                var(2601)
+                                    + var(2602) * SymbExpr::from_u32(256)
+                                    + var(2603) * SymbExpr::from_u32(65536)
+                                    + var(2604) * SymbExpr::from_u32(16777216),
+                                var(2605)
+                                    + var(2606) * SymbExpr::from_u32(256)
+                                    + var(2607) * SymbExpr::from_u32(65536)
+                                    + var(2608) * SymbExpr::from_u32(16777216),
+                                var(2609)
+                                    + var(2610) * SymbExpr::from_u32(256)
+                                    + var(2611) * SymbExpr::from_u32(65536)
+                                    + var(2612) * SymbExpr::from_u32(16777216),
+                                var(2613)
+                                    + var(2614) * SymbExpr::from_u32(256)
+                                    + var(2615) * SymbExpr::from_u32(65536)
+                                    + var(2616) * SymbExpr::from_u32(16777216),
+                                var(2617)
+                                    + var(2618) * SymbExpr::from_u32(256)
+                                    + var(2619) * SymbExpr::from_u32(65536)
+                                    + var(2620) * SymbExpr::from_u32(16777216),
+                                var(2621)
+                                    + var(2622) * SymbExpr::from_u32(256)
+                                    + var(2623) * SymbExpr::from_u32(65536)
+                                    + var(2624) * SymbExpr::from_u32(16777216),
+                                var(2625)
+                                    + var(2626) * SymbExpr::from_u32(256)
+                                    + var(2627) * SymbExpr::from_u32(65536)
+                                    + var(2628) * SymbExpr::from_u32(16777216),
+                                var(2629)
+                                    + var(2630) * SymbExpr::from_u32(256)
+                                    + var(2631) * SymbExpr::from_u32(65536)
+                                    + var(2632) * SymbExpr::from_u32(16777216),
+                                var(2633)
+                                    + var(2634) * SymbExpr::from_u32(256)
+                                    + var(2635) * SymbExpr::from_u32(65536)
+                                    + var(2636) * SymbExpr::from_u32(16777216),
+                                var(2637)
+                                    + var(2638) * SymbExpr::from_u32(256)
+                                    + var(2639) * SymbExpr::from_u32(65536)
+                                    + var(2640) * SymbExpr::from_u32(16777216),
+                                var(2641)
+                                    + var(2642) * SymbExpr::from_u32(256)
+                                    + var(2643) * SymbExpr::from_u32(65536)
+                                    + var(2644) * SymbExpr::from_u32(16777216),
+                                var(2645)
+                                    + var(2646) * SymbExpr::from_u32(256)
+                                    + var(2647) * SymbExpr::from_u32(65536)
+                                    + var(2648) * SymbExpr::from_u32(16777216),
+                                var(2649)
+                                    + var(2650) * SymbExpr::from_u32(256)
+                                    + var(2651) * SymbExpr::from_u32(65536)
+                                    + var(2652) * SymbExpr::from_u32(16777216),
+                                var(2653)
+                                    + var(2654) * SymbExpr::from_u32(256)
+                                    + var(2655) * SymbExpr::from_u32(65536)
+                                    + var(2656) * SymbExpr::from_u32(16777216),
+                                var(2657)
+                                    + var(2658) * SymbExpr::from_u32(256)
+                                    + var(2659) * SymbExpr::from_u32(65536)
+                                    + var(2660) * SymbExpr::from_u32(16777216),
+                                var(2661)
+                                    + var(2662) * SymbExpr::from_u32(256)
+                                    + var(2663) * SymbExpr::from_u32(65536)
+                                    + var(2664) * SymbExpr::from_u32(16777216),
+                                var(2665)
+                                    + var(2666) * SymbExpr::from_u32(256)
+                                    + var(2667) * SymbExpr::from_u32(65536)
+                                    + var(2668) * SymbExpr::from_u32(16777216),
+                                var(2669)
+                                    + var(2670) * SymbExpr::from_u32(256)
+                                    + var(2671) * SymbExpr::from_u32(65536)
+                                    + var(2672) * SymbExpr::from_u32(16777216),
+                                var(2673)
+                                    + var(2674) * SymbExpr::from_u32(256)
+                                    + var(2675) * SymbExpr::from_u32(65536)
+                                    + var(2676) * SymbExpr::from_u32(16777216),
+                                var(2677)
+                                    + var(2678) * SymbExpr::from_u32(256)
+                                    + var(2679) * SymbExpr::from_u32(65536)
+                                    + var(2680) * SymbExpr::from_u32(16777216),
+                                var(2681)
+                                    + var(2682) * SymbExpr::from_u32(256)
+                                    + var(2683) * SymbExpr::from_u32(65536)
+                                    + var(2684) * SymbExpr::from_u32(16777216),
+                                var(2685)
+                                    + var(2686) * SymbExpr::from_u32(256)
+                                    + var(2687) * SymbExpr::from_u32(65536)
+                                    + var(2688) * SymbExpr::from_u32(16777216),
                             ],
                         ),
                         // ROUND 0
@@ -4408,6 +4602,296 @@ mod tests {
                                     + var(2368) * SymbExpr::from_u32(16777216),
                             ],
                         ),
+                        // state[i] ^= state[i + 8]
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2369)
+                                    + var(2370) * SymbExpr::from_u32(256)
+                                    + var(2371) * SymbExpr::from_u32(65536)
+                                    + var(2372) * SymbExpr::from_u32(16777216),
+                                var(2373)
+                                    + var(2374) * SymbExpr::from_u32(256)
+                                    + var(2375) * SymbExpr::from_u32(65536)
+                                    + var(2376) * SymbExpr::from_u32(16777216),
+                                var(2377)
+                                    + var(2378) * SymbExpr::from_u32(256)
+                                    + var(2379) * SymbExpr::from_u32(65536)
+                                    + var(2380) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2381)
+                                    + var(2382) * SymbExpr::from_u32(256)
+                                    + var(2383) * SymbExpr::from_u32(65536)
+                                    + var(2384) * SymbExpr::from_u32(16777216),
+                                var(2385)
+                                    + var(2386) * SymbExpr::from_u32(256)
+                                    + var(2387) * SymbExpr::from_u32(65536)
+                                    + var(2388) * SymbExpr::from_u32(16777216),
+                                var(2389)
+                                    + var(2390) * SymbExpr::from_u32(256)
+                                    + var(2391) * SymbExpr::from_u32(65536)
+                                    + var(2392) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2393)
+                                    + var(2394) * SymbExpr::from_u32(256)
+                                    + var(2395) * SymbExpr::from_u32(65536)
+                                    + var(2396) * SymbExpr::from_u32(16777216),
+                                var(2397)
+                                    + var(2398) * SymbExpr::from_u32(256)
+                                    + var(2399) * SymbExpr::from_u32(65536)
+                                    + var(2400) * SymbExpr::from_u32(16777216),
+                                var(2401)
+                                    + var(2402) * SymbExpr::from_u32(256)
+                                    + var(2403) * SymbExpr::from_u32(65536)
+                                    + var(2404) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2405)
+                                    + var(2406) * SymbExpr::from_u32(256)
+                                    + var(2407) * SymbExpr::from_u32(65536)
+                                    + var(2408) * SymbExpr::from_u32(16777216),
+                                var(2409)
+                                    + var(2410) * SymbExpr::from_u32(256)
+                                    + var(2411) * SymbExpr::from_u32(65536)
+                                    + var(2412) * SymbExpr::from_u32(16777216),
+                                var(2413)
+                                    + var(2414) * SymbExpr::from_u32(256)
+                                    + var(2415) * SymbExpr::from_u32(65536)
+                                    + var(2416) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2417)
+                                    + var(2418) * SymbExpr::from_u32(256)
+                                    + var(2419) * SymbExpr::from_u32(65536)
+                                    + var(2420) * SymbExpr::from_u32(16777216),
+                                var(2421)
+                                    + var(2422) * SymbExpr::from_u32(256)
+                                    + var(2423) * SymbExpr::from_u32(65536)
+                                    + var(2424) * SymbExpr::from_u32(16777216),
+                                var(2425)
+                                    + var(2426) * SymbExpr::from_u32(256)
+                                    + var(2427) * SymbExpr::from_u32(65536)
+                                    + var(2428) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2429)
+                                    + var(2430) * SymbExpr::from_u32(256)
+                                    + var(2431) * SymbExpr::from_u32(65536)
+                                    + var(2432) * SymbExpr::from_u32(16777216),
+                                var(2433)
+                                    + var(2434) * SymbExpr::from_u32(256)
+                                    + var(2435) * SymbExpr::from_u32(65536)
+                                    + var(2436) * SymbExpr::from_u32(16777216),
+                                var(2437)
+                                    + var(2438) * SymbExpr::from_u32(256)
+                                    + var(2439) * SymbExpr::from_u32(65536)
+                                    + var(2440) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2441)
+                                    + var(2442) * SymbExpr::from_u32(256)
+                                    + var(2443) * SymbExpr::from_u32(65536)
+                                    + var(2444) * SymbExpr::from_u32(16777216),
+                                var(2445)
+                                    + var(2446) * SymbExpr::from_u32(256)
+                                    + var(2447) * SymbExpr::from_u32(65536)
+                                    + var(2448) * SymbExpr::from_u32(16777216),
+                                var(2449)
+                                    + var(2450) * SymbExpr::from_u32(256)
+                                    + var(2451) * SymbExpr::from_u32(65536)
+                                    + var(2452) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2453)
+                                    + var(2454) * SymbExpr::from_u32(256)
+                                    + var(2455) * SymbExpr::from_u32(65536)
+                                    + var(2456) * SymbExpr::from_u32(16777216),
+                                var(2457)
+                                    + var(2458) * SymbExpr::from_u32(256)
+                                    + var(2459) * SymbExpr::from_u32(65536)
+                                    + var(2460) * SymbExpr::from_u32(16777216),
+                                var(2461)
+                                    + var(2462) * SymbExpr::from_u32(256)
+                                    + var(2463) * SymbExpr::from_u32(65536)
+                                    + var(2464) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        // state[i + 8] ^= chaining_value[i]
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2465)
+                                    + var(2466) * SymbExpr::from_u32(256)
+                                    + var(2467) * SymbExpr::from_u32(65536)
+                                    + var(2468) * SymbExpr::from_u32(16777216),
+                                var(2469)
+                                    + var(2470) * SymbExpr::from_u32(256)
+                                    + var(2471) * SymbExpr::from_u32(65536)
+                                    + var(2472) * SymbExpr::from_u32(16777216),
+                                var(2473)
+                                    + var(2474) * SymbExpr::from_u32(256)
+                                    + var(2475) * SymbExpr::from_u32(65536)
+                                    + var(2476) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2477)
+                                    + var(2478) * SymbExpr::from_u32(256)
+                                    + var(2479) * SymbExpr::from_u32(65536)
+                                    + var(2480) * SymbExpr::from_u32(16777216),
+                                var(2481)
+                                    + var(2482) * SymbExpr::from_u32(256)
+                                    + var(2483) * SymbExpr::from_u32(65536)
+                                    + var(2484) * SymbExpr::from_u32(16777216),
+                                var(2485)
+                                    + var(2486) * SymbExpr::from_u32(256)
+                                    + var(2487) * SymbExpr::from_u32(65536)
+                                    + var(2488) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2489)
+                                    + var(2490) * SymbExpr::from_u32(256)
+                                    + var(2491) * SymbExpr::from_u32(65536)
+                                    + var(2492) * SymbExpr::from_u32(16777216),
+                                var(2493)
+                                    + var(2494) * SymbExpr::from_u32(256)
+                                    + var(2495) * SymbExpr::from_u32(65536)
+                                    + var(2496) * SymbExpr::from_u32(16777216),
+                                var(2497)
+                                    + var(2498) * SymbExpr::from_u32(256)
+                                    + var(2499) * SymbExpr::from_u32(65536)
+                                    + var(2500) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2501)
+                                    + var(2502) * SymbExpr::from_u32(256)
+                                    + var(2503) * SymbExpr::from_u32(65536)
+                                    + var(2504) * SymbExpr::from_u32(16777216),
+                                var(2505)
+                                    + var(2506) * SymbExpr::from_u32(256)
+                                    + var(2507) * SymbExpr::from_u32(65536)
+                                    + var(2508) * SymbExpr::from_u32(16777216),
+                                var(2509)
+                                    + var(2510) * SymbExpr::from_u32(256)
+                                    + var(2511) * SymbExpr::from_u32(65536)
+                                    + var(2512) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2513)
+                                    + var(2514) * SymbExpr::from_u32(256)
+                                    + var(2515) * SymbExpr::from_u32(65536)
+                                    + var(2516) * SymbExpr::from_u32(16777216),
+                                var(2517)
+                                    + var(2518) * SymbExpr::from_u32(256)
+                                    + var(2519) * SymbExpr::from_u32(65536)
+                                    + var(2520) * SymbExpr::from_u32(16777216),
+                                var(2521)
+                                    + var(2522) * SymbExpr::from_u32(256)
+                                    + var(2523) * SymbExpr::from_u32(65536)
+                                    + var(2524) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2525)
+                                    + var(2526) * SymbExpr::from_u32(256)
+                                    + var(2527) * SymbExpr::from_u32(65536)
+                                    + var(2528) * SymbExpr::from_u32(16777216),
+                                var(2529)
+                                    + var(2530) * SymbExpr::from_u32(256)
+                                    + var(2531) * SymbExpr::from_u32(65536)
+                                    + var(2532) * SymbExpr::from_u32(16777216),
+                                var(2533)
+                                    + var(2534) * SymbExpr::from_u32(256)
+                                    + var(2535) * SymbExpr::from_u32(65536)
+                                    + var(2536) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2537)
+                                    + var(2538) * SymbExpr::from_u32(256)
+                                    + var(2539) * SymbExpr::from_u32(65536)
+                                    + var(2540) * SymbExpr::from_u32(16777216),
+                                var(2541)
+                                    + var(2542) * SymbExpr::from_u32(256)
+                                    + var(2543) * SymbExpr::from_u32(65536)
+                                    + var(2544) * SymbExpr::from_u32(16777216),
+                                var(2545)
+                                    + var(2546) * SymbExpr::from_u32(256)
+                                    + var(2547) * SymbExpr::from_u32(65536)
+                                    + var(2548) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
+                        Lookup::push(
+                            SymbExpr::ONE,
+                            vec![
+                                SymbExpr::from_usize(u32_xor_idx),
+                                var(2549)
+                                    + var(2550) * SymbExpr::from_u32(256)
+                                    + var(2551) * SymbExpr::from_u32(65536)
+                                    + var(2552) * SymbExpr::from_u32(16777216),
+                                var(2553)
+                                    + var(2554) * SymbExpr::from_u32(256)
+                                    + var(2555) * SymbExpr::from_u32(65536)
+                                    + var(2556) * SymbExpr::from_u32(16777216),
+                                var(2557)
+                                    + var(2558) * SymbExpr::from_u32(256)
+                                    + var(2559) * SymbExpr::from_u32(65536)
+                                    + var(2560) * SymbExpr::from_u32(16777216),
+                            ],
+                        ),
                     ]
                 }
             }
@@ -4611,7 +5095,7 @@ mod tests {
                             let b_1 = (b_0 ^ c_1).rotate_right(7);
 
                             g_function_values_from_claims
-                                .push((a_in, b_in, c_in, d_in, mx_in, my_in, a_1, b_1, c_1, d_1));
+                                .push((a_in, b_in, c_in, d_in, mx_in, my_in, a_1, b_1, c_1, d_1)); // send data to G_Function chip
 
                             state[a[j]] = a_1;
                             state[b[j]] = b_1;
@@ -4662,6 +5146,47 @@ mod tests {
                             }
                         }
                     }
+
+                    for i in 0..8 {
+                        let a = state[i];
+                        let b = state[i + 8];
+                        state[i] ^= state[i + 8]; // ^ state[i + 8]
+                        let xor = state[i];
+
+                        // save (state[i]), (state[i + 8]) and (state[i] ^ state[i + 8]) to StateTransition trace for looking up
+                        let a_bytes: [u8; 4] = a.to_le_bytes();
+                        let b_bytes: [u8; 4] = b.to_le_bytes();
+                        let xor_bytes: [u8; 4] = xor.to_le_bytes();
+
+                        state_transition_trace_values
+                            .extend_from_slice(a_bytes.map(Val::from_u8).as_slice());
+                        state_transition_trace_values
+                            .extend_from_slice(b_bytes.map(Val::from_u8).as_slice());
+                        state_transition_trace_values
+                            .extend_from_slice(xor_bytes.map(Val::from_u8).as_slice());
+
+                        u32_xor_values_from_claims.push((a, b, xor)); // send data to U32Xor chip
+
+                        let a = state[i + 8];
+                        let b = state_in_io[i];
+                        state[i + 8] ^= state_in_io[i]; // ^ chaining_value[i]
+                        let xor = state[i + 8];
+
+                        // save (state[i + 8]), (state_in_io[i]) and (state[i + 8] ^ state_in_io[i]) to StateTransition trace for looking up
+                        let a_bytes: [u8; 4] = a.to_le_bytes();
+                        let b_bytes: [u8; 4] = b.to_le_bytes();
+                        let xor_bytes: [u8; 4] = xor.to_le_bytes();
+
+                        state_transition_trace_values
+                            .extend_from_slice(a_bytes.map(Val::from_u8).as_slice());
+                        state_transition_trace_values
+                            .extend_from_slice(b_bytes.map(Val::from_u8).as_slice());
+                        state_transition_trace_values
+                            .extend_from_slice(xor_bytes.map(Val::from_u8).as_slice());
+
+                        u32_xor_values_from_claims.push((a, b, xor)); // send data to U32Xor chip
+                    }
+
                     debug_assert_eq!(state_out_io, state);
                     let state_out_io_bytes = state_out_io
                         .into_iter()
@@ -5330,60 +5855,23 @@ mod tests {
             0xffff0000u32,
         ];
 
-        // full 56 iterations
-        // let state_out = vec![
-        //     0xf1569e4cu32,
-        //     0x1679374bu32,
-        //     0x1651a035u32,
-        //     0x2122875fu32,
-        //     0x98fa291cu32,
-        //     0xade9b522u32,
-        //     0x64dcd090u32,
-        //     0x3c0f0fecu32,
-        //     0x6404f194u32,
-        //     0xe4face19u32,
-        //     0x0ae8c308u32,
-        //     0xa1e77038u32,
-        //     0x8df0fa3eu32,
-        //     0x2154a283u32,
-        //     0x28036063u32,
-        //     0x9b732eccu32,
-        //     0x00000000u32,
-        //     0x11110000u32,
-        //     0x22220000u32,
-        //     0x33330000u32,
-        //     0x44440000u32,
-        //     0x55550000u32,
-        //     0x66660000u32,
-        //     0x77770000u32,
-        //     0x88880000u32,
-        //     0x99990000u32,
-        //     0xaaaa0000u32,
-        //     0xbbbb0000u32,
-        //     0xcccc0000u32,
-        //     0xdddd0000u32,
-        //     0xeeee0000u32,
-        //     0xffff0000u32,
-        // ];
-
-        // full 56 rounds + permutation
         let state_out = vec![
-            0x7e9b3096u32,
-            0xca46c2aau32,
-            0x94ebf8a4u32,
-            0xe94281fcu32,
-            0xacd39a3bu32,
-            0x224dc354u32,
-            0x0f4db96bu32,
-            0x206f9d1du32,
+            0xd304e51cu32,
+            0xc2df34a0u32,
+            0x5eba7f1fu32,
+            0x2ab9650fu32,
+            0xd9cef159u32,
+            0x4e9d3a6au32,
+            0xcac2e310u32,
+            0xc6b9be7eu32,
             0xad9fd58au32,
-            0x0899f60au32,
-            0xca5187bbu32,
-            0xc3fbe4f3u32,
-            0x751d6b62u32,
-            0x6cd0f93eu32,
-            0xc58f5a7bu32,
-            0xe6d62363u32,
+            0x0899e71bu32,
+            0xca51a599u32,
+            0xc3fbd7c0u32,
+            0x751d2f26u32,
+            0x6cd0ac6bu32,
+            0xc58f3c1du32,
+            0xe6d65414u32,
             0xbbbb0000u32,
             0xffff0000u32,
             0x55550000u32,
@@ -5758,7 +6246,7 @@ mod tests {
         let mx = [16, 18, 20, 22, 24, 26, 28, 30];
         let my = [17, 19, 21, 23, 25, 27, 29, 31];
 
-        let mut state = state_in;
+        let mut state = state_in.clone();
         for round_idx in 0..7 {
             for j in 0..8 {
                 let a_in = state[a[j]];
@@ -5796,26 +6284,30 @@ mod tests {
             }
         }
 
+        for i in 0..8 {
+            state[i] ^= state[i + 8];
+            state[i + 8] ^= state_in[i]; // ^chaining_value
+        }
+
         let state_out = state;
 
-        // full rounds + permutation
         let state_out_expected = vec![
-            0x7e9b3096u32,
-            0xca46c2aau32,
-            0x94ebf8a4u32,
-            0xe94281fcu32,
-            0xacd39a3bu32,
-            0x224dc354u32,
-            0x0f4db96bu32,
-            0x206f9d1du32,
+            0xd304e51cu32,
+            0xc2df34a0u32,
+            0x5eba7f1fu32,
+            0x2ab9650fu32,
+            0xd9cef159u32,
+            0x4e9d3a6au32,
+            0xcac2e310u32,
+            0xc6b9be7eu32,
             0xad9fd58au32,
-            0x0899f60au32,
-            0xca5187bbu32,
-            0xc3fbe4f3u32,
-            0x751d6b62u32,
-            0x6cd0f93eu32,
-            0xc58f5a7bu32,
-            0xe6d62363u32,
+            0x0899e71bu32,
+            0xca51a599u32,
+            0xc3fbd7c0u32,
+            0x751d2f26u32,
+            0x6cd0ac6bu32,
+            0xc58f3c1du32,
+            0xe6d65414u32,
             0xbbbb0000u32,
             0xffff0000u32,
             0x55550000u32,
@@ -5835,10 +6327,6 @@ mod tests {
         ];
 
         assert_eq!(state_out, state_out_expected);
-
-        // for item in state_out {
-        //     println!("{:02x?},", item);
-        // }
     }
 
     // useful for debugging
