@@ -45,8 +45,8 @@ mod tests {
     // a_1_tmp(4), a_1(4), d_1_tmp(4), d_1(4), c_1(4), b_1_tmp(4), b_1(4)
     const G_FUNCTION_TRACE_WIDHT: usize = 81;
 
-    // multiplicity, [state_in_0 (4), ... state_in_31 (4), [a_in (4), b_in (4), c_in (4), d_in (4), mx_in (4), my_in (4), a_1 (4), b_1 (4), c_1 (4), d_1 (4)] (x56), [state_i (4), state_i_8 (4), i_i8_xor (4)] (x8), [state_i (4), chaining_value_i (4), i_cv_xor (4)] (x8), state_out_0 (4), ... state_out_31 (4)]
-    const STATE_TRANSITION_TRACE_WIDTH: usize = 1 + 32 * 4 * 2 + 40 * 56 + 12 * 8 * 2;
+    // multiplicity, [state_in_0 (4), ... state_in_31 (4), [a_in (4), b_in (4), c_in (4), d_in (4), mx_in (4), my_in (4), a_1 (4), b_1 (4), c_1 (4), d_1 (4)] (x56), [state_i (4), state_i_8 (4), i_i8_xor (4)] (x8), [state_i_8 (4), chaining_value_i (4), i_cv_xor (4)] (x8), state_out_0 (4), ... state_out_16 (4)]
+    const COMPRESSION_TRACE_WIDTH: usize = 1 + 32 * 4 + 16 * 4 + 40 * 56 + 12 * 8 * 2;
 
     enum Blake3CompressionChips {
         U8Xor,
@@ -58,7 +58,7 @@ mod tests {
         U32RightRotate7, // FIXME: currently underconstrained (range check is not performed). Needs rewriting using Gabriel's advice
         U8PairRangeCheck,
         GFunction,
-        StateTransition,
+        Compression,
     }
 
     impl Blake3CompressionChips {
@@ -73,7 +73,7 @@ mod tests {
                 Blake3CompressionChips::U32RightRotate7 => 6,
                 Blake3CompressionChips::U8PairRangeCheck => 7,
                 Blake3CompressionChips::GFunction => 8,
-                Blake3CompressionChips::StateTransition => 9,
+                Blake3CompressionChips::Compression => 9,
             }
         }
     }
@@ -89,7 +89,7 @@ mod tests {
                 Self::U32RightRotate12 => U32_RIGHT_ROTATE_12_TRACE_WIDTH,
                 Self::U32RightRotate7 => U32_RIGHT_ROTATE_7_TRACE_WIDTH,
                 Self::GFunction => G_FUNCTION_TRACE_WIDHT,
-                Self::StateTransition => STATE_TRANSITION_TRACE_WIDTH,
+                Self::Compression => COMPRESSION_TRACE_WIDTH,
             }
         }
 
@@ -117,7 +117,7 @@ mod tests {
                 Self::U32RightRotate12 => None,
                 Self::U32RightRotate7 => None,
                 Self::GFunction => None,
-                Self::StateTransition => None,
+                Self::Compression => None,
             }
         }
     }
@@ -199,7 +199,222 @@ mod tests {
                     builder.assert_eq(output, input_div + input_rem * two_pow_32_minus_k);
                 }
                 Self::GFunction => {}
-                Self::StateTransition => {}
+                Self::Compression => {
+                    const MSG_PERMUTATION: [usize; 16] =
+                        [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+
+                    let a = [0, 1, 2, 3, 0, 1, 2, 3];
+                    let b = [4, 5, 6, 7, 5, 6, 7, 4];
+                    let c = [8, 9, 10, 11, 10, 11, 8, 9];
+                    let d = [12, 13, 14, 15, 15, 12, 13, 14];
+                    let mx = [16, 18, 20, 22, 24, 26, 28, 30];
+                    let my = [17, 19, 21, 23, 25, 27, 29, 31];
+
+                    let main = builder.main();
+                    let columns = main.row_slice(0).unwrap();
+
+                    let mut offset = 1usize;
+                    let indices: [usize; 128] = array::from_fn(|i| i + 1);
+
+                    let mut state = indices
+                        .chunks(4)
+                        .map(|word_indices| {
+                            columns[word_indices[0]]
+                                + columns[word_indices[1]] * AB::Expr::from_u32(256)
+                                + columns[word_indices[2]] * AB::Expr::from_u32(256 * 256)
+                                + columns[word_indices[3]] * AB::Expr::from_u32(256 * 256 * 256)
+                        })
+                        .collect::<Vec<_>>();
+                    debug_assert_eq!(state.len(), 32);
+                    offset += 128;
+
+                    let mut a_in = vec![];
+                    let mut b_in = vec![];
+                    let mut c_in = vec![];
+                    let mut d_in = vec![];
+                    let mut mx_in = vec![];
+                    let mut my_in = vec![];
+
+                    let mut a_1 = vec![];
+                    let mut b_1 = vec![];
+                    let mut c_1 = vec![];
+                    let mut d_1 = vec![];
+
+                    for _ in 0..56 {
+                        let a_in_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+                        let b_in_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+                        let c_in_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+                        let d_in_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+                        let mx_in_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+                        let my_in_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+
+                        let a_1_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+                        let d_1_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+                        let c_1_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+                        let b_1_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+
+                        a_in.push(a_in_i);
+                        b_in.push(b_in_i);
+                        c_in.push(c_in_i);
+                        d_in.push(d_in_i);
+                        mx_in.push(mx_in_i);
+                        my_in.push(my_in_i);
+
+                        a_1.push(a_1_i);
+                        b_1.push(b_1_i);
+                        c_1.push(c_1_i);
+                        d_1.push(d_1_i);
+                    }
+
+                    let mut state_i = vec![];
+                    let mut state_i_8 = vec![];
+                    let mut i_i8_xor = vec![];
+                    let mut state_i_8_copy = vec![];
+                    let mut chaining_values = vec![];
+                    let mut i_cv_xor = vec![];
+                    let chaining_values_expected = state[0..8].to_vec();
+
+                    for _ in 0..8 {
+                        let state_i_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+                        let state_i_8_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+                        let i_i8_xor_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+                        let state_i_8_updated_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+                        let chaining_values_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+                        let i_cv_xor_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+
+                        state_i.push(state_i_i);
+                        state_i_8.push(state_i_8_i);
+                        i_i8_xor.push(i_i8_xor_i);
+                        state_i_8_copy.push(state_i_8_updated_i);
+                        chaining_values.push(chaining_values_i);
+                        i_cv_xor.push(i_cv_xor_i);
+                    }
+
+                    let mut state_out = vec![];
+                    for _ in 0..16 {
+                        let state_out_i = columns[offset]
+                            + columns[offset + 1] * AB::Expr::from_u32(256)
+                            + columns[offset + 2] * AB::Expr::from_u32(256 * 256)
+                            + columns[offset + 3] * AB::Expr::from_u32(256 * 256 * 256);
+                        offset += 4;
+
+                        state_out.push(state_out_i);
+                    }
+
+                    // check state_in <-> temp variables relation
+                    let mut offset_2 = 0usize;
+                    for round_idx in 0..7 {
+                        for j in 0..8 {
+                            let a_in_expected = state[a[j]].clone();
+                            let b_in_expected = state[b[j]].clone();
+                            let c_in_expected = state[c[j]].clone();
+                            let d_in_expected = state[d[j]].clone();
+                            let mx_in_expected = state[mx[j]].clone();
+                            let my_in_expected = state[my[j]].clone();
+
+                            builder.assert_eq(a_in_expected.clone(), a_in[offset_2].clone());
+                            builder.assert_eq(b_in_expected.clone(), b_in[offset_2].clone());
+                            builder.assert_eq(c_in_expected.clone(), c_in[offset_2].clone());
+                            builder.assert_eq(d_in_expected.clone(), d_in[offset_2].clone());
+                            builder.assert_eq(mx_in_expected.clone(), mx_in[offset_2].clone());
+                            builder.assert_eq(my_in_expected.clone(), my_in[offset_2].clone());
+
+                            state[a[j]] = a_1[offset_2].clone();
+                            state[b[j]] = b_1[offset_2].clone();
+                            state[c[j]] = c_1[offset_2].clone();
+                            state[d[j]] = d_1[offset_2].clone();
+
+                            offset_2 += 1;
+                        }
+                        if round_idx < 6 {
+                            let mut permuted = [AB::Expr::ZERO; 16];
+                            for i in 0..16 {
+                                permuted[i] = state[16 + MSG_PERMUTATION[i]].clone();
+                            }
+                            for i in 0..16 {
+                                state[i + 16] = permuted[i].clone();
+                            }
+                        }
+                    }
+
+                    // check state_out <-> XOR variables relation
+                    for i in 0..8 {
+                        builder.assert_eq(state[i].clone(), state_i[i].clone());
+                        builder.assert_eq(state[i + 8].clone(), state_i_8[i].clone());
+                        builder.assert_eq(i_i8_xor[i].clone(), state_out[i].clone());
+
+                        builder.assert_eq(state[i + 8].clone(), state_i_8_copy[i].clone()); // TODO: probably we can save one column in the traces
+                        builder.assert_eq(
+                            chaining_values_expected[i].clone(),
+                            chaining_values[i].clone(),
+                        );
+                        builder.assert_eq(i_cv_xor[i].clone(), state_out[i + 8].clone());
+                    }
+                }
             }
         }
     }
@@ -225,7 +440,7 @@ mod tests {
             let u32_right_rotate_7_idx = Blake3CompressionChips::U32RightRotate7.position();
             let u8_pair_range_check_idx = Blake3CompressionChips::U8PairRangeCheck.position();
             let g_function_idx = Blake3CompressionChips::GFunction.position();
-            let state_transition_idx = Blake3CompressionChips::StateTransition.position();
+            let state_transition_idx = Blake3CompressionChips::Compression.position();
 
             match self {
                 Self::U8Xor | Self::U8PairRangeCheck => {
@@ -785,7 +1000,7 @@ mod tests {
                 // state_in (32 * 4),
                 // a_in (4), b_in (4), c_in (4), d_in (4), mx_in (4), my_in (4), a_1 (4), d_1 (4), c_1 (4), b_1 (4)
                 // state_out (32 * 4),
-                Self::StateTransition => {
+                Self::Compression => {
                     // let mut offset = 1; // we start from 1 since at var(0) we have multiplicity
                     //
                     // let indices: [usize; 128] = array::from_fn(|i| i + offset);
@@ -1840,6 +2055,8 @@ mod tests {
                                 //     + var(2558) * SymbExpr::from_u32(256)
                                 //     + var(2559) * SymbExpr::from_u32(65536)
                                 //     + var(2560) * SymbExpr::from_u32(16777216),
+
+                                // state_out
                                 var(2561)
                                     + var(2562) * SymbExpr::from_u32(256)
                                     + var(2563) * SymbExpr::from_u32(65536)
@@ -1904,70 +2121,6 @@ mod tests {
                                     + var(2622) * SymbExpr::from_u32(256)
                                     + var(2623) * SymbExpr::from_u32(65536)
                                     + var(2624) * SymbExpr::from_u32(16777216),
-                                var(2625)
-                                    + var(2626) * SymbExpr::from_u32(256)
-                                    + var(2627) * SymbExpr::from_u32(65536)
-                                    + var(2628) * SymbExpr::from_u32(16777216),
-                                var(2629)
-                                    + var(2630) * SymbExpr::from_u32(256)
-                                    + var(2631) * SymbExpr::from_u32(65536)
-                                    + var(2632) * SymbExpr::from_u32(16777216),
-                                var(2633)
-                                    + var(2634) * SymbExpr::from_u32(256)
-                                    + var(2635) * SymbExpr::from_u32(65536)
-                                    + var(2636) * SymbExpr::from_u32(16777216),
-                                var(2637)
-                                    + var(2638) * SymbExpr::from_u32(256)
-                                    + var(2639) * SymbExpr::from_u32(65536)
-                                    + var(2640) * SymbExpr::from_u32(16777216),
-                                var(2641)
-                                    + var(2642) * SymbExpr::from_u32(256)
-                                    + var(2643) * SymbExpr::from_u32(65536)
-                                    + var(2644) * SymbExpr::from_u32(16777216),
-                                var(2645)
-                                    + var(2646) * SymbExpr::from_u32(256)
-                                    + var(2647) * SymbExpr::from_u32(65536)
-                                    + var(2648) * SymbExpr::from_u32(16777216),
-                                var(2649)
-                                    + var(2650) * SymbExpr::from_u32(256)
-                                    + var(2651) * SymbExpr::from_u32(65536)
-                                    + var(2652) * SymbExpr::from_u32(16777216),
-                                var(2653)
-                                    + var(2654) * SymbExpr::from_u32(256)
-                                    + var(2655) * SymbExpr::from_u32(65536)
-                                    + var(2656) * SymbExpr::from_u32(16777216),
-                                var(2657)
-                                    + var(2658) * SymbExpr::from_u32(256)
-                                    + var(2659) * SymbExpr::from_u32(65536)
-                                    + var(2660) * SymbExpr::from_u32(16777216),
-                                var(2661)
-                                    + var(2662) * SymbExpr::from_u32(256)
-                                    + var(2663) * SymbExpr::from_u32(65536)
-                                    + var(2664) * SymbExpr::from_u32(16777216),
-                                var(2665)
-                                    + var(2666) * SymbExpr::from_u32(256)
-                                    + var(2667) * SymbExpr::from_u32(65536)
-                                    + var(2668) * SymbExpr::from_u32(16777216),
-                                var(2669)
-                                    + var(2670) * SymbExpr::from_u32(256)
-                                    + var(2671) * SymbExpr::from_u32(65536)
-                                    + var(2672) * SymbExpr::from_u32(16777216),
-                                var(2673)
-                                    + var(2674) * SymbExpr::from_u32(256)
-                                    + var(2675) * SymbExpr::from_u32(65536)
-                                    + var(2676) * SymbExpr::from_u32(16777216),
-                                var(2677)
-                                    + var(2678) * SymbExpr::from_u32(256)
-                                    + var(2679) * SymbExpr::from_u32(65536)
-                                    + var(2680) * SymbExpr::from_u32(16777216),
-                                var(2681)
-                                    + var(2682) * SymbExpr::from_u32(256)
-                                    + var(2683) * SymbExpr::from_u32(65536)
-                                    + var(2684) * SymbExpr::from_u32(16777216),
-                                var(2685)
-                                    + var(2686) * SymbExpr::from_u32(256)
-                                    + var(2687) * SymbExpr::from_u32(65536)
-                                    + var(2688) * SymbExpr::from_u32(16777216),
                             ],
                         ),
                         // ROUND 0
@@ -5023,13 +5176,13 @@ mod tests {
                     }
 
                     9u64 => {
-                        /* This is our StateTransition claim. We should have chip_idx, state_in[32], state_out[32] */
-                        assert!(claim.len() == 65, "[StateTransition] wrong claim format");
+                        /* This is our StateTransition claim. We should have chip_idx, state_in[32], state_out[16] */
+                        assert!(claim.len() == 49, "[StateTransition] wrong claim format");
 
                         let state_in: [u32; 32] = array::from_fn(|i| {
                             u32::try_from(claim[i + 1].as_canonical_u64()).unwrap()
                         });
-                        let state_out: [u32; 32] = array::from_fn(|i| {
+                        let state_out: [u32; 16] = array::from_fn(|i| {
                             u32::try_from(claim[i + 1 + 32].as_canonical_u64()).unwrap()
                         });
 
@@ -5046,9 +5199,16 @@ mod tests {
             let mut state_transition_trace_values =
                 Vec::<Val>::with_capacity(state_transition_values_from_claims.len());
             if state_transition_values_from_claims.is_empty() {
-                state_transition_trace_values = Val::zero_vec(STATE_TRANSITION_TRACE_WIDTH);
+                state_transition_trace_values = Val::zero_vec(COMPRESSION_TRACE_WIDTH);
+                for _ in 0..56 {
+                    g_function_values_from_claims
+                        .push((0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32));
+                }
 
-                // TODO: lookups for padded rows
+                for _ in 0..8 {
+                    u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
+                    u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
+                }
             } else {
                 for (state_in_io, state_out_io) in state_transition_values_from_claims.into_iter() {
                     let state_in_io_bytes = state_in_io
@@ -5187,7 +5347,10 @@ mod tests {
                         u32_xor_values_from_claims.push((a, b, xor)); // send data to U32Xor chip
                     }
 
-                    debug_assert_eq!(state_out_io, state);
+                    let mut state_out = state.to_vec();
+                    state_out.truncate(16); // compression output is first 16 u32 words of state_out
+
+                    debug_assert_eq!(state_out_io.to_vec(), state_out);
                     let state_out_io_bytes = state_out_io
                         .into_iter()
                         .flat_map(|u32_out_io| u32_out_io.to_le_bytes())
@@ -5202,11 +5365,21 @@ mod tests {
                 }
             }
             let mut state_transition_trace =
-                RowMajorMatrix::new(state_transition_trace_values, STATE_TRANSITION_TRACE_WIDTH);
+                RowMajorMatrix::new(state_transition_trace_values, COMPRESSION_TRACE_WIDTH);
             let height = state_transition_trace.height().next_power_of_two();
             let zero_rows_added = height - state_transition_trace.height();
             for _ in 0..zero_rows_added {
-                // TODO: lookups for padded rows
+                // we have 56 communications with G_Function chip
+                for _ in 0..56 {
+                    g_function_values_from_claims
+                        .push((0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32));
+                }
+
+                // we have 8 * 2 communications with U32_XOR chip
+                for _ in 0..8 {
+                    u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
+                    u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
+                }
             }
             state_transition_trace.pad_to_height(height, Val::ZERO);
 
@@ -5773,8 +5946,8 @@ mod tests {
         );
 
         let state_transition_circuit = LookupAir::new(
-            Blake3CompressionChips::StateTransition,
-            Blake3CompressionChips::StateTransition.lookups(),
+            Blake3CompressionChips::Compression,
+            Blake3CompressionChips::Compression.lookups(),
         );
 
         let (system, prover_key) = System::new(
@@ -5819,7 +5992,7 @@ mod tests {
         let b_1_tmp = b_0 ^ c_1;
         let b_1 = b_1_tmp.rotate_right(7);
 
-        // State transition IO
+        // Compression IO
         let state_in = vec![
             0x00000000u32,
             0x00001111u32,
@@ -5872,22 +6045,6 @@ mod tests {
             0x6cd0ac6bu32,
             0xc58f3c1du32,
             0xe6d65414u32,
-            0xbbbb0000u32,
-            0xffff0000u32,
-            0x55550000u32,
-            0x00000000u32,
-            0x11110000u32,
-            0x99990000u32,
-            0x88880000u32,
-            0x66660000u32,
-            0xeeee0000u32,
-            0xaaaa0000u32,
-            0x22220000u32,
-            0xcccc0000u32,
-            0x33330000u32,
-            0x44440000u32,
-            0x77770000u32,
-            0xdddd0000u32,
         ];
 
         let claims = Blake3CompressionClaims {
@@ -6104,13 +6261,45 @@ mod tests {
                     f32(c_1),
                     f32(b_1),
                 ],
-                // 1 state transition claim
+                // 5 compression claims
                 vec![
                     vec![Val::from_usize(
-                        Blake3CompressionChips::StateTransition.position(),
+                        Blake3CompressionChips::Compression.position(),
                     )],
-                    state_in.into_iter().map(Val::from_u32).collect(),
-                    state_out.into_iter().map(Val::from_u32).collect(),
+                    state_in.clone().into_iter().map(Val::from_u32).collect(),
+                    state_out.clone().into_iter().map(Val::from_u32).collect(),
+                ]
+                .concat(),
+                vec![
+                    vec![Val::from_usize(
+                        Blake3CompressionChips::Compression.position(),
+                    )],
+                    state_in.clone().into_iter().map(Val::from_u32).collect(),
+                    state_out.clone().into_iter().map(Val::from_u32).collect(),
+                ]
+                .concat(),
+                vec![
+                    vec![Val::from_usize(
+                        Blake3CompressionChips::Compression.position(),
+                    )],
+                    state_in.clone().into_iter().map(Val::from_u32).collect(),
+                    state_out.clone().into_iter().map(Val::from_u32).collect(),
+                ]
+                .concat(),
+                vec![
+                    vec![Val::from_usize(
+                        Blake3CompressionChips::Compression.position(),
+                    )],
+                    state_in.clone().into_iter().map(Val::from_u32).collect(),
+                    state_out.clone().into_iter().map(Val::from_u32).collect(),
+                ]
+                .concat(),
+                vec![
+                    vec![Val::from_usize(
+                        Blake3CompressionChips::Compression.position(),
+                    )],
+                    state_in.clone().into_iter().map(Val::from_u32).collect(),
+                    state_out.clone().into_iter().map(Val::from_u32).collect(),
                 ]
                 .concat(),
             ],
@@ -6118,40 +6307,7 @@ mod tests {
 
         let (traces, witness) = claims.witness(&system);
 
-        // // byte chip trace
-        // println!("BYTE CHIP");
-        // print_trace(&traces[0], U8_XOR_PAIR_RANGE_CHECK_TRACE_WIDTH, true);
-        //
-        // // u32 xor trace
-        // println!("U32 XOR");
-        // print_trace(&traces[1], U32_XOR_TRACE_WIDTH, false);
-        //
-        // // u32 add trace
-        // println!("U32 ADD");
-        // print_trace(&traces[2], U32_ADD_TRACE_WIDTH, false);
-        //
-        // // u32 rotate right 8 trace
-        // println!("U32 RIGHT_ROTATE 8");
-        // print_trace(&traces[3], U32_RIGHT_ROTATE_8_TRACE_WIDTH, false);
-        //
-        // // u32 rotate right 16 trace
-        // println!("U32 RIGHT_ROTATE 16");
-        // print_trace(&traces[4], U32_RIGHT_ROTATE_16_TRACE_WIDTH, false);
-        //
-        // // u32 rotate right 12 trace
-        // println!("U32 RIGHT_ROTATE 12");
-        // print_trace(&traces[5], U32_RIGHT_ROTATE_12_TRACE_WIDTH, false);
-        //
-        // // u32 rotate right 7 trace
-        // println!("U32 RIGHT_ROTATE 7");
-        // print_trace(&traces[6], U32_RIGHT_ROTATE_7_TRACE_WIDTH, false);
-        //
-        // // g function trace
-        // println!("G_FUNCTION");
-        // print_trace(&traces[7], G_FUNCTION_TRACE_WIDHT, false);
-
-        // println!("STATE_TRANSITION");
-        // print_trace(&traces[8], STATE_TRANSITION_TRACE_WIDTH, true);
+        // print_trace(&traces[8], STATE_TRANSITION_TRACE_WIDTH, false);
 
         let claims_slice: Vec<&[Val]> = claims.claims.iter().map(|v| v.as_slice()).collect();
         let claims_slice: &[&[Val]] = &claims_slice;
@@ -6201,7 +6357,7 @@ mod tests {
     }
 
     #[test]
-    fn state_transition_test_vector() {
+    fn compression_test_vector() {
         let state_in = vec![
             0x00000000u32,
             0x00001111u32,
@@ -6289,7 +6445,7 @@ mod tests {
             state[i + 8] ^= state_in[i]; // ^chaining_value
         }
 
-        let state_out = state;
+        let state_out = state[0..16].to_vec();
 
         let state_out_expected = vec![
             0xd304e51cu32,
@@ -6308,22 +6464,6 @@ mod tests {
             0x6cd0ac6bu32,
             0xc58f3c1du32,
             0xe6d65414u32,
-            0xbbbb0000u32,
-            0xffff0000u32,
-            0x55550000u32,
-            0x00000000u32,
-            0x11110000u32,
-            0x99990000u32,
-            0x88880000u32,
-            0x66660000u32,
-            0xeeee0000u32,
-            0xaaaa0000u32,
-            0x22220000u32,
-            0xcccc0000u32,
-            0x33330000u32,
-            0x44440000u32,
-            0x77770000u32,
-            0xdddd0000u32,
         ];
 
         assert_eq!(state_out, state_out_expected);
