@@ -24,6 +24,7 @@ p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3", rev = "5ebf8e4d34
 p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "5ebf8e4d340db4894fb09e4da34a9e0dbf3ccb5e" }
 p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "5ebf8e4d340db4894fb09e4da34a9e0dbf3ccb5e" }
 p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "5ebf8e4d340db4894fb09e4da34a9e0dbf3ccb5e" }
+blake3 = "1.8.2"
 
 [features]
 parallel = ["p3-maybe-rayon/parallel"]

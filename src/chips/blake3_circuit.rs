@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::builder::symbolic::{Entry, SymbolicExpression, SymbolicVariable};
-    use crate::chips::SymbExpr;
+    use crate::chips::{SymbExpr, blake3_new_update_finalize};
     use crate::lookup::{Lookup, LookupAir};
     use crate::system::{System, SystemWitness};
     use crate::types::{CommitmentParameters, FriParameters, Val};
@@ -14,6 +14,10 @@ mod tests {
 
     // Blake3-specific constants
 
+    const IV: [u32; 8] = [
+        0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB,
+        0x5BE0CD19,
+    ];
     const MSG_PERMUTATION: [usize; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
     const A: [usize; 8] = [0, 1, 2, 3, 0, 1, 2, 3];
     const B: [usize; 8] = [4, 5, 6, 7, 5, 6, 7, 4];
@@ -81,16 +85,16 @@ mod tests {
     impl Blake3CompressionChips {
         fn position(&self) -> usize {
             match self {
-                Blake3CompressionChips::U8Xor => 0,
-                Blake3CompressionChips::U32Xor => 1,
-                Blake3CompressionChips::U32Add => 2,
-                Blake3CompressionChips::U32RightRotate8 => 3,
-                Blake3CompressionChips::U32RightRotate16 => 4,
-                Blake3CompressionChips::U32RightRotate12 => 5,
-                Blake3CompressionChips::U32RightRotate7 => 6,
-                Blake3CompressionChips::U8PairRangeCheck => 7,
-                Blake3CompressionChips::GFunction => 8,
-                Blake3CompressionChips::Compression => 9,
+                Self::U8Xor => 0,
+                Self::U32Xor => 1,
+                Self::U32Add => 2,
+                Self::U32RightRotate8 => 3,
+                Self::U32RightRotate16 => 4,
+                Self::U32RightRotate12 => 5,
+                Self::U32RightRotate7 => 6,
+                Self::U8PairRangeCheck => 7,
+                Self::GFunction => 8,
+                Self::Compression => 9,
             }
         }
     }
@@ -127,14 +131,14 @@ mod tests {
                     }
                     Some(RowMajorMatrix::new(trace_values, PREPROCESSED_TRACE_WIDTH))
                 }
-                Self::U32Xor => None,
-                Self::U32Add => None,
-                Self::U32RightRotate8 => None,
-                Self::U32RightRotate16 => None,
-                Self::U32RightRotate12 => None,
-                Self::U32RightRotate7 => None,
-                Self::GFunction => None,
-                Self::Compression => None,
+                Self::U32Xor
+                | Self::U32Add
+                | Self::U32RightRotate8
+                | Self::U32RightRotate16
+                | Self::U32RightRotate12
+                | Self::U32RightRotate7
+                | Self::GFunction
+                | Self::Compression => None,
             }
         }
     }
@@ -146,8 +150,12 @@ mod tests {
     {
         fn eval(&self, builder: &mut AB) {
             match self {
-                Self::U8Xor | Self::U8PairRangeCheck => {}
-                Self::U32Xor => {}
+                Self::U8Xor
+                | Self::U8PairRangeCheck
+                | Self::U32Xor
+                | Self::U32RightRotate8
+                | Self::U32RightRotate16
+                | Self::GFunction => {}
                 Self::U32Add => {
                     let main = builder.main();
                     let local = main.row_slice(0).unwrap();
@@ -173,8 +181,6 @@ mod tests {
                         + carry * AB::Expr::from_u64(256 * 256 * 256 * 256);
                     builder.assert_eq(expr1, expr2);
                 }
-                Self::U32RightRotate8 => {}
-                Self::U32RightRotate16 => {}
                 Self::U32RightRotate12 | Self::U32RightRotate7 => {
                     let main = builder.main();
                     let local = main.row_slice(0).unwrap();
@@ -215,7 +221,6 @@ mod tests {
                     );
                     builder.assert_eq(output, input_div + input_rem * two_pow_32_minus_k);
                 }
-                Self::GFunction => {}
                 Self::Compression => {
                     let main = builder.main();
                     let columns = main.row_slice(0).unwrap();
@@ -438,16 +443,16 @@ mod tests {
                 ))
             };
 
-            let u8_xor_idx = Blake3CompressionChips::U8Xor.position();
-            let u32_xor_idx = Blake3CompressionChips::U32Xor.position();
-            let u32_add_idx = Blake3CompressionChips::U32Add.position();
-            let u32_right_rotate_8_idx = Blake3CompressionChips::U32RightRotate8.position();
-            let u32_right_rotate_16_idx = Blake3CompressionChips::U32RightRotate16.position();
-            let u32_right_rotate_12_idx = Blake3CompressionChips::U32RightRotate12.position();
-            let u32_right_rotate_7_idx = Blake3CompressionChips::U32RightRotate7.position();
-            let u8_pair_range_check_idx = Blake3CompressionChips::U8PairRangeCheck.position();
-            let g_function_idx = Blake3CompressionChips::GFunction.position();
-            let compression_idx = Blake3CompressionChips::Compression.position();
+            let u8_xor_idx = Self::U8Xor.position();
+            let u32_xor_idx = Self::U32Xor.position();
+            let u32_add_idx = Self::U32Add.position();
+            let u32_right_rotate_8_idx = Self::U32RightRotate8.position();
+            let u32_right_rotate_16_idx = Self::U32RightRotate16.position();
+            let u32_right_rotate_12_idx = Self::U32RightRotate12.position();
+            let u32_right_rotate_7_idx = Self::U32RightRotate7.position();
+            let u8_pair_range_check_idx = Self::U8PairRangeCheck.position();
+            let g_function_idx = Self::GFunction.position();
+            let compression_idx = Self::Compression.position();
 
             fn pull_state_in_state_out(
                 multiplicity: SymbExpr,
@@ -459,19 +464,12 @@ mod tests {
                 assert_eq!(state_in_range.len(), 128);
                 assert_eq!(state_out_range.len(), 64);
 
-                let in_i = state_in_range
-                    .into_iter()
-                    .map(|ind| ind)
-                    .collect::<Vec<usize>>();
+                let in_i = state_in_range.collect::<Vec<usize>>();
 
-                let out_i = state_out_range
-                    .into_iter()
-                    .map(|ind| ind)
-                    .collect::<Vec<usize>>();
+                let out_i = state_out_range.collect::<Vec<usize>>();
 
                 let state_in = in_i
                     .chunks(4)
-                    .into_iter()
                     .map(|i| {
                         var(i[0])
                             + var(i[1]) * SymbExpr::from_u32(256)
@@ -482,7 +480,6 @@ mod tests {
 
                 let state_out = out_i
                     .chunks(4)
-                    .into_iter()
                     .map(|i| {
                         var(i[0])
                             + var(i[1]) * SymbExpr::from_u32(256)
@@ -505,7 +502,7 @@ mod tests {
             ) -> Lookup<SymbExpr> {
                 assert_eq!(v_ind.len(), 40);
 
-                let i = v_ind.into_iter().map(|ind| ind).collect::<Vec<usize>>();
+                let i = v_ind.collect::<Vec<usize>>();
 
                 Lookup::push(
                     multiplicity,
@@ -582,7 +579,7 @@ mod tests {
             ) -> Lookup<SymbExpr> {
                 assert_eq!(v_ind.len(), 12);
 
-                let i = v_ind.into_iter().map(|ind| ind).collect::<Vec<usize>>();
+                let i = v_ind.collect::<Vec<usize>>();
 
                 push_pull(
                     multiplicity,
@@ -1214,7 +1211,7 @@ mod tests {
 
             for claim in self.claims.clone() {
                 // we should have at least chip index
-                assert!(claim.len() > 0, "wrong claim format");
+                assert!(!claim.is_empty(), "wrong claim format");
                 match claim[0].as_canonical_u64() {
                     0u64 => {
                         // This is our U8Xor claim. We should have chip_idx, A, B, A xor B (where A, B are bytes)
@@ -1340,7 +1337,7 @@ mod tests {
                     u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
                 }
             } else {
-                for (state_in_io, state_out_io) in state_transition_values_from_claims.into_iter() {
+                for (state_in_io, state_out_io) in state_transition_values_from_claims {
                     let state_in_io_bytes = state_in_io
                         .into_iter()
                         .flat_map(|u32_in_io| u32_in_io.to_le_bytes())
@@ -1349,7 +1346,7 @@ mod tests {
                     state_transition_trace_values.extend_from_slice(
                         state_in_io_bytes
                             .into_iter()
-                            .map(|byte| Val::from_u8(byte))
+                            .map(Val::from_u8)
                             .collect::<Vec<Val>>()
                             .as_slice(),
                     );
@@ -1382,13 +1379,13 @@ mod tests {
                             state[C[j]] = c_1;
                             state[D[j]] = d_1;
 
-                            [a_in, b_in, c_in, d_in, mx_in, my_in, a_1, d_1, c_1, b_1]
-                                .iter()
-                                .for_each(|u32_val| {
-                                    let bytes: [u8; 4] = u32_val.to_le_bytes();
-                                    state_transition_trace_values
-                                        .extend_from_slice(bytes.map(Val::from_u8).as_slice());
-                                });
+                            for u32_val in
+                                [a_in, b_in, c_in, d_in, mx_in, my_in, a_1, d_1, c_1, b_1].iter()
+                            {
+                                let bytes: [u8; 4] = u32_val.to_le_bytes();
+                                state_transition_trace_values
+                                    .extend_from_slice(bytes.map(Val::from_u8).as_slice());
+                            }
                         }
 
                         // execute permutation for the 6 first rounds
@@ -1454,7 +1451,7 @@ mod tests {
                     state_transition_trace_values.extend_from_slice(
                         state_out_io_bytes
                             .into_iter()
-                            .map(|byte| Val::from_u8(byte))
+                            .map(Val::from_u8)
                             .collect::<Vec<Val>>()
                             .as_slice(),
                     );
@@ -1508,7 +1505,7 @@ mod tests {
                 }
             } else {
                 for (a_in, b_in, c_in, d_in, mx_in, my_in, a1, b1, c1, d1) in
-                    g_function_values_from_claims.into_iter()
+                    g_function_values_from_claims
                 {
                     let a_0_tmp = a_in.wrapping_add(b_in);
                     u32_add_values_from_claims.push((a_in, b_in, a_0_tmp)); // send data to U32Add chip
@@ -1557,18 +1554,17 @@ mod tests {
                     debug_assert_eq!(c_1, c1);
                     debug_assert_eq!(d_1, d1);
 
-
                     g_function_trace_values.push(Val::ONE); // multiplicity
-                    [
+                    for u32_val in [
                         a_in, b_in, c_in, d_in, mx_in, my_in, a_0_tmp, a_0, d_0_tmp, d_0, c_0,
                         b_0_tmp, b_0, a_1_tmp, a_1, d_1_tmp, d_1, c_1, b_1_tmp, b_1,
                     ]
                     .iter()
-                    .for_each(|u32_val| {
+                    {
                         let bytes: [u8; 4] = u32_val.to_le_bytes();
                         g_function_trace_values
                             .extend_from_slice(bytes.map(Val::from_u8).as_slice());
-                    });
+                    }
                 }
             }
             let mut g_function_trace =
@@ -1603,7 +1599,7 @@ mod tests {
                     byte_xor_values_from_claims.push((Val::ZERO, Val::ZERO, Val::ZERO));
                 }
             } else {
-                for (left, right, xor) in u32_xor_values_from_claims.into_iter() {
+                for (left, right, xor) in u32_xor_values_from_claims {
                     debug_assert_eq!(left ^ right, xor);
 
                     let left_bytes: [u8; 4] = left.to_le_bytes();
@@ -1619,26 +1615,13 @@ mod tests {
 
                     /* we send bytes to U8Xor chip, relying on lookup constraining */
 
-                    byte_xor_values_from_claims.push((
-                        Val::from_u8(left_bytes[0]),
-                        Val::from_u8(right_bytes[0]),
-                        Val::from_u8(xor_bytes[0]),
-                    ));
-                    byte_xor_values_from_claims.push((
-                        Val::from_u8(left_bytes[1]),
-                        Val::from_u8(right_bytes[1]),
-                        Val::from_u8(xor_bytes[1]),
-                    ));
-                    byte_xor_values_from_claims.push((
-                        Val::from_u8(left_bytes[2]),
-                        Val::from_u8(right_bytes[2]),
-                        Val::from_u8(xor_bytes[2]),
-                    ));
-                    byte_xor_values_from_claims.push((
-                        Val::from_u8(left_bytes[3]),
-                        Val::from_u8(right_bytes[3]),
-                        Val::from_u8(xor_bytes[3]),
-                    ));
+                    for i in 0..4 {
+                        byte_xor_values_from_claims.push((
+                            Val::from_u8(left_bytes[i]),
+                            Val::from_u8(right_bytes[i]),
+                            Val::from_u8(xor_bytes[i]),
+                        ));
+                    }
                 }
             }
             let mut u32_xor_trace = RowMajorMatrix::new(u32_xor_trace_values, U32_XOR_TRACE_WIDTH);
@@ -1662,7 +1645,6 @@ mod tests {
                 for _ in 0..8 {
                     byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
                 }
-
             } else {
                 for (left, right, sum) in u32_add_values_from_claims {
                     let (z, carry) = left.overflowing_add(right);
@@ -1683,23 +1665,12 @@ mod tests {
 
                     /* we send decomposed bytes to U8Xor chip, relying on lookup constraining */
 
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(left_bytes[0]), Val::from_u8(right_bytes[0])));
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(left_bytes[1]), Val::from_u8(right_bytes[1])));
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(left_bytes[2]), Val::from_u8(right_bytes[2])));
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(left_bytes[3]), Val::from_u8(right_bytes[3])));
-
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(sum_bytes[0]), Val::ZERO));
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(sum_bytes[1]), Val::ZERO));
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(sum_bytes[2]), Val::ZERO));
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(sum_bytes[3]), Val::ZERO));
+                    for i in 0..4 {
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(left_bytes[i]), Val::from_u8(right_bytes[i])));
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(sum_bytes[i]), Val::ZERO));
+                    }
                 }
             }
             let mut u32_add_trace = RowMajorMatrix::new(u32_add_trace_values, U32_ADD_TRACE_WIDTH);
@@ -1707,15 +1678,10 @@ mod tests {
             let zero_rows = height - u32_add_trace.height();
             for _ in 0..zero_rows {
                 // we also need to balance the lookups using zeroes for every padded row
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
 
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                for _ in 0..8 {
+                    byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
+                }
             }
             u32_add_trace.pad_to_height(height, Val::ZERO);
 
@@ -1811,7 +1777,7 @@ mod tests {
 
             fn rot_7_12_trace_values(
                 k: u32,
-                vals_from_claim: Vec<(u32, u32)>,
+                vals_from_claim: &[(u32, u32)],
             ) -> RowMajorMatrix<Val> {
                 let width = match k {
                     7 => U32_RIGHT_ROTATE_7_TRACE_WIDTH,
@@ -1823,11 +1789,11 @@ mod tests {
                 if vals_from_claim.is_empty() {
                     values = Val::zero_vec(width);
                 } else {
-                    for (val, rot) in vals_from_claim.clone() {
+                    for (val, rot) in vals_from_claim {
                         values.push(Val::ONE); // multiplicity
 
                         // actual rotate result should match to the value from claim
-                        debug_assert_eq!(val.rotate_right(k), rot);
+                        debug_assert_eq!(val.rotate_right(k), *rot);
 
                         let two_pow_k = u32::try_from(2usize.pow(k)).unwrap();
                         let two_pow_32_minus_k = u32::try_from(2usize.pow(32 - k)).unwrap();
@@ -1861,21 +1827,13 @@ mod tests {
                 trace
             }
 
-            // build U32RotateRight12 trace (columns:
-            //      multiplicity,
-            //      a0, a1, a2, a3,
-            //      rot0, rot1, rot2, rot3,
-            //      two_pow_k_0, two_pow_k_1, two_pow_k_2, two_pow_k_3,
-            //      two_pow_32_minus_k_0, two_pow_32_minus_k_1, two_pow_32_minus_k_2, two_pow_32_minus_k_3,
-            //      value_div_0, value_div_1, value_div_2, value_div_3,
-            //      value_rem_0, value_rem_1, value_rem_2, value_rem_3
-            // )
+            // build U32RotateRight12 trace
             let u32_rotate_right_12_trace =
-                rot_7_12_trace_values(12, u32_rotate_right_12_values_from_claims);
+                rot_7_12_trace_values(12, &u32_rotate_right_12_values_from_claims);
 
-            // build U32RotateRight7 trace (columns same as for U32RotateRight12)
+            // build U32RotateRight7 trace
             let u32_rotate_right_7_trace =
-                rot_7_12_trace_values(7, u32_rotate_right_7_values_from_claims);
+                rot_7_12_trace_values(7, &u32_rotate_right_7_values_from_claims);
 
             // finally build U8Xor / U8PairRangeCheck trace (columns: multiplicity_u8_xor, multiplicity_pair_range_check)
             // since this it "lowest-level" trace, its multiplicities could be updated by other chips previously
@@ -1927,25 +1885,37 @@ mod tests {
     }
 
     #[test]
-    fn blake3_test_debug() {
-        // computation
+    fn test_compression_reference_compatibility() {
+        let input: Vec<u8> = vec![0x54; 64];
 
-        let a_u8 = 0xa1u8;
-        let b_u8 = 0xa8u8;
-        let xor_u8 = a_u8 ^ b_u8;
+        let mut reference_hasher = blake3::Hasher::new();
+        reference_hasher.update(&input);
+        let reference_hash = reference_hasher.finalize();
+        let expected = reference_hash.as_bytes();
 
-        let a1_u8 = 0x01u8;
-        let b1_u8 = 0x02u8;
-        let xor1_u8 = a1_u8 ^ b1_u8;
+        let (claim_data, actual) = blake3_new_update_finalize(&input);
+        assert_eq!(expected.to_vec(), actual.to_vec());
+        assert_eq!(claim_data.len(), 1);
 
-        let a_u32 = 0x000000ffu32;
-        let b_u32 = 0x0000ff01u32;
-        let xor_u32 = a_u32 ^ b_u32;
-        let add_u32 = a_u32.wrapping_add(b_u32);
-        let a_rot_8 = a_u32.rotate_right(8);
-        let a_rot_16 = a_u32.rotate_right(16);
-        let a_rot_12 = a_u32.rotate_right(12);
-        let a_rot_7 = a_u32.rotate_right(7);
+        let claim_data = claim_data.first().unwrap();
+
+        let state_in = [
+            claim_data.cv.to_vec(),
+            vec![
+                IV[0],
+                IV[1],
+                IV[2],
+                IV[3],
+                claim_data.counter_low,
+                claim_data.counter_high,
+                claim_data.block_len,
+                claim_data.flags,
+            ],
+            claim_data.block_words.to_vec(),
+        ]
+        .concat();
+
+        let state_out = claim_data.output.to_vec();
 
         // circuit testing
         let commitment_parameters = CommitmentParameters { log_blowup: 1 };
@@ -2002,10 +1972,55 @@ mod tests {
             ],
         );
 
-        let f = Val::from_u8;
-        let f32 = Val::from_u32;
+        let claims = Blake3CompressionClaims {
+            claims: vec![
+                [
+                    vec![Val::from_usize(
+                        Blake3CompressionChips::Compression.position(),
+                    )],
+                    state_in.into_iter().map(Val::from_u32).collect(),
+                    state_out.into_iter().map(Val::from_u32).collect(),
+                ]
+                .concat(),
+            ],
+        };
 
-        // G_function IO
+        let (_traces, witness) = claims.witness(&system);
+
+        let claims_slice: Vec<&[Val]> = claims.claims.iter().map(|v| v.as_slice()).collect();
+        let claims_slice: &[&[Val]] = &claims_slice;
+
+        let fri_parameters = FriParameters {
+            log_final_poly_len: 0,
+            num_queries: 64,
+            proof_of_work_bits: 0,
+        };
+
+        let proof =
+            system.prove_multiple_claims(fri_parameters, &prover_key, claims_slice, witness);
+        system
+            .verify_multiple_claims(fri_parameters, claims_slice, &proof)
+            .expect("verification issue");
+    }
+
+    #[test]
+    fn test_all_claims() {
+        // computations IO
+
+        let a_u8 = 0xa1u8;
+        let b_u8 = 0xa8u8;
+        let xor_u8 = a_u8 ^ b_u8;
+
+        let a_u32 = 0x000000ffu32;
+        let b_u32 = 0x0000ff01u32;
+        let xor_u32 = a_u32 ^ b_u32;
+        let add_u32 = a_u32.wrapping_add(b_u32);
+        let a_rot_8 = a_u32.rotate_right(8);
+        let a_rot_16 = a_u32.rotate_right(16);
+        let a_rot_12 = a_u32.rotate_right(12);
+        let a_rot_7 = a_u32.rotate_right(7);
+
+        // G function IO
         let a_in = 0x11111111u32;
         let b_in = 0x22222222u32;
         let c_in = 0x33333333u32;
@@ -2029,7 +2044,7 @@ mod tests {
         let b_1_tmp = b_0 ^ c_1;
         let b_1 = b_1_tmp.rotate_right(7);
 
-        // Compression IO
+        // compression IO
         let state_in = vec![
             0x00000000u32,
             0x00001111u32,
@@ -2084,6 +2099,84 @@ mod tests {
             0xe6d65414u32,
         ];
 
+        fn run_test(claims: &Blake3CompressionClaims) {
+            // circuit testing
+            let commitment_parameters = CommitmentParameters { log_blowup: 1 };
+            let u8_circuit = LookupAir::new(
+                Blake3CompressionChips::U8Xor,
+                Blake3CompressionChips::U8Xor.lookups(),
+            );
+            let u32_circuit = LookupAir::new(
+                Blake3CompressionChips::U32Xor,
+                Blake3CompressionChips::U32Xor.lookups(),
+            );
+            let u32_add_circuit = LookupAir::new(
+                Blake3CompressionChips::U32Add,
+                Blake3CompressionChips::U32Add.lookups(),
+            );
+            let u32_rotate_right_8_circuit = LookupAir::new(
+                Blake3CompressionChips::U32RightRotate8,
+                Blake3CompressionChips::U32RightRotate8.lookups(),
+            );
+            let u32_rotate_right_16_circuit = LookupAir::new(
+                Blake3CompressionChips::U32RightRotate16,
+                Blake3CompressionChips::U32RightRotate16.lookups(),
+            );
+            let u32_rotate_right_12_circuit = LookupAir::new(
+                Blake3CompressionChips::U32RightRotate12,
+                Blake3CompressionChips::U32RightRotate12.lookups(),
+            );
+            let u32_rotate_right_7_circuit = LookupAir::new(
+                Blake3CompressionChips::U32RightRotate7,
+                Blake3CompressionChips::U32RightRotate7.lookups(),
+            );
+            let g_function_circuit = LookupAir::new(
+                Blake3CompressionChips::GFunction,
+                Blake3CompressionChips::GFunction.lookups(),
+            );
+
+            let state_transition_circuit = LookupAir::new(
+                Blake3CompressionChips::Compression,
+                Blake3CompressionChips::Compression.lookups(),
+            );
+
+            let (system, prover_key) = System::new(
+                commitment_parameters,
+                vec![
+                    u8_circuit,
+                    u32_circuit,
+                    u32_add_circuit,
+                    u32_rotate_right_8_circuit,
+                    u32_rotate_right_16_circuit,
+                    u32_rotate_right_12_circuit,
+                    u32_rotate_right_7_circuit,
+                    g_function_circuit,
+                    state_transition_circuit,
+                ],
+            );
+
+            let (_traces, witness) = claims.witness(&system);
+
+            let claims_slice: Vec<&[Val]> = claims.claims.iter().map(|v| v.as_slice()).collect();
+            let claims_slice: &[&[Val]] = &claims_slice;
+
+            let fri_parameters = FriParameters {
+                log_final_poly_len: 0,
+                num_queries: 64,
+                proof_of_work_bits: 0,
+            };
+
+            let proof =
+                system.prove_multiple_claims(fri_parameters, &prover_key, claims_slice, witness);
+            system
+                .verify_multiple_claims(fri_parameters, claims_slice, &proof)
+                .expect("verification issue");
+        }
+
+        // claims construction
+        let f = Val::from_u8;
+        let f32 = Val::from_u32;
+
         let claims = Blake3CompressionClaims {
             claims: vec![
                 // 3 u8 xor claims
@@ -2093,89 +2186,70 @@ mod tests {
                     f(b_u8),
                     f(xor_u8),
                 ],
+            ],
+        };
+
+        run_test(&claims);
+
+        let claims = Blake3CompressionClaims {
+            claims: vec![
+                // 5 u8 xor claims
                 vec![
                     Val::from_usize(Blake3CompressionChips::U8Xor.position()),
-                    f(a1_u8),
-                    f(b1_u8),
-                    f(xor1_u8),
-                ],
+                    f(a_u8),
+                    f(b_u8),
+                    f(xor_u8),
+                ]; 5
+            ],
+        };
+        run_test(&claims);
+
+        let claims = Blake3CompressionClaims {
+            claims: vec![
+                // 2 u32 xor claims
                 vec![
                     Val::from_usize(Blake3CompressionChips::U8Xor.position()),
-                    f(a1_u8),
-                    f(b1_u8),
-                    f(xor1_u8),
-                ],
-                // 5 u32 xor claims
+                    f(a_u8),
+                    f(b_u8),
+                    f(xor_u8),
+                ]; 2
+            ],
+        };
+        run_test(&claims);
+
+        let claims = Blake3CompressionClaims {
+            claims: vec![
+                // 3 u32 xor claims
                 vec![
                     Val::from_usize(Blake3CompressionChips::U32Xor.position()),
                     f32(a_u32),
                     f32(b_u32),
                     f32(xor_u32),
-                ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32Xor.position()),
-                    f32(a_u32),
-                    f32(b_u32),
-                    f32(xor_u32),
-                ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32Xor.position()),
-                    f32(a_u32),
-                    f32(b_u32),
-                    f32(xor_u32),
-                ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32Xor.position()),
-                    f32(a_u32),
-                    f32(b_u32),
-                    f32(xor_u32),
-                ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32Xor.position()),
-                    f32(a_u32),
-                    f32(b_u32),
-                    f32(xor_u32),
-                ],
-                // 3 u32 addition claims
+                ]; 3
+            ],
+        };
+        run_test(&claims);
+
+        let claims = Blake3CompressionClaims {
+            claims: vec![
+                // 6 u32 add claims
                 vec![
                     Val::from_usize(Blake3CompressionChips::U32Add.position()),
                     f32(a_u32),
                     f32(b_u32),
                     f32(add_u32),
-                ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32Add.position()),
-                    f32(a_u32),
-                    f32(b_u32),
-                    f32(add_u32),
-                ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32Add.position()),
-                    f32(a_u32),
-                    f32(b_u32),
-                    f32(add_u32),
-                ],
-                // 3 u32 right rotate to 8 claims
+                ]; 6
+            ],
+        };
+        run_test(&claims);
+
+        let claims = Blake3CompressionClaims {
+            claims: vec![
+                // Right rotate claims (1 per each operation)
                 vec![
                     Val::from_usize(Blake3CompressionChips::U32RightRotate8.position()),
                     f32(a_u32),
                     f32(a_rot_8),
-                ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32RightRotate8.position()),
-                    f32(a_u32),
-                    f32(a_rot_8),
-                ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32RightRotate8.position()),
-                    f32(a_u32),
-                    f32(a_rot_8),
-                ],
-                // 3 u32 right rotate to 16 claims
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32RightRotate16.position()),
-                    f32(a_u32),
-                    f32(a_rot_16),
                 ],
                 vec![
                     Val::from_usize(Blake3CompressionChips::U32RightRotate16.position()),
@@ -2183,56 +2257,22 @@ mod tests {
                     f32(a_rot_16),
                 ],
                 vec![
-                    Val::from_usize(Blake3CompressionChips::U32RightRotate16.position()),
-                    f32(a_u32),
-                    f32(a_rot_16),
-                ],
-                // 3 u32 right rotate to 12 claims
-                vec![
                     Val::from_usize(Blake3CompressionChips::U32RightRotate12.position()),
                     f32(a_u32),
                     f32(a_rot_12),
-                ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32RightRotate12.position()),
-                    f32(a_u32),
-                    f32(a_rot_12),
-                ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32RightRotate12.position()),
-                    f32(a_u32),
-                    f32(a_rot_12),
-                ],
-                // 3 u32 right rotate to 7 claims
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32RightRotate7.position()),
-                    f32(a_u32),
-                    f32(a_rot_7),
                 ],
                 vec![
                     Val::from_usize(Blake3CompressionChips::U32RightRotate7.position()),
                     f32(a_u32),
                     f32(a_rot_7),
                 ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32RightRotate7.position()),
-                    f32(a_u32),
-                    f32(a_rot_7),
-                ],
-                // 6 G_function claims
-                vec![
-                    Val::from_usize(Blake3CompressionChips::GFunction.position()),
-                    f32(a_in),
-                    f32(b_in),
-                    f32(c_in),
-                    f32(d_in),
-                    f32(mx_in),
-                    f32(my_in),
-                    f32(a_1),
-                    f32(d_1),
-                    f32(c_1),
-                    f32(b_1),
-                ],
+            ],
+        };
+        run_test(&claims);
+
+        let claims = Blake3CompressionClaims {
+            // 3 G function claims
+            claims: vec![
                 vec![
                     Val::from_usize(Blake3CompressionChips::GFunction.position()),
                     f32(a_in),
@@ -2245,93 +2285,45 @@ mod tests {
                     f32(d_1),
                     f32(c_1),
                     f32(b_1),
-                ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::GFunction.position()),
-                    f32(a_in),
-                    f32(b_in),
-                    f32(c_in),
-                    f32(d_in),
-                    f32(mx_in),
-                    f32(my_in),
-                    f32(a_1),
-                    f32(d_1),
-                    f32(c_1),
-                    f32(b_1),
-                ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::GFunction.position()),
-                    f32(a_in),
-                    f32(b_in),
-                    f32(c_in),
-                    f32(d_in),
-                    f32(mx_in),
-                    f32(my_in),
-                    f32(a_1),
-                    f32(d_1),
-                    f32(c_1),
-                    f32(b_1),
-                ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::GFunction.position()),
-                    f32(a_in),
-                    f32(b_in),
-                    f32(c_in),
-                    f32(d_in),
-                    f32(mx_in),
-                    f32(my_in),
-                    f32(a_1),
-                    f32(d_1),
-                    f32(c_1),
-                    f32(b_1),
-                ],
-                vec![
-                    Val::from_usize(Blake3CompressionChips::GFunction.position()),
-                    f32(a_in),
-                    f32(b_in),
-                    f32(c_in),
-                    f32(d_in),
-                    f32(mx_in),
-                    f32(my_in),
-                    f32(a_1),
-                    f32(d_1),
-                    f32(c_1),
-                    f32(b_1),
-                ],
-                // 5 compression claims
-                vec![
+                ];
+                3
+            ],
+        };
+        run_test(&claims);
+
+        let claims = Blake3CompressionClaims {
+            // 11 Compression claims
+            claims: vec![
+                [
                     vec![Val::from_usize(
                         Blake3CompressionChips::Compression.position(),
                     )],
                     state_in.clone().into_iter().map(Val::from_u32).collect(),
                     state_out.clone().into_iter().map(Val::from_u32).collect(),
                 ]
-                .concat(),
+                .concat();
+                5
+            ],
+        };
+        run_test(&claims);
+
+        let claims = Blake3CompressionClaims {
+            // Compression + G_Function claims
+            claims: vec![
                 vec![
-                    vec![Val::from_usize(
-                        Blake3CompressionChips::Compression.position(),
-                    )],
-                    state_in.clone().into_iter().map(Val::from_u32).collect(),
-                    state_out.clone().into_iter().map(Val::from_u32).collect(),
-                ]
-                .concat(),
-                vec![
-                    vec![Val::from_usize(
-                        Blake3CompressionChips::Compression.position(),
-                    )],
-                    state_in.clone().into_iter().map(Val::from_u32).collect(),
-                    state_out.clone().into_iter().map(Val::from_u32).collect(),
-                ]
-                .concat(),
-                vec![
-                    vec![Val::from_usize(
-                        Blake3CompressionChips::Compression.position(),
-                    )],
-                    state_in.clone().into_iter().map(Val::from_u32).collect(),
-                    state_out.clone().into_iter().map(Val::from_u32).collect(),
-                ]
-                .concat(),
-                vec![
+                    Val::from_usize(Blake3CompressionChips::GFunction.position()),
+                    f32(a_in),
+                    f32(b_in),
+                    f32(c_in),
+                    f32(d_in),
+                    f32(mx_in),
+                    f32(my_in),
+                    f32(a_1),
+                    f32(d_1),
+                    f32(c_1),
+                    f32(b_1),
+                ],
+                [
                     vec![Val::from_usize(
                         Blake3CompressionChips::Compression.position(),
                     )],
@@ -2341,25 +2333,7 @@ mod tests {
                 .concat(),
             ],
         };
-
-        let (traces, witness) = claims.witness(&system);
-
-        // print_trace(&traces[8], STATE_TRANSITION_TRACE_WIDTH, false);
-
-        let claims_slice: Vec<&[Val]> = claims.claims.iter().map(|v| v.as_slice()).collect();
-        let claims_slice: &[&[Val]] = &claims_slice;
-
-        let fri_parameters = FriParameters {
-            log_final_poly_len: 0,
-            num_queries: 64,
-            proof_of_work_bits: 0,
-        };
-
-        let proof =
-            system.prove_multiple_claims(fri_parameters, &prover_key, claims_slice, witness);
-        system
-            .verify_multiple_claims(fri_parameters, claims_slice, &proof)
-            .expect("verification issue");
+        run_test(&claims);
     }
 
     #[test]
@@ -2498,18 +2472,18 @@ mod tests {
     }
 
     // useful for debugging
-    fn print_trace(trace: &RowMajorMatrix<Val>, width: usize, ignore_zeroes: bool) {
-        println!();
-        for row in trace.values.chunks(width) {
-            if ignore_zeroes {
-                if row.iter().all(|&x| x == Val::ZERO) {
-                } else {
-                    println!("{:?}", row);
-                }
-            } else {
-                println!("{:?}", row);
-            }
-        }
-        println!();
-    }
+    // fn print_trace(trace: &RowMajorMatrix<Val>, width: usize, ignore_zeroes: bool) {
+    //     println!();
+    //     for row in trace.values.chunks(width) {
+    //         if ignore_zeroes {
+    //             if row.iter().all(|&x| x == Val::ZERO) {
+    //             } else {
+    //                 println!("{:?}", row);
+    //             }
+    //         } else {
+    //             println!("{:?}", row);
+    //         }
+    //     }
+    //     println!();
+    // }
 }
