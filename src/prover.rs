@@ -96,11 +96,16 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         });
         let (stage_1_trace_commit, stage_1_trace_data) =
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
-        // TODO: do we have to observe the log_degrees?
+
         if let Some(commit) = self.preprocessed_commit {
             challenger.observe(commit);
         }
         challenger.observe(stage_1_trace_commit);
+
+        // observe the traces' heights. TODO: is this necessary?
+        for log_degree in &log_degrees {
+            challenger.observe(Val::from_usize(*log_degree));
+        }
 
         // observe the claims
         // this has to be done before generating the lookup argument challenge

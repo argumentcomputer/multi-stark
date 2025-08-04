@@ -69,6 +69,11 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         }
         challenger.observe(commitments.stage_1_trace);
 
+        // observe the traces' heights. TODO: is this necessary?
+        for log_degree in log_degrees {
+            challenger.observe(Val::from_u8(*log_degree));
+        }
+
         // observe the claims
         for claim in claims {
             challenger.observe_slice(claim);
