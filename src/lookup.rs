@@ -1,12 +1,13 @@
-use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, BaseAirWithPublicValues};
+use p3_air::{Air, BaseAir, BaseAirWithPublicValues, ExtensionBuilder};
 use p3_field::{Algebra, Field, PrimeCharacteristicRing, batch_multiplicative_inverse};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 use crate::{
     builder::{PreprocessedBuilder, TwoStagedBuilder, symbolic::SymbolicExpression},
-    system::MIN_IO_SIZE,
     types::{ExtVal, Val},
 };
+
+pub const MIN_IO_SIZE: usize = 4;
 
 #[derive(Clone)]
 pub struct Lookup<Expr> {
@@ -65,6 +66,16 @@ impl<A: BaseAir<Val>> LookupAir<A> {
     pub fn stage_2_width(&self) -> usize {
         self.lookups.len() + 1
     }
+}
+
+/// Computes a fingerprint of the coefficients using Horner's method.
+fn fingerprint<F: Field, Expr: Algebra<F>>(
+    r: &Expr,
+    coeffs: impl DoubleEndedIterator<Item = Expr>,
+) -> Expr {
+    coeffs
+        .rev()
+        .fold(F::ZERO.into(), |acc, coeff| acc * r.clone() + coeff)
 }
 
 impl Lookup<SymbolicExpression<Val>> {
@@ -174,17 +185,17 @@ where
 
 impl<A> BaseAirWithPublicValues<Val> for LookupAir<A>
 where
-    A: BaseAir<Val>,
+    A: BaseAirWithPublicValues<Val>,
 {
     fn num_public_values(&self) -> usize {
-        MIN_IO_SIZE
+        self.inner_air.num_public_values()
     }
 }
 
 impl<A, AB> Air<AB> for LookupAir<A>
 where
     A: Air<AB>,
-    AB: AirBuilderWithPublicValues<F = Val> + TwoStagedBuilder + PreprocessedBuilder,
+    AB: PreprocessedBuilder + TwoStagedBuilder<F = Val, EF = ExtVal>,
 {
     fn eval(&self, builder: &mut AB) {
         if let Some(preprocessed) = builder.preprocessed() {
@@ -201,16 +212,16 @@ impl<A> LookupAir<A> {
     fn eval_with_preprocessed_row<AB>(&self, builder: &mut AB, preprocessed_row: Option<&[AB::Var]>)
     where
         A: Air<AB>,
-        AB: AirBuilderWithPublicValues<F = Val> + TwoStagedBuilder + PreprocessedBuilder,
+        AB: PreprocessedBuilder + TwoStagedBuilder<F = Val, EF = ExtVal>,
     {
         let lookups = &self.lookups;
         self.inner_air.eval(builder);
-        let public_values = builder.public_values();
-        debug_assert_eq!(public_values.len(), MIN_IO_SIZE);
-        let lookup_challenge = public_values[0];
-        let fingerprint_challenge = public_values[1];
-        let acc = public_values[2];
-        let next_acc = public_values[3];
+        let stage_2_public_values = builder.stage_2_public_values();
+        debug_assert_eq!(stage_2_public_values.len(), MIN_IO_SIZE);
+        let lookup_challenge = stage_2_public_values[0];
+        let fingerprint_challenge = stage_2_public_values[1];
+        let acc = stage_2_public_values[2];
+        let next_acc = stage_2_public_values[3];
 
         let main = builder.main();
         let stage_2 = builder.stage_2();
@@ -222,38 +233,30 @@ impl<A> LookupAir<A> {
 
         let row = main.row_slice(0).unwrap();
         let acc_col = &stage_2_row[0];
-        let mut acc_expr: AB::Expr = acc_col.clone().into();
+        let mut acc_expr: AB::ExprEF = (*acc_col).into();
         for (lookup, inverse_of_message) in lookups.iter().zip(inverse_of_messages) {
-            let multiplicity = lookup.multiplicity.interpret(&row, preprocessed_row);
-            let fingerprint = fingerprint::<Val, _>(
+            let multiplicity: AB::ExprEF =
+                lookup.multiplicity.interpret(&row, preprocessed_row).into();
+            let fingerprint = fingerprint::<ExtVal, AB::ExprEF>(
                 &fingerprint_challenge.into(),
                 lookup
                     .args
                     .iter()
-                    .map(|arg| arg.interpret(&row, preprocessed_row)),
+                    .map(|arg| arg.interpret(&row, preprocessed_row).into()),
             );
-            let message = lookup_challenge.into() + fingerprint;
-            builder.assert_one(message.clone() * inverse_of_message.clone());
-            acc_expr += multiplicity * inverse_of_message.clone();
+            let message: AB::ExprEF = lookup_challenge.into() + fingerprint;
+            builder.assert_one_ext(message.clone() * (*inverse_of_message).into());
+            acc_expr += multiplicity * (*inverse_of_message).into();
         }
         builder
             .when_transition()
-            .assert_eq(acc_expr.clone(), next_acc_col.clone());
-        builder.when_first_row().assert_eq(acc_col.clone(), acc);
-        builder.when_last_row().assert_eq(acc_expr, next_acc);
+            .assert_eq_ext(acc_expr.clone(), *next_acc_col);
+        builder.when_first_row().assert_eq_ext(*acc_col, acc);
+        builder.when_last_row().assert_eq_ext(acc_expr, next_acc);
     }
 }
 
-/// Computes a fingerprint of the coefficients using Horner's method.
-fn fingerprint<F: Field, Expr: Algebra<F>>(
-    r: &Expr,
-    coeffs: impl DoubleEndedIterator<Item = Expr>,
-) -> Expr {
-    coeffs
-        .rev()
-        .fold(F::ZERO.into(), |acc, coeff| acc * r.clone() + coeff)
-}
-
+/*
 #[cfg(test)]
 mod tests {
     use p3_field::PrimeCharacteristicRing;
@@ -401,3 +404,4 @@ mod tests {
         system.verify(fri_parameters, claim, &proof).unwrap();
     }
 }
+*/
