@@ -1,5 +1,5 @@
 /// Adapted from Plonky3's `https://github.com/Plonky3/Plonky3/blob/main/uni-stark/src/folder.rs`
-use p3_air::{AirBuilder, AirBuilderWithPublicValues};
+use p3_air::{AirBuilder, AirBuilderWithPublicValues, ExtensionBuilder};
 use p3_field::{BasedVectorSpace, PackedField};
 use p3_matrix::dense::RowMajorMatrixView;
 use p3_matrix::stack::VerticalPair;
@@ -12,8 +12,9 @@ use super::{PreprocessedBuilder, TwoStagedBuilder};
 pub struct ProverConstraintFolder<'a> {
     pub preprocessed: Option<RowMajorMatrixView<'a, PackedVal>>,
     pub stage_1: RowMajorMatrixView<'a, PackedVal>,
-    pub stage_2: RowMajorMatrixView<'a, PackedVal>,
-    pub public_values: &'a [ExtVal],
+    pub stage_2: RowMajorMatrixView<'a, PackedExtVal>,
+    pub stage_1_public_values: &'a [Val],
+    pub stage_2_public_values: &'a [ExtVal],
     pub is_first_row: PackedVal,
     pub is_last_row: PackedVal,
     pub is_transition: PackedVal,
@@ -30,7 +31,8 @@ pub struct VerifierConstraintFolder<'a> {
     pub preprocessed: Option<ViewPair<'a, ExtVal>>,
     pub stage_1: ViewPair<'a, ExtVal>,
     pub stage_2: ViewPair<'a, ExtVal>,
-    pub public_values: &'a [ExtVal],
+    pub stage_1_public_values: &'a [Val],
+    pub stage_2_public_values: &'a [ExtVal],
     pub is_first_row: ExtVal,
     pub is_last_row: ExtVal,
     pub is_transition: ExtVal,
@@ -90,12 +92,29 @@ impl<'a> AirBuilder for ProverConstraintFolder<'a> {
     }
 }
 
+impl<'a> ExtensionBuilder for ProverConstraintFolder<'a> {
+    type EF = ExtVal;
+    type ExprEF = PackedExtVal;
+    type VarEF = PackedExtVal;
+
+    /// Assert that an extension field expression is zero.
+    fn assert_zero_ext<I>(&mut self, x: I)
+    where
+        I: Into<Self::ExprEF>,
+    {
+        let x: PackedExtVal = x.into();
+        let alpha_power = self.alpha_powers[self.constraint_index];
+        self.accumulator += Into::<PackedExtVal>::into(alpha_power) * x;
+        self.constraint_index += 1;
+    }
+}
+
 impl AirBuilderWithPublicValues for ProverConstraintFolder<'_> {
     type PublicVar = Self::F;
 
     #[inline]
     fn public_values(&self) -> &[Self::F] {
-        self.public_values
+        self.stage_1_public_values
     }
 }
 
@@ -106,8 +125,16 @@ impl<'a> PreprocessedBuilder for ProverConstraintFolder<'a> {
 }
 
 impl<'a> TwoStagedBuilder for ProverConstraintFolder<'a> {
-    fn stage_2(&self) -> Self::M {
+    type MP = RowMajorMatrixView<'a, PackedExtVal>;
+
+    type Stage2PublicVar = Self::EF;
+
+    fn stage_2(&self) -> Self::MP {
         self.stage_2
+    }
+
+    fn stage_2_public_values(&self) -> &[Self::Stage2PublicVar] {
+        self.stage_2_public_values
     }
 }
 
@@ -150,7 +177,7 @@ impl AirBuilderWithPublicValues for VerifierConstraintFolder<'_> {
     type PublicVar = Self::F;
 
     fn public_values(&self) -> &[Self::F] {
-        self.public_values
+        self.stage_1_public_values
     }
 }
 
@@ -160,8 +187,32 @@ impl<'a> PreprocessedBuilder for VerifierConstraintFolder<'a> {
     }
 }
 
+impl<'a> ExtensionBuilder for VerifierConstraintFolder<'a> {
+    type EF = ExtVal;
+    type ExprEF = ExtVal;
+    type VarEF = ExtVal;
+
+    /// Assert that an extension field expression is zero.
+    fn assert_zero_ext<I>(&mut self, x: I)
+    where
+        I: Into<Self::ExprEF>,
+    {
+        let x: ExtVal = x.into();
+        self.accumulator *= self.alpha;
+        self.accumulator += x;
+    }
+}
+
 impl<'a> TwoStagedBuilder for VerifierConstraintFolder<'a> {
-    fn stage_2(&self) -> Self::M {
+    type MP = ViewPair<'a, ExtVal>;
+
+    type Stage2PublicVar = Self::EF;
+
+    fn stage_2(&self) -> Self::MP {
         self.stage_2
+    }
+
+    fn stage_2_public_values(&self) -> &[Self::Stage2PublicVar] {
+        self.stage_2_public_values
     }
 }

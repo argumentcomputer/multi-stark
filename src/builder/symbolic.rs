@@ -1,5 +1,5 @@
 /// Adapted from Plonky3's `https://github.com/Plonky3/Plonky3/blob/main/uni-stark/src/symbolic_builder.rs`
-use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues};
+use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, ExtensionBuilder};
 use p3_field::{Algebra, Field, InjectiveMonomial, PrimeCharacteristicRing};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_util::log2_ceil_usize;
@@ -9,6 +9,8 @@ use std::marker::PhantomData;
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use std::sync::Arc;
 
+use crate::types::Val;
+
 use super::{PreprocessedBuilder, TwoStagedBuilder};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -17,6 +19,7 @@ pub enum Entry {
     Main { offset: usize },
     Stage2 { offset: usize },
     Public,
+    Stage2Public,
     Challenge,
 }
 
@@ -40,7 +43,7 @@ impl<F> SymbolicVariable<F> {
     pub const fn degree_multiple(&self) -> usize {
         match self.entry {
             Entry::Preprocessed { .. } | Entry::Main { .. } | Entry::Stage2 { .. } => 1,
-            Entry::Public | Entry::Challenge => 0,
+            Entry::Public | Entry::Challenge | Entry::Stage2Public => 0,
         }
     }
 }
@@ -316,11 +319,13 @@ pub fn get_log_quotient_degree<F, A>(
     stage_1_width: usize,
     stage_2_width: usize,
     num_public_values: usize,
+    num_stage_2_public_values: usize,
+
     is_zk: usize,
 ) -> usize
 where
     F: Field,
-    A: Air<SymbolicAirBuilder<F>>,
+    A: Air<SymbolicAirBuilder>,
 {
     assert!(is_zk <= 1, "is_zk must be either 0 or 1");
     // We pad to at least degree 2, since a quotient argument doesn't make sense with smaller degrees.
@@ -330,6 +335,7 @@ where
         stage_1_width,
         stage_2_width,
         num_public_values,
+        num_stage_2_public_values,
     ) + is_zk)
         .max(2);
 
@@ -339,16 +345,16 @@ where
     log2_ceil_usize(constraint_degree - 1)
 }
 
-pub fn get_max_constraint_degree<F, A>(
+pub fn get_max_constraint_degree<A>(
     air: &A,
     preprocessed_width: usize,
     stage_1_width: usize,
     stage_2_width: usize,
     num_public_values: usize,
+    num_stage_2_public_values: usize,
 ) -> usize
 where
-    F: Field,
-    A: Air<SymbolicAirBuilder<F>>,
+    A: Air<SymbolicAirBuilder>,
 {
     get_symbolic_constraints(
         air,
@@ -356,6 +362,7 @@ where
         stage_1_width,
         stage_2_width,
         num_public_values,
+        num_stage_2_public_values,
     )
     .iter()
     .map(|c| c.degree_multiple())
@@ -363,22 +370,23 @@ where
     .unwrap_or(0)
 }
 
-pub fn get_symbolic_constraints<F, A>(
+pub fn get_symbolic_constraints<A>(
     air: &A,
     preprocessed_width: usize,
     stage_1_width: usize,
     stage_2_width: usize,
     num_public_values: usize,
-) -> Vec<SymbolicExpression<F>>
+    num_stage_2_public_values: usize,
+) -> Vec<SymbolicExpression<Val>>
 where
-    F: Field,
-    A: Air<SymbolicAirBuilder<F>>,
+    A: Air<SymbolicAirBuilder>,
 {
     let mut builder = SymbolicAirBuilder::new(
         preprocessed_width,
         stage_1_width,
         stage_2_width,
         num_public_values,
+        num_stage_2_public_values,
     );
     air.eval(&mut builder);
     builder.constraints()
@@ -386,20 +394,22 @@ where
 
 /// An `AirBuilder` for evaluating constraints symbolically, and recording them for later use.
 #[derive(Debug)]
-pub struct SymbolicAirBuilder<F: Field> {
-    preprocessed: Option<RowMajorMatrix<SymbolicVariable<F>>>,
-    stage_1: RowMajorMatrix<SymbolicVariable<F>>,
-    stage_2: RowMajorMatrix<SymbolicVariable<F>>,
-    public_values: Vec<SymbolicVariable<F>>,
-    constraints: Vec<SymbolicExpression<F>>,
+pub struct SymbolicAirBuilder {
+    preprocessed: Option<RowMajorMatrix<SymbolicVariable<Val>>>,
+    stage_1: RowMajorMatrix<SymbolicVariable<Val>>,
+    stage_2: RowMajorMatrix<SymbolicVariable<Val>>,
+    public_values: Vec<SymbolicVariable<Val>>,
+    stage_2_public_values: Vec<SymbolicVariable<Val>>,
+    constraints: Vec<SymbolicExpression<Val>>,
 }
 
-impl<F: Field> SymbolicAirBuilder<F> {
+impl SymbolicAirBuilder {
     pub(crate) fn new(
         preprocessed_width: usize,
         stage_1_width: usize,
         stage_2_width: usize,
         num_public_values: usize,
+        num_stage_2_public_values: usize,
     ) -> Self {
         let prep_values = [0, 1]
             .into_iter()
@@ -425,6 +435,9 @@ impl<F: Field> SymbolicAirBuilder<F> {
         let public_values = (0..num_public_values)
             .map(move |index| SymbolicVariable::new(Entry::Public, index))
             .collect();
+        let stage_2_public_values = (0..num_stage_2_public_values)
+            .map(move |index| SymbolicVariable::new(Entry::Stage2Public, index))
+            .collect();
         Self {
             preprocessed: if preprocessed_width == 0 {
                 None
@@ -434,19 +447,20 @@ impl<F: Field> SymbolicAirBuilder<F> {
             stage_1: RowMajorMatrix::new(stage_1_values, stage_1_width),
             stage_2: RowMajorMatrix::new(stage_2_values, stage_2_width),
             public_values,
+            stage_2_public_values,
             constraints: vec![],
         }
     }
 
-    pub(crate) fn constraints(self) -> Vec<SymbolicExpression<F>> {
+    pub(crate) fn constraints(self) -> Vec<SymbolicExpression<Val>> {
         self.constraints
     }
 }
 
-impl<F: Field> AirBuilder for SymbolicAirBuilder<F> {
-    type F = F;
-    type Expr = SymbolicExpression<F>;
-    type Var = SymbolicVariable<F>;
+impl AirBuilder for SymbolicAirBuilder {
+    type F = Val;
+    type Expr = SymbolicExpression<Val>;
+    type Var = SymbolicVariable<Val>;
     type M = RowMajorMatrix<Self::Var>;
 
     fn main(&self) -> Self::M {
@@ -476,21 +490,42 @@ impl<F: Field> AirBuilder for SymbolicAirBuilder<F> {
     }
 }
 
-impl<F: Field> AirBuilderWithPublicValues for SymbolicAirBuilder<F> {
-    type PublicVar = SymbolicVariable<F>;
+impl AirBuilderWithPublicValues for SymbolicAirBuilder {
+    type PublicVar = SymbolicVariable<Val>;
     fn public_values(&self) -> &[Self::PublicVar] {
         &self.public_values
     }
 }
 
-impl<F: Field> PreprocessedBuilder for SymbolicAirBuilder<F> {
+impl PreprocessedBuilder for SymbolicAirBuilder {
     fn preprocessed(&self) -> Option<Self::M> {
         self.preprocessed.clone()
     }
 }
 
-impl<F: Field> TwoStagedBuilder for SymbolicAirBuilder<F> {
-    fn stage_2(&self) -> Self::M {
+impl ExtensionBuilder for SymbolicAirBuilder {
+    type EF = Val;
+    type ExprEF = SymbolicExpression<Val>;
+    type VarEF = SymbolicVariable<Val>;
+
+    fn assert_zero_ext<I>(&mut self, x: I)
+    where
+        I: Into<Self::ExprEF>,
+    {
+        self.constraints.push(x.into());
+    }
+}
+
+impl TwoStagedBuilder for SymbolicAirBuilder {
+    type MP = RowMajorMatrix<Self::Var>;
+
+    type Stage2PublicVar = SymbolicVariable<Val>;
+
+    fn stage_2(&self) -> Self::MP {
         self.stage_2.clone()
+    }
+
+    fn stage_2_public_values(&self) -> &[Self::Stage2PublicVar] {
+        &self.stage_2_public_values
     }
 }
