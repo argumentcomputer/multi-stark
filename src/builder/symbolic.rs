@@ -113,6 +113,16 @@ pub enum SymbolicExpression<F> {
     },
 }
 
+#[inline]
+pub fn var<F: Field>(i: usize) -> SymbolicExpression<F> {
+    SymbolicExpression::from(SymbolicVariable::new(Entry::Main { offset: 0 }, i))
+}
+
+#[inline]
+pub fn preprocessed_var<F: Field>(i: usize) -> SymbolicExpression<F> {
+    SymbolicExpression::from(SymbolicVariable::new(Entry::Preprocessed { offset: 0 }, i))
+}
+
 impl<F: Field> SymbolicExpression<F> {
     pub fn interpret<Expr: Algebra<F>, Var: Into<Expr> + Clone>(
         &self,

@@ -6,7 +6,7 @@ mod tests {
 
     use crate::chips::SymbExpr;
     use crate::{
-        builder::symbolic::{Entry, SymbolicVariable},
+        builder::symbolic::{preprocessed_var, var},
         lookup::{Lookup, LookupAir},
         system::{ProverKey, System, SystemWitness},
         types::{CommitmentParameters, FriParameters, Val},
@@ -85,14 +85,6 @@ mod tests {
 
     impl U32CS {
         fn lookups(&self) -> Vec<Lookup<SymbExpr>> {
-            let var =
-                |index| SymbExpr::from(SymbolicVariable::new(Entry::Main { offset: 0 }, index));
-            let preprocessed_var = |index| {
-                SymbExpr::from(SymbolicVariable::new(
-                    Entry::Preprocessed { offset: 0 },
-                    index,
-                ))
-            };
             let byte_index = SymbExpr::from_u8(0);
             let u32_index = SymbExpr::from_u8(1);
             match self {

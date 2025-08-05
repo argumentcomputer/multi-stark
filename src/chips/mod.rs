@@ -26,6 +26,8 @@ struct CompressionInfo {
     output: [u32; 16],
 }
 
+// one-line Blake3 hasher (that additionally produces compressions IO required for claims construction) tested to be compatible
+// with the reference implementation: https://github.com/BLAKE3-team/BLAKE3/blob/master/reference_impl/reference_impl.rs
 fn blake3_new_update_finalize(input: &[u8]) -> (Vec<CompressionInfo>, [u8; 32]) {
     const IV: [u32; 8] = [
         0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB,

@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::builder::symbolic::{Entry, SymbolicExpression, SymbolicVariable};
+    use crate::builder::symbolic::{preprocessed_var, var};
     use crate::chips::SymbExpr;
     use crate::lookup::{Lookup, LookupAir};
     use crate::system::{System, SystemWitness};
@@ -69,16 +69,6 @@ mod tests {
 
     impl ByteCS {
         fn lookups(&self) -> Vec<Lookup<SymbExpr>> {
-            let var =
-                |i| SymbolicExpression::from(SymbolicVariable::new(Entry::Main { offset: 0 }, i));
-
-            let preprocessed_var = |i| {
-                SymbolicExpression::from(SymbolicVariable::new(
-                    Entry::Preprocessed { offset: 0 },
-                    i,
-                ))
-            };
-
             let xor_idx = ByteOperation::Xor.position();
             let and_idx = ByteOperation::And.position();
             let or_idx = ByteOperation::Or.position();
