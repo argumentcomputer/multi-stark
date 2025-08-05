@@ -7,7 +7,7 @@ use crate::{
     types::{ExtVal, Val},
 };
 
-pub const MIN_IO_SIZE: usize = 4;
+pub const LOOKUP_PUBLIC_SIZE: usize = 4;
 
 #[derive(Clone)]
 pub struct Lookup<Expr> {
@@ -217,7 +217,7 @@ impl<A> LookupAir<A> {
         let lookups = &self.lookups;
         self.inner_air.eval(builder);
         let stage_2_public_values = builder.stage_2_public_values();
-        debug_assert_eq!(stage_2_public_values.len(), MIN_IO_SIZE);
+        debug_assert_eq!(stage_2_public_values.len(), LOOKUP_PUBLIC_SIZE);
         let lookup_challenge = stage_2_public_values[0];
         let fingerprint_challenge = stage_2_public_values[1];
         let acc = stage_2_public_values[2];

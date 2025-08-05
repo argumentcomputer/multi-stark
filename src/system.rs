@@ -1,18 +1,10 @@
 use crate::{
     builder::symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
-    ensure_eq,
-    lookup::{Lookup, LookupAir},
+    lookup::{LOOKUP_PUBLIC_SIZE, Lookup, LookupAir},
     types::{Commitment, CommitmentParameters, Committer, ProverData, Val},
 };
-use p3_air::{Air, BaseAir, BaseAirWithPublicValues};
+use p3_air::{Air, BaseAir};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
-
-/// Each circuit is required to have 4 arguments:
-/// 1. Lookup challenge
-/// 2. Fingerprint challenge
-/// 3. Current accumulator
-/// 4. Next accumulator
-pub const MIN_IO_SIZE: usize = 8;
 
 pub struct System<A> {
     pub commitment_parameters: CommitmentParameters,
@@ -25,7 +17,7 @@ pub struct ProverKey {
     pub preprocessed_data: Option<ProverData>,
 }
 
-impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> System<A> {
+impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> System<A> {
     #[inline]
     pub fn new(
         commitment_parameters: CommitmentParameters,
@@ -117,10 +109,10 @@ impl SystemWitness {
     }
 }
 
-impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
+impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> Circuit<A> {
     pub fn from_air(air: LookupAir<A>) -> Result<(Self, Option<RowMajorMatrix<Val>>), String> {
-        let io_size = air.num_public_values();
-        ensure_eq!(io_size, MIN_IO_SIZE, "Incompatible IO size");
+        // as of now, we assume no public values apart from the lookup values
+        let io_size = 0;
         let stage_1_width = air.inner_air.width();
         let stage_2_width = air.stage_2_width();
         let preprocessed_trace = air.preprocessed_trace();
@@ -132,6 +124,7 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
             stage_1_width,
             stage_2_width,
             io_size,
+            LOOKUP_PUBLIC_SIZE,
         )
         .len();
         let max_constraint_degree = get_max_constraint_degree(
@@ -140,6 +133,7 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val>>> Circuit<A> {
             stage_1_width,
             stage_2_width,
             io_size,
+            LOOKUP_PUBLIC_SIZE,
         );
         let circuit = Self {
             air,

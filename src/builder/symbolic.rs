@@ -7,9 +7,8 @@ use std::fmt::Debug;
 use std::iter::{Product, Sum};
 use std::marker::PhantomData;
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
-use std::sync::Arc;
 
-use crate::types::Val;
+use crate::types::{ExtVal, Val};
 
 use super::{PreprocessedBuilder, TwoStagedBuilder};
 
@@ -96,22 +95,22 @@ pub enum SymbolicExpression<F> {
     IsTransition,
     Constant(F),
     Add {
-        x: Arc<Self>,
-        y: Arc<Self>,
+        x: Box<Self>,
+        y: Box<Self>,
         degree_multiple: usize,
     },
     Sub {
-        x: Arc<Self>,
-        y: Arc<Self>,
+        x: Box<Self>,
+        y: Box<Self>,
         degree_multiple: usize,
     },
     Neg {
-        x: Arc<Self>,
+        x: Box<Self>,
         degree_multiple: usize,
     },
     Mul {
-        x: Arc<Self>,
-        y: Arc<Self>,
+        x: Box<Self>,
+        y: Box<Self>,
         degree_multiple: usize,
     },
 }
@@ -212,8 +211,8 @@ where
             (Self::Constant(lhs), Self::Constant(rhs)) => Self::Constant(lhs + rhs),
             (lhs, rhs) => Self::Add {
                 degree_multiple: lhs.degree_multiple().max(rhs.degree_multiple()),
-                x: Arc::new(lhs),
-                y: Arc::new(rhs),
+                x: Box::new(lhs),
+                y: Box::new(rhs),
             },
         }
     }
@@ -249,8 +248,8 @@ impl<F: Field, T: Into<Self>> Sub<T> for SymbolicExpression<F> {
             (Self::Constant(lhs), Self::Constant(rhs)) => Self::Constant(lhs - rhs),
             (lhs, rhs) => Self::Sub {
                 degree_multiple: lhs.degree_multiple().max(rhs.degree_multiple()),
-                x: Arc::new(lhs),
-                y: Arc::new(rhs),
+                x: Box::new(lhs),
+                y: Box::new(rhs),
             },
         }
     }
@@ -273,7 +272,7 @@ impl<F: Field> Neg for SymbolicExpression<F> {
             Self::Constant(c) => Self::Constant(-c),
             expr => Self::Neg {
                 degree_multiple: expr.degree_multiple(),
-                x: Arc::new(expr),
+                x: Box::new(expr),
             },
         }
     }
@@ -289,8 +288,8 @@ impl<F: Field, T: Into<Self>> Mul<T> for SymbolicExpression<F> {
             (Self::Constant(lhs), Self::Constant(rhs)) => Self::Constant(lhs * rhs),
             (lhs, rhs) => Self::Mul {
                 degree_multiple: lhs.degree_multiple() + rhs.degree_multiple(),
-                x: Arc::new(lhs),
-                y: Arc::new(rhs),
+                x: Box::new(lhs),
+                y: Box::new(rhs),
             },
         }
     }
@@ -377,7 +376,7 @@ pub fn get_symbolic_constraints<A>(
     stage_2_width: usize,
     num_public_values: usize,
     num_stage_2_public_values: usize,
-) -> Vec<SymbolicExpression<Val>>
+) -> Vec<SymbolicExpression<ExtVal>>
 where
     A: Air<SymbolicAirBuilder>,
 {
@@ -389,7 +388,7 @@ where
         num_stage_2_public_values,
     );
     air.eval(&mut builder);
-    builder.constraints()
+    builder.constraints
 }
 
 /// An `AirBuilder` for evaluating constraints symbolically, and recording them for later use.
@@ -397,10 +396,10 @@ where
 pub struct SymbolicAirBuilder {
     preprocessed: Option<RowMajorMatrix<SymbolicVariable<Val>>>,
     stage_1: RowMajorMatrix<SymbolicVariable<Val>>,
-    stage_2: RowMajorMatrix<SymbolicVariable<Val>>,
+    stage_2: RowMajorMatrix<SymbolicVariable<ExtVal>>,
     public_values: Vec<SymbolicVariable<Val>>,
-    stage_2_public_values: Vec<SymbolicVariable<Val>>,
-    constraints: Vec<SymbolicExpression<Val>>,
+    stage_2_public_values: Vec<SymbolicVariable<ExtVal>>,
+    constraints: Vec<SymbolicExpression<ExtVal>>,
 }
 
 impl SymbolicAirBuilder {
@@ -451,10 +450,6 @@ impl SymbolicAirBuilder {
             constraints: vec![],
         }
     }
-
-    pub(crate) fn constraints(self) -> Vec<SymbolicExpression<Val>> {
-        self.constraints
-    }
 }
 
 impl AirBuilder for SymbolicAirBuilder {
@@ -486,7 +481,7 @@ impl AirBuilder for SymbolicAirBuilder {
     }
 
     fn assert_zero<I: Into<Self::Expr>>(&mut self, x: I) {
-        self.constraints.push(x.into());
+        self.constraints.push(x.into().into());
     }
 }
 
@@ -503,10 +498,63 @@ impl PreprocessedBuilder for SymbolicAirBuilder {
     }
 }
 
+impl Algebra<SymbolicExpression<Val>> for SymbolicExpression<ExtVal> {}
+
+impl From<SymbolicExpression<Val>> for SymbolicExpression<ExtVal> {
+    fn from(value: SymbolicExpression<Val>) -> Self {
+        match value {
+            SymbolicExpression::Variable(SymbolicVariable {
+                entry,
+                index,
+                _phantom,
+            }) => Self::Variable(SymbolicVariable {
+                entry,
+                index,
+                _phantom: PhantomData,
+            }),
+            SymbolicExpression::IsFirstRow => Self::IsFirstRow,
+            SymbolicExpression::IsLastRow => Self::IsLastRow,
+            SymbolicExpression::IsTransition => Self::IsTransition,
+            SymbolicExpression::Constant(f) => Self::Constant(f.into()),
+            SymbolicExpression::Add {
+                x,
+                y,
+                degree_multiple,
+            } => Self::Add {
+                x: Self::from(*x).into(),
+                y: Self::from(*y).into(),
+                degree_multiple,
+            },
+            SymbolicExpression::Sub {
+                x,
+                y,
+                degree_multiple,
+            } => Self::Sub {
+                x: Self::from(*x).into(),
+                y: Self::from(*y).into(),
+                degree_multiple,
+            },
+            SymbolicExpression::Mul {
+                x,
+                y,
+                degree_multiple,
+            } => Self::Mul {
+                x: Self::from(*x).into(),
+                y: Self::from(*y).into(),
+                degree_multiple,
+            },
+            SymbolicExpression::Neg { x, degree_multiple } => Self::Neg {
+                x: Self::from(*x).into(),
+                degree_multiple,
+            },
+        }
+    }
+}
+
 impl ExtensionBuilder for SymbolicAirBuilder {
-    type EF = Val;
-    type ExprEF = SymbolicExpression<Val>;
-    type VarEF = SymbolicVariable<Val>;
+    type EF = ExtVal;
+    type ExprEF = SymbolicExpression<ExtVal>;
+    type VarEF = SymbolicVariable<ExtVal>;
 
     fn assert_zero_ext<I>(&mut self, x: I)
     where
@@ -517,9 +565,9 @@ impl ExtensionBuilder for SymbolicAirBuilder {
 }
 
 impl TwoStagedBuilder for SymbolicAirBuilder {
-    type MP = RowMajorMatrix<Self::Var>;
+    type MP = RowMajorMatrix<Self::VarEF>;
 
-    type Stage2PublicVar = SymbolicVariable<Val>;
+    type Stage2PublicVar = Self::VarEF;
 
     fn stage_2(&self) -> Self::MP {
         self.stage_2.clone()

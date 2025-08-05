@@ -2,7 +2,7 @@ pub mod builder;
 // mod chips;
 pub mod lookup;
 // pub mod prover;
-// pub mod system;
+pub mod system;
 pub mod types;
 // pub mod verifier;
 
