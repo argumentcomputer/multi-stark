@@ -431,6 +431,7 @@ where
         stage_1_on_quotient_domain.vertically_packed_row_pair::<PackedVal>(i_start, next_step),
         stage_1_width,
     );
+    let extension_d = <PackedExtVal as BasedVectorSpace<PackedVal>>::DIMENSION;
     let stage_2 = RowMajorMatrix::new(
         {
             let rows = stage_2_on_quotient_domain.wrapping_row_slices(i_start, PackedVal::WIDTH);
@@ -438,20 +439,24 @@ where
                 .wrapping_row_slices(i_start + next_step, PackedVal::WIDTH);
 
             (0..stage_2_on_quotient_domain.width())
-                .step_by(2)
+                .step_by(extension_d)
                 .map(|c| {
                     PackedExtVal::from_basis_coefficients_fn(|j| {
                         PackedVal::from_fn(|i| rows[i][c + j])
                     })
                 })
-                .chain((0..stage_2_on_quotient_domain.width()).step_by(2).map(|c| {
-                    PackedExtVal::from_basis_coefficients_fn(|j| {
-                        PackedVal::from_fn(|i| next_rows[i][c + j])
-                    })
-                }))
+                .chain(
+                    (0..stage_2_on_quotient_domain.width())
+                        .step_by(extension_d)
+                        .map(|c| {
+                            PackedExtVal::from_basis_coefficients_fn(|j| {
+                                PackedVal::from_fn(|i| next_rows[i][c + j])
+                            })
+                        }),
+                )
                 .collect::<Vec<_>>()
         },
-        stage_2_width,
+        stage_2_width / extension_d,
     );
 
     let accumulator = PackedExtVal::ZERO;

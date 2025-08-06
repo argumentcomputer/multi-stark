@@ -215,6 +215,29 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                 RowMajorMatrixView::new_row(stage_1_row),
                 RowMajorMatrixView::new_row(stage_1_next_row),
             );
+            let extension_d = <ExtVal as BasedVectorSpace<Val>>::DIMENSION;
+            let stage_2_row = &stage_2_row
+                .chunks_exact(extension_d)
+                .map(|c| {
+                    c.iter()
+                        .enumerate()
+                        .map(|(i, c)| {
+                            *c * <ExtVal as BasedVectorSpace<Val>>::ith_basis_element(i).unwrap()
+                        })
+                        .sum()
+                })
+                .collect::<Vec<_>>();
+            let stage_2_next_row = &stage_2_next_row
+                .chunks_exact(extension_d)
+                .map(|c| {
+                    c.iter()
+                        .enumerate()
+                        .map(|(i, c)| {
+                            *c * <ExtVal as BasedVectorSpace<Val>>::ith_basis_element(i).unwrap()
+                        })
+                        .sum()
+                })
+                .collect::<Vec<_>>();
             let stage_2 = VerticalPair::new(
                 RowMajorMatrixView::new_row(stage_2_row),
                 RowMajorMatrixView::new_row(stage_2_next_row),
@@ -359,9 +382,10 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                     circuit.stage_1_width,
                     VerificationError::InvalidProofShape
                 );
+                let extension_d = <ExtVal as BasedVectorSpace<Val>>::DIMENSION;
                 ensure_eq!(
                     stage_2_opened_values[i][j].len(),
-                    circuit.stage_2_width,
+                    circuit.stage_2_width * extension_d,
                     VerificationError::InvalidProofShape
                 );
             }
