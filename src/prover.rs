@@ -138,7 +138,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             let degree = trace.height();
             let trace_domain =
                 <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
-            (trace_domain, trace)
+            (trace_domain, trace.flatten_to_base())
         });
         let (stage_2_trace_commit, stage_2_trace_data) =
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
@@ -196,7 +196,8 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
                         quotient_domain,
                     );
                 // compute the quotient values which are elements of the extension field and flatten it to the base field
-                let public_values = [
+                let public_values = [];
+                let stage_2_public_values = [
                     lookup_argument_challenge,
                     fingerprint_challenge,
                     acc,
@@ -205,6 +206,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
                 let quotient_values = quotient_values(
                     air,
                     &public_values,
+                    &stage_2_public_values,
                     trace_domain,
                     quotient_domain,
                     &preprocessed_trace_on_quotient_domain,
@@ -294,7 +296,8 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
 #[allow(clippy::too_many_arguments)]
 fn quotient_values<A>(
     air: &A,
-    public_values: &[ExtVal],
+    public_values: &[Val],
+    stage_2_public_values: &[ExtVal],
     trace_domain: Domain,
     quotient_domain: Domain,
     preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_>>,
@@ -344,6 +347,7 @@ where
                 quotient_values_inner(
                     air,
                     public_values,
+                    stage_2_public_values,
                     &sels,
                     quotient_size,
                     preprocessed_on_quotient_domain,
@@ -368,6 +372,7 @@ where
                 quotient_values_inner(
                     air,
                     public_values,
+                    stage_2_public_values,
                     &sels,
                     quotient_size,
                     preprocessed_on_quotient_domain,
@@ -389,7 +394,8 @@ where
 #[allow(clippy::too_many_arguments)]
 fn quotient_values_inner<A>(
     air: &A,
-    public_values: &[ExtVal],
+    stage_1_public_values: &[Val],
+    stage_2_public_values: &[ExtVal],
     sels: &LagrangeSelectors<Vec<Val>>,
     quotient_size: usize,
     preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_>>,
@@ -422,11 +428,29 @@ where
             )
         });
     let stage_1 = RowMajorMatrix::new(
-        stage_1_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
+        stage_1_on_quotient_domain.vertically_packed_row_pair::<PackedVal>(i_start, next_step),
         stage_1_width,
     );
     let stage_2 = RowMajorMatrix::new(
-        stage_2_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
+        {
+            let rows = stage_2_on_quotient_domain.wrapping_row_slices(i_start, PackedVal::WIDTH);
+            let next_rows = stage_2_on_quotient_domain
+                .wrapping_row_slices(i_start + next_step, PackedVal::WIDTH);
+
+            (0..stage_2_on_quotient_domain.width())
+                .step_by(2)
+                .map(|c| {
+                    PackedExtVal::from_basis_coefficients_fn(|j| {
+                        PackedVal::from_fn(|i| rows[i][c + j])
+                    })
+                })
+                .chain((0..stage_2_on_quotient_domain.width()).step_by(2).map(|c| {
+                    PackedExtVal::from_basis_coefficients_fn(|j| {
+                        PackedVal::from_fn(|i| next_rows[i][c + j])
+                    })
+                }))
+                .collect::<Vec<_>>()
+        },
         stage_2_width,
     );
 
@@ -435,7 +459,8 @@ where
         preprocessed: preprocessed.as_ref().map(|mat| mat.as_view()),
         stage_1: stage_1.as_view(),
         stage_2: stage_2.as_view(),
-        public_values,
+        stage_1_public_values,
+        stage_2_public_values,
         is_first_row,
         is_last_row,
         is_transition,
