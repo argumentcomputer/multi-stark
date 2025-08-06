@@ -256,9 +256,9 @@ impl<A> LookupAir<A> {
     }
 }
 
-/*
 #[cfg(test)]
 mod tests {
+    use p3_air::AirBuilder;
     use p3_field::PrimeCharacteristicRing;
 
     use crate::{
@@ -329,7 +329,7 @@ mod tests {
     }
     impl<AB> Air<AB> for CS
     where
-        AB: AirBuilderWithPublicValues,
+        AB: AirBuilder,
         AB::Var: Copy,
     {
         fn eval(&self, builder: &mut AB) {
@@ -404,4 +404,3 @@ mod tests {
         system.verify(fri_parameters, claim, &proof).unwrap();
     }
 }
-*/

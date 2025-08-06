@@ -219,7 +219,8 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                 RowMajorMatrixView::new_row(stage_2_row),
                 RowMajorMatrixView::new_row(stage_2_next_row),
             );
-            let public_values = &[
+            let stage_1_public_values = &[];
+            let stage_2_public_values = &[
                 lookup_argument_challenge,
                 fingerprint_challenge,
                 acc,
@@ -229,7 +230,8 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                 preprocessed,
                 stage_1,
                 stage_2,
-                public_values,
+                stage_1_public_values,
+                stage_2_public_values,
                 is_first_row: sels.is_first_row,
                 is_last_row: sels.is_last_row,
                 is_transition: sels.is_transition,
