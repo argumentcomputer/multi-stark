@@ -1,6 +1,7 @@
 use crate::{
     builder::folder::VerifierConstraintFolder,
     ensure, ensure_eq,
+    lookup::fingerprint,
     prover::Proof,
     system::System,
     types::{Challenger, ExtVal, FriParameters, Pcs, PcsError, StarkConfig, Val},
@@ -92,9 +93,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         let mut acc = ExtVal::ZERO;
         for claim in claims {
             let message = lookup_argument_challenge
-                + claim.iter().rev().fold(ExtVal::ZERO, |acc, &coeff| {
-                    acc * fingerprint_challenge + coeff
-                });
+                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
             acc += message.inverse();
         }
 
@@ -218,25 +217,11 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
             let extension_d = <ExtVal as BasedVectorSpace<Val>>::DIMENSION;
             let stage_2_row = &stage_2_row
                 .chunks_exact(extension_d)
-                .map(|c| {
-                    c.iter()
-                        .enumerate()
-                        .map(|(i, c)| {
-                            *c * <ExtVal as BasedVectorSpace<Val>>::ith_basis_element(i).unwrap()
-                        })
-                        .sum()
-                })
+                .map(from_ext_basis)
                 .collect::<Vec<_>>();
             let stage_2_next_row = &stage_2_next_row
                 .chunks_exact(extension_d)
-                .map(|c| {
-                    c.iter()
-                        .enumerate()
-                        .map(|(i, c)| {
-                            *c * <ExtVal as BasedVectorSpace<Val>>::ith_basis_element(i).unwrap()
-                        })
-                        .sum()
-                })
+                .map(from_ext_basis)
                 .collect::<Vec<_>>();
             let stage_2 = VerticalPair::new(
                 RowMajorMatrixView::new_row(stage_2_row),
@@ -285,16 +270,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                 .collect::<Vec<_>>();
             let quotient = quotient_chunks
                 .enumerate()
-                .map(|(ch_i, ch)| {
-                    zps[ch_i]
-                        * ch.iter()
-                            .enumerate()
-                            .map(|(e_i, &c)| {
-                                <ExtVal as BasedVectorSpace<Val>>::ith_basis_element(e_i).unwrap()
-                                    * c
-                            })
-                            .sum::<ExtVal>()
-                })
+                .map(|(ch_i, ch)| zps[ch_i] * from_ext_basis(ch))
                 .sum::<ExtVal>();
 
             // finally, check that the composition polynomial
@@ -425,6 +401,14 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         );
         Ok(quotient_degrees)
     }
+}
+
+fn from_ext_basis(coeffs: &[ExtVal]) -> ExtVal {
+    coeffs
+        .iter()
+        .enumerate()
+        .map(|(i, c)| *c * <ExtVal as BasedVectorSpace<Val>>::ith_basis_element(i).unwrap())
+        .sum()
 }
 
 #[cfg(test)]

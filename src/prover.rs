@@ -1,6 +1,8 @@
+use std::ops::Deref;
+
 use crate::{
     builder::folder::ProverConstraintFolder,
-    lookup::Lookup,
+    lookup::{Lookup, fingerprint},
     system::{ProverKey, System, SystemWitness},
     types::{
         Challenger, Commitment, Domain, EvaluationsOnDomain, ExtVal, FriParameters, PackedExtVal,
@@ -123,9 +125,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         let mut acc = ExtVal::ZERO;
         for claim in claims {
             let message = lookup_argument_challenge
-                + claim.iter().rev().fold(ExtVal::ZERO, |acc, &coeff| {
-                    acc * fingerprint_challenge + coeff
-                });
+                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
             acc += message.inverse();
         }
 
@@ -433,29 +433,15 @@ where
     );
     let extension_d = <PackedExtVal as BasedVectorSpace<PackedVal>>::DIMENSION;
     let stage_2 = RowMajorMatrix::new(
-        {
-            let rows = stage_2_on_quotient_domain.wrapping_row_slices(i_start, PackedVal::WIDTH);
-            let next_rows = stage_2_on_quotient_domain
-                .wrapping_row_slices(i_start + next_step, PackedVal::WIDTH);
-
-            (0..stage_2_on_quotient_domain.width())
-                .step_by(extension_d)
-                .map(|c| {
-                    PackedExtVal::from_basis_coefficients_fn(|j| {
-                        PackedVal::from_fn(|i| rows[i][c + j])
-                    })
-                })
-                .chain(
-                    (0..stage_2_on_quotient_domain.width())
-                        .step_by(extension_d)
-                        .map(|c| {
-                            PackedExtVal::from_basis_coefficients_fn(|j| {
-                                PackedVal::from_fn(|i| next_rows[i][c + j])
-                            })
-                        }),
-                )
-                .collect::<Vec<_>>()
-        },
+        pack(
+            stage_2_on_quotient_domain.width(),
+            stage_2_on_quotient_domain.wrapping_row_slices(i_start, PackedVal::WIDTH),
+        )
+        .chain(pack(
+            stage_2_on_quotient_domain.width(),
+            stage_2_on_quotient_domain.wrapping_row_slices(i_start + next_step, PackedVal::WIDTH),
+        ))
+        .collect::<Vec<_>>(),
         stage_2_width / extension_d,
     );
 
@@ -484,5 +470,12 @@ where
                 [coeff_idx]
                 .as_slice()[idx_in_packing]
         })
+    })
+}
+
+fn pack(n: usize, rows: Vec<impl Deref<Target = [Val]>>) -> impl Iterator<Item = PackedExtVal> {
+    let extension_d = <PackedExtVal as BasedVectorSpace<PackedVal>>::DIMENSION;
+    (0..n).step_by(extension_d).map(move |c| {
+        PackedExtVal::from_basis_coefficients_fn(|j| PackedVal::from_fn(|i| rows[i][c + j]))
     })
 }

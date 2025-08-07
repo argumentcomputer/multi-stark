@@ -28,7 +28,7 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> System<A> {
         let mut preprocessed_traces = vec![];
         let mut preprocessed_indices = vec![];
         for air in airs {
-            let (circuit, maybe_preprocessed_trace) = Circuit::from_air(air).unwrap();
+            let (circuit, maybe_preprocessed_trace) = Circuit::from_air(air);
             circuits.push(circuit);
             if let Some(preprocessed_trace) = maybe_preprocessed_trace {
                 preprocessed_indices.push(Some(preprocessed_traces.len()));
@@ -110,7 +110,7 @@ impl SystemWitness {
 }
 
 impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> Circuit<A> {
-    pub fn from_air(air: LookupAir<A>) -> Result<(Self, Option<RowMajorMatrix<Val>>), String> {
+    pub fn from_air(air: LookupAir<A>) -> (Self, Option<RowMajorMatrix<Val>>) {
         // as of now, we assume no public values apart from the lookup values
         let io_size = 0;
         let stage_1_width = air.inner_air.width();
@@ -144,6 +144,6 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> Circuit<A> {
             stage_1_width,
             stage_2_width,
         };
-        Ok((circuit, preprocessed_trace))
+        (circuit, preprocessed_trace)
     }
 }

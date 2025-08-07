@@ -1,5 +1,5 @@
 use p3_air::{Air, BaseAir, BaseAirWithPublicValues, ExtensionBuilder};
-use p3_field::{Algebra, Field, PrimeCharacteristicRing, batch_multiplicative_inverse};
+use p3_field::{PrimeCharacteristicRing, batch_multiplicative_inverse};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 use crate::{
@@ -7,6 +7,8 @@ use crate::{
     types::{ExtVal, Val},
 };
 
+/// Each circuit is required to have 4 arguments for the second stage. Namely, the lookup challenge,
+/// fingerprint challenge, current accumulator and next accumulator
 pub const LOOKUP_PUBLIC_SIZE: usize = 4;
 
 #[derive(Clone)]
@@ -69,13 +71,16 @@ impl<A: BaseAir<Val>> LookupAir<A> {
 }
 
 /// Computes a fingerprint of the coefficients using Horner's method.
-fn fingerprint<F: Field, Expr: Algebra<F>>(
-    r: &Expr,
-    coeffs: impl DoubleEndedIterator<Item = Expr>,
-) -> Expr {
+#[inline]
+pub(crate) fn fingerprint<F, I, Iter>(r: &F, coeffs: Iter) -> F
+where
+    F: PrimeCharacteristicRing,
+    I: Into<F>,
+    Iter: DoubleEndedIterator<Item = I>,
+{
     coeffs
         .rev()
-        .fold(F::ZERO.into(), |acc, coeff| acc * r.clone() + coeff)
+        .fold(F::ZERO, |acc, coeff| acc * r.clone() + coeff.into())
 }
 
 impl Lookup<SymbolicExpression<Val>> {
@@ -96,10 +101,7 @@ impl Lookup<Val> {
         lookup_challenge: ExtVal,
         fingerprint_challenge: &ExtVal,
     ) -> ExtVal {
-        let args = fingerprint::<ExtVal, _>(
-            fingerprint_challenge,
-            self.args.iter().map(|v| ExtVal::from(*v)),
-        );
+        let args = fingerprint(fingerprint_challenge, self.args.iter().cloned());
         lookup_challenge + args
     }
 
@@ -237,12 +239,12 @@ impl<A> LookupAir<A> {
         for (lookup, inverse_of_message) in lookups.iter().zip(inverse_of_messages) {
             let multiplicity: AB::ExprEF =
                 lookup.multiplicity.interpret(&row, preprocessed_row).into();
-            let fingerprint = fingerprint::<ExtVal, AB::ExprEF>(
+            let fingerprint = fingerprint(
                 &fingerprint_challenge.into(),
                 lookup
                     .args
                     .iter()
-                    .map(|arg| arg.interpret(&row, preprocessed_row).into()),
+                    .map(|arg| arg.interpret(&row, preprocessed_row)),
             );
             let message: AB::ExprEF = lookup_challenge.into() + fingerprint;
             builder.assert_one_ext(message.clone() * (*inverse_of_message).into());
@@ -259,7 +261,7 @@ impl<A> LookupAir<A> {
 #[cfg(test)]
 mod tests {
     use p3_air::AirBuilder;
-    use p3_field::PrimeCharacteristicRing;
+    use p3_field::Field;
 
     use crate::{
         builder::symbolic::{Entry, SymbolicVariable},
