@@ -1,6 +1,8 @@
+use std::ops::Deref;
+
 use crate::{
     builder::folder::ProverConstraintFolder,
-    lookup::Lookup,
+    lookup::{Lookup, fingerprint},
     system::{ProverKey, System, SystemWitness},
     types::{
         Challenger, Commitment, Domain, EvaluationsOnDomain, ExtVal, FriParameters, PackedExtVal,
@@ -23,7 +25,6 @@ use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use serde::{Deserialize, Serialize};
-use std::cmp::min;
 
 #[derive(Serialize, Deserialize)]
 pub struct Commitments {
@@ -35,7 +36,7 @@ pub struct Commitments {
 #[derive(Serialize, Deserialize)]
 pub struct Proof {
     pub commitments: Commitments,
-    pub intermediate_accumulators: Vec<Val>,
+    pub intermediate_accumulators: Vec<ExtVal>,
     pub log_degrees: Vec<u8>,
     pub opening_proof: PcsProof,
     pub quotient_opened_values: OpenedValuesForRound<ExtVal>,
@@ -115,20 +116,16 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         }
 
         // generate lookup challenges
-        // TODO use `ExtVal` instead of `Val`
-        let lookup_argument_challenge: Val = challenger.sample_algebra_element();
+        let lookup_argument_challenge: ExtVal = challenger.sample_algebra_element();
         challenger.observe_algebra_element(lookup_argument_challenge);
-        let fingerprint_challenge: Val = challenger.sample_algebra_element();
+        let fingerprint_challenge: ExtVal = challenger.sample_algebra_element();
         challenger.observe_algebra_element(fingerprint_challenge);
 
         // construct the accumulator from the claims
-        let mut acc = Val::ZERO;
+        let mut acc = ExtVal::ZERO;
         for claim in claims {
             let message = lookup_argument_challenge
-                + claim
-                    .iter()
-                    .rev()
-                    .fold(Val::ZERO, |acc, &coeff| acc * fingerprint_challenge + coeff);
+                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
             acc += message.inverse();
         }
 
@@ -141,7 +138,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             let degree = trace.height();
             let trace_domain =
                 <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
-            (trace_domain, trace)
+            (trace_domain, trace.flatten_to_base())
         });
         let (stage_2_trace_commit, stage_2_trace_data) =
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
@@ -199,7 +196,8 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
                         quotient_domain,
                     );
                 // compute the quotient values which are elements of the extension field and flatten it to the base field
-                let public_values = [
+                let public_values = [];
+                let stage_2_public_values = [
                     lookup_argument_challenge,
                     fingerprint_challenge,
                     acc,
@@ -208,6 +206,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
                 let quotient_values = quotient_values(
                     air,
                     &public_values,
+                    &stage_2_public_values,
                     trace_domain,
                     quotient_domain,
                     &preprocessed_trace_on_quotient_domain,
@@ -298,6 +297,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
 fn quotient_values<A>(
     air: &A,
     public_values: &[Val],
+    stage_2_public_values: &[ExtVal],
     trace_domain: Domain,
     quotient_domain: Domain,
     preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_>>,
@@ -347,6 +347,7 @@ where
                 quotient_values_inner(
                     air,
                     public_values,
+                    stage_2_public_values,
                     &sels,
                     quotient_size,
                     preprocessed_on_quotient_domain,
@@ -371,6 +372,7 @@ where
                 quotient_values_inner(
                     air,
                     public_values,
+                    stage_2_public_values,
                     &sels,
                     quotient_size,
                     preprocessed_on_quotient_domain,
@@ -392,7 +394,8 @@ where
 #[allow(clippy::too_many_arguments)]
 fn quotient_values_inner<A>(
     air: &A,
-    public_values: &[Val],
+    stage_1_public_values: &[Val],
+    stage_2_public_values: &[ExtVal],
     sels: &LagrangeSelectors<Vec<Val>>,
     quotient_size: usize,
     preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_>>,
@@ -425,12 +428,21 @@ where
             )
         });
     let stage_1 = RowMajorMatrix::new(
-        stage_1_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
+        stage_1_on_quotient_domain.vertically_packed_row_pair::<PackedVal>(i_start, next_step),
         stage_1_width,
     );
+    let extension_d = <PackedExtVal as BasedVectorSpace<PackedVal>>::DIMENSION;
     let stage_2 = RowMajorMatrix::new(
-        stage_2_on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
-        stage_2_width,
+        pack(
+            stage_2_on_quotient_domain.width(),
+            stage_2_on_quotient_domain.wrapping_row_slices(i_start, PackedVal::WIDTH),
+        )
+        .chain(pack(
+            stage_2_on_quotient_domain.width(),
+            stage_2_on_quotient_domain.wrapping_row_slices(i_start + next_step, PackedVal::WIDTH),
+        ))
+        .collect::<Vec<_>>(),
+        stage_2_width / extension_d,
     );
 
     let accumulator = PackedExtVal::ZERO;
@@ -438,7 +450,8 @@ where
         preprocessed: preprocessed.as_ref().map(|mat| mat.as_view()),
         stage_1: stage_1.as_view(),
         stage_2: stage_2.as_view(),
-        public_values,
+        stage_1_public_values,
+        stage_2_public_values,
         is_first_row,
         is_last_row,
         is_transition,
@@ -451,11 +464,18 @@ where
 
     let quotient = folder.accumulator * inv_vanishing;
 
-    (0..min(quotient_size, PackedVal::WIDTH)).map(move |idx_in_packing| {
+    (0..quotient_size.min(PackedVal::WIDTH)).map(move |idx_in_packing| {
         ExtVal::from_basis_coefficients_fn(|coeff_idx| {
             <PackedExtVal as BasedVectorSpace<PackedVal>>::as_basis_coefficients_slice(&quotient)
                 [coeff_idx]
                 .as_slice()[idx_in_packing]
         })
+    })
+}
+
+fn pack(n: usize, rows: Vec<impl Deref<Target = [Val]>>) -> impl Iterator<Item = PackedExtVal> {
+    let extension_d = <PackedExtVal as BasedVectorSpace<PackedVal>>::DIMENSION;
+    (0..n).step_by(extension_d).map(move |c| {
+        PackedExtVal::from_basis_coefficients_fn(|j| PackedVal::from_fn(|i| rows[i][c + j]))
     })
 }

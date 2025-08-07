@@ -1,6 +1,7 @@
 use crate::{
     builder::folder::VerifierConstraintFolder,
     ensure, ensure_eq,
+    lookup::fingerprint,
     prover::Proof,
     system::System,
     types::{Challenger, ExtVal, FriParameters, Pcs, PcsError, StarkConfig, Val},
@@ -54,7 +55,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         // the last accumulator should be 0
         ensure_eq!(
             intermediate_accumulators.last(),
-            Some(&Val::ZERO),
+            Some(&ExtVal::ZERO),
             VerificationError::UnbalancedChannel
         );
 
@@ -80,23 +81,19 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         }
 
         // generate lookup challenges
-        // TODO use `ExtVal` instead of `Val`
-        let lookup_argument_challenge: Val = challenger.sample_algebra_element();
+        let lookup_argument_challenge: ExtVal = challenger.sample_algebra_element();
         challenger.observe_algebra_element(lookup_argument_challenge);
-        let fingerprint_challenge: Val = challenger.sample_algebra_element();
+        let fingerprint_challenge: ExtVal = challenger.sample_algebra_element();
         challenger.observe_algebra_element(fingerprint_challenge);
 
         // observe stage_2 commitment
         challenger.observe(commitments.stage_2_trace);
 
         // construct the accumulator from the claims
-        let mut acc = Val::ZERO;
+        let mut acc = ExtVal::ZERO;
         for claim in claims {
             let message = lookup_argument_challenge
-                + claim
-                    .iter()
-                    .rev()
-                    .fold(Val::ZERO, |acc, &coeff| acc * fingerprint_challenge + coeff);
+                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
             acc += message.inverse();
         }
 
@@ -217,11 +214,21 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                 RowMajorMatrixView::new_row(stage_1_row),
                 RowMajorMatrixView::new_row(stage_1_next_row),
             );
+            let extension_d = <ExtVal as BasedVectorSpace<Val>>::DIMENSION;
+            let stage_2_row = &stage_2_row
+                .chunks_exact(extension_d)
+                .map(from_ext_basis)
+                .collect::<Vec<_>>();
+            let stage_2_next_row = &stage_2_next_row
+                .chunks_exact(extension_d)
+                .map(from_ext_basis)
+                .collect::<Vec<_>>();
             let stage_2 = VerticalPair::new(
                 RowMajorMatrixView::new_row(stage_2_row),
                 RowMajorMatrixView::new_row(stage_2_next_row),
             );
-            let public_values = &[
+            let stage_1_public_values = &[];
+            let stage_2_public_values = &[
                 lookup_argument_challenge,
                 fingerprint_challenge,
                 acc,
@@ -231,7 +238,8 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                 preprocessed,
                 stage_1,
                 stage_2,
-                public_values,
+                stage_1_public_values,
+                stage_2_public_values,
                 is_first_row: sels.is_first_row,
                 is_last_row: sels.is_last_row,
                 is_transition: sels.is_transition,
@@ -262,16 +270,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                 .collect::<Vec<_>>();
             let quotient = quotient_chunks
                 .enumerate()
-                .map(|(ch_i, ch)| {
-                    zps[ch_i]
-                        * ch.iter()
-                            .enumerate()
-                            .map(|(e_i, &c)| {
-                                <ExtVal as BasedVectorSpace<Val>>::ith_basis_element(e_i).unwrap()
-                                    * c
-                            })
-                            .sum::<ExtVal>()
-                })
+                .map(|(ch_i, ch)| zps[ch_i] * from_ext_basis(ch))
                 .sum::<ExtVal>();
 
             // finally, check that the composition polynomial
@@ -359,9 +358,10 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                     circuit.stage_1_width,
                     VerificationError::InvalidProofShape
                 );
+                let extension_d = <ExtVal as BasedVectorSpace<Val>>::DIMENSION;
                 ensure_eq!(
                     stage_2_opened_values[i][j].len(),
-                    circuit.stage_2_width,
+                    circuit.stage_2_width * extension_d,
                     VerificationError::InvalidProofShape
                 );
             }
@@ -401,6 +401,14 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         );
         Ok(quotient_degrees)
     }
+}
+
+fn from_ext_basis(coeffs: &[ExtVal]) -> ExtVal {
+    coeffs
+        .iter()
+        .enumerate()
+        .map(|(i, c)| *c * <ExtVal as BasedVectorSpace<Val>>::ith_basis_element(i).unwrap())
+        .sum()
 }
 
 #[cfg(test)]
