@@ -132,7 +132,9 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         // commit to stage 2 traces
         let (stage_2_traces, intermediate_accumulators) = Lookup::stage_2_traces(
             &witness.lookups,
-            &[lookup_argument_challenge, fingerprint_challenge, acc],
+            lookup_argument_challenge,
+            &fingerprint_challenge,
+            acc,
         );
         let evaluations = stage_2_traces.into_iter().map(|trace| {
             let degree = trace.height();
