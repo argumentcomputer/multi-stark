@@ -118,16 +118,7 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> Circuit<A> {
         let preprocessed_trace = air.preprocessed_trace();
         let preprocessed_height = preprocessed_trace.as_ref().map_or(0, |mat| mat.height());
         let preprocessed_width = preprocessed_trace.as_ref().map_or(0, |mat| mat.width());
-        let constraint_count = get_symbolic_constraints(
-            &air,
-            preprocessed_width,
-            stage_1_width,
-            stage_2_width,
-            io_size,
-            LOOKUP_PUBLIC_SIZE,
-        )
-        .len();
-        let max_constraint_degree = get_max_constraint_degree(
+        let symbolic_constraints = get_symbolic_constraints(
             &air,
             preprocessed_width,
             stage_1_width,
@@ -135,6 +126,8 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> Circuit<A> {
             io_size,
             LOOKUP_PUBLIC_SIZE,
         );
+        let constraint_count = symbolic_constraints.len();
+        let max_constraint_degree = get_max_constraint_degree(&symbolic_constraints);
         let circuit = Self {
             air,
             max_constraint_degree,
