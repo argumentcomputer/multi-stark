@@ -322,63 +322,6 @@ impl<F: Field, T: Into<Self>> Product<T> for SymbolicExpression<F> {
     }
 }
 
-pub fn get_log_quotient_degree<F, A>(
-    air: &A,
-    preprocessed_width: usize,
-    stage_1_width: usize,
-    stage_2_width: usize,
-    num_public_values: usize,
-    num_stage_2_public_values: usize,
-
-    is_zk: usize,
-) -> usize
-where
-    F: Field,
-    A: Air<SymbolicAirBuilder>,
-{
-    assert!(is_zk <= 1, "is_zk must be either 0 or 1");
-    // We pad to at least degree 2, since a quotient argument doesn't make sense with smaller degrees.
-    let constraint_degree = (get_max_constraint_degree(
-        air,
-        preprocessed_width,
-        stage_1_width,
-        stage_2_width,
-        num_public_values,
-        num_stage_2_public_values,
-    ) + is_zk)
-        .max(2);
-
-    // The quotient's actual degree is approximately (max_constraint_degree - 1) n,
-    // where subtracting 1 comes from division by the vanishing polynomial.
-    // But we pad it to a power of two so that we can efficiently decompose the quotient.
-    log2_ceil_usize(constraint_degree - 1)
-}
-
-pub fn get_max_constraint_degree<A>(
-    air: &A,
-    preprocessed_width: usize,
-    stage_1_width: usize,
-    stage_2_width: usize,
-    num_public_values: usize,
-    num_stage_2_public_values: usize,
-) -> usize
-where
-    A: Air<SymbolicAirBuilder>,
-{
-    get_symbolic_constraints(
-        air,
-        preprocessed_width,
-        stage_1_width,
-        stage_2_width,
-        num_public_values,
-        num_stage_2_public_values,
-    )
-    .iter()
-    .map(|c| c.degree_multiple())
-    .max()
-    .unwrap_or(0)
-}
-
 pub fn get_symbolic_constraints<A>(
     air: &A,
     preprocessed_width: usize,
@@ -399,6 +342,24 @@ where
     );
     air.eval(&mut builder);
     builder.constraints
+}
+
+pub fn get_max_constraint_degree(constraints: &[SymbolicExpression<ExtVal>]) -> usize {
+    constraints
+        .iter()
+        .map(|c| c.degree_multiple())
+        .max()
+        .unwrap_or(0)
+}
+
+pub fn get_log_quotient_degree(max_constraint_degree: usize, is_zk: bool) -> usize {
+    // We pad to at least degree 2, since a quotient argument doesn't make sense with smaller degrees.
+    let constraint_degree = (max_constraint_degree + usize::from(is_zk)).max(2);
+
+    // The quotient's actual degree is approximately (max_constraint_degree - 1) n,
+    // where subtracting 1 comes from division by the vanishing polynomial.
+    // But we pad it to a power of two so that we can efficiently decompose the quotient.
+    log2_ceil_usize(constraint_degree - 1)
 }
 
 /// An `AirBuilder` for evaluating constraints symbolically, and recording them for later use.
