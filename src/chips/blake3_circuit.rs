@@ -1209,13 +1209,13 @@ mod tests {
                 match claim[0].as_canonical_u64() {
                     0u64 => {
                         // This is our U8Xor claim. We should have chip_idx, A, B, A xor B (where A, B are bytes)
-                        assert!(claim.len() == 4, "[U8Xor] wrong claim format");
+                        assert_eq!(claim.len(), 4, "[U8Xor] wrong claim format");
                         byte_xor_values_from_claims.push((claim[1], claim[2], claim[3]));
                     }
                     1u64 => {
                         /* This is our U32Xor claim. We should have chip_idx, A, B, A xor B (where A, B are u32) */
 
-                        assert!(claim.len() == 4, "[U32Xor] wrong claim format");
+                        assert_eq!(claim.len(), 4, "[U32Xor] wrong claim format");
                         let a_u32 = u32::try_from(claim[1].as_canonical_u64()).unwrap();
                         let b_u32 = u32::try_from(claim[2].as_canonical_u64()).unwrap();
                         let xor_u32 = u32::try_from(claim[3].as_canonical_u64()).unwrap();
@@ -1226,7 +1226,7 @@ mod tests {
                     2u64 => {
                         /* This is our U32Add claim. We should have chip_idx, A, B, A + B (where A, B are u32) */
 
-                        assert!(claim.len() == 4, "[U32Add] wrong claim format");
+                        assert_eq!(claim.len(), 4, "[U32Add] wrong claim format");
                         let a_u32 = u32::try_from(claim[1].as_canonical_u64()).unwrap();
                         let b_u32 = u32::try_from(claim[2].as_canonical_u64()).unwrap();
                         let add_u32 = u32::try_from(claim[3].as_canonical_u64()).unwrap();
@@ -1236,7 +1236,7 @@ mod tests {
                     3u64 => {
                         /* This is our U32RotateRight8 claim. We should have chip_idx, A, A_rot */
 
-                        assert!(claim.len() == 3, "[U32RightRotate8] wrong claim format");
+                        assert_eq!(claim.len(), 3, "[U32RightRotate8] wrong claim format");
                         let a_u32 = u32::try_from(claim[1].as_canonical_u64()).unwrap();
                         let rot_u32 = u32::try_from(claim[2].as_canonical_u64()).unwrap();
 
@@ -1245,7 +1245,7 @@ mod tests {
                     4u64 => {
                         /* This is our U32RotateRight16 claim. We should have chip_idx, A, A_rot */
 
-                        assert!(claim.len() == 3, "[U32RightRotate16] wrong claim format");
+                        assert_eq!(claim.len(), 3, "[U32RightRotate16] wrong claim format");
                         let a_u32 = u32::try_from(claim[1].as_canonical_u64()).unwrap();
                         let rot_u32 = u32::try_from(claim[2].as_canonical_u64()).unwrap();
 
@@ -1254,7 +1254,7 @@ mod tests {
                     5u64 => {
                         /* This is our U32RotateRight12 claim. We should have chip_idx, A, A_rot */
 
-                        assert!(claim.len() == 3, "[U32RightRotate12] wrong claim format");
+                        assert_eq!(claim.len(), 3, "[U32RightRotate12] wrong claim format");
                         let a_u32 = u32::try_from(claim[1].as_canonical_u64()).unwrap();
                         let rot_u32 = u32::try_from(claim[2].as_canonical_u64()).unwrap();
 
@@ -1263,7 +1263,7 @@ mod tests {
                     6u64 => {
                         /* This is our U32RotateRight7 claim. We should have chip_idx, A, A_rot */
 
-                        assert!(claim.len() == 3, "[U32RightRotate7] wrong claim format");
+                        assert_eq!(claim.len(), 3, "[U32RightRotate7] wrong claim format");
                         let a_u32 = u32::try_from(claim[1].as_canonical_u64()).unwrap();
                         let rot_u32 = u32::try_from(claim[2].as_canonical_u64()).unwrap();
 
@@ -1273,13 +1273,13 @@ mod tests {
                     7u64 => {
                         /* This is our U8PairRangeCheck claim. We should have chip_idx, A, B */
 
-                        assert!(claim.len() == 3, "[U8Xor] wrong claim format");
+                        assert_eq!(claim.len(), 3, "[U8PairRangeCheck] wrong claim format");
                         byte_range_check_values_from_claims.push((claim[1], claim[2]));
                     }
 
                     8u64 => {
                         /* This is our GFunction claim. We should have chip_idx, A, B, C, D, MX_IN, MY_IN, A1, D1, C1, B1 */
-                        assert!(claim.len() == 11, "[GFunction] wrong claim format");
+                        assert_eq!(claim.len(), 11, "[GFunction] wrong claim format");
 
                         let a_in = u32::try_from(claim[1].as_canonical_u64()).unwrap();
                         let b_in = u32::try_from(claim[2].as_canonical_u64()).unwrap();
@@ -1298,7 +1298,7 @@ mod tests {
 
                     9u64 => {
                         /* This is our StateTransition claim. We should have chip_idx, state_in[32], state_out[16] */
-                        assert!(claim.len() == 49, "[StateTransition] wrong claim format");
+                        assert_eq!(claim.len(), 49, "[StateTransition] wrong claim format");
 
                         let state_in: [u32; 32] = array::from_fn(|i| {
                             u32::try_from(claim[i + 1].as_canonical_u64()).unwrap()
