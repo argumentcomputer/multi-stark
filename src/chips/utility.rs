@@ -78,6 +78,7 @@ mod tests {
     where
         AB: AirBuilder,
         AB::Var: Copy,
+        AB::F: Field,
     {
         fn eval(&self, _builder: &mut AB) {
             match self {
