@@ -10,6 +10,7 @@ mod tests {
     use p3_matrix::Matrix;
     use p3_matrix::dense::RowMajorMatrix;
     use std::array;
+    use std::ops::Range;
 
     const BYTE_VALUES_NUM: usize = 256;
 
@@ -28,6 +29,9 @@ mod tests {
     // multiplicity, in_byte0, in_byte1, in_byte2, in_byte3, in_byte4, in_byte5, in_byte6, in_byte7
     const U64_SHIFT_32_TRACE_WIDTH: usize = 9;
 
+    // multiplicity, in_bit_0 ... in_bit_63
+    const U64_SHIFT_RIGHT_1: usize = 65;
+
     enum UtilityChip {
         U32FromLeBytes,
         U32Or,
@@ -35,6 +39,7 @@ mod tests {
         U8PairRangeCheck,
         U64ShiftRight32AsU32,
         U64AsU32,
+        U64ShiftRight1,
     }
 
     impl UtilityChip {
@@ -46,6 +51,7 @@ mod tests {
                 Self::U32Or => 3,
                 Self::U64ShiftRight32AsU32 => 4,
                 Self::U64AsU32 => 5,
+                Self::U64ShiftRight1 => 6,
             }
         }
     }
@@ -57,6 +63,7 @@ mod tests {
                 Self::U32Or => U32_OR_TRACE_WIDTH,
                 Self::U8Or | Self::U8PairRangeCheck => U8_OR_PAIR_RANGE_CHECK_TRACE_WIDTH,
                 Self::U64ShiftRight32AsU32 | Self::U64AsU32 => U64_SHIFT_32_TRACE_WIDTH,
+                Self::U64ShiftRight1 => U64_SHIFT_RIGHT_1,
             }
         }
 
@@ -80,7 +87,8 @@ mod tests {
                 Self::U32FromLeBytes
                 | Self::U32Or
                 | Self::U64ShiftRight32AsU32
-                | Self::U64AsU32 => None,
+                | Self::U64AsU32
+                | Self::U64ShiftRight1 => None,
             }
         }
     }
@@ -91,7 +99,7 @@ mod tests {
         AB::Var: Copy,
         AB::F: Field,
     {
-        fn eval(&self, _builder: &mut AB) {
+        fn eval(&self, builder: &mut AB) {
             match self {
                 Self::U32FromLeBytes
                 | Self::U32Or
@@ -99,6 +107,13 @@ mod tests {
                 | Self::U8PairRangeCheck
                 | Self::U64ShiftRight32AsU32
                 | Self::U64AsU32 => {}
+                Self::U64ShiftRight1 => {
+                    let main = builder.main();
+                    let local = main.row_slice(0).unwrap();
+                    for i in 0..64 {
+                        builder.assert_bool(local[i + 1]);
+                    }
+                }
             }
         }
     }
@@ -111,6 +126,7 @@ mod tests {
             let u32_or_idx = Self::U32Or.position();
             let u64_shift_right_32_idx = Self::U64ShiftRight32AsU32.position();
             let u64_shift_left_32_idx = Self::U64AsU32.position();
+            let u64_shift_right_1_idx = Self::U64ShiftRight1.position();
 
             match self {
                 Self::U32FromLeBytes => {
@@ -269,6 +285,27 @@ mod tests {
 
                     lookups
                 }
+
+                Self::U64ShiftRight1 => {
+                    fn bit_decomposition(bit_range: Range<usize>) -> SymbExpr {
+                        let powers_of_two: Vec<SymbExpr> =
+                            (0..63).map(|i| SymbExpr::from_u64(1u64 << i)).collect();
+                        let vars: Vec<SymbExpr> = bit_range.map(var).collect();
+
+                        vars.into_iter()
+                            .zip(powers_of_two)
+                            .fold(SymbExpr::ZERO, |acc, (v, pow_2)| acc + v * pow_2)
+                    }
+
+                    vec![Lookup::pull(
+                        var(0),
+                        vec![
+                            SymbExpr::from_usize(u64_shift_right_1_idx),
+                            bit_decomposition(1..64),
+                            bit_decomposition(2..64),
+                        ],
+                    )]
+                }
             }
         }
     }
@@ -288,6 +325,7 @@ mod tests {
             let mut u32_or_values_from_claims = vec![];
             let mut u64_shift_right_32_values_from_claims = vec![];
             let mut u64_to_u32_values_from_claims = vec![];
+            let mut u64_shift_right_1_values_from_claims = vec![];
 
             for claim in self.claims.clone() {
                 // we should have at least chip index
@@ -306,7 +344,7 @@ mod tests {
                     }
                     2u64 => {
                         // this is our u32_from_le_bytes chip. We should have chip_idx, byte0, byte1, byte2, byte3, u32
-                        assert_eq!(claim.len(), 6);
+                        assert_eq!(claim.len(), 6, "[U32FromLeBytes] wrong claim format");
 
                         let byte0_val = u8::try_from(claim[1].as_canonical_u64()).unwrap();
                         let byte1_val = u8::try_from(claim[2].as_canonical_u64()).unwrap();
@@ -320,7 +358,7 @@ mod tests {
                     }
                     3u64 => {
                         // this is our u32_or chip. We should have: chip_idx, left, right, or
-                        assert_eq!(claim.len(), 4);
+                        assert_eq!(claim.len(), 4, "[U32Or] wrong claim format");
 
                         let left = u32::try_from(claim[1].as_canonical_u64()).unwrap();
                         let right = u32::try_from(claim[2].as_canonical_u64()).unwrap();
@@ -331,7 +369,7 @@ mod tests {
 
                     4u64 => {
                         // this is our u64_shift_right_32. We should have: chip_idx, u64 (input), u32 (output)
-                        assert_eq!(claim.len(), 3);
+                        assert_eq!(claim.len(), 3, "[U64ShiftRight32] wrong claim format");
 
                         let u64_val = claim[1].as_canonical_u64();
                         let shifted = u32::try_from(claim[2].as_canonical_u64()).unwrap();
@@ -340,12 +378,25 @@ mod tests {
                     }
                     5u64 => {
                         // this is our u64_to_u32. We should have: chip_idx, u64 (input), u32 (output)
-                        assert_eq!(claim.len(), 3);
+                        assert_eq!(claim.len(), 3, "[U64ToU32] wrong claim format");
 
                         let u64_val = claim[1].as_canonical_u64();
                         let shifted = u32::try_from(claim[2].as_canonical_u64()).unwrap();
 
                         u64_to_u32_values_from_claims.push((u64_val, shifted));
+                    }
+
+                    6u64 => {
+                        // this is our u64_shift_right_1. We should have: chip_idx, u64 (input), u64 (output)
+                        assert_eq!(claim.len(), 3, "[U64ShiftRight1] wrong claim format");
+                        let u64_val = claim[1].as_canonical_u64();
+
+                        // technical limitation since Goldilock can't be instantiated from u64::MAX
+                        assert!(u64_val < u64::MAX);
+
+                        let u64_shifted = claim[2].as_canonical_u64();
+
+                        u64_shift_right_1_values_from_claims.push((u64_val, u64_shifted));
                     }
 
                     _ => {
@@ -354,6 +405,31 @@ mod tests {
                 }
             }
 
+            // u64_shift_right_1
+            let mut u64_shift_right_1_trace_values =
+                Vec::<Val>::with_capacity(u64_shift_right_1_values_from_claims.len());
+            if u64_shift_right_1_values_from_claims.is_empty() {
+                u64_shift_right_1_trace_values = Val::zero_vec(U64_SHIFT_RIGHT_1);
+            } else {
+                for (u64_val, u64_val_shifted_1) in u64_shift_right_1_values_from_claims {
+                    debug_assert_eq!(u64_val_shifted_1, u64_val >> 1);
+
+                    u64_shift_right_1_trace_values.push(Val::ONE); // multiplicity
+                    for i in 0..64 {
+                        if ((u64_val >> i) & 1) == 1 {
+                            u64_shift_right_1_trace_values.push(Val::ONE)
+                        } else {
+                            u64_shift_right_1_trace_values.push(Val::ZERO)
+                        }
+                    }
+                }
+            }
+            let mut u64_shift_right_1_trace =
+                RowMajorMatrix::new(u64_shift_right_1_trace_values, U64_SHIFT_RIGHT_1);
+            let height = u64_shift_right_1_trace.height().next_power_of_two();
+            u64_shift_right_1_trace.pad_to_height(height, Val::ZERO);
+
+            // u64_to_32
             fn u64_to_u32(
                 values_from_claims: &Vec<(u64, u32)>,
                 range_check_values: &mut Vec<(Val, Val)>,
@@ -406,7 +482,6 @@ mod tests {
                 u64_to_u32_trace
             }
 
-            // u64_to_32
             let u64_to_u32_trace = u64_to_u32(
                 &u64_to_u32_values_from_claims,
                 &mut byte_range_check_values_from_claims,
@@ -419,48 +494,6 @@ mod tests {
                 &mut byte_range_check_values_from_claims,
                 true,
             );
-
-            // // u64_shift_right_32
-            // let mut u64_shift_right_32_trace_values =
-            //     Vec::<Val>::with_capacity(u64_shift_right_32_values_from_claims.len());
-            // if u64_shift_right_32_values_from_claims.is_empty() {
-            //     u64_shift_right_32_trace_values = Val::zero_vec(U64_SHIFT_32_TRACE_WIDTH);
-            //
-            //     byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-            //     byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-            //     byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-            //     byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-            // } else {
-            //     for (u64_val, shifted) in u64_shift_right_32_values_from_claims {
-            //         let computed = (u64_val >> 32) as u32;
-            //         debug_assert_eq!(computed, shifted);
-            //
-            //         let u64_bytes: [u8; 8] = u64_val.to_le_bytes();
-            //         u64_shift_right_32_trace_values.push(Val::ONE); // multiplicity
-            //         u64_shift_right_32_trace_values
-            //             .extend_from_slice(u64_bytes.map(Val::from_u8).as_slice());
-            //
-            //         byte_range_check_values_from_claims
-            //             .push((Val::from_u8(u64_bytes[0]), Val::from_u8(u64_bytes[4])));
-            //         byte_range_check_values_from_claims
-            //             .push((Val::from_u8(u64_bytes[1]), Val::from_u8(u64_bytes[5])));
-            //         byte_range_check_values_from_claims
-            //             .push((Val::from_u8(u64_bytes[2]), Val::from_u8(u64_bytes[6])));
-            //         byte_range_check_values_from_claims
-            //             .push((Val::from_u8(u64_bytes[3]), Val::from_u8(u64_bytes[7])));
-            //     }
-            // }
-            // let mut u64_shift_right_32_trace =
-            //     RowMajorMatrix::new(u64_shift_right_32_trace_values, U64_SHIFT_32_TRACE_WIDTH);
-            // let height = u64_shift_right_32_trace.height().next_power_of_two();
-            // let zero_rows = height - u64_shift_right_32_trace.height();
-            // for _ in 0..zero_rows {
-            //     byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-            //     byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-            //     byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-            //     byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-            // }
-            // u64_shift_right_32_trace.pad_to_height(height, Val::ZERO);
 
             // u32_or
             let mut u32_or_trace_values =
@@ -596,6 +629,7 @@ mod tests {
                 u32_or_trace,
                 u64_shift_right_32_trace,
                 u64_to_u32_trace,
+                u64_shift_right_1_trace,
             ];
 
             (traces.clone(), SystemWitness::from_stage_1(traces, system))
@@ -623,6 +657,10 @@ mod tests {
         );
         let u64_as_u32_circuit =
             LookupAir::new(UtilityChip::U64AsU32, UtilityChip::U64AsU32.lookups());
+        let u64_shift_right_1_circuit = LookupAir::new(
+            UtilityChip::U64ShiftRight1,
+            UtilityChip::U64ShiftRight1.lookups(),
+        );
 
         let (system, prover_key) = System::new(
             commitment_parameters,
@@ -632,6 +670,7 @@ mod tests {
                 u32_or_circuit,
                 u64_shift_right_32_circuit,
                 u64_as_u32_circuit,
+                u64_shift_right_1_circuit,
             ], // order matters
         );
 
@@ -688,6 +727,10 @@ mod tests {
         );
         let u64_as_u32_circuit =
             LookupAir::new(UtilityChip::U64AsU32, UtilityChip::U64AsU32.lookups());
+        let u64_shift_right_1_circuit = LookupAir::new(
+            UtilityChip::U64ShiftRight1,
+            UtilityChip::U64ShiftRight1.lookups(),
+        );
 
         let (system, prover_key) = System::new(
             commitment_parameters,
@@ -697,6 +740,7 @@ mod tests {
                 u32_or_circuit,
                 u64_shift_right_32_circuit,
                 u64_as_u32_circuit,
+                u64_shift_right_1_circuit,
             ], // order matters
         );
 
@@ -747,6 +791,10 @@ mod tests {
         );
         let u64_as_u32_circuit =
             LookupAir::new(UtilityChip::U64AsU32, UtilityChip::U64AsU32.lookups());
+        let u64_shift_right_1_circuit = LookupAir::new(
+            UtilityChip::U64ShiftRight1,
+            UtilityChip::U64ShiftRight1.lookups(),
+        );
 
         let (system, prover_key) = System::new(
             commitment_parameters,
@@ -756,6 +804,7 @@ mod tests {
                 u32_or_circuit,
                 u64_shift_right_32_circuit,
                 u64_as_u32_circuit,
+                u64_shift_right_1_circuit,
             ], // order matters
         );
 
@@ -805,6 +854,10 @@ mod tests {
         );
         let u64_as_u32_circuit =
             LookupAir::new(UtilityChip::U64AsU32, UtilityChip::U64AsU32.lookups());
+        let u64_shift_right_1_circuit = LookupAir::new(
+            UtilityChip::U64ShiftRight1,
+            UtilityChip::U64ShiftRight1.lookups(),
+        );
 
         let (system, prover_key) = System::new(
             commitment_parameters,
@@ -814,6 +867,7 @@ mod tests {
                 u32_or_circuit,
                 u64_shift_right_32_circuit,
                 u64_as_u32_circuit,
+                u64_shift_right_1_circuit,
             ], // order matters
         );
 
@@ -869,6 +923,10 @@ mod tests {
         );
         let u64_as_u32_circuit =
             LookupAir::new(UtilityChip::U64AsU32, UtilityChip::U64AsU32.lookups());
+        let u64_shift_right_1_circuit = LookupAir::new(
+            UtilityChip::U64ShiftRight1,
+            UtilityChip::U64ShiftRight1.lookups(),
+        );
 
         let (system, prover_key) = System::new(
             commitment_parameters,
@@ -878,6 +936,7 @@ mod tests {
                 u32_or_circuit,
                 u64_shift_right_32_circuit,
                 u64_as_u32_circuit,
+                u64_shift_right_1_circuit,
             ], // order matters
         );
 
@@ -886,6 +945,70 @@ mod tests {
                 [
                     vec![Val::from_usize(UtilityChip::U64AsU32.position())],
                     vec![Val::from_u64(u64_val), Val::from_u32(u32_val)],
+                ]
+                .concat(),
+            ],
+        };
+
+        let (_traces, witness) = claims.witness(&system);
+
+        let claims_slice: Vec<&[Val]> = claims.claims.iter().map(|v| v.as_slice()).collect();
+        let claims_slice: &[&[Val]] = &claims_slice;
+
+        let fri_parameters = FriParameters {
+            log_final_poly_len: 0,
+            num_queries: 64,
+            proof_of_work_bits: 0,
+        };
+
+        let proof =
+            system.prove_multiple_claims(fri_parameters, &prover_key, claims_slice, witness);
+        system
+            .verify_multiple_claims(fri_parameters, claims_slice, &proof)
+            .expect("verification issue");
+    }
+
+    #[test]
+    fn test_u64_shift_right_1() {
+        let u64_val = 0x7fffffffffffffffu64;
+        let u64_val_right_shifted = u64_val >> 1;
+        assert_eq!(u64_val_right_shifted, 0x3fffffffffffffffu64);
+
+        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
+        let u8_circuit = LookupAir::new(UtilityChip::U8Or, UtilityChip::U8Or.lookups());
+        let u32_or_circuit = LookupAir::new(UtilityChip::U32Or, UtilityChip::U32Or.lookups());
+        let u32_from_le_bytes_circuit = LookupAir::new(
+            UtilityChip::U32FromLeBytes,
+            UtilityChip::U32FromLeBytes.lookups(),
+        );
+        let u64_shift_right_32_circuit = LookupAir::new(
+            UtilityChip::U64ShiftRight32AsU32,
+            UtilityChip::U64ShiftRight32AsU32.lookups(),
+        );
+        let u64_as_u32_circuit =
+            LookupAir::new(UtilityChip::U64AsU32, UtilityChip::U64AsU32.lookups());
+        let u64_shift_right_1_circuit = LookupAir::new(
+            UtilityChip::U64ShiftRight1,
+            UtilityChip::U64ShiftRight1.lookups(),
+        );
+
+        let (system, prover_key) = System::new(
+            commitment_parameters,
+            vec![
+                u8_circuit,
+                u32_from_le_bytes_circuit,
+                u32_or_circuit,
+                u64_shift_right_32_circuit,
+                u64_as_u32_circuit,
+                u64_shift_right_1_circuit,
+            ], // order matters
+        );
+
+        let claims = UtilityChipClaims {
+            claims: vec![
+                [
+                    vec![Val::from_usize(UtilityChip::U64ShiftRight1.position())],
+                    vec![Val::from_u64(u64_val), Val::from_u64(u64_val_right_shifted)],
                 ]
                 .concat(),
             ],
