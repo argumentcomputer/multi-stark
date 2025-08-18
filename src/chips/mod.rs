@@ -7,6 +7,7 @@
 mod blake3_circuit;
 mod byte_operations;
 mod u32_add;
+mod utility;
 
 use crate::builder::symbolic::SymbolicExpression;
 use crate::types::Val;
