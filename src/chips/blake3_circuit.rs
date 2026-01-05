@@ -1990,7 +1990,8 @@ mod tests {
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
             num_queries: 64,
-            proof_of_work_bits: 0,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
         };
 
         let proof =
@@ -2160,7 +2161,8 @@ mod tests {
             let fri_parameters = FriParameters {
                 log_final_poly_len: 0,
                 num_queries: 64,
-                proof_of_work_bits: 0,
+                commit_proof_of_work_bits: 0,
+                query_proof_of_work_bits: 0,
             };
 
             let proof =

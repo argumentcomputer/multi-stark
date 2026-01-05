@@ -65,7 +65,8 @@ impl Committer {
         let dummy_parameters = FriParameters {
             log_final_poly_len: 0,
             num_queries: 0,
-            proof_of_work_bits: 0,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
         };
         let pcs = new_pcs(commitment_parameters, dummy_parameters);
         Self { pcs }
@@ -92,7 +93,10 @@ pub struct CommitmentParameters {
 pub struct FriParameters {
     pub log_final_poly_len: usize,
     pub num_queries: usize,
-    pub proof_of_work_bits: usize,
+    /// Number of bits for the PoW phase before sampling _each_ batching challenge.
+    pub commit_proof_of_work_bits: usize,
+    /// Number of bits for the PoW phase before sampling the queries.
+    pub query_proof_of_work_bits: usize,
 }
 
 type KeccakCompressionFunction =
@@ -113,7 +117,8 @@ fn new_pcs(commitment_parameters: CommitmentParameters, fri_parameters: FriParam
         log_blowup: commitment_parameters.log_blowup,
         log_final_poly_len: fri_parameters.log_final_poly_len,
         num_queries: fri_parameters.num_queries,
-        proof_of_work_bits: fri_parameters.proof_of_work_bits,
+        commit_proof_of_work_bits: fri_parameters.commit_proof_of_work_bits,
+        query_proof_of_work_bits: fri_parameters.query_proof_of_work_bits,
         mmcs,
     };
     let dft = Dft::default();
