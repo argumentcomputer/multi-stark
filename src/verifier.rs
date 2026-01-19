@@ -491,7 +491,8 @@ mod tests {
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
             num_queries: 64,
-            proof_of_work_bits: 0,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
         };
         let no_claims = &[];
         let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
@@ -525,7 +526,8 @@ mod tests {
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
             num_queries: 100,
-            proof_of_work_bits: 20,
+            commit_proof_of_work_bits: 10,
+            query_proof_of_work_bits: 10,
         };
         let no_claims = &[];
         let proof = benchmark!(
