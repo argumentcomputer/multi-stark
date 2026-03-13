@@ -6,20 +6,27 @@ use crate::{
     system::System,
     types::{Challenger, ExtVal, FriParameters, Pcs, PcsError, StarkConfig, Val},
 };
-use p3_air::{Air, BaseAir};
+use p3_air::{Air, BaseAir, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs as PcsTrait, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 use p3_util::log2_strict_usize;
 
+/// Errors that can occur during proof verification.
 #[derive(Debug)]
 pub enum VerificationError<PcsErr> {
+    /// A provided claim is invalid.
     InvalidClaim,
+    /// The PCS opening proof failed to verify.
     InvalidOpeningArgument(PcsErr),
+    /// The proof has an unexpected shape (wrong number of opened values, etc.).
     InvalidProofShape,
+    /// The system configuration is invalid (e.g. no circuits).
     InvalidSystem,
+    /// The recomputed composition polynomial does not match the quotient.
     OodEvaluationMismatch,
+    /// The lookup accumulator did not balance to zero.
     UnbalancedChannel,
 }
 
@@ -65,10 +72,10 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         let mut challenger = config.initialise_challenger();
 
         // observe preprocessed and stage_1 commitment
-        if let Some(commit) = self.preprocessed_commit {
+        if let Some(commit) = &self.preprocessed_commit {
             challenger.observe(commit);
         }
-        challenger.observe(commitments.stage_1_trace);
+        challenger.observe(commitments.stage_1_trace.clone());
 
         // observe the traces' heights. TODO: is this necessary?
         for log_degree in log_degrees {
@@ -87,7 +94,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         challenger.observe_algebra_element(fingerprint_challenge);
 
         // observe stage_2 commitment
-        challenger.observe(commitments.stage_2_trace);
+        challenger.observe(commitments.stage_2_trace.clone());
 
         // construct the accumulator from the claims
         let mut acc = ExtVal::ZERO;
@@ -101,7 +108,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();
 
         // observe quotient commitment
-        challenger.observe(commitments.quotient_chunks);
+        challenger.observe(commitments.quotient_chunks.clone());
 
         // generate out of domain points and verify the PCS opening
         let zeta: ExtVal = challenger.sample_algebra_element();
@@ -166,12 +173,18 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
             last_quotient_i += quotient_degree;
         }
         let mut coms_to_verify = vec![
-            (commitments.stage_1_trace, stage_1_trace_evaluations),
-            (commitments.stage_2_trace, stage_2_trace_evaluations),
-            (commitments.quotient_chunks, quotient_chunks_evaluations),
+            (commitments.stage_1_trace.clone(), stage_1_trace_evaluations),
+            (commitments.stage_2_trace.clone(), stage_2_trace_evaluations),
+            (
+                commitments.quotient_chunks.clone(),
+                quotient_chunks_evaluations,
+            ),
         ];
-        if let Some(preprocessed_commitment) = self.preprocessed_commit {
-            coms_to_verify.extend([(preprocessed_commitment, preprocessed_trace_evaluations)])
+        if let Some(preprocessed_commitment) = &self.preprocessed_commit {
+            coms_to_verify.extend([(
+                preprocessed_commitment.clone(),
+                preprocessed_trace_evaluations,
+            )])
         }
         pcs.verify(coms_to_verify, opening_proof, &mut challenger)
             .map_err(VerificationError::InvalidOpeningArgument)?;
@@ -203,12 +216,9 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                 let preprocessed_opened_values = preprocessed_opened_values.as_ref().unwrap();
                 let preprocessed_row = &preprocessed_opened_values[i][0];
                 let preprocessed_next_row = &preprocessed_opened_values[i][1];
-                Some(VerticalPair::new(
-                    RowMajorMatrixView::new_row(preprocessed_row),
-                    RowMajorMatrixView::new_row(preprocessed_next_row),
-                ))
+                RowWindow::from_two_rows(preprocessed_row, preprocessed_next_row)
             } else {
-                None
+                RowWindow::from_two_rows(&[], &[])
             };
             let stage_1 = VerticalPair::new(
                 RowMajorMatrixView::new_row(stage_1_row),
@@ -420,8 +430,8 @@ mod tests {
         system::{ProverKey, SystemWitness},
         types::{CommitmentParameters, FriParameters},
     };
-    use p3_air::{AirBuilderWithPublicValues, BaseAir};
-    use p3_matrix::{Matrix, dense::RowMajorMatrix};
+    use p3_air::{AirBuilder, BaseAir, WindowAccess};
+    use p3_matrix::dense::RowMajorMatrix;
 
     enum CS {
         Pythagorean,
@@ -437,14 +447,14 @@ mod tests {
     }
     impl<AB> Air<AB> for CS
     where
-        AB: AirBuilderWithPublicValues,
+        AB: AirBuilder,
         AB::Var: Copy,
     {
         fn eval(&self, builder: &mut AB) {
             match self {
                 Self::Pythagorean => {
                     let main = builder.main();
-                    let local = main.row_slice(0).unwrap();
+                    let local = main.current_slice();
                     let expr1 = local[0] * local[0] + local[1] * local[1];
                     let expr2 = local[2] * local[2];
                     // this extra `local[0]` multiplication is there to increase the maximum constraint degree
@@ -452,7 +462,7 @@ mod tests {
                 }
                 Self::Complex => {
                     let main = builder.main();
-                    let local = main.row_slice(0).unwrap();
+                    let local = main.current_slice();
                     // (a + ib)(c + id) = (ac - bd) + i(ad + bc)
                     let expr1 = local[0] * local[2] - local[1] * local[3];
                     let expr2 = local[4];
@@ -475,7 +485,10 @@ mod tests {
 
     #[test]
     fn multi_stark_test() {
-        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        };
         let (system, key) = system(commitment_parameters);
         let f = Val::from_u32;
         let witness = SystemWitness::from_stage_1(
@@ -490,6 +503,7 @@ mod tests {
         );
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
+            max_log_arity: 1,
             num_queries: 64,
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,
@@ -507,7 +521,10 @@ mod tests {
         // To run this benchmark effectively, run the following command
         // RUSTFLAGS="-Ctarget-cpu=native" cargo test multi_stark_benchmark_test --release --features parallel -- --include-ignored --nocapture
         const LOG_HEIGHT: usize = 20;
-        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        };
         let (system, key) = system(commitment_parameters);
         let f = Val::from_u32;
         let mut pythagorean_trace = [3, 4, 5].map(f).to_vec();
@@ -525,6 +542,7 @@ mod tests {
         );
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
+            max_log_arity: 1,
             num_queries: 100,
             commit_proof_of_work_bits: 10,
             query_proof_of_work_bits: 10,

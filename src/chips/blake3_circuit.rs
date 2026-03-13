@@ -5,7 +5,7 @@ mod tests {
     use crate::lookup::{Lookup, LookupAir};
     use crate::system::{System, SystemWitness};
     use crate::types::{CommitmentParameters, FriParameters, Val};
-    use p3_air::{Air, AirBuilder, BaseAir};
+    use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
     use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
     use p3_matrix::Matrix;
     use p3_matrix::dense::RowMajorMatrix;
@@ -162,7 +162,7 @@ mod tests {
                 | Self::GFunction => {}
                 Self::U32Add => {
                     let main = builder.main();
-                    let local = main.row_slice(0).unwrap();
+                    let local = main.current_slice();
                     let x = &local[0..4];
                     let y = &local[4..8];
                     let z = &local[8..12];
@@ -187,7 +187,7 @@ mod tests {
                 }
                 Self::U32RightRotate12 | Self::U32RightRotate7 => {
                     let main = builder.main();
-                    let local = main.row_slice(0).unwrap();
+                    let local = main.current_slice();
 
                     let input = local[1]
                         + local[2] * AB::Expr::from_u32(256)
@@ -227,7 +227,7 @@ mod tests {
                 }
                 Self::Compression => {
                     let main = builder.main();
-                    let columns = main.row_slice(0).unwrap();
+                    let columns = main.current_slice();
 
                     let mut offset = 1usize;
                     let indices: [usize; 128] = array::from_fn(|i| i + 1);
@@ -1915,7 +1915,10 @@ mod tests {
         assert_eq!(actual, expected.to_vec());
 
         // circuit testing
-        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        };
         let u8_circuit = LookupAir::new(
             Blake3CompressionChips::U8Xor,
             Blake3CompressionChips::U8Xor.lookups(),
@@ -1989,6 +1992,7 @@ mod tests {
 
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
+            max_log_arity: 1,
             num_queries: 64,
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,
@@ -2099,7 +2103,10 @@ mod tests {
 
         fn run_test(claims: &Blake3CompressionClaims) {
             // circuit testing
-            let commitment_parameters = CommitmentParameters { log_blowup: 1 };
+            let commitment_parameters = CommitmentParameters {
+                log_blowup: 1,
+                cap_height: 0,
+            };
             let u8_circuit = LookupAir::new(
                 Blake3CompressionChips::U8Xor,
                 Blake3CompressionChips::U8Xor.lookups(),
@@ -2160,6 +2167,7 @@ mod tests {
 
             let fri_parameters = FriParameters {
                 log_final_poly_len: 0,
+                max_log_arity: 1,
                 num_queries: 64,
                 commit_proof_of_work_bits: 0,
                 query_proof_of_work_bits: 0,

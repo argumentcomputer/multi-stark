@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use p3_air::{Air, AirBuilder, BaseAir};
+    use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
     use p3_field::{Field, PrimeCharacteristicRing};
-    use p3_matrix::{Matrix, dense::RowMajorMatrix};
+    use p3_matrix::dense::RowMajorMatrix;
 
     use crate::chips::SymbExpr;
     use crate::{
@@ -57,7 +57,7 @@ mod tests {
                 Self::ByteChip => {}
                 Self::U32AddChip => {
                     let main = builder.main();
-                    let local = main.row_slice(0).unwrap();
+                    let local = main.current_slice();
                     let x = &local[0..4];
                     let y = &local[4..8];
                     let z = &local[8..12];
@@ -183,7 +183,10 @@ mod tests {
 
     #[test]
     fn u32_add_proof() {
-        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        };
         let (system, key) = byte_system(commitment_parameters);
         let calls = AddCalls {
             calls: vec![(10, 5), (30, 20), (100, 100), (8000, 10000)],
@@ -197,6 +200,7 @@ mod tests {
         let claims: &[&[Val]] = &[claim1, claim2, claim3, claim4];
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
+            max_log_arity: 1,
             num_queries: 64,
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,

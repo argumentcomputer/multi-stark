@@ -1,4 +1,4 @@
-use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, ExtensionBuilder};
+use p3_air::{Air, AirBuilder, ExtensionBuilder, RowWindow};
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::Matrix;
 use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixView};
@@ -6,7 +6,7 @@ use p3_matrix::stack::VerticalPair;
 
 use crate::types::{ExtVal, Val};
 
-use super::{PreprocessedBuilder, TwoStagedBuilder};
+use super::TwoStagedBuilder;
 
 pub fn check_constraints<A>(
     air: &A,
@@ -38,7 +38,7 @@ pub fn check_constraints<A>(
         );
         let mut builder = DebugConstraintBuilder {
             row_index: i,
-            preprocessed: None,
+            preprocessed: RowWindow::from_two_rows(&[], &[]),
             stage_1,
             stage_2,
             public_values,
@@ -52,11 +52,8 @@ pub fn check_constraints<A>(
         if let Some(preprocessed) = preprocessed {
             let preprocessed_local = preprocessed.row_slice(i).unwrap(); // i < height so unwrap should never fail.
             let preprocessed_next = preprocessed.row_slice(i_next).unwrap(); // i_next < height so unwrap should never fail.
-            let preprocessed = Some(VerticalPair::new(
-                RowMajorMatrixView::new_row(&*preprocessed_local),
-                RowMajorMatrixView::new_row(&*preprocessed_next),
-            ));
-            builder.preprocessed = preprocessed;
+            builder.preprocessed =
+                RowWindow::from_two_rows(&preprocessed_local, &preprocessed_next);
             air.eval(&mut builder);
         } else {
             air.eval(&mut builder);
@@ -68,8 +65,8 @@ pub fn check_constraints<A>(
 pub struct DebugConstraintBuilder<'a> {
     /// The index of the row currently being evaluated.
     row_index: usize,
-    /// A view of the current and next row as a vertical pair.
-    preprocessed: Option<VerticalPair<RowMajorMatrixView<'a, Val>, RowMajorMatrixView<'a, Val>>>,
+    /// A two-row window over the preprocessed trace (current and next row).
+    preprocessed: RowWindow<'a, Val>,
     stage_1: VerticalPair<RowMajorMatrixView<'a, Val>, RowMajorMatrixView<'a, Val>>,
     stage_2: VerticalPair<RowMajorMatrixView<'a, ExtVal>, RowMajorMatrixView<'a, ExtVal>>,
     /// The public values provided for constraint validation (e.g. inputs or outputs).
@@ -87,10 +84,16 @@ impl<'a> AirBuilder for DebugConstraintBuilder<'a> {
     type F = Val;
     type Expr = Val;
     type Var = Val;
-    type M = VerticalPair<RowMajorMatrixView<'a, Val>, RowMajorMatrixView<'a, Val>>;
+    type PreprocessedWindow = RowWindow<'a, Val>;
+    type MainWindow = RowWindow<'a, Val>;
+    type PublicVar = Val;
 
-    fn main(&self) -> Self::M {
-        self.stage_1
+    fn main(&self) -> Self::MainWindow {
+        RowWindow::from_two_rows(self.stage_1.top.values, self.stage_1.bottom.values)
+    }
+
+    fn preprocessed(&self) -> &Self::PreprocessedWindow {
+        &self.preprocessed
     }
 
     fn is_first_row(&self) -> Self::Expr {
@@ -129,19 +132,9 @@ impl<'a> AirBuilder for DebugConstraintBuilder<'a> {
             self.row_index, x, y
         );
     }
-}
 
-impl AirBuilderWithPublicValues for DebugConstraintBuilder<'_> {
-    type PublicVar = Self::F;
-
-    fn public_values(&self) -> &[Self::F] {
+    fn public_values(&self) -> &[Self::PublicVar] {
         self.public_values
-    }
-}
-
-impl PreprocessedBuilder for DebugConstraintBuilder<'_> {
-    fn preprocessed(&self) -> Option<Self::M> {
-        self.preprocessed
     }
 }
 

@@ -1,5 +1,5 @@
-/// Adapted from Plonky3's `https://github.com/Plonky3/Plonky3/blob/main/uni-stark/src/symbolic_builder.rs`
-use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, ExtensionBuilder};
+/// Symbolic constraint builder and expressions, adapted from Plonky3.
+use p3_air::{Air, AirBuilder, ExtensionBuilder};
 use p3_field::{Algebra, Field, InjectiveMonomial, PrimeCharacteristicRing};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_util::log2_ceil_usize;
@@ -10,7 +10,7 @@ use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use crate::types::{ExtVal, Val};
 
-use super::{PreprocessedBuilder, TwoStagedBuilder};
+use super::TwoStagedBuilder;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Entry {
@@ -365,7 +365,7 @@ pub fn get_log_quotient_degree(max_constraint_degree: usize, is_zk: bool) -> usi
 /// An `AirBuilder` for evaluating constraints symbolically, and recording them for later use.
 #[derive(Debug)]
 pub struct SymbolicAirBuilder {
-    preprocessed: Option<RowMajorMatrix<SymbolicVariable<Val>>>,
+    preprocessed: RowMajorMatrix<SymbolicVariable<Val>>,
     stage_1: RowMajorMatrix<SymbolicVariable<Val>>,
     stage_2: RowMajorMatrix<SymbolicVariable<ExtVal>>,
     public_values: Vec<SymbolicVariable<Val>>,
@@ -409,11 +409,7 @@ impl SymbolicAirBuilder {
             .map(move |index| SymbolicVariable::new(Entry::Stage2Public, index))
             .collect();
         Self {
-            preprocessed: if preprocessed_width == 0 {
-                None
-            } else {
-                Some(RowMajorMatrix::new(prep_values, preprocessed_width))
-            },
+            preprocessed: RowMajorMatrix::new(prep_values, preprocessed_width),
             stage_1: RowMajorMatrix::new(stage_1_values, stage_1_width),
             stage_2: RowMajorMatrix::new(stage_2_values, stage_2_width),
             public_values,
@@ -427,10 +423,16 @@ impl AirBuilder for SymbolicAirBuilder {
     type F = Val;
     type Expr = SymbolicExpression<Val>;
     type Var = SymbolicVariable<Val>;
-    type M = RowMajorMatrix<Self::Var>;
+    type PreprocessedWindow = RowMajorMatrix<Self::Var>;
+    type MainWindow = RowMajorMatrix<Self::Var>;
+    type PublicVar = SymbolicVariable<Val>;
 
-    fn main(&self) -> Self::M {
+    fn main(&self) -> Self::MainWindow {
         self.stage_1.clone()
+    }
+
+    fn preprocessed(&self) -> &Self::PreprocessedWindow {
+        &self.preprocessed
     }
 
     fn is_first_row(&self) -> Self::Expr {
@@ -454,18 +456,9 @@ impl AirBuilder for SymbolicAirBuilder {
     fn assert_zero<I: Into<Self::Expr>>(&mut self, x: I) {
         self.constraints.push(x.into().into());
     }
-}
 
-impl AirBuilderWithPublicValues for SymbolicAirBuilder {
-    type PublicVar = SymbolicVariable<Val>;
     fn public_values(&self) -> &[Self::PublicVar] {
         &self.public_values
-    }
-}
-
-impl PreprocessedBuilder for SymbolicAirBuilder {
-    fn preprocessed(&self) -> Option<Self::M> {
-        self.preprocessed.clone()
     }
 }
 
