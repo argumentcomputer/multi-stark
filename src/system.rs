@@ -6,14 +6,21 @@ use crate::{
 use p3_air::{Air, BaseAir};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
+/// A multi-circuit STARK system. Contains all circuits together with their
+/// shared preprocessed commitment and commitment parameters.
 pub struct System<A> {
     pub commitment_parameters: CommitmentParameters,
     pub circuits: Vec<Circuit<A>>,
+    /// Commitment to all preprocessed traces (if any circuit has one).
     pub preprocessed_commit: Option<Commitment>,
+    /// Maps each circuit index to its position within the preprocessed commitment.
+    /// `None` if that circuit has no preprocessed trace.
     pub preprocessed_indices: Vec<Option<usize>>,
 }
 
+/// Prover-side data that must be retained between system setup and proving.
 pub struct ProverKey {
+    /// PCS prover data for the preprocessed traces.
     pub preprocessed_data: Option<ProverData>,
 }
 
@@ -55,6 +62,8 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> System<A> {
     }
 }
 
+/// A single circuit within the system, wrapping an AIR together with
+/// precomputed metadata used by the prover and verifier.
 pub struct Circuit<A> {
     pub air: LookupAir<A>,
     pub constraint_count: usize,
@@ -65,9 +74,13 @@ pub struct Circuit<A> {
     pub stage_2_width: usize,
 }
 
+/// Witness data for the multi-circuit system, comprising stage 1 traces and
+/// the concrete lookup values derived from them.
 #[derive(Clone)]
 pub struct SystemWitness {
+    /// Stage 1 (main) execution traces, one per circuit.
     pub traces: Vec<RowMajorMatrix<Val>>,
+    /// Lookup values per circuit, per row, per lookup.
     pub lookups: Vec<Vec<Vec<Lookup<Val>>>>,
 }
 
