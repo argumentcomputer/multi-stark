@@ -14,7 +14,7 @@ use bincode::{
     error::{DecodeError, EncodeError},
     serde::{decode_from_slice, encode_to_vec},
 };
-use p3_air::{Air, BaseAir};
+use p3_air::{Air, BaseAir, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{LagrangeSelectors, OpenedValuesForRound, Pcs as PcsTrait, PolynomialSpace};
 use p3_field::{
@@ -26,18 +26,26 @@ use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use serde::{Deserialize, Serialize};
 
+/// Polynomial commitments included in the proof.
 #[derive(Serialize, Deserialize)]
 pub struct Commitments {
+    /// Commitment to the stage 1 (main) execution traces.
     pub stage_1_trace: Commitment,
+    /// Commitment to the stage 2 (lookup) execution traces.
     pub stage_2_trace: Commitment,
+    /// Commitment to the quotient polynomial chunks.
     pub quotient_chunks: Commitment,
 }
 
+/// A STARK proof for a multi-circuit system.
 #[derive(Serialize, Deserialize)]
 pub struct Proof {
     pub commitments: Commitments,
+    /// Per-circuit intermediate accumulator values for the lookup argument.
     pub intermediate_accumulators: Vec<ExtVal>,
+    /// Log2 of the trace degree for each circuit.
     pub log_degrees: Vec<u8>,
+    /// PCS opening proof covering all rounds.
     pub opening_proof: PcsProof,
     pub quotient_opened_values: OpenedValuesForRound<ExtVal>,
     pub preprocessed_opened_values: Option<OpenedValuesForRound<ExtVal>>,
@@ -98,10 +106,10 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         let (stage_1_trace_commit, stage_1_trace_data) =
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
 
-        if let Some(commit) = self.preprocessed_commit {
+        if let Some(commit) = &self.preprocessed_commit {
             challenger.observe(commit);
         }
-        challenger.observe(stage_1_trace_commit);
+        challenger.observe(stage_1_trace_commit.clone());
 
         // observe the traces' heights. TODO: is this necessary?
         for log_degree in &log_degrees {
@@ -144,7 +152,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         });
         let (stage_2_trace_commit, stage_2_trace_data) =
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
-        challenger.observe(stage_2_trace_commit);
+        challenger.observe(stage_2_trace_commit.clone());
 
         // generate constraint challenge
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();
@@ -233,7 +241,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             });
         let (quotient_commit, quotient_data) =
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, quotient_evaluations);
-        challenger.observe(quotient_commit);
+        challenger.observe(quotient_commit.clone());
 
         // save the commitments
         let commitments = Commitments {
@@ -449,7 +457,10 @@ where
 
     let accumulator = PackedExtVal::ZERO;
     let mut folder = ProverConstraintFolder {
-        preprocessed: preprocessed.as_ref().map(|mat| mat.as_view()),
+        preprocessed: match preprocessed.as_ref() {
+            Some(mat) => RowWindow::from_view(&mat.as_view()),
+            None => RowWindow::from_two_rows(&[], &[]),
+        },
         stage_1: stage_1.as_view(),
         stage_2: stage_2.as_view(),
         stage_1_public_values,

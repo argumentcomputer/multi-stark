@@ -124,7 +124,10 @@ mod tests {
     #[test]
     #[ignore]
     fn byte_test() {
-        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        };
         let circuit = LookupAir::new(ByteCS {}, ByteCS {}.lookups());
         let (system, key) = System::new(commitment_parameters, vec![circuit]);
         let calls = ByteCalls {
@@ -144,6 +147,7 @@ mod tests {
         let claims: &[&[Val]] = &[claim1, claim2, claim3, claim4];
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
+            max_log_arity: 1,
             num_queries: 64,
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,

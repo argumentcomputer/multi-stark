@@ -19,11 +19,14 @@ pub type Mmcs = MerkleTreeMmcs<
     [u64; p3_keccak::VECTOR_LEN],
     SerializingHasher<PaddingFreeSponge<KeccakF, 25, 17, 4>>,
     KeccakCompressionFunction,
+    2,
     4,
 >;
 pub type ExtMmcs = ExtensionMmcs<Val, ExtVal, Mmcs>;
 pub type Pcs = TwoAdicFriPcs<Val, Dft, Mmcs, ExtMmcs>;
 
+/// Configuration for the STARK prover and verifier, bundling the PCS and an
+/// initial challenger state.
 #[derive(Debug)]
 pub struct StarkConfig {
     /// The PCS used to commit polynomials and prove opening proofs.
@@ -64,6 +67,7 @@ impl Committer {
     pub fn new(commitment_parameters: CommitmentParameters) -> Self {
         let dummy_parameters = FriParameters {
             log_final_poly_len: 0,
+            max_log_arity: 1,
             num_queries: 0,
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,
@@ -87,11 +91,19 @@ impl Committer {
 #[derive(Clone, Copy)]
 pub struct CommitmentParameters {
     pub log_blowup: usize,
+    /// Height of the Merkle cap (number of top layers included in the commitment).
+    /// A cap height of 0 means only the root is committed.
+    pub cap_height: usize,
 }
 
+/// Parameters controlling the FRI protocol.
 #[derive(Clone, Copy)]
 pub struct FriParameters {
+    /// Log2 of the degree of the final polynomial (0 means a constant).
     pub log_final_poly_len: usize,
+    /// Maximum folding arity per FRI round (log2). A value of 1 means binary folding.
+    pub max_log_arity: usize,
+    /// Number of query repetitions for soundness amplification.
     pub num_queries: usize,
     /// Number of bits for the PoW phase before sampling _each_ batching challenge.
     pub commit_proof_of_work_bits: usize,
@@ -103,19 +115,20 @@ type KeccakCompressionFunction =
     CompressionFunctionFromHasher<PaddingFreeSponge<KeccakF, 25, 17, 4>, 2, 4>;
 type Dft = Radix2DitParallel<Val>;
 
-fn new_mmcs() -> Mmcs {
+fn new_mmcs(cap_height: usize) -> Mmcs {
     let u64_hash = PaddingFreeSponge::<KeccakF, 25, 17, 4>::new(KeccakF {});
     let field_hash = SerializingHasher::new(u64_hash);
     let compress = KeccakCompressionFunction::new(u64_hash);
-    Mmcs::new(field_hash, compress)
+    Mmcs::new(field_hash, compress, cap_height)
 }
 
 fn new_pcs(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Pcs {
-    let val_mmcs = new_mmcs();
+    let val_mmcs = new_mmcs(commitment_parameters.cap_height);
     let mmcs = ExtensionMmcs::new(val_mmcs.clone());
     let inner_parameters = InnerFriParameters {
         log_blowup: commitment_parameters.log_blowup,
         log_final_poly_len: fri_parameters.log_final_poly_len,
+        max_log_arity: fri_parameters.max_log_arity,
         num_queries: fri_parameters.num_queries,
         commit_proof_of_work_bits: fri_parameters.commit_proof_of_work_bits,
         query_proof_of_work_bits: fri_parameters.query_proof_of_work_bits,

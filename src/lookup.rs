@@ -1,9 +1,9 @@
-use p3_air::{Air, BaseAir, BaseAirWithPublicValues, ExtensionBuilder};
+use p3_air::{Air, BaseAir, ExtensionBuilder, WindowAccess};
 use p3_field::{PrimeCharacteristicRing, batch_multiplicative_inverse};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 use crate::{
-    builder::{PreprocessedBuilder, TwoStagedBuilder, symbolic::SymbolicExpression},
+    builder::{TwoStagedBuilder, symbolic::SymbolicExpression},
     types::{ExtVal, Val},
 };
 
@@ -201,25 +201,16 @@ where
     }
 }
 
-impl<A> BaseAirWithPublicValues<Val> for LookupAir<A>
-where
-    A: BaseAirWithPublicValues<Val>,
-{
-    fn num_public_values(&self) -> usize {
-        self.inner_air.num_public_values()
-    }
-}
-
 impl<A, AB> Air<AB> for LookupAir<A>
 where
     A: Air<AB>,
-    AB: PreprocessedBuilder + TwoStagedBuilder<F = Val, EF = ExtVal>,
+    AB: TwoStagedBuilder<F = Val, EF = ExtVal>,
 {
     fn eval(&self, builder: &mut AB) {
-        if let Some(preprocessed) = builder.preprocessed() {
-            let preprocessed_row = preprocessed.row_slice(0);
-            debug_assert!(preprocessed_row.is_some());
-            self.eval_with_preprocessed_row(builder, preprocessed_row.as_deref())
+        if self.preprocessed.is_some() {
+            let preprocessed = builder.preprocessed().clone();
+            let preprocessed_row = preprocessed.current_slice();
+            self.eval_with_preprocessed_row(builder, Some(preprocessed_row))
         } else {
             self.eval_with_preprocessed_row(builder, None)
         }
@@ -230,7 +221,7 @@ impl<A> LookupAir<A> {
     fn eval_with_preprocessed_row<AB>(&self, builder: &mut AB, preprocessed_row: Option<&[AB::Var]>)
     where
         A: Air<AB>,
-        AB: PreprocessedBuilder + TwoStagedBuilder<F = Val, EF = ExtVal>,
+        AB: TwoStagedBuilder<F = Val, EF = ExtVal>,
     {
         // Call `eval` for regular stage 1 constraints.
         self.inner_air.eval(builder);
@@ -258,15 +249,15 @@ impl<A> LookupAir<A> {
         // inverses are indeed the inverses of the messages computed on the main
         // trace.
         let main = builder.main();
-        let row = main.row_slice(0).unwrap();
+        let row = main.current_slice();
         let mut acc_expr = acc_col.into();
         for (lookup, &message_inverse) in lookups.iter().zip(messages_inverses) {
             let multiplicity: AB::ExprEF =
-                lookup.multiplicity.interpret(&row, preprocessed_row).into();
+                lookup.multiplicity.interpret(row, preprocessed_row).into();
             let args = lookup
                 .args
                 .iter()
-                .map(|arg| arg.interpret(&row, preprocessed_row));
+                .map(|arg| arg.interpret(row, preprocessed_row));
             let fingerprint = fingerprint(&fingerprint_challenge, args);
             let message: AB::ExprEF = lookup_challenge.clone() + fingerprint;
             let message_inverse = message_inverse.into();
@@ -290,7 +281,7 @@ impl<A> LookupAir<A> {
 
 #[cfg(test)]
 mod tests {
-    use p3_air::AirBuilder;
+    use p3_air::{AirBuilder, WindowAccess};
     use p3_field::Field;
 
     use crate::{
@@ -361,7 +352,7 @@ mod tests {
         fn eval(&self, builder: &mut AB) {
             // both even and odd have the same constraints, they only differ on the lookups
             let main = builder.main();
-            let local = main.row_slice(0).unwrap();
+            let local = main.current_slice();
             let multiplicity = local[0];
             let input = local[1];
             let input_inverse = local[2];
@@ -385,7 +376,10 @@ mod tests {
 
     #[test]
     fn lookup_test() {
-        let commitment_parameters = CommitmentParameters { log_blowup: 1 };
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        };
         let (system, key) = system(commitment_parameters);
         let f = Val::from_u32;
         #[rustfmt::skip]
@@ -423,6 +417,7 @@ mod tests {
         let claim = &[f(0), f(4), f(1)];
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
+            max_log_arity: 1,
             num_queries: 64,
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,
