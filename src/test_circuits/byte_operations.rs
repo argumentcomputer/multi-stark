@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
     use crate::builder::symbolic::{preprocessed_var, var};
-    use crate::chips::SymbExpr;
     use crate::lookup::{Lookup, LookupAir};
     use crate::system::{System, SystemWitness};
+    use crate::test_circuits::SymbExpr;
     use crate::types::{CommitmentParameters, FriParameters, Val};
     use p3_air::{Air, AirBuilder, BaseAir};
     use p3_field::{Field, PrimeCharacteristicRing};
@@ -122,7 +122,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn byte_test() {
         let commitment_parameters = CommitmentParameters {
             log_blowup: 1,

@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
     use crate::builder::symbolic::{preprocessed_var, var};
-    use crate::chips::{SymbExpr, blake3_new_update_finalize};
     use crate::lookup::{Lookup, LookupAir};
     use crate::system::{System, SystemWitness};
+    use crate::test_circuits::SymbExpr;
     use crate::types::{CommitmentParameters, FriParameters, Val};
     use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
     use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
@@ -11,6 +11,344 @@ mod tests {
     use p3_matrix::dense::RowMajorMatrix;
     use std::array;
     use std::ops::Range;
+
+    struct CompressionInfo {
+        cv: [u32; 8],
+        block_words: [u32; 16],
+        counter_low: u32,
+        counter_high: u32,
+        block_len: u32,
+        flags: u32,
+        output: [u32; 16],
+    }
+
+    // Blake3 reference hasher that additionally produces compression IO for claims construction.
+    // Tested to be compatible with: https://github.com/BLAKE3-team/BLAKE3/blob/master/reference_impl/reference_impl.rs
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_truncation,
+        clippy::cast_lossless
+    )]
+    fn blake3_new_update_finalize(input: &[u8]) -> (Vec<CompressionInfo>, [u8; 32]) {
+        const IV: [u32; 8] = [
+            0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB,
+            0x5BE0CD19,
+        ];
+        const MSG_PERMUTATION: [usize; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+        const CHUNK_LEN: usize = 1024;
+        const BLOCK_LEN: usize = 64;
+
+        const CHUNK_START: u32 = 1 << 0;
+        const CHUNK_END: u32 = 1 << 1;
+        const PARENT: u32 = 1 << 2;
+        const OUT_LEN: usize = 32;
+        const ROOT: u32 = 1 << 3;
+
+        fn compress(
+            chaining_value: &[u32; 8],
+            block_words: &[u32; 16],
+            counter: u64,
+            block_len: u32,
+            flags: u32,
+        ) -> [u32; 16] {
+            let counter_low = counter as u32;
+            let counter_high = (counter >> 32) as u32;
+
+            #[rustfmt::skip]
+            let mut state = [
+                chaining_value[0], chaining_value[1], chaining_value[2], chaining_value[3],
+                chaining_value[4], chaining_value[5], chaining_value[6], chaining_value[7],
+                IV[0],             IV[1],             IV[2],             IV[3],
+                counter_low,       counter_high,      block_len,         flags,
+                block_words[0], block_words[1], block_words[2], block_words[3],
+                block_words[4], block_words[5], block_words[6], block_words[7],
+                block_words[8], block_words[9], block_words[10], block_words[11],
+                block_words[12], block_words[13], block_words[14], block_words[15],
+            ];
+
+            let a = [0, 1, 2, 3, 0, 1, 2, 3];
+            let b = [4, 5, 6, 7, 5, 6, 7, 4];
+            let c = [8, 9, 10, 11, 10, 11, 8, 9];
+            let d = [12, 13, 14, 15, 15, 12, 13, 14];
+            let mx = [16, 18, 20, 22, 24, 26, 28, 30];
+            let my = [17, 19, 21, 23, 25, 27, 29, 31];
+
+            for round_idx in 0..7 {
+                for j in 0..8 {
+                    let a_in = state[a[j]];
+                    let b_in = state[b[j]];
+                    let c_in = state[c[j]];
+                    let d_in = state[d[j]];
+                    let mx_in = state[mx[j]];
+                    let my_in = state[my[j]];
+
+                    let a_0 = a_in.wrapping_add(b_in).wrapping_add(mx_in);
+                    let d_0 = (d_in ^ a_0).rotate_right(16);
+                    let c_0 = c_in.wrapping_add(d_0);
+                    let b_0 = (b_in ^ c_0).rotate_right(12);
+
+                    let a_1 = a_0.wrapping_add(b_0).wrapping_add(my_in);
+                    let d_1 = (d_0 ^ a_1).rotate_right(8);
+                    let c_1 = c_0.wrapping_add(d_1);
+                    let b_1 = (b_0 ^ c_1).rotate_right(7);
+
+                    state[a[j]] = a_1;
+                    state[b[j]] = b_1;
+                    state[c[j]] = c_1;
+                    state[d[j]] = d_1;
+                }
+
+                if round_idx < 6 {
+                    let mut permuted = [0; 16];
+                    for i in 0..16 {
+                        permuted[i] = state[16 + MSG_PERMUTATION[i]];
+                    }
+                    state[16..(16 + 16)].copy_from_slice(&permuted);
+                }
+            }
+
+            for i in 0..8 {
+                state[i] ^= state[i + 8];
+                state[i + 8] ^= chaining_value[i];
+            }
+
+            array::from_fn(|i| state[i])
+        }
+
+        fn words_from_little_endian_bytes(bytes: &[u8], words: &mut [u32]) {
+            debug_assert_eq!(bytes.len(), 4 * words.len());
+            for (four_bytes, word) in bytes.chunks_exact(4).zip(words) {
+                *word = u32::from_le_bytes(four_bytes.try_into().unwrap());
+            }
+        }
+
+        fn first_8_words(compression_output: [u32; 16]) -> [u32; 8] {
+            compression_output[0..8].try_into().unwrap()
+        }
+
+        fn start_flag(blocks_compressed: u8) -> u32 {
+            if blocks_compressed == 0 {
+                CHUNK_START
+            } else {
+                0
+            }
+        }
+
+        let mut c_info = vec![];
+        let mut input = input;
+        let mut output = [0u8; 32];
+
+        let hasher_key_words = IV;
+        let mut hasher_cv_stack = [[0u32; 8]; 54];
+        let mut hasher_cv_stack_len = 0u32;
+        let hasher_flags = 0u32;
+
+        let mut chunk_state_chaining_value = hasher_key_words;
+        let mut chunk_state_chunk_counter = 0u64;
+        let mut chunk_state_block = [0u8; BLOCK_LEN];
+        let mut chunk_state_block_len = 0u8;
+        let mut chunk_state_blocks_compressed = 0u8;
+        let mut chunk_state_flags = hasher_flags;
+
+        while !input.is_empty() {
+            let chunk_state_len =
+                BLOCK_LEN * chunk_state_blocks_compressed as usize + chunk_state_block_len as usize;
+            if CHUNK_LEN == chunk_state_len {
+                let mut block_words = [0; 16];
+                words_from_little_endian_bytes(&chunk_state_block, &mut block_words);
+                let chaining_value = chunk_state_chaining_value;
+                let counter = chunk_state_chunk_counter;
+                let block_len = chunk_state_block_len;
+                let flags =
+                    chunk_state_flags | start_flag(chunk_state_blocks_compressed) | CHUNK_END;
+
+                let cv = compress(
+                    &chaining_value,
+                    &block_words,
+                    counter,
+                    block_len as u32,
+                    flags,
+                );
+                c_info.push(CompressionInfo {
+                    cv: chaining_value,
+                    block_words,
+                    counter_low: counter as u32,
+                    counter_high: (counter >> 32) as u32,
+                    block_len: block_len as u32,
+                    flags,
+                    output: cv,
+                });
+
+                let chaining_value = first_8_words(cv);
+                let chunk_cv = chaining_value;
+                let total_chunks = chunk_state_chunk_counter + 1;
+
+                let mut new_cv = chunk_cv;
+                let mut total_chunks_inner = total_chunks;
+                while total_chunks_inner & 1 == 0 {
+                    hasher_cv_stack_len -= 1;
+                    let pop_stack = hasher_cv_stack[hasher_cv_stack_len as usize];
+
+                    let left_child_cv = pop_stack;
+                    let right_child_cv = new_cv;
+
+                    let mut block_words = [0u32; 16];
+                    block_words[..8].copy_from_slice(&left_child_cv);
+                    block_words[8..].copy_from_slice(&right_child_cv);
+
+                    let input_chaining_value = hasher_key_words;
+                    let counter = 0u64;
+                    let block_len = BLOCK_LEN as u32;
+                    let flags = PARENT | hasher_flags;
+
+                    let cv = compress(
+                        &input_chaining_value,
+                        &block_words,
+                        counter,
+                        block_len,
+                        flags,
+                    );
+                    c_info.push(CompressionInfo {
+                        cv: input_chaining_value,
+                        block_words,
+                        counter_low: counter as u32,
+                        counter_high: (counter >> 32) as u32,
+                        block_len,
+                        flags,
+                        output: cv,
+                    });
+
+                    new_cv = first_8_words(cv);
+                    total_chunks_inner >>= 1;
+                }
+
+                hasher_cv_stack[hasher_cv_stack_len as usize] = new_cv;
+                hasher_cv_stack_len += 1;
+
+                chunk_state_chaining_value = hasher_key_words;
+                chunk_state_chunk_counter = total_chunks;
+                chunk_state_block = [0u8; BLOCK_LEN];
+                chunk_state_block_len = 0u8;
+                chunk_state_blocks_compressed = 0u8;
+                chunk_state_flags = hasher_flags;
+            }
+
+            let chunk_state_len =
+                BLOCK_LEN * chunk_state_blocks_compressed as usize + chunk_state_block_len as usize;
+            let want = CHUNK_LEN - chunk_state_len;
+            let take = std::cmp::min(want, input.len());
+
+            let mut input_inner = &input[..take];
+
+            while !input_inner.is_empty() {
+                if chunk_state_block_len as usize == BLOCK_LEN {
+                    let mut block_words = [0; 16];
+                    words_from_little_endian_bytes(&chunk_state_block, &mut block_words);
+
+                    let cv = compress(
+                        &chunk_state_chaining_value,
+                        &block_words,
+                        chunk_state_chunk_counter,
+                        BLOCK_LEN as u32,
+                        chunk_state_flags | start_flag(chunk_state_blocks_compressed),
+                    );
+                    c_info.push(CompressionInfo {
+                        cv: chunk_state_chaining_value,
+                        block_words,
+                        counter_low: chunk_state_chunk_counter as u32,
+                        counter_high: (chunk_state_chunk_counter >> 32) as u32,
+                        block_len: BLOCK_LEN as u32,
+                        flags: chunk_state_flags | start_flag(chunk_state_blocks_compressed),
+                        output: cv,
+                    });
+
+                    chunk_state_chaining_value = first_8_words(cv);
+                    chunk_state_blocks_compressed += 1;
+                    chunk_state_block = [0u8; BLOCK_LEN];
+                    chunk_state_block_len = 0;
+                }
+
+                let want = BLOCK_LEN - chunk_state_block_len as usize;
+                let take = std::cmp::min(want, input_inner.len());
+                chunk_state_block[chunk_state_block_len as usize..][..take]
+                    .copy_from_slice(&input_inner[..take]);
+                chunk_state_block_len += take as u8;
+                input_inner = &input_inner[take..];
+            }
+
+            input = &input[take..];
+        }
+
+        let mut block_words = [0; 16];
+        words_from_little_endian_bytes(&chunk_state_block, &mut block_words);
+        let mut input_chaining_value = chunk_state_chaining_value;
+        let mut counter = chunk_state_chunk_counter;
+        let mut block_len = chunk_state_block_len as u32;
+        let mut flags = chunk_state_flags | start_flag(chunk_state_blocks_compressed) | CHUNK_END;
+
+        let mut parent_nodes_remaining = hasher_cv_stack_len as usize;
+        while parent_nodes_remaining > 0 {
+            parent_nodes_remaining -= 1;
+
+            let left_child_cv = hasher_cv_stack[parent_nodes_remaining];
+
+            let cv = compress(
+                &input_chaining_value,
+                &block_words,
+                counter,
+                block_len,
+                flags,
+            );
+            c_info.push(CompressionInfo {
+                cv: input_chaining_value,
+                block_words,
+                counter_low: counter as u32,
+                counter_high: (counter >> 32) as u32,
+                block_len,
+                flags,
+                output: cv,
+            });
+
+            let right_child_cv = first_8_words(cv);
+
+            let mut block_words_inner = [0; 16];
+            block_words_inner[..8].copy_from_slice(&left_child_cv);
+            block_words_inner[8..].copy_from_slice(&right_child_cv);
+
+            input_chaining_value = hasher_key_words;
+            block_words = block_words_inner;
+            counter = 0;
+            block_len = BLOCK_LEN as u32;
+            flags = PARENT | hasher_flags;
+        }
+
+        for (output_block_counter, out_block) in output.chunks_mut(2 * OUT_LEN).enumerate() {
+            let output_block_counter = output_block_counter as u64;
+            let cv = compress(
+                &input_chaining_value,
+                &block_words,
+                output_block_counter,
+                block_len,
+                flags | ROOT,
+            );
+            c_info.push(CompressionInfo {
+                cv: input_chaining_value,
+                block_words,
+                counter_low: output_block_counter as u32,
+                counter_high: (output_block_counter >> 32) as u32,
+                block_len,
+                flags: flags | ROOT,
+                output: cv,
+            });
+
+            let words = cv;
+            for (word, out_word) in words.iter().zip(out_block.chunks_mut(4)) {
+                out_word.copy_from_slice(&word.to_le_bytes()[..out_word.len()]);
+            }
+        }
+
+        (c_info, output)
+    }
 
     // Blake3-specific constants
 
@@ -72,7 +410,7 @@ mod tests {
     // 1 + 32 * 4 + 40 * 56 + 12 * 8 * 2 + 16 * 4
     const COMPRESSION_TRACE_WIDTH: usize = 2625;
 
-    enum Blake3CompressionChips {
+    enum Blake3CompressionCircuit {
         U8Xor,
         U32Xor,
         U32Add,
@@ -85,7 +423,7 @@ mod tests {
         Compression,
     }
 
-    impl Blake3CompressionChips {
+    impl Blake3CompressionCircuit {
         fn position(&self) -> usize {
             match self {
                 Self::U8Xor => 0,
@@ -102,7 +440,7 @@ mod tests {
         }
     }
 
-    impl<F: Field> BaseAir<F> for Blake3CompressionChips {
+    impl<F: Field> BaseAir<F> for Blake3CompressionCircuit {
         fn width(&self) -> usize {
             match self {
                 Self::U8Xor | Self::U8PairRangeCheck => U8_XOR_PAIR_RANGE_CHECK_TRACE_WIDTH,
@@ -146,7 +484,7 @@ mod tests {
         }
     }
 
-    impl<AB> Air<AB> for Blake3CompressionChips
+    impl<AB> Air<AB> for Blake3CompressionCircuit
     where
         AB: AirBuilder,
         AB::Var: Copy,
@@ -411,9 +749,7 @@ mod tests {
                             for i in 0..16 {
                                 permuted[i] = state[16 + MSG_PERMUTATION[i]].clone();
                             }
-                            for i in 0..16 {
-                                state[i + 16] = permuted[i].clone();
-                            }
+                            state[16..(16 + 16)].clone_from_slice(&permuted);
                         }
                     }
 
@@ -435,7 +771,7 @@ mod tests {
         }
     }
 
-    impl Blake3CompressionChips {
+    impl Blake3CompressionCircuit {
         fn lookups(&self) -> Vec<Lookup<SymbExpr>> {
             let u8_xor_idx = Self::U8Xor.position();
             let u32_xor_idx = Self::U32Xor.position();
@@ -450,7 +786,7 @@ mod tests {
 
             fn pull_state_in_state_out(
                 multiplicity: SymbExpr,
-                chip_idx: usize,
+                circuit_idx: usize,
                 state_in_range: Range<usize>,
                 state_out_range: Range<usize>,
                 var: fn(usize) -> SymbExpr,
@@ -484,13 +820,13 @@ mod tests {
 
                 Lookup::pull(
                     multiplicity,
-                    [vec![SymbExpr::from_usize(chip_idx)], state_in, state_out].concat(),
+                    [vec![SymbExpr::from_usize(circuit_idx)], state_in, state_out].concat(),
                 )
             }
 
             fn push_round(
                 multiplicity: SymbExpr,
-                chip_idx: usize,
+                circuit_idx: usize,
                 v_ind: Range<usize>,
                 var: fn(usize) -> SymbExpr,
             ) -> Lookup<SymbExpr> {
@@ -501,7 +837,7 @@ mod tests {
                 Lookup::push(
                     multiplicity,
                     vec![
-                        SymbExpr::from_usize(chip_idx),
+                        SymbExpr::from_usize(circuit_idx),
                         var(i[0])
                             + var(i[1]) * SymbExpr::from_u32(256)
                             + var(i[2]) * SymbExpr::from_u32(65536)
@@ -548,26 +884,26 @@ mod tests {
 
             fn push_u32(
                 multiplicity: SymbExpr,
-                chip_idx: usize,
+                circuit_idx: usize,
                 v_ind: Range<usize>,
                 var: fn(usize) -> SymbExpr,
             ) -> Lookup<SymbExpr> {
-                lookup_u32_inner(Lookup::push, multiplicity, chip_idx, v_ind, var)
+                lookup_u32_inner(Lookup::push, multiplicity, circuit_idx, v_ind, var)
             }
 
             fn pull_u32(
                 multiplicity: SymbExpr,
-                chip_idx: usize,
+                circuit_idx: usize,
                 v_ind: Range<usize>,
                 var: fn(usize) -> SymbExpr,
             ) -> Lookup<SymbExpr> {
-                lookup_u32_inner(Lookup::pull, multiplicity, chip_idx, v_ind, var)
+                lookup_u32_inner(Lookup::pull, multiplicity, circuit_idx, v_ind, var)
             }
 
             fn lookup_u32_inner(
                 lookup_fn: fn(SymbExpr, Vec<SymbExpr>) -> Lookup<SymbExpr>,
                 multiplicity: SymbExpr,
-                chip_idx: usize,
+                circuit_idx: usize,
                 v_ind: Range<usize>,
                 var: fn(usize) -> SymbExpr,
             ) -> Lookup<SymbExpr> {
@@ -578,7 +914,7 @@ mod tests {
                 lookup_fn(
                     multiplicity,
                     vec![
-                        SymbExpr::from_usize(chip_idx),
+                        SymbExpr::from_usize(circuit_idx),
                         var(i[0])
                             + var(i[1]) * SymbExpr::from_u32(256)
                             + var(i[2]) * SymbExpr::from_u32(256 * 256)
@@ -618,11 +954,11 @@ mod tests {
                     ]
                 }
 
-                // (4 push lookups to u8_xor_chip)
+                // (4 push lookups to u8_xor circuit)
                 Self::U32Xor => {
                     let mut lookups = vec![pull_u32(var(0), u32_xor_idx, 1..12 + 1, var)];
 
-                    // push (A, B, A^B) tuples to U8Xor chip for verification
+                    // push (A, B, A^B) tuples to U8Xor circuit for verification
                     lookups.extend((0..4).map(|i| {
                         Lookup::push(
                             SymbExpr::ONE,
@@ -642,7 +978,7 @@ mod tests {
                     // Pull
                     let mut lookups = vec![pull_u32(var(13), u32_add_idx, 0..11 + 1, var)];
 
-                    // push (A, B) tuples to U8PairRangeCheck chip for verification
+                    // push (A, B) tuples to U8PairRangeCheck circuit for verification
                     lookups.extend((0..4).map(|i| {
                         Lookup::push(
                             SymbExpr::ONE,
@@ -654,7 +990,7 @@ mod tests {
                         )
                     }));
 
-                    // push (A + B, 0) tuples to U8PairRangeCheck chip for verification. 0 is used just as a stub
+                    // push (A + B, 0) tuples to U8PairRangeCheck circuit for verification. 0 is used just as a stub
                     lookups.extend((0..4).map(|i| {
                         Lookup::push(
                             SymbExpr::ONE,
@@ -822,7 +1158,7 @@ mod tests {
                                     + var(80) * SymbExpr::from_u32(256 * 256 * 256),
                             ],
                         ),
-                        // interacting with lower-level chips that constrain operations used in G function
+                        // interacting with lower-level circuits that constrain operations used in G function
 
                         // a_in + b_in = a_0_tmp
                         Lookup::push(
@@ -1179,7 +1515,7 @@ mod tests {
     impl Blake3CompressionClaims {
         fn witness(
             &self,
-            system: &System<Blake3CompressionChips>,
+            system: &System<Blake3CompressionCircuit>,
         ) -> (Vec<RowMajorMatrix<Val>>, SystemWitness) {
             // Grabbing values from a claims
 
@@ -1204,16 +1540,16 @@ mod tests {
             let mut state_transition_values_from_claims = vec![];
 
             for claim in self.claims.clone() {
-                // we should have at least chip index
+                // we should have at least circuit index
                 assert!(!claim.is_empty(), "wrong claim format");
                 match claim[0].as_canonical_u64() {
                     0u64 => {
-                        // This is our U8Xor claim. We should have chip_idx, A, B, A xor B (where A, B are bytes)
+                        // This is our U8Xor claim. We should have circuit_idx, A, B, A xor B (where A, B are bytes)
                         assert!(claim.len() == 4, "[U8Xor] wrong claim format");
                         byte_xor_values_from_claims.push((claim[1], claim[2], claim[3]));
                     }
                     1u64 => {
-                        /* This is our U32Xor claim. We should have chip_idx, A, B, A xor B (where A, B are u32) */
+                        /* This is our U32Xor claim. We should have circuit_idx, A, B, A xor B (where A, B are u32) */
 
                         assert!(claim.len() == 4, "[U32Xor] wrong claim format");
                         let a_u32 = u32::try_from(claim[1].as_canonical_u64()).unwrap();
@@ -1224,7 +1560,7 @@ mod tests {
                     }
 
                     2u64 => {
-                        /* This is our U32Add claim. We should have chip_idx, A, B, A + B (where A, B are u32) */
+                        /* This is our U32Add claim. We should have circuit_idx, A, B, A + B (where A, B are u32) */
 
                         assert!(claim.len() == 4, "[U32Add] wrong claim format");
                         let a_u32 = u32::try_from(claim[1].as_canonical_u64()).unwrap();
@@ -1234,7 +1570,7 @@ mod tests {
                         u32_add_values_from_claims.push((a_u32, b_u32, add_u32));
                     }
                     3u64 => {
-                        /* This is our U32RotateRight8 claim. We should have chip_idx, A, A_rot */
+                        /* This is our U32RotateRight8 claim. We should have circuit_idx, A, A_rot */
 
                         assert!(claim.len() == 3, "[U32RightRotate8] wrong claim format");
                         let a_u32 = u32::try_from(claim[1].as_canonical_u64()).unwrap();
@@ -1243,7 +1579,7 @@ mod tests {
                         u32_rotate_right_8_values_from_claims.push((a_u32, rot_u32));
                     }
                     4u64 => {
-                        /* This is our U32RotateRight16 claim. We should have chip_idx, A, A_rot */
+                        /* This is our U32RotateRight16 claim. We should have circuit_idx, A, A_rot */
 
                         assert!(claim.len() == 3, "[U32RightRotate16] wrong claim format");
                         let a_u32 = u32::try_from(claim[1].as_canonical_u64()).unwrap();
@@ -1252,7 +1588,7 @@ mod tests {
                         u32_rotate_right_16_values_from_claims.push((a_u32, rot_u32));
                     }
                     5u64 => {
-                        /* This is our U32RotateRight12 claim. We should have chip_idx, A, A_rot */
+                        /* This is our U32RotateRight12 claim. We should have circuit_idx, A, A_rot */
 
                         assert!(claim.len() == 3, "[U32RightRotate12] wrong claim format");
                         let a_u32 = u32::try_from(claim[1].as_canonical_u64()).unwrap();
@@ -1261,7 +1597,7 @@ mod tests {
                         u32_rotate_right_12_values_from_claims.push((a_u32, rot_u32));
                     }
                     6u64 => {
-                        /* This is our U32RotateRight7 claim. We should have chip_idx, A, A_rot */
+                        /* This is our U32RotateRight7 claim. We should have circuit_idx, A, A_rot */
 
                         assert!(claim.len() == 3, "[U32RightRotate7] wrong claim format");
                         let a_u32 = u32::try_from(claim[1].as_canonical_u64()).unwrap();
@@ -1271,14 +1607,14 @@ mod tests {
                     }
 
                     7u64 => {
-                        /* This is our U8PairRangeCheck claim. We should have chip_idx, A, B */
+                        /* This is our U8PairRangeCheck claim. We should have circuit_idx, A, B */
 
                         assert!(claim.len() == 3, "[U8Xor] wrong claim format");
                         byte_range_check_values_from_claims.push((claim[1], claim[2]));
                     }
 
                     8u64 => {
-                        /* This is our GFunction claim. We should have chip_idx, A, B, C, D, MX_IN, MY_IN, A1, D1, C1, B1 */
+                        /* This is our GFunction claim. We should have circuit_idx, A, B, C, D, MX_IN, MY_IN, A1, D1, C1, B1 */
                         assert!(claim.len() == 11, "[GFunction] wrong claim format");
 
                         let a_in = u32::try_from(claim[1].as_canonical_u64()).unwrap();
@@ -1297,7 +1633,7 @@ mod tests {
                     }
 
                     9u64 => {
-                        /* This is our StateTransition claim. We should have chip_idx, state_in[32], state_out[16] */
+                        /* This is our StateTransition claim. We should have circuit_idx, state_in[32], state_out[16] */
                         assert!(claim.len() == 49, "[StateTransition] wrong claim format");
 
                         let state_in: [u32; 32] = array::from_fn(|i| {
@@ -1310,11 +1646,11 @@ mod tests {
                         state_transition_values_from_claims.push((state_in, state_out));
                     }
 
-                    _ => panic!("unsupported chip"),
+                    _ => panic!("unsupported circuit"),
                 }
             }
 
-            // Build traces. If claim for a given chip was not provided (and hence no data available), we just use zero trace
+            // Build traces. If claim for a given circuit was not provided (and hence no data available), we just use zero trace
             // and balance lookups providing zero values
 
             let mut state_transition_trace_values =
@@ -1366,7 +1702,7 @@ mod tests {
                             let b_1 = (b_0 ^ c_1).rotate_right(7);
 
                             g_function_values_from_claims
-                                .push((a_in, b_in, c_in, d_in, mx_in, my_in, a_1, b_1, c_1, d_1)); // send data to G_Function chip
+                                .push((a_in, b_in, c_in, d_in, mx_in, my_in, a_1, b_1, c_1, d_1)); // send data to G_Function circuit
 
                             state[A[j]] = a_1;
                             state[B[j]] = b_1;
@@ -1388,9 +1724,7 @@ mod tests {
                             for i in 0..16 {
                                 permuted[i] = state[16 + MSG_PERMUTATION[i]];
                             }
-                            for i in 0..16 {
-                                state[i + 16] = permuted[i];
-                            }
+                            state[16..(16 + 16)].copy_from_slice(&permuted);
                         }
                     }
 
@@ -1412,7 +1746,7 @@ mod tests {
                         state_transition_trace_values
                             .extend_from_slice(xor_bytes.map(Val::from_u8).as_slice());
 
-                        u32_xor_values_from_claims.push((left, right, xor)); // send data to U32Xor chip
+                        u32_xor_values_from_claims.push((left, right, xor)); // send data to U32Xor circuit
 
                         let left = state[i + 8];
                         let right = state_in_io[i];
@@ -1431,7 +1765,7 @@ mod tests {
                         state_transition_trace_values
                             .extend_from_slice(xor_bytes.map(Val::from_u8).as_slice());
 
-                        u32_xor_values_from_claims.push((left, right, xor)); // send data to U32Xor chip
+                        u32_xor_values_from_claims.push((left, right, xor)); // send data to U32Xor circuit
                     }
 
                     let mut state_out = state.to_vec();
@@ -1456,13 +1790,13 @@ mod tests {
             let height = state_transition_trace.height().next_power_of_two();
             let zero_rows_added = height - state_transition_trace.height();
             for _ in 0..zero_rows_added {
-                // we have 56 communications with G_Function chip
+                // we have 56 communications with G_Function circuit
                 for _ in 0..56 {
                     g_function_values_from_claims
                         .push((0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32));
                 }
 
-                // we have 8 * 2 communications with U32_XOR chip
+                // we have 8 * 2 communications with U32_XOR circuit
                 for _ in 0..8 {
                     u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
                     u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
@@ -1502,43 +1836,43 @@ mod tests {
                     g_function_values_from_claims
                 {
                     let a_0_tmp = a_in.wrapping_add(b_in);
-                    u32_add_values_from_claims.push((a_in, b_in, a_0_tmp)); // send data to U32Add chip
+                    u32_add_values_from_claims.push((a_in, b_in, a_0_tmp)); // send data to U32Add circuit
 
                     let a_0 = a_0_tmp.wrapping_add(mx_in);
-                    u32_add_values_from_claims.push((a_0_tmp, mx_in, a_0)); // send data to U32Add chip
+                    u32_add_values_from_claims.push((a_0_tmp, mx_in, a_0)); // send data to U32Add circuit
 
                     let d_0_tmp = d_in ^ a_0;
-                    u32_xor_values_from_claims.push((d_in, a_0, d_0_tmp)); // send data to U32Xor chip
+                    u32_xor_values_from_claims.push((d_in, a_0, d_0_tmp)); // send data to U32Xor circuit
 
                     let d_0 = d_0_tmp.rotate_right(16);
-                    u32_rotate_right_16_values_from_claims.push((d_0_tmp, d_0)); // send data to U32RightRotate16 chip
+                    u32_rotate_right_16_values_from_claims.push((d_0_tmp, d_0)); // send data to U32RightRotate16 circuit
 
                     let c_0 = c_in.wrapping_add(d_0);
-                    u32_add_values_from_claims.push((c_in, d_0, c_0)); // send data to U32Add chip
+                    u32_add_values_from_claims.push((c_in, d_0, c_0)); // send data to U32Add circuit
 
                     let b_0_tmp = b_in ^ c_0;
-                    u32_xor_values_from_claims.push((b_in, c_0, b_0_tmp)); // send data to U32Xor chip
+                    u32_xor_values_from_claims.push((b_in, c_0, b_0_tmp)); // send data to U32Xor circuit
 
                     let b_0 = b_0_tmp.rotate_right(12);
-                    u32_rotate_right_12_values_from_claims.push((b_0_tmp, b_0)); // send data to U32RightRotate12 chip
+                    u32_rotate_right_12_values_from_claims.push((b_0_tmp, b_0)); // send data to U32RightRotate12 circuit
 
                     let a_1_tmp = a_0.wrapping_add(b_0);
-                    u32_add_values_from_claims.push((a_0, b_0, a_1_tmp)); // send data to U32Add chip
+                    u32_add_values_from_claims.push((a_0, b_0, a_1_tmp)); // send data to U32Add circuit
 
                     let a_1 = a_1_tmp.wrapping_add(my_in);
-                    u32_add_values_from_claims.push((a_1_tmp, my_in, a_1)); // send data to U32Add chip
+                    u32_add_values_from_claims.push((a_1_tmp, my_in, a_1)); // send data to U32Add circuit
 
                     let d_1_tmp = d_0 ^ a_1;
-                    u32_xor_values_from_claims.push((d_0, a_1, d_1_tmp)); // send data to U32Xor chip
+                    u32_xor_values_from_claims.push((d_0, a_1, d_1_tmp)); // send data to U32Xor circuit
 
                     let d_1 = d_1_tmp.rotate_right(8);
                     u32_rotate_right_8_values_from_claims.push((d_1_tmp, d_1));
 
                     let c_1 = c_0.wrapping_add(d_1);
-                    u32_add_values_from_claims.push((c_0, d_1, c_1)); // send data to U32Add chip
+                    u32_add_values_from_claims.push((c_0, d_1, c_1)); // send data to U32Add circuit
 
                     let b_1_tmp = b_0 ^ c_1;
-                    u32_xor_values_from_claims.push((b_0, c_1, b_1_tmp)); // send data to U32Xor chip
+                    u32_xor_values_from_claims.push((b_0, c_1, b_1_tmp)); // send data to U32Xor circuit
 
                     let b_1 = b_1_tmp.rotate_right(7);
                     u32_rotate_right_7_values_from_claims.push((b_1_tmp, b_1));
@@ -1587,7 +1921,7 @@ mod tests {
             if u32_xor_values_from_claims.is_empty() {
                 u32_xor_trace_values = Val::zero_vec(U32_XOR_TRACE_WIDTH);
 
-                // we also need to balance the U8Xor chip lookups using zeroes
+                // we also need to balance the U8Xor circuit lookups using zeroes
 
                 for _ in 0..4 {
                     byte_xor_values_from_claims.push((Val::ZERO, Val::ZERO, Val::ZERO));
@@ -1607,7 +1941,7 @@ mod tests {
                         .extend_from_slice(right_bytes.map(Val::from_u8).as_slice());
                     u32_xor_trace_values.extend_from_slice(xor_bytes.map(Val::from_u8).as_slice());
 
-                    /* we send bytes to U8Xor chip, relying on lookup constraining */
+                    /* we send bytes to U8Xor circuit, relying on lookup constraining */
 
                     for i in 0..4 {
                         byte_xor_values_from_claims.push((
@@ -1622,7 +1956,7 @@ mod tests {
             let height = u32_xor_trace.height().next_power_of_two();
             let zero_rows = height - u32_xor_trace.height();
             for _ in 0..zero_rows {
-                // we also need to balance the U8Xor chip lookups using zeroes for every padded row
+                // we also need to balance the U8Xor circuit lookups using zeroes for every padded row
                 for _ in 0..4 {
                     byte_xor_values_from_claims.push((Val::ZERO, Val::ZERO, Val::ZERO));
                 }
@@ -1657,7 +1991,7 @@ mod tests {
                     u32_add_trace_values.push(Val::from_bool(carry));
                     u32_add_trace_values.push(Val::ONE); // multiplicity
 
-                    /* we send decomposed bytes to U8Xor chip, relying on lookup constraining */
+                    /* we send decomposed bytes to U8Xor circuit, relying on lookup constraining */
 
                     for i in 0..4 {
                         byte_range_check_values_from_claims
@@ -1684,7 +2018,7 @@ mod tests {
             if u32_rotate_right_8_values_from_claims.is_empty() {
                 u32_rotate_right_8_trace_values = Val::zero_vec(U32_RIGHT_ROTATE_8_TRACE_WIDTH);
 
-                // we also need to balance U8PairRangeCheck chip lookups using zeroes
+                // we also need to balance U8PairRangeCheck circuit lookups using zeroes
 
                 byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
                 byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
@@ -1703,7 +2037,7 @@ mod tests {
                     u32_rotate_right_8_trace_values
                         .extend_from_slice(rot_bytes.map(Val::from_u8).as_slice());
 
-                    /* we send decomposed bytes to U8PairRangeCheck chip, relying on lookup constraining */
+                    /* we send decomposed bytes to U8PairRangeCheck circuit, relying on lookup constraining */
 
                     byte_range_check_values_from_claims
                         .push((Val::from_u8(val_bytes[0]), Val::from_u8(val_bytes[2])));
@@ -1748,7 +2082,7 @@ mod tests {
                     u32_rotate_right_16_trace_values
                         .extend_from_slice(rot_bytes.map(Val::from_u8).as_slice());
 
-                    /* we send decomposed bytes to U8PairRangeCheck chip, relying on lookup constraining */
+                    /* we send decomposed bytes to U8PairRangeCheck circuit, relying on lookup constraining */
 
                     byte_range_check_values_from_claims
                         .push((Val::from_u8(a_bytes[0]), Val::from_u8(a_bytes[2])));
@@ -1830,7 +2164,7 @@ mod tests {
                 rot_7_12_trace_values(7, &u32_rotate_right_7_values_from_claims);
 
             // finally build U8Xor / U8PairRangeCheck trace (columns: multiplicity_u8_xor, multiplicity_pair_range_check)
-            // since this it "lowest-level" trace, its multiplicities could be updated by other chips previously
+            // since this it "lowest-level" trace, its multiplicities could be updated by other circuits previously
             let mut u8_xor_range_check_trace_values = Vec::<Val>::with_capacity(
                 BYTE_VALUES_NUM * BYTE_VALUES_NUM * U8_XOR_PAIR_RANGE_CHECK_TRACE_WIDTH,
             );
@@ -1920,41 +2254,41 @@ mod tests {
             cap_height: 0,
         };
         let u8_circuit = LookupAir::new(
-            Blake3CompressionChips::U8Xor,
-            Blake3CompressionChips::U8Xor.lookups(),
+            Blake3CompressionCircuit::U8Xor,
+            Blake3CompressionCircuit::U8Xor.lookups(),
         );
         let u32_circuit = LookupAir::new(
-            Blake3CompressionChips::U32Xor,
-            Blake3CompressionChips::U32Xor.lookups(),
+            Blake3CompressionCircuit::U32Xor,
+            Blake3CompressionCircuit::U32Xor.lookups(),
         );
         let u32_add_circuit = LookupAir::new(
-            Blake3CompressionChips::U32Add,
-            Blake3CompressionChips::U32Add.lookups(),
+            Blake3CompressionCircuit::U32Add,
+            Blake3CompressionCircuit::U32Add.lookups(),
         );
         let u32_rotate_right_8_circuit = LookupAir::new(
-            Blake3CompressionChips::U32RightRotate8,
-            Blake3CompressionChips::U32RightRotate8.lookups(),
+            Blake3CompressionCircuit::U32RightRotate8,
+            Blake3CompressionCircuit::U32RightRotate8.lookups(),
         );
         let u32_rotate_right_16_circuit = LookupAir::new(
-            Blake3CompressionChips::U32RightRotate16,
-            Blake3CompressionChips::U32RightRotate16.lookups(),
+            Blake3CompressionCircuit::U32RightRotate16,
+            Blake3CompressionCircuit::U32RightRotate16.lookups(),
         );
         let u32_rotate_right_12_circuit = LookupAir::new(
-            Blake3CompressionChips::U32RightRotate12,
-            Blake3CompressionChips::U32RightRotate12.lookups(),
+            Blake3CompressionCircuit::U32RightRotate12,
+            Blake3CompressionCircuit::U32RightRotate12.lookups(),
         );
         let u32_rotate_right_7_circuit = LookupAir::new(
-            Blake3CompressionChips::U32RightRotate7,
-            Blake3CompressionChips::U32RightRotate7.lookups(),
+            Blake3CompressionCircuit::U32RightRotate7,
+            Blake3CompressionCircuit::U32RightRotate7.lookups(),
         );
         let g_function_circuit = LookupAir::new(
-            Blake3CompressionChips::GFunction,
-            Blake3CompressionChips::GFunction.lookups(),
+            Blake3CompressionCircuit::GFunction,
+            Blake3CompressionCircuit::GFunction.lookups(),
         );
 
         let state_transition_circuit = LookupAir::new(
-            Blake3CompressionChips::Compression,
-            Blake3CompressionChips::Compression.lookups(),
+            Blake3CompressionCircuit::Compression,
+            Blake3CompressionCircuit::Compression.lookups(),
         );
 
         let (system, prover_key) = System::new(
@@ -1976,7 +2310,7 @@ mod tests {
             claims: vec![
                 [
                     vec![Val::from_usize(
-                        Blake3CompressionChips::Compression.position(),
+                        Blake3CompressionCircuit::Compression.position(),
                     )],
                     state_in.into_iter().map(Val::from_u32).collect(),
                     state_out.into_iter().map(Val::from_u32).collect(),
@@ -2108,41 +2442,41 @@ mod tests {
                 cap_height: 0,
             };
             let u8_circuit = LookupAir::new(
-                Blake3CompressionChips::U8Xor,
-                Blake3CompressionChips::U8Xor.lookups(),
+                Blake3CompressionCircuit::U8Xor,
+                Blake3CompressionCircuit::U8Xor.lookups(),
             );
             let u32_circuit = LookupAir::new(
-                Blake3CompressionChips::U32Xor,
-                Blake3CompressionChips::U32Xor.lookups(),
+                Blake3CompressionCircuit::U32Xor,
+                Blake3CompressionCircuit::U32Xor.lookups(),
             );
             let u32_add_circuit = LookupAir::new(
-                Blake3CompressionChips::U32Add,
-                Blake3CompressionChips::U32Add.lookups(),
+                Blake3CompressionCircuit::U32Add,
+                Blake3CompressionCircuit::U32Add.lookups(),
             );
             let u32_rotate_right_8_circuit = LookupAir::new(
-                Blake3CompressionChips::U32RightRotate8,
-                Blake3CompressionChips::U32RightRotate8.lookups(),
+                Blake3CompressionCircuit::U32RightRotate8,
+                Blake3CompressionCircuit::U32RightRotate8.lookups(),
             );
             let u32_rotate_right_16_circuit = LookupAir::new(
-                Blake3CompressionChips::U32RightRotate16,
-                Blake3CompressionChips::U32RightRotate16.lookups(),
+                Blake3CompressionCircuit::U32RightRotate16,
+                Blake3CompressionCircuit::U32RightRotate16.lookups(),
             );
             let u32_rotate_right_12_circuit = LookupAir::new(
-                Blake3CompressionChips::U32RightRotate12,
-                Blake3CompressionChips::U32RightRotate12.lookups(),
+                Blake3CompressionCircuit::U32RightRotate12,
+                Blake3CompressionCircuit::U32RightRotate12.lookups(),
             );
             let u32_rotate_right_7_circuit = LookupAir::new(
-                Blake3CompressionChips::U32RightRotate7,
-                Blake3CompressionChips::U32RightRotate7.lookups(),
+                Blake3CompressionCircuit::U32RightRotate7,
+                Blake3CompressionCircuit::U32RightRotate7.lookups(),
             );
             let g_function_circuit = LookupAir::new(
-                Blake3CompressionChips::GFunction,
-                Blake3CompressionChips::GFunction.lookups(),
+                Blake3CompressionCircuit::GFunction,
+                Blake3CompressionCircuit::GFunction.lookups(),
             );
 
             let state_transition_circuit = LookupAir::new(
-                Blake3CompressionChips::Compression,
-                Blake3CompressionChips::Compression.lookups(),
+                Blake3CompressionCircuit::Compression,
+                Blake3CompressionCircuit::Compression.lookups(),
             );
 
             let (system, prover_key) = System::new(
@@ -2184,92 +2518,59 @@ mod tests {
         let f = Val::from_u8;
         let f32 = Val::from_u32;
 
+        // 1 u8 xor claim — leaf primitive
         let claims = Blake3CompressionClaims {
-            claims: vec![
-                // 3 u8 xor claims
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U8Xor.position()),
-                    f(a_u8),
-                    f(b_u8),
-                    f(xor_u8),
-                ],
-            ],
-        };
-
-        run_test(&claims);
-
-        let claims = Blake3CompressionClaims {
-            claims: vec![
-                // 5 u8 xor claims
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U8Xor.position()),
-                    f(a_u8),
-                    f(b_u8),
-                    f(xor_u8),
-                ]; 5
-            ],
+            claims: vec![vec![
+                Val::from_usize(Blake3CompressionCircuit::U8Xor.position()),
+                f(a_u8),
+                f(b_u8),
+                f(xor_u8),
+            ]],
         };
         run_test(&claims);
 
+        // 1 u32 xor claim — u32→u8 lookup chain
         let claims = Blake3CompressionClaims {
-            claims: vec![
-                // 2 u32 xor claims
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U8Xor.position()),
-                    f(a_u8),
-                    f(b_u8),
-                    f(xor_u8),
-                ]; 2
-            ],
+            claims: vec![vec![
+                Val::from_usize(Blake3CompressionCircuit::U32Xor.position()),
+                f32(a_u32),
+                f32(b_u32),
+                f32(xor_u32),
+            ]],
         };
         run_test(&claims);
 
+        // 1 u32 add claim — add→range check lookup chain
         let claims = Blake3CompressionClaims {
-            claims: vec![
-                // 3 u32 xor claims
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32Xor.position()),
-                    f32(a_u32),
-                    f32(b_u32),
-                    f32(xor_u32),
-                ]; 3
-            ],
+            claims: vec![vec![
+                Val::from_usize(Blake3CompressionCircuit::U32Add.position()),
+                f32(a_u32),
+                f32(b_u32),
+                f32(add_u32),
+            ]],
         };
         run_test(&claims);
 
+        // 1 claim per rotation variant
         let claims = Blake3CompressionClaims {
             claims: vec![
-                // 6 u32 add claims
                 vec![
-                    Val::from_usize(Blake3CompressionChips::U32Add.position()),
-                    f32(a_u32),
-                    f32(b_u32),
-                    f32(add_u32),
-                ]; 6
-            ],
-        };
-        run_test(&claims);
-
-        let claims = Blake3CompressionClaims {
-            claims: vec![
-                // Right rotate claims (1 per each operation)
-                vec![
-                    Val::from_usize(Blake3CompressionChips::U32RightRotate8.position()),
+                    Val::from_usize(Blake3CompressionCircuit::U32RightRotate8.position()),
                     f32(a_u32),
                     f32(a_rot_8),
                 ],
                 vec![
-                    Val::from_usize(Blake3CompressionChips::U32RightRotate16.position()),
+                    Val::from_usize(Blake3CompressionCircuit::U32RightRotate16.position()),
                     f32(a_u32),
                     f32(a_rot_16),
                 ],
                 vec![
-                    Val::from_usize(Blake3CompressionChips::U32RightRotate12.position()),
+                    Val::from_usize(Blake3CompressionCircuit::U32RightRotate12.position()),
                     f32(a_u32),
                     f32(a_rot_12),
                 ],
                 vec![
-                    Val::from_usize(Blake3CompressionChips::U32RightRotate7.position()),
+                    Val::from_usize(Blake3CompressionCircuit::U32RightRotate7.position()),
                     f32(a_u32),
                     f32(a_rot_7),
                 ],
@@ -2277,65 +2578,33 @@ mod tests {
         };
         run_test(&claims);
 
+        // 1 G-function claim — G→{add,xor,rotate} composition
         let claims = Blake3CompressionClaims {
-            // 3 G function claims
-            claims: vec![
-                vec![
-                    Val::from_usize(Blake3CompressionChips::GFunction.position()),
-                    f32(a_in),
-                    f32(b_in),
-                    f32(c_in),
-                    f32(d_in),
-                    f32(mx_in),
-                    f32(my_in),
-                    f32(a_1),
-                    f32(d_1),
-                    f32(c_1),
-                    f32(b_1),
-                ];
-                3
-            ],
+            claims: vec![vec![
+                Val::from_usize(Blake3CompressionCircuit::GFunction.position()),
+                f32(a_in),
+                f32(b_in),
+                f32(c_in),
+                f32(d_in),
+                f32(mx_in),
+                f32(my_in),
+                f32(a_1),
+                f32(d_1),
+                f32(c_1),
+                f32(b_1),
+            ]],
         };
         run_test(&claims);
 
+        // 1 compression claim — full end-to-end chain
         let claims = Blake3CompressionClaims {
-            // 11 Compression claims
             claims: vec![
                 [
                     vec![Val::from_usize(
-                        Blake3CompressionChips::Compression.position(),
+                        Blake3CompressionCircuit::Compression.position(),
                     )],
-                    state_in.clone().into_iter().map(Val::from_u32).collect(),
-                    state_out.clone().into_iter().map(Val::from_u32).collect(),
-                ]
-                .concat();
-                5
-            ],
-        };
-        run_test(&claims);
-
-        let claims = Blake3CompressionClaims {
-            // Compression + G_Function claims
-            claims: vec![
-                vec![
-                    Val::from_usize(Blake3CompressionChips::GFunction.position()),
-                    f32(a_in),
-                    f32(b_in),
-                    f32(c_in),
-                    f32(d_in),
-                    f32(mx_in),
-                    f32(my_in),
-                    f32(a_1),
-                    f32(d_1),
-                    f32(c_1),
-                    f32(b_1),
-                ],
-                [
-                    vec![Val::from_usize(
-                        Blake3CompressionChips::Compression.position(),
-                    )],
-                    state_in.clone().into_iter().map(Val::from_u32).collect(),
-                    state_out.clone().into_iter().map(Val::from_u32).collect(),
+                    state_in.into_iter().map(Val::from_u32).collect(),
+                    state_out.into_iter().map(Val::from_u32).collect(),
                 ]
                 .concat(),
             ],
@@ -2443,9 +2712,7 @@ mod tests {
                 for i in 0..16 {
                     permuted[i] = state[16 + MSG_PERMUTATION[i]];
                 }
-                for i in 0..16 {
-                    state[i + 16] = permuted[i];
-                }
+                state[16..(16 + 16)].copy_from_slice(&permuted);
             }
         }
 

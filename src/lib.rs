@@ -1,8 +1,9 @@
 pub mod builder;
-mod chips;
 pub mod lookup;
 pub mod prover;
 pub mod system;
+#[cfg(test)]
+mod test_circuits;
 pub mod types;
 pub mod verifier;
 

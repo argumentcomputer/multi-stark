@@ -25,6 +25,13 @@ p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09
 p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
 p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
 
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "multi_stark"
+harness = false
+
 [features]
 parallel = ["p3-maybe-rayon/parallel"]
 
