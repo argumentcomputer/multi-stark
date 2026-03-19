@@ -17,12 +17,12 @@ lookup arguments for shared state.
 
 ## Cryptographic setup
 
-| Component | Choice |
-|-----------|--------|
-| Field | Goldilocks (p = 2^64 - 2^32 + 1) |
+| Component | Choice                                        |
+|-----------|-----------------------------------------------|
+| Field     | Goldilocks (p = 2^64 - 2^32 + 1)              |
 | Extension | Degree-2 binomial extension (~2^128 elements) |
-| Hash | Keccak-256 |
-| PCS | FRI over Merkle trees |
+| Hash      | Keccak-256                                    |
+| PCS       | FRI over Merkle trees                         |
 
 Security level is configurable via `FriParameters`. With `log_blowup = 1` and
 `num_queries = 100`, FRI provides ~2^(-100) soundness error. See the
