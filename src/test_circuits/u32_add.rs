@@ -4,7 +4,7 @@ mod tests {
     use p3_field::{Field, PrimeCharacteristicRing};
     use p3_matrix::dense::RowMajorMatrix;
 
-    use crate::chips::SymbExpr;
+    use crate::test_circuits::SymbExpr;
     use crate::{
         builder::symbolic::{preprocessed_var, var},
         lookup::{Lookup, LookupAir},
@@ -13,11 +13,11 @@ mod tests {
     };
 
     enum U32CS {
-        ByteChip,
-        U32AddChip,
+        ByteTable,
+        U32Add,
     }
 
-    // ByteChip will have a preprocessed column for the bytes and
+    // ByteTable has a preprocessed column for the bytes and
     // a column for the multiplicities
     // Example
     // | multiplicity | byte |
@@ -32,16 +32,18 @@ mod tests {
     impl<F: Field> BaseAir<F> for U32CS {
         fn width(&self) -> usize {
             match self {
-                Self::ByteChip => 1,
+                Self::ByteTable => 1,
                 // 4 bytes for x, 4 bytes for y, 4 bytes for z, 1 byte for the carry, 1 column for the multiplicity
-                Self::U32AddChip => 14,
+                Self::U32Add => 14,
             }
         }
 
         fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
             match self {
-                Self::ByteChip => Some(RowMajorMatrix::new((0..256).map(F::from_u32).collect(), 1)),
-                Self::U32AddChip => None,
+                Self::ByteTable => {
+                    Some(RowMajorMatrix::new((0..256).map(F::from_u32).collect(), 1))
+                }
+                Self::U32Add => None,
             }
         }
     }
@@ -54,8 +56,8 @@ mod tests {
     {
         fn eval(&self, builder: &mut AB) {
             match self {
-                Self::ByteChip => {}
-                Self::U32AddChip => {
+                Self::ByteTable => {}
+                Self::U32Add => {
                     let main = builder.main();
                     let local = main.current_slice();
                     let x = &local[0..4];
@@ -89,8 +91,10 @@ mod tests {
             let byte_index = SymbExpr::from_u8(0);
             let u32_index = SymbExpr::from_u8(1);
             match self {
-                Self::ByteChip => vec![Lookup::pull(var(0), vec![byte_index, preprocessed_var(0)])],
-                Self::U32AddChip => {
+                Self::ByteTable => {
+                    vec![Lookup::pull(var(0), vec![byte_index, preprocessed_var(0)])]
+                }
+                Self::U32Add => {
                     // Pull
                     let mut lookups = vec![Lookup::pull(
                         var(13),
@@ -122,9 +126,9 @@ mod tests {
     }
 
     fn byte_system(commitment_parameters: CommitmentParameters) -> (System<U32CS>, ProverKey) {
-        let byte_chip = LookupAir::new(U32CS::ByteChip, U32CS::ByteChip.lookups());
-        let u32_add_chip = LookupAir::new(U32CS::U32AddChip, U32CS::U32AddChip.lookups());
-        System::new(commitment_parameters, [byte_chip, u32_add_chip])
+        let byte_table = LookupAir::new(U32CS::ByteTable, U32CS::ByteTable.lookups());
+        let u32_add = LookupAir::new(U32CS::U32Add, U32CS::U32Add.lookups());
+        System::new(commitment_parameters, [byte_table, u32_add])
     }
 
     struct AddCalls {

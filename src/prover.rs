@@ -1,3 +1,35 @@
+//! Multi-circuit STARK prover.
+//!
+//! The proving protocol proceeds in several stages:
+//!
+//! 1. **Stage 1 — Main traces**: Each circuit's execution trace is committed via the
+//!    PCS (FRI-based polynomial commitment over Goldilocks with degree-2 extension and
+//!    Keccak-256 hashing). The preprocessed commitment (if any), stage-1 commitment,
+//!    trace heights, and claims are observed into the Fiat-Shamir challenger. Claims
+//!    must be observed before lookup challenges are sampled; otherwise the prover could
+//!    choose claims adaptively to balance the lookup accumulator.
+//!
+//! 2. **Lookup challenges**: The challenger samples two independent challenges:
+//!    `lookup_argument_challenge` (β) and `fingerprint_challenge` (γ). An initial
+//!    accumulator is computed from the claims:
+//!    `acc = Σ (β + fingerprint(γ, claim_i))⁻¹`.
+//!
+//! 3. **Stage 2 — Lookup traces**: For each circuit, the lookup traces are computed
+//!    (running accumulator and message inverses per row) and committed via PCS. Each
+//!    circuit produces an intermediate accumulator value recording where its running
+//!    sum ended up; the verifier will check that the last one is zero.
+//!
+//! 4. **Quotient polynomial**: A constraint challenge (α) is sampled and used to fold
+//!    all constraints via powers of α. The folded constraint polynomial is divided by
+//!    the vanishing polynomial, split into degree-bounded chunks, and committed.
+//!
+//! 5. **Opening**: An out-of-domain point (ζ) is sampled. All polynomials are opened
+//!    at ζ and ζ·g (where g is the trace domain generator) via the PCS, producing
+//!    the FRI opening proof.
+//!
+//! The resulting [`Proof`] can be serialized with [`Proof::to_bytes`] and deserialized
+//! with [`Proof::from_bytes`] for transport or storage.
+
 use std::ops::Deref;
 
 use crate::{
@@ -71,6 +103,9 @@ impl Proof {
 }
 
 impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
+    /// Generates a STARK proof for the system with a single claim.
+    ///
+    /// This is a convenience wrapper around [`Self::prove_multiple_claims`].
     pub fn prove(
         &self,
         fri_parameters: FriParameters,
@@ -81,6 +116,10 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         self.prove_multiple_claims(fri_parameters, key, &[claim], witness)
     }
 
+    /// Generates a STARK proof for the system with multiple claims.
+    ///
+    /// Each claim is a slice of field elements that is observed by the challenger
+    /// before lookup challenges are sampled, binding the proof to the claimed values.
     pub fn prove_multiple_claims(
         &self,
         fri_parameters: FriParameters,

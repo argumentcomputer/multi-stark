@@ -97,6 +97,12 @@ pub struct CommitmentParameters {
 }
 
 /// Parameters controlling the FRI protocol.
+///
+/// These parameters determine the concrete security level. The FRI soundness
+/// error is approximately `ρ^num_queries` where `ρ = 2^(-log_blowup)` (set in
+/// [`CommitmentParameters`]). For example, `log_blowup = 1` with
+/// `num_queries = 100` gives ~2^(-100) soundness error from FRI queries alone.
+/// The PoW bits add grinding cost on top of this bound.
 #[derive(Clone, Copy)]
 pub struct FriParameters {
     /// Log2 of the degree of the final polynomial (0 means a constant).
