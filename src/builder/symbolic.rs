@@ -1,6 +1,6 @@
 /// Symbolic constraint builder and expressions, adapted from Plonky3.
 use p3_air::{Air, AirBuilder, ExtensionBuilder};
-use p3_field::{Algebra, Field, InjectiveMonomial, PrimeCharacteristicRing};
+use p3_field::{Algebra, Dup, Field, InjectiveMonomial, PrimeCharacteristicRing};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_util::log2_ceil_usize;
 use std::fmt::Debug;
@@ -173,6 +173,13 @@ impl<F: Field> SymbolicExpression<F> {
                 degree_multiple, ..
             } => *degree_multiple,
         }
+    }
+}
+
+impl<F: Field> Dup for SymbolicExpression<F> {
+    #[inline(always)]
+    fn dup(&self) -> Self {
+        self.clone()
     }
 }
 

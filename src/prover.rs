@@ -29,6 +29,126 @@
 //!
 //! The resulting [`Proof`] can be serialized with [`Proof::to_bytes`] and deserialized
 //! with [`Proof::from_bytes`] for transport or storage.
+//!
+//! # Prover cost analysis
+//!
+//! The prover's computational work divides into polynomial commitments (FFT +
+//! Merkle hashing), lookup trace construction, constraint evaluation, and the
+//! FRI opening protocol. This section gives a concrete cost breakdown.
+//!
+//! ## Notation
+//!
+//! We use the following notation throughout:
+//! - C — number of circuits in the system
+//! - n_i — trace height (rows, power of two) of circuit i
+//! - w_i — stage 1 trace width (columns) of circuit i
+//! - p_i — preprocessed trace width of circuit i (0 if none)
+//! - L_i — number of lookups in circuit i
+//! - k_i — number of constraints in circuit i (after lookup expansion)
+//! - d_i — maximum constraint degree multiple of circuit i
+//! - q_i = next_pow2(max(d_i, 2) − 1) — quotient polynomial degree
+//! - D = 2 — extension field dimension (`BinomialExtensionField<Goldilocks, 2>`)
+//! - B = 2^log_blowup — FRI blowup factor
+//! - Q = num_queries — FRI query repetitions
+//! - a = max_log_arity — FRI folding arity (log₂)
+//!
+//! Derived quantities:
+//! - w2_i = 1 + L_i — stage 2 width in extension field elements
+//! - W_i = w_i + w2_i · D + q_i · D — total committed width per circuit (base field)
+//! - H = max_i(n_i) · B — largest LDE height
+//! - R = ⌈(log₂ H − log_final_poly_len) / a⌉ — FRI folding rounds
+//!
+//! ## Stage 1 commit
+//!
+//! Each circuit's main trace (n_i × w_i) undergoes a coset LDE (FFT-based)
+//! expanding from n_i to n_i · B evaluations, followed by Merkle tree
+//! construction over the LDE rows. All circuits are committed together.
+//!
+//! ```text
+//! FFT work:   Σ_i  w_i · n_i · B · log₂(n_i · B)   field multiplications
+//! Hashing:    Σ_i  n_i · B                            Merkle leaf hashes
+//! ```
+//!
+//! ## Lookup trace construction
+//!
+//! For each circuit with L_i > 0 lookups, the prover computes per-row
+//! fingerprints (Horner evaluations in the extension field), batch-inverts
+//! all messages via Montgomery's trick (≈ 3 extension multiplications per
+//! element), and builds the running accumulator.
+//!
+//! ```text
+//! Fingerprints:  Σ_i  n_i · L_i · |args|   extension field multiplications
+//! Inversions:    Σ_i  3 · n_i · L_i         extension field multiplications
+//! Accumulator:   Σ_i  n_i · L_i             extension field multiply-adds
+//! ```
+//!
+//! ## Stage 2 commit
+//!
+//! Stage 2 traces (n_i × w2_i extension elements, flattened to
+//! n_i × w2_i · D base elements) are committed identically to stage 1.
+//!
+//! ```text
+//! FFT work:   Σ_i  w2_i · D · n_i · B · log₂(n_i · B)   field multiplications
+//! Hashing:    Σ_i  n_i · B                                 Merkle leaf hashes
+//! ```
+//!
+//! ## Quotient computation and commit
+//!
+//! For each circuit, the prover evaluates all k_i constraints at every point
+//! of the quotient domain (size n_i · q_i) and divides by the vanishing
+//! polynomial. If q_i ≤ B, the trace evaluations on the quotient domain are
+//! obtained by subsetting the LDE (essentially free); otherwise an additional
+//! iFFT + FFT is required.
+//!
+//! The quotient polynomial is split into q_i sub-polynomials (each of degree
+//! n_i) and committed.
+//!
+//! ```text
+//! Constraint eval:  Σ_i  n_i · q_i · eval_cost(k_i)         field operations
+//! Quotient FFT:     Σ_i  q_i · D · n_i · B · log₂(n_i · B)  field multiplications
+//! Hashing:          Σ_i  q_i · n_i · B                        Merkle leaf hashes
+//! ```
+//!
+//! Here eval_cost(k_i) denotes the per-row cost of evaluating all k_i folded
+//! constraints, which depends on the specific AIR.
+//!
+//! ## FRI opening
+//!
+//! All polynomials (stage 1, stage 2, quotient, and preprocessed if present)
+//! are opened at ζ and ζ·g via barycentric interpolation, then verified
+//! through FRI. The preprocessed traces' LDE was computed at setup time
+//! ([`System::new`]); only their opening contributes to per-proof cost.
+//!
+//! ```text
+//! Interpolation:  Σ_i  n_i · B · W_i     field multiply-adds (barycentric)
+//! FRI folding:    ≈ H · 2^a / (2^a − 1)  extension field operations
+//! FRI queries:    Q · R · log₂ H          hash operations (Merkle paths)
+//! FRI grinding:   2^pow_commit · R + 2^pow_query   hash invocations
+//! ```
+//!
+//! ## Overall cost
+//!
+//! The total per-proof cost is approximately:
+//!
+//! ```text
+//! C_prove  ≈  Σ_i  n_i · B · log₂(n_i · B) · W_i     (FFT — all commit rounds)
+//!           + Σ_i  n_i · q_i · eval_cost(k_i)          (constraint evaluation)
+//!           + Σ_i  n_i · B · W_i                        (barycentric interpolation)
+//!           + Q · R · log₂ H                            (FRI query phase)
+//!           + 2^pow_commit · R + 2^pow_query            (FRI grinding)
+//! ```
+//!
+//! For typical parameters (B = 2, Q = 100, a = 1):
+//! - **FFT dominates** when traces have large n_i · W_i products.
+//! - **Constraint evaluation** can dominate for circuits with many complex
+//!   constraints (large k_i) or high quotient degree (large q_i).
+//! - **FRI queries** grow logarithmically in trace height but linearly in Q.
+//! - **Lookup computation** is subdominant unless L_i is very large.
+//! - **Grinding** is a constant overhead per FRI round (or once for queries).
+//!
+//! Cost scales **linearly** in trace height n_i for fixed circuit structure,
+//! with a logarithmic factor from the FFT. Doubling n_i approximately doubles
+//! the prover's work.
 
 use std::ops::Deref;
 
@@ -132,7 +252,8 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         let pcs = config.pcs();
         let mut challenger = config.initialise_challenger();
 
-        // commit to stage 1 traces
+        // Cost: "Stage 1 commit" — coset LDE (FFT) of each trace from n_i to
+        // n_i·B rows, then Merkle tree. FFT work: Σ w_i · n_i · B · log₂(n_i·B).
         let mut log_degrees = vec![];
         let evaluations = witness.traces.into_iter().map(|trace| {
             let degree = trace.height();
@@ -176,13 +297,16 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             acc += message.inverse();
         }
 
-        // commit to stage 2 traces
+        // Cost: "Lookup trace construction" — fingerprint (Horner), batch
+        // inversion, and accumulator update. Total: Σ n_i·L_i extension field ops.
         let (stage_2_traces, intermediate_accumulators) = Lookup::stage_2_traces(
             &witness.lookups,
             lookup_argument_challenge,
             &fingerprint_challenge,
             acc,
         );
+        // Cost: "Stage 2 commit" — LDE + Merkle for flattened extension traces.
+        // FFT work: Σ w2_i · D · n_i · B · log₂(n_i·B).
         let evaluations = stage_2_traces.into_iter().map(|trace| {
             let degree = trace.height();
             let trace_domain =
@@ -196,7 +320,9 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         // generate constraint challenge
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();
 
-        // commit to evaluations of the quotient polynomials
+        // Cost: "Quotient computation and commit" — constraint evaluation on the
+        // quotient domain (Σ n_i·q_i·eval_cost(k_i)) plus LDE + Merkle of the
+        // quotient sub-polynomials (Σ q_i·D·n_i·B·log₂(n_i·B)).
         debug_assert_eq!(intermediate_accumulators.len(), self.circuits.len());
         debug_assert_eq!(log_degrees.len(), self.circuits.len());
         let mut quotient_degrees = vec![];
@@ -289,7 +415,8 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             quotient_chunks: quotient_commit,
         };
 
-        // generate the out of domain point and prove polynomial evaluations
+        // Cost: "FRI opening" — barycentric interpolation (Σ n_i·B·W_i),
+        // FRI folding (≈ H), and FRI queries (Q·R·log₂ H hash ops).
         let zeta: ExtVal = challenger.sample_algebra_element();
         let mut round0_openings = vec![];
         let mut round1_openings = vec![];

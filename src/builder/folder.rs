@@ -1,6 +1,6 @@
 /// Constraint folders for the prover and verifier, adapted from Plonky3.
 use p3_air::{AirBuilder, ExtensionBuilder, RowWindow};
-use p3_field::{BasedVectorSpace, PackedField};
+use p3_field::{Algebra, BasedVectorSpace};
 use p3_matrix::dense::RowMajorMatrixView;
 use p3_matrix::stack::VerticalPair;
 
@@ -92,7 +92,7 @@ impl<'a> AirBuilder for ProverConstraintFolder<'a> {
         self.accumulator += PackedExtVal::from_basis_coefficients_fn(|i| {
             let alpha_powers = &self.decomposed_alpha_powers[i]
                 [self.constraint_index..(self.constraint_index + N)];
-            PackedVal::packed_linear_combination::<N>(alpha_powers, &expr_array)
+            PackedVal::batched_linear_combination(&expr_array, alpha_powers)
         });
         self.constraint_index += N;
     }
