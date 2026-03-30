@@ -11,19 +11,19 @@ rust-version = "1.88"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }
-p3-air = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
-p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
-p3-challenger = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
-p3-commit = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
-p3-dft = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
-p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
-p3-fri = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
-p3-keccak = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
-p3-matrix = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
-p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
-p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
-p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
-p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "e52636ec09663fd7d3bd4eaabb21dba8698f129a" }
+p3-air = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
+p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
+p3-challenger = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
+p3-dft = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
+p3-fri = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
+p3-keccak = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
+p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
+p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
 
 [dev-dependencies]
 criterion = "0.5"
