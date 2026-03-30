@@ -26,7 +26,7 @@ p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd68
 p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "multi_stark"
