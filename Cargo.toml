@@ -36,6 +36,14 @@ harness = false
 [features]
 parallel = ["p3-maybe-rayon/parallel"]
 
+# Required when this crate is consumed via Lean FFI: unwinding across the
+# FFI boundary is undefined behaviour (see lean-ffi guidance).
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
 # Similar to `release`, but preserves debug info
 [profile.dev-ci]
 inherits = "dev"
