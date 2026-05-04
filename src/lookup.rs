@@ -123,11 +123,13 @@ impl Lookup<Val> {
             .collect();
 
         // Compute the message for each lookup, in flat circuit-major order.
+        // Flatten the references serially first so the parallel map operates
+        // on an indexed slice and `collect` can write straight into the
+        // output Vec without tree-reducing worker buffers.
         let _g = tracing::info_span!("stark/lookup_messages").entered();
-        let messages: Vec<ExtVal> = lookups
+        let flat: Vec<&Self> = lookups.iter().flatten().flatten().collect();
+        let messages: Vec<ExtVal> = flat
             .par_iter()
-            .flatten()
-            .flatten()
             .map(|lookup| lookup.compute_message(lookup_challenge, fingerprint_challenge))
             .collect();
         drop(_g);
