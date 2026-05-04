@@ -240,6 +240,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
     ///
     /// Each claim is a slice of field elements that is observed by the challenger
     /// before lookup challenges are sampled, binding the proof to the claimed values.
+    #[tracing::instrument(level = "info", skip_all, name = "stark/prove")]
     pub fn prove_multiple_claims(
         &self,
         fri_parameters: FriParameters,
@@ -247,7 +248,6 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         claims: &[&[Val]],
         witness: SystemWitness,
     ) -> Proof {
-        cronos::clock("stark/prove");
         // initialize pcs and challenger
         let config = StarkConfig::new(self.commitment_parameters, fri_parameters);
         let pcs = config.pcs();
@@ -255,7 +255,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
 
         // Cost: "Stage 1 commit" — coset LDE (FFT) of each trace from n_i to
         // n_i·B rows, then Merkle tree. FFT work: Σ w_i · n_i · B · log₂(n_i·B).
-        cronos::clock("stark/stage1_commit");
+        let _g = tracing::info_span!("stark/stage1_commit").entered();
         let mut log_degrees = vec![];
         let evaluations = witness.traces.into_iter().map(|trace| {
             let degree = trace.height();
@@ -267,7 +267,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         });
         let (stage_1_trace_commit, stage_1_trace_data) =
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
-        cronos::clock("stark/stage1_commit");
+        drop(_g);
 
         if let Some(commit) = &self.preprocessed_commit {
             challenger.observe(commit);
@@ -302,17 +302,18 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
 
         // Cost: "Lookup trace construction" — fingerprint (Horner), batch
         // inversion, and accumulator update. Total: Σ n_i·L_i extension field ops.
-        cronos::clock("stark/lookup_construction");
+        let _g = tracing::info_span!("stark/lookup_construction").entered();
         let (stage_2_traces, intermediate_accumulators) = Lookup::stage_2_traces(
             &witness.lookups,
             lookup_argument_challenge,
             &fingerprint_challenge,
             acc,
         );
-        cronos::clock("stark/lookup_construction");
+        drop(_g);
+
         // Cost: "Stage 2 commit" — LDE + Merkle for flattened extension traces.
         // FFT work: Σ w2_i · D · n_i · B · log₂(n_i·B).
-        cronos::clock("stark/stage2_commit");
+        let _g = tracing::info_span!("stark/stage2_commit").entered();
         let evaluations = stage_2_traces.into_iter().map(|trace| {
             let degree = trace.height();
             let trace_domain =
@@ -321,7 +322,8 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         });
         let (stage_2_trace_commit, stage_2_trace_data) =
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
-        cronos::clock("stark/stage2_commit");
+        drop(_g);
+
         challenger.observe(stage_2_trace_commit.clone());
 
         // generate constraint challenge
@@ -330,7 +332,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         // Cost: "Quotient computation and commit" — constraint evaluation on the
         // quotient domain (Σ n_i·q_i·eval_cost(k_i)) plus LDE + Merkle of the
         // quotient sub-polynomials (Σ q_i·D·n_i·B·log₂(n_i·B)).
-        cronos::clock("stark/quotient");
+        let _g = tracing::info_span!("stark/quotient").entered();
         debug_assert_eq!(intermediate_accumulators.len(), self.circuits.len());
         debug_assert_eq!(log_degrees.len(), self.circuits.len());
         let mut quotient_degrees = vec![];
@@ -415,7 +417,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         let (quotient_commit, quotient_data) =
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, quotient_evaluations);
         challenger.observe(quotient_commit.clone());
-        cronos::clock("stark/quotient");
+        drop(_g);
 
         // save the commitments
         let commitments = Commitments {
@@ -426,7 +428,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
 
         // Cost: "FRI opening" — barycentric interpolation (Σ n_i·B·W_i),
         // FRI folding (≈ H), and FRI queries (Q·R·log₂ H hash ops).
-        cronos::clock("stark/fri_open");
+        let _g = tracing::info_span!("stark/fri_open").entered();
         let zeta: ExtVal = challenger.sample_algebra_element();
         let mut round0_openings = vec![];
         let mut round1_openings = vec![];
@@ -456,7 +458,8 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             rounds.push((key.preprocessed_data.as_ref().unwrap(), round0_openings));
         }
         let (opened_values, opening_proof) = pcs.open(rounds, &mut challenger);
-        cronos::clock("stark/fri_open");
+        drop(_g);
+
         let mut opened_values_iter = opened_values.into_iter();
         let stage_1_opened_values = opened_values_iter.next().unwrap();
         let stage_2_opened_values = opened_values_iter.next().unwrap();
@@ -467,7 +470,6 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             .into_iter()
             .map(|n| n.try_into().unwrap())
             .collect();
-        cronos::clock("stark/prove");
         Proof {
             commitments,
             intermediate_accumulators,

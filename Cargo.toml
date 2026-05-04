@@ -9,7 +9,8 @@ rust-version = "1.88"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-cronos = { path = "../cronos" }
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+tracing-texray = { git = "https://github.com/argumentcomputer/tracing-texray", rev = "82f40204e77c42d63200fa4e90971684eb68c6d9" }
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }
 p3-air = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }

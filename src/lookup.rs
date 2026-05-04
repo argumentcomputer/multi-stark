@@ -128,6 +128,7 @@ impl Lookup<Val> {
         }
 
         // Compute and collect all messages. There's one message per lookup.
+        let _g = tracing::info_span!("stark/lookup_messages").entered();
         let mut messages = Vec::with_capacity(total_num_lookups);
         for circuit_lookups in lookups {
             let circuit_messages = circuit_lookups
@@ -136,11 +137,14 @@ impl Lookup<Val> {
                 .map(|lookup| lookup.compute_message(lookup_challenge, fingerprint_challenge));
             messages.extend(circuit_messages);
         }
+        drop(_g);
 
         // Compute the inverses of all messages in batch.
-        let messages_inverses = batch_multiplicative_inverse(&messages);
+        let messages_inverses = tracing::info_span!("stark/batch_inverse")
+            .in_scope(|| batch_multiplicative_inverse(&messages));
 
         // Compute and collect intermediate accumulators and traces.
+        let _g = tracing::info_span!("stark/lookup_traces").entered();
         let mut intermediate_accumulators = Vec::with_capacity(lookups.len());
         let mut traces = Vec::with_capacity(lookups.len());
         let mut offset = 0;
@@ -179,6 +183,7 @@ impl Lookup<Val> {
             intermediate_accumulators.push(accumulator);
             traces.push(trace);
         }
+        drop(_g);
         (traces, intermediate_accumulators)
     }
 
