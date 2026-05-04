@@ -1,6 +1,7 @@
 use p3_air::{Air, BaseAir, ExtensionBuilder, WindowAccess};
 use p3_field::{PrimeCharacteristicRing, batch_multiplicative_inverse};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
+use p3_maybe_rayon::prelude::*;
 
 use crate::{
     builder::{TwoStagedBuilder, symbolic::SymbolicExpression},
@@ -113,30 +114,22 @@ impl Lookup<Val> {
         fingerprint_challenge: &ExtVal,
         mut accumulator: ExtVal,
     ) -> (Vec<RowMajorMatrix<ExtVal>>, Vec<ExtVal>) {
-        // Collect the number of lookups per circuit while accumulating the total
-        // number of lookups.
-        let mut num_lookups_per_circuit = Vec::with_capacity(lookups.len());
-        let mut total_num_lookups = 0;
-        for circuit_lookups in lookups {
-            let num_rows = circuit_lookups.len();
-            // Every row is assumed to have the same number of lookups, which is
-            // the number of lookups of the first row.
-            let num_row_lookups = circuit_lookups[0].len();
-            let num_circuit_lookups = num_rows * num_row_lookups;
-            num_lookups_per_circuit.push(num_circuit_lookups);
-            total_num_lookups += num_circuit_lookups;
-        }
+        // Number of lookups per circuit. Every row in a circuit is assumed to
+        // have the same number of lookups (the lookups are expected to be fully
+        // padded), so this is taken from the first row.
+        let num_lookups_per_circuit: Vec<usize> = lookups
+            .iter()
+            .map(|circuit_lookups| circuit_lookups.len() * circuit_lookups[0].len())
+            .collect();
 
-        // Compute and collect all messages. There's one message per lookup.
+        // Compute the message for each lookup, in flat circuit-major order.
         let _g = tracing::info_span!("stark/lookup_messages").entered();
-        let mut messages = Vec::with_capacity(total_num_lookups);
-        for circuit_lookups in lookups {
-            let circuit_messages = circuit_lookups
-                .iter()
-                .flatten()
-                .map(|lookup| lookup.compute_message(lookup_challenge, fingerprint_challenge));
-            messages.extend(circuit_messages);
-        }
+        let messages: Vec<ExtVal> = lookups
+            .par_iter()
+            .flatten()
+            .flatten()
+            .map(|lookup| lookup.compute_message(lookup_challenge, fingerprint_challenge))
+            .collect();
         drop(_g);
 
         // Compute the inverses of all messages in batch.
