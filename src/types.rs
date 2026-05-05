@@ -3,7 +3,10 @@ use p3_commit::{ExtensionMmcs, Pcs as PcsTrait};
 use p3_dft::Radix2DitParallel;
 use p3_field::{ExtensionField, Field, extension::BinomialExtensionField};
 use p3_fri::{FriParameters as InnerFriParameters, TwoAdicFriPcs};
-use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks, default_goldilocks_poseidon2_12};
+use p3_goldilocks::{
+    Goldilocks, Poseidon2Goldilocks, default_goldilocks_poseidon2_8,
+    default_goldilocks_poseidon2_16,
+};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
@@ -13,15 +16,19 @@ pub type PackedVal = <Val as Field>::Packing;
 pub type ExtVal = BinomialExtensionField<Val, 2>;
 pub type PackedExtVal = <ExtVal as ExtensionField<Val>>::ExtensionPacking;
 
-/// Width-12 Poseidon2 permutation over Goldilocks. Used for Merkle leaf hashing,
-/// inner-node compression, and the duplex challenger so the entire transcript is
-/// recursion-friendly.
-pub type Perm = Poseidon2Goldilocks<12>;
-/// Sponge hash for Merkle leaves: rate 8, capacity 4, digest 4 elements (~256-bit parity with Keccak-256).
-pub type Hash = PaddingFreeSponge<Perm, 12, 8, 4>;
-/// Pairwise inner-node compression: 2 children × 4 digest elements = 8 absorbed, 4 squeezed.
-pub type Compress = TruncatedPermutation<Perm, 2, 4, 12>;
-pub type Challenger = DuplexChallenger<Val, Perm, 12, 8>;
+/// Width-16 Poseidon2 permutation: used for leaf hashing and the duplex challenger,
+/// where high rate amortizes the larger permutation cost across many absorbed elements.
+pub type PermSponge = Poseidon2Goldilocks<16>;
+/// Width-8 Poseidon2 permutation: used for the 2-to-1 Merkle compression function,
+/// where each call hashes a fixed full-state input and the smaller permutation is faster.
+pub type PermCompress = Poseidon2Goldilocks<8>;
+/// Sponge hash for Merkle leaves: rate 12, capacity 4, digest 4 elements (128-bit
+/// indifferentiability bound = |F|^(cap/2) = 2^128 over Goldilocks).
+pub type Hash = PaddingFreeSponge<PermSponge, 16, 12, 4>;
+/// Pairwise inner-node compression: 2 children × 4 digest elements absorbed
+/// into a width-8 permutation; first 4 elements squeezed as the new digest.
+pub type Compress = TruncatedPermutation<PermCompress, 2, 4, 8>;
+pub type Challenger = DuplexChallenger<Val, PermSponge, 16, 12>;
 pub type Mmcs =
     MerkleTreeMmcs<<Val as Field>::Packing, <Val as Field>::Packing, Hash, Compress, 2, 4>;
 pub type ExtMmcs = ExtensionMmcs<Val, ExtVal, Mmcs>;
@@ -53,7 +60,7 @@ impl StarkConfig {
 
     pub fn new(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Self {
         let pcs = new_pcs(commitment_parameters, fri_parameters);
-        let challenger = Challenger::new(default_goldilocks_poseidon2_12());
+        let challenger = Challenger::new(default_goldilocks_poseidon2_16());
         Self { pcs, challenger }
     }
 }
@@ -121,9 +128,8 @@ pub struct FriParameters {
 type Dft = Radix2DitParallel<Val>;
 
 fn new_mmcs(cap_height: usize) -> Mmcs {
-    let perm = default_goldilocks_poseidon2_12();
-    let hash = Hash::new(perm.clone());
-    let compress = Compress::new(perm);
+    let hash = Hash::new(default_goldilocks_poseidon2_16());
+    let compress = Compress::new(default_goldilocks_poseidon2_8());
     Mmcs::new(hash, compress, cap_height)
 }
 
