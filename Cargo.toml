@@ -25,6 +25,10 @@ p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3", rev = "56cbe64919
 p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "56cbe64919c21974f30199ff8e9a4a428cfcfd7a" }
 p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "56cbe64919c21974f30199ff8e9a4a428cfcfd7a" }
 p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "56cbe64919c21974f30199ff8e9a4a428cfcfd7a" }
+sppark = { version = "0.1.14", optional = true }
+
+[build-dependencies]
+cc = "1"
 
 [dev-dependencies]
 criterion = "0.5"
@@ -35,6 +39,9 @@ harness = false
 
 [features]
 parallel = ["p3-maybe-rayon/parallel"]
+# Route DFT/LDE through CUDA kernels (sppark Goldilocks NTT). Requires nvcc on PATH;
+# Merkle hashing currently stays on CPU — Phase 1 of the GPU rollout.
+cuda = ["dep:sppark"]
 
 # Required when this crate is consumed via Lean FFI: unwinding across the
 # FFI boundary is undefined behaviour (see lean-ffi guidance).

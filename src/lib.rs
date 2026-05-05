@@ -1,4 +1,6 @@
 pub mod builder;
+#[cfg(feature = "cuda")]
+pub mod cuda;
 pub mod lookup;
 pub mod prover;
 pub mod system;

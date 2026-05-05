@@ -1,5 +1,6 @@
 use p3_challenger::DuplexChallenger;
 use p3_commit::{ExtensionMmcs, Pcs as PcsTrait};
+#[cfg(not(feature = "cuda"))]
 use p3_dft::Radix2DitParallel;
 use p3_field::{ExtensionField, Field, extension::BinomialExtensionField};
 use p3_fri::{FriParameters as InnerFriParameters, TwoAdicFriPcs};
@@ -10,6 +11,9 @@ use p3_goldilocks::{
 use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+
+#[cfg(feature = "cuda")]
+use crate::cuda::CudaRadix2Dft;
 
 pub type Val = Goldilocks;
 pub type PackedVal = <Val as Field>::Packing;
@@ -125,7 +129,10 @@ pub struct FriParameters {
     pub query_proof_of_work_bits: usize,
 }
 
+#[cfg(not(feature = "cuda"))]
 type Dft = Radix2DitParallel<Val>;
+#[cfg(feature = "cuda")]
+type Dft = CudaRadix2Dft<Val>;
 
 fn new_mmcs(cap_height: usize) -> Mmcs {
     let hash = Hash::new(default_goldilocks_poseidon2_16());
