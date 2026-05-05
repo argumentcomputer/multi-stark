@@ -24,10 +24,10 @@
 //!
 //! # Soundness argument
 //!
-//! The protocol is sound in the random oracle model (instantiated by Keccak-256 via
-//! the Fiat-Shamir challenger). Informally: if a prover produces a proof that the
-//! verifier accepts, then with overwhelming probability the claimed computation is
-//! correct.
+//! The protocol is sound in the random oracle model (instantiated by a width-12
+//! Poseidon2 duplex sponge over Goldilocks). Informally: if a prover produces a
+//! proof that the verifier accepts, then with overwhelming probability the claimed
+//! computation is correct.
 //!
 //! We use the following notation throughout:
 //! - |F_ext| ≈ 2^128 — size of the extension field (GoldilocksBinomialExtension<2>)
@@ -85,8 +85,9 @@
 //!
 //! ## Fiat-Shamir (random oracle model)
 //!
-//! All challenges (α, ζ, β, γ) are derived from the transcript via Keccak-256.
-//! Security relies on Keccak-256 behaving as a random oracle. The ordering of
+//! All challenges (α, ζ, β, γ) are derived from the transcript via the Poseidon2
+//! duplex sponge. Security relies on the sponge being indifferentiable from a
+//! random oracle in its capacity (here 4 Goldilocks ≈ 256 bits). The ordering of
 //! observations is critical: in particular, claims must be observed *before* lookup
 //! challenges are sampled, otherwise the prover could choose claims adaptively to
 //! make the accumulator balance.
@@ -185,7 +186,8 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         );
 
         // Soundness: Fiat-Shamir. All challenges below are derived deterministically
-        // from the transcript via Keccak-256 (random oracle model). The verifier
+        // from the transcript via the Poseidon2 duplex sponge (random oracle model).
+        // The verifier
         // replays exactly the same observations as the prover, so any divergence
         // (e.g. different commitments) produces different challenges, making it
         // infeasible for a cheating prover to predict them.

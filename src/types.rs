@@ -1,33 +1,34 @@
-use p3_challenger::{HashChallenger, SerializingChallenger64};
+use p3_challenger::DuplexChallenger;
 use p3_commit::{ExtensionMmcs, Pcs as PcsTrait};
 use p3_dft::Radix2DitParallel;
 use p3_field::{ExtensionField, Field, extension::BinomialExtensionField};
 use p3_fri::{FriParameters as InnerFriParameters, TwoAdicFriPcs};
-use p3_goldilocks::Goldilocks;
-use p3_keccak::{Keccak256Hash, KeccakF};
+use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks, default_goldilocks_poseidon2_12};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::MerkleTreeMmcs;
-use p3_symmetric::{CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher};
+use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 
 pub type Val = Goldilocks;
 pub type PackedVal = <Val as Field>::Packing;
 pub type ExtVal = BinomialExtensionField<Val, 2>;
 pub type PackedExtVal = <ExtVal as ExtensionField<Val>>::ExtensionPacking;
-pub type Challenger = SerializingChallenger64<Val, HashChallenger<u8, Keccak256Hash, 32>>;
-pub type Mmcs = MerkleTreeMmcs<
-    [Val; p3_keccak::VECTOR_LEN],
-    [u64; p3_keccak::VECTOR_LEN],
-    SerializingHasher<PaddingFreeSponge<KeccakF, 25, 17, 4>>,
-    KeccakCompressionFunction,
-    2,
-    4,
->;
+
+/// Width-12 Poseidon2 permutation over Goldilocks. Used for Merkle leaf hashing,
+/// inner-node compression, and the duplex challenger so the entire transcript is
+/// recursion-friendly.
+pub type Perm = Poseidon2Goldilocks<12>;
+/// Sponge hash for Merkle leaves: rate 8, capacity 4, digest 4 elements (~256-bit parity with Keccak-256).
+pub type Hash = PaddingFreeSponge<Perm, 12, 8, 4>;
+/// Pairwise inner-node compression: 2 children × 4 digest elements = 8 absorbed, 4 squeezed.
+pub type Compress = TruncatedPermutation<Perm, 2, 4, 12>;
+pub type Challenger = DuplexChallenger<Val, Perm, 12, 8>;
+pub type Mmcs =
+    MerkleTreeMmcs<<Val as Field>::Packing, <Val as Field>::Packing, Hash, Compress, 2, 4>;
 pub type ExtMmcs = ExtensionMmcs<Val, ExtVal, Mmcs>;
 pub type Pcs = TwoAdicFriPcs<Val, Dft, Mmcs, ExtMmcs>;
 
 /// Configuration for the STARK prover and verifier, bundling the PCS and an
 /// initial challenger state.
-#[derive(Debug)]
 pub struct StarkConfig {
     /// The PCS used to commit polynomials and prove opening proofs.
     pcs: Pcs,
@@ -52,7 +53,7 @@ impl StarkConfig {
 
     pub fn new(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Self {
         let pcs = new_pcs(commitment_parameters, fri_parameters);
-        let challenger = Challenger::from_hasher(vec![], Keccak256Hash {});
+        let challenger = Challenger::new(default_goldilocks_poseidon2_12());
         Self { pcs, challenger }
     }
 }
@@ -117,15 +118,13 @@ pub struct FriParameters {
     pub query_proof_of_work_bits: usize,
 }
 
-type KeccakCompressionFunction =
-    CompressionFunctionFromHasher<PaddingFreeSponge<KeccakF, 25, 17, 4>, 2, 4>;
 type Dft = Radix2DitParallel<Val>;
 
 fn new_mmcs(cap_height: usize) -> Mmcs {
-    let u64_hash = PaddingFreeSponge::<KeccakF, 25, 17, 4>::new(KeccakF {});
-    let field_hash = SerializingHasher::new(u64_hash);
-    let compress = KeccakCompressionFunction::new(u64_hash);
-    Mmcs::new(field_hash, compress, cap_height)
+    let perm = default_goldilocks_poseidon2_12();
+    let hash = Hash::new(perm.clone());
+    let compress = Compress::new(perm);
+    Mmcs::new(hash, compress, cap_height)
 }
 
 fn new_pcs(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Pcs {

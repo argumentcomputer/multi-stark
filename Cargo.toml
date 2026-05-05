@@ -20,7 +20,6 @@ p3-commit = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f
 p3-dft = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
 p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
 p3-fri = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
-p3-keccak = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
 p3-matrix = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
 p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
 p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }

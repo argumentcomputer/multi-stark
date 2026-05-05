@@ -4,7 +4,7 @@
 //!
 //! 1. **Stage 1 — Main traces**: Each circuit's execution trace is committed via the
 //!    PCS (FRI-based polynomial commitment over Goldilocks with degree-2 extension and
-//!    Keccak-256 hashing). The preprocessed commitment (if any), stage-1 commitment,
+//!    width-12 Poseidon2 hashing). The preprocessed commitment (if any), stage-1 commitment,
 //!    trace heights, and claims are observed into the Fiat-Shamir challenger. Claims
 //!    must be observed before lookup challenges are sampled; otherwise the prover could
 //!    choose claims adaptively to balance the lookup accumulator.
