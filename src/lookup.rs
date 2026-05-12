@@ -126,16 +126,20 @@ impl Lookup<Val> {
         // Flatten the references serially first so the parallel map operates
         // on an indexed slice and `collect` can write straight into the
         // output Vec without tree-reducing worker buffers.
+        let _g = tracing::info_span!("stark/lookup_messages").entered();
         let flat: Vec<&Self> = lookups.iter().flatten().flatten().collect();
         let messages: Vec<ExtVal> = flat
             .par_iter()
             .map(|lookup| lookup.compute_message(lookup_challenge, fingerprint_challenge))
             .collect();
+        drop(_g);
 
         // Compute the inverses of all messages in batch.
-        let messages_inverses = batch_multiplicative_inverse(&messages);
+        let messages_inverses = tracing::info_span!("stark/batch_inverse")
+            .in_scope(|| batch_multiplicative_inverse(&messages));
 
         // Compute and collect intermediate accumulators and traces.
+        let _g = tracing::info_span!("stark/lookup_traces").entered();
         let mut intermediate_accumulators = Vec::with_capacity(lookups.len());
         let mut traces = Vec::with_capacity(lookups.len());
         let mut offset = 0;
@@ -174,6 +178,7 @@ impl Lookup<Val> {
             intermediate_accumulators.push(accumulator);
             traces.push(trace);
         }
+        drop(_g);
         (traces, intermediate_accumulators)
     }
 
