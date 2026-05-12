@@ -83,11 +83,13 @@ fn main() {
     };
 
     // Prove
-    let no_claims: &[Val] = &[];
-    let proof = system.prove(fri_parameters, &key, no_claims, witness);
+    let no_claims = &[];
+    let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
 
     // Verify
-    system.verify(fri_parameters, no_claims, &proof).unwrap();
+    system
+        .verify_multiple_claims(fri_parameters, no_claims, &proof)
+        .unwrap();
     println!("Proof verified successfully!");
 
     // Show proof size
