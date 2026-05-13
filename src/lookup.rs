@@ -1,12 +1,19 @@
 use p3_air::{Air, BaseAir, ExtensionBuilder, WindowAccess};
-use p3_field::{PrimeCharacteristicRing, batch_multiplicative_inverse};
-use p3_matrix::{Matrix, dense::RowMajorMatrix};
+use p3_field::{batch_multiplicative_inverse, PrimeCharacteristicRing};
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use p3_maybe_rayon::prelude::*;
 
 use crate::{
-    builder::{TwoStagedBuilder, symbolic::SymbolicExpression},
+    builder::{symbolic::SymbolicExpression, TwoStagedBuilder},
     types::{ExtVal, Val},
 };
+
+/// Per-thread chunk size for the fused denom-build / batch-invert / row-sum
+/// step in [`stage_2_traces`]. Sized to keep the per-chunk working set
+/// (`CHUNK × K × (sizeof(ExtVal) + sizeof(Val))`) comfortably in L2 across
+/// typical circuit widths, and matches the internal block size used by
+/// `batch_multiplicative_inverse`.
+const STAGE_2_INVERT_CHUNK_ROWS: usize = 1024;
 
 /// Each circuit is required to have 4 arguments for the second stage. Namely,
 /// the lookup challenge, fingerprint challenge, current accumulator and next
@@ -87,99 +94,253 @@ where
         .fold(F::ZERO, |acc, coeff| acc * r.clone() + coeff.into())
 }
 
-impl Lookup<SymbolicExpression<Val>> {
-    /// Computes the concrete lookup attributes for its respective expressions
-    /// given a trace row and a preprocessed trace row.
-    pub fn compute_expr(&self, row: &[Val], preprocessed: Option<&[Val]>) -> Lookup<Val> {
-        let multiplicity = self.multiplicity.interpret(row, preprocessed);
-        let args = self
-            .args
-            .iter()
-            .map(|arg| arg.interpret(row, preprocessed))
-            .collect();
-        Lookup { multiplicity, args }
-    }
+/// References needed to build one circuit's stage 2 trace without
+/// materializing per-row `Lookup<Val>` values: the main trace, the
+/// preprocessed trace (if any), and the AIR-side symbolic lookups.
+pub struct CircuitWitness<'a> {
+    pub main: &'a RowMajorMatrix<Val>,
+    pub preprocessed: Option<&'a RowMajorMatrix<Val>>,
+    pub lookups: &'a [Lookup<SymbolicExpression<Val>>],
 }
 
-impl Lookup<Val> {
-    /// Computes the stage 2 traces and the intermediate accumulators for each
-    /// circuit given a lookup challenge, a fingerprint challenge and the current
-    /// accumulator value (computed from the initial claims).
+impl Lookup<SymbolicExpression<Val>> {
+    /// Build all circuits' stage 2 traces in a single pass, resolving
+    /// concrete lookup values directly from each row of the main trace.
     ///
-    /// Note: the lookups are expected to be fully padded. That is, for each
-    /// circuit, every row must have the exact same number of lookups.
+    /// For each circuit:
+    /// 1. Chunked fused loop over rows. Per chunk, denominators
+    ///    `lookup_challenge + fingerprint(γ, args)` and multiplicities are
+    ///    built from the symbolic lookups, batch-inverted in place, and the
+    ///    inverses are written directly into stage 2 columns 1..=K. A
+    ///    per-row partial sum is accumulated into `row_sums`.
+    /// 2. Three-phase parallel exclusive prefix scan of `row_sums` seeded
+    ///    with the incoming accumulator. The exclusive prefix is written
+    ///    into stage 2 column 0.
+    ///
+    /// Peak working set per thread: `STAGE_2_INVERT_CHUNK_ROWS × K ×
+    /// (sizeof(ExtVal) + sizeof(Val))`. The previous implementation's
+    /// flat `messages` / `messages_inverses` arrays (each
+    /// `total_lookups × sizeof(ExtVal)`) are gone; only the stage 2 output
+    /// buffer itself stays alive.
+    ///
+    /// Returns: per-circuit stage 2 traces and intermediate accumulators
+    /// (the second is the running-sum value at the end of each circuit).
     pub fn stage_2_traces(
-        lookups: &[Vec<Vec<Self>>],
+        circuits: &[CircuitWitness<'_>],
         lookup_challenge: ExtVal,
         fingerprint_challenge: &ExtVal,
-        mut accumulator: ExtVal,
+        initial_accumulator: ExtVal,
     ) -> (Vec<RowMajorMatrix<ExtVal>>, Vec<ExtVal>) {
-        // Number of lookups per circuit. Every row in a circuit is assumed to
-        // have the same number of lookups (the lookups are expected to be fully
-        // padded), so this is taken from the first row.
-        let num_lookups_per_circuit: Vec<usize> = lookups
-            .iter()
-            .map(|circuit_lookups| circuit_lookups.len() * circuit_lookups[0].len())
-            .collect();
-
-        // Compute the message for each lookup, in flat circuit-major order.
-        // Flatten the references serially first so the parallel map operates
-        // on an indexed slice and `collect` can write straight into the
-        // output Vec without tree-reducing worker buffers.
-        let flat: Vec<&Self> = lookups.iter().flatten().flatten().collect();
-        let messages: Vec<ExtVal> = flat
-            .par_iter()
-            .map(|lookup| lookup.compute_message(lookup_challenge, fingerprint_challenge))
-            .collect();
-
-        // Compute the inverses of all messages in batch.
-        let messages_inverses = batch_multiplicative_inverse(&messages);
-
-        // Compute and collect intermediate accumulators and traces.
-        let mut intermediate_accumulators = Vec::with_capacity(lookups.len());
-        let mut traces = Vec::with_capacity(lookups.len());
-        let mut offset = 0;
-        for (circuit_lookups, num_circuit_messages) in lookups.iter().zip(num_lookups_per_circuit) {
-            // Get the slice containing the messages inverses for the current circuit.
-            let circuit_messages_inverses =
-                &messages_inverses[offset..offset + num_circuit_messages];
-            offset += num_circuit_messages;
-
-            let num_row_lookups = circuit_lookups[0].len();
-            let vec = if num_row_lookups == 0 {
-                // No row lookup. Just repeat the accumulator for each row.
-                vec![accumulator; circuit_lookups.len()]
-            } else {
-                // Flatten each row accumulator followed by the inverse of the message
-                // associated with each row lookup.
-                circuit_lookups
-                    .iter()
-                    .zip(circuit_messages_inverses.chunks_exact(num_row_lookups))
-                    .flat_map(|(row_lookups, row_messages_inverses)| {
-                        let mut row = Vec::with_capacity(1 + row_lookups.len());
-                        row.push(accumulator);
-                        row.extend(row_lookups.iter().zip(row_messages_inverses).map(
-                            |(lookup, &message_inverse)| {
-                                accumulator += ExtVal::from(lookup.multiplicity) * message_inverse;
-                                message_inverse
-                            },
-                        ));
-                        row
-                    })
-                    .collect()
-            };
-            let width = 1 + num_row_lookups;
-            debug_assert_eq!(vec.len() % width, 0);
-            let trace = RowMajorMatrix::new(vec, width);
-            intermediate_accumulators.push(accumulator);
-            traces.push(trace);
+        // Per-circuit intermediate state produced by Phase A. Phase C writes
+        // the final accumulator column into `stage_2_buf` after the
+        // sequential cross-circuit combine has fixed each circuit's global
+        // starting offset.
+        struct CircuitData {
+            stage_2_buf: Vec<ExtVal>,
+            /// `row_sums` after Phase 2a: local inclusive prefix within each
+            /// scan chunk, seeded at zero (no circuit offset applied yet).
+            row_sums: Vec<ExtVal>,
+            /// Per-scan-chunk offsets *within the circuit*, seeded at zero.
+            /// The global offset (carrying the inter-circuit accumulator) is
+            /// added in Phase C.
+            chunk_offsets: Vec<ExtVal>,
+            scan_chunk: usize,
+            width: usize,
+            /// Total contribution of this circuit to the running sum.
+            circuit_total: ExtVal,
         }
-        (traces, intermediate_accumulators)
-    }
 
-    fn compute_message(&self, lookup_challenge: ExtVal, fingerprint_challenge: &ExtVal) -> ExtVal {
-        let fingerprint = fingerprint(fingerprint_challenge, self.args.iter().cloned());
-        lookup_challenge + fingerprint
+        // ── Phase A (parallel across circuits + within each circuit) ──
+        //
+        // Each circuit's denom build / invert / row-sum / local prefix scan
+        // runs independently because we defer the inter-circuit accumulator
+        // chain to the sequential combine below.
+        let _g = tracing::info_span!("stark/stage_2_phase_a").entered();
+        let per_circuit: Vec<CircuitData> = circuits
+            .par_iter()
+            .map(|circuit| {
+                let num_rows = circuit.main.height();
+                let k = circuit.lookups.len();
+                let width = 1 + k;
+                let mut stage_2_buf = ExtVal::zero_vec(num_rows * width);
+
+                // Fast path: circuit has no lookups. Phase 1 / 2 are noops;
+                // Phase C will fill column 0 with the constant global offset.
+                if k == 0 {
+                    return CircuitData {
+                        stage_2_buf,
+                        row_sums: Vec::new(),
+                        chunk_offsets: vec![ExtVal::ZERO],
+                        scan_chunk: num_rows.max(1),
+                        width,
+                        circuit_total: ExtVal::ZERO,
+                    };
+                }
+
+                // Per-row partial sums: row_sums[r] = Σ_s mult[r,s] · inv[r,s]
+                let mut row_sums = ExtVal::zero_vec(num_rows);
+
+                // ── Phase 1: chunked fused denom build / batch invert ──
+                row_sums
+                    .par_chunks_mut(STAGE_2_INVERT_CHUNK_ROWS)
+                    .zip(stage_2_buf.par_chunks_mut(STAGE_2_INVERT_CHUNK_ROWS * width))
+                    .enumerate()
+                    .for_each(|(chunk_idx, (row_sums_chunk, stage_2_chunk))| {
+                        let chunk_rows = row_sums_chunk.len();
+                        let start_row = chunk_idx * STAGE_2_INVERT_CHUNK_ROWS;
+
+                        // Thread-local denominator and multiplicity buffers for
+                        // this chunk. Dropped before the row-sum pass to
+                        // release memory back to the allocator promptly.
+                        let mut denoms: Vec<ExtVal> = ExtVal::zero_vec(chunk_rows * k);
+                        let mut mults: Vec<Val> = Val::zero_vec(chunk_rows * k);
+
+                        // 1a. Resolve symbolic args + multiplicity against each
+                        // row of the main (and preprocessed) trace.
+                        //
+                        // Trailing-zero invariant: rows whose effective args are
+                        // shorter than the AIR-side max width (e.g., the
+                        // unselected side of a match branch where selectors
+                        // zero out trailing contributions) still produce the
+                        // correct message — `fingerprint` is reverse-Horner
+                        // from zero, so trailing zeros fold out.
+                        for local_r in 0..chunk_rows {
+                            let r = start_row + local_r;
+                            let main_row = circuit.main.row_slice(r).unwrap();
+                            let prep_row = circuit.preprocessed.map(|p| p.row_slice(r).unwrap());
+                            let prep_ref = prep_row.as_deref();
+
+                            for (s, lookup) in circuit.lookups.iter().enumerate() {
+                                // Interpret args in the base field; fingerprint
+                                // then lifts each via `Into<ExtVal>`. This keeps
+                                // the per-arg work in the cheap base-field path
+                                // and only the Horner fold runs in the extension.
+                                let fp: ExtVal = fingerprint(
+                                    fingerprint_challenge,
+                                    lookup
+                                        .args
+                                        .iter()
+                                        .map(|arg| arg.interpret::<Val, _>(&main_row, prep_ref)),
+                                );
+                                denoms[local_r * k + s] = lookup_challenge + fp;
+                                mults[local_r * k + s] =
+                                    lookup.multiplicity.interpret(&main_row, prep_ref);
+                            }
+                        }
+
+                        // 1b. Batch invert this chunk's denominators.
+                        let inverses = batch_multiplicative_inverse(&denoms);
+                        drop(denoms);
+
+                        // 1c. Write inverses into stage 2 cols 1..=K and
+                        // accumulate per-row partial sums.
+                        for local_r in 0..chunk_rows {
+                            let mut row_sum = ExtVal::ZERO;
+                            let row_off = local_r * width;
+                            for s in 0..k {
+                                let inv = inverses[local_r * k + s];
+                                let m = mults[local_r * k + s];
+                                stage_2_chunk[row_off + 1 + s] = inv;
+                                row_sum += ExtVal::from(m) * inv;
+                            }
+                            row_sums_chunk[local_r] = row_sum;
+                        }
+                    });
+
+                // ── Phase 2a: parallel local inclusive prefix per scan chunk ──
+                let num_threads = current_num_threads().max(1);
+                let scan_chunk = num_rows.div_ceil(num_threads);
+                row_sums.par_chunks_mut(scan_chunk).for_each(|c| {
+                    for i in 1..c.len() {
+                        let prev = c[i - 1];
+                        c[i] += prev;
+                    }
+                });
+
+                // ── Phase 2b (zero-seeded): per-scan-chunk offsets within
+                // this circuit. The global circuit offset is folded in
+                // during Phase C; here we only resolve the local layout.
+                let num_chunks = num_rows.div_ceil(scan_chunk);
+                let mut chunk_offsets = ExtVal::zero_vec(num_chunks);
+                for c in 1..num_chunks {
+                    let prev_chunk_end = (c * scan_chunk).min(num_rows);
+                    chunk_offsets[c] = chunk_offsets[c - 1] + row_sums[prev_chunk_end - 1];
+                }
+                let circuit_total = chunk_offsets[num_chunks - 1] + row_sums[num_rows - 1];
+
+                CircuitData {
+                    stage_2_buf,
+                    row_sums,
+                    chunk_offsets,
+                    scan_chunk,
+                    width,
+                    circuit_total,
+                }
+            })
+            .collect();
+        drop(_g);
+
+        // ── Sequential combine across circuits ──
+        //
+        // Compute each circuit's global starting offset and final
+        // intermediate accumulator. Tiny — one add per circuit.
+        let _g = tracing::info_span!("stark/stage_2_combine").entered();
+        let mut global_offsets = Vec::with_capacity(per_circuit.len());
+        let mut intermediate_accumulators = Vec::with_capacity(per_circuit.len());
+        let mut acc = initial_accumulator;
+        for cd in &per_circuit {
+            global_offsets.push(acc);
+            acc += cd.circuit_total;
+            intermediate_accumulators.push(acc);
+        }
+        drop(_g);
+
+        // ── Phase C (parallel across circuits + within each circuit) ──
+        //
+        // Fold each circuit's global offset into stage 2 column 0.
+        let _g = tracing::info_span!("stark/stage_2_phase_c").entered();
+        let traces: Vec<RowMajorMatrix<ExtVal>> = per_circuit
+            .into_par_iter()
+            .zip(global_offsets.into_par_iter())
+            .map(|(cd, global_offset)| {
+                let CircuitData {
+                    mut stage_2_buf,
+                    row_sums,
+                    chunk_offsets,
+                    scan_chunk,
+                    width,
+                    circuit_total: _,
+                } = cd;
+
+                if row_sums.is_empty() {
+                    // k == 0 path: column 0 is the constant global offset.
+                    stage_2_buf
+                        .par_chunks_mut(width)
+                        .for_each(|row| row[0] = global_offset);
+                } else {
+                    stage_2_buf
+                        .par_chunks_mut(scan_chunk * width)
+                        .enumerate()
+                        .for_each(|(c, chunk)| {
+                            let chunk_start = c * scan_chunk;
+                            let chunk_off = chunk_offsets[c];
+                            for (p, row) in chunk.chunks_exact_mut(width).enumerate() {
+                                let excl = if p == 0 {
+                                    ExtVal::ZERO
+                                } else {
+                                    row_sums[chunk_start + p - 1]
+                                };
+                                row[0] = global_offset + chunk_off + excl;
+                            }
+                        });
+                }
+
+                RowMajorMatrix::new(stage_2_buf, width)
+            })
+            .collect();
+        drop(_g);
+
+        (traces, intermediate_accumulators)
     }
 }
 

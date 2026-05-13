@@ -1,10 +1,10 @@
 use crate::{
-    builder::symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
-    lookup::{LOOKUP_PUBLIC_SIZE, Lookup, LookupAir},
+    builder::symbolic::{get_max_constraint_degree, get_symbolic_constraints, SymbolicAirBuilder},
+    lookup::{LookupAir, LOOKUP_PUBLIC_SIZE},
     types::{Commitment, CommitmentParameters, Committer, ProverData, Val},
 };
 use p3_air::{Air, BaseAir};
-use p3_matrix::{Matrix, dense::RowMajorMatrix};
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
 
 /// A multi-circuit STARK system. Contains all circuits together with their
 /// shared preprocessed commitment and commitment parameters.
@@ -74,51 +74,29 @@ pub struct Circuit<A> {
     pub stage_2_width: usize,
 }
 
-/// Witness data for the multi-circuit system, comprising stage 1 traces and
-/// the concrete lookup values derived from them.
+/// Witness data for the multi-circuit system.
+///
+/// Only stage 1 (main) execution traces are owned by the caller. Concrete
+/// per-row lookup values are resolved during proving by interpreting each
+/// circuit's AIR-side symbolic lookups against its main and preprocessed
+/// traces — no materialized `Lookup<Val>` storage exists between stages.
 #[derive(Clone)]
 pub struct SystemWitness {
     /// Stage 1 (main) execution traces, one per circuit.
     pub traces: Vec<RowMajorMatrix<Val>>,
-    /// Lookup values per circuit, per row, per lookup.
-    pub lookups: Vec<Vec<Vec<Lookup<Val>>>>,
 }
 
 impl SystemWitness {
-    pub fn from_stage_1<A>(traces: Vec<RowMajorMatrix<Val>>, system: &System<A>) -> Self {
-        let lookups = traces
-            .iter()
-            .zip(system.circuits.iter())
-            .map(|(trace, circuit)| {
-                if let Some(preprocessed) = &circuit.air.preprocessed {
-                    trace
-                        .row_slices()
-                        .zip(preprocessed.row_slices())
-                        .map(|(row, preprocessed_row)| {
-                            circuit
-                                .air
-                                .lookups
-                                .iter()
-                                .map(|lookup| lookup.compute_expr(row, Some(preprocessed_row)))
-                                .collect::<Vec<_>>()
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    trace
-                        .row_slices()
-                        .map(|row| {
-                            circuit
-                                .air
-                                .lookups
-                                .iter()
-                                .map(|lookup| lookup.compute_expr(row, None))
-                                .collect::<Vec<_>>()
-                        })
-                        .collect::<Vec<_>>()
-                }
-            })
-            .collect::<Vec<_>>();
-        Self { traces, lookups }
+    pub fn new(traces: Vec<RowMajorMatrix<Val>>) -> Self {
+        Self { traces }
+    }
+
+    /// Back-compat shim for callers that used to materialize per-row
+    /// lookup values up front. The `_system` argument is now unused: the
+    /// prover resolves lookups symbolically against `traces` on demand.
+    #[inline]
+    pub fn from_stage_1<A>(traces: Vec<RowMajorMatrix<Val>>, _system: &System<A>) -> Self {
+        Self::new(traces)
     }
 }
 
