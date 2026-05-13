@@ -263,20 +263,17 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         // below. This is still net cheaper than the previous design, which
         // kept a `Vec<Vec<Vec<Lookup<Val>>>>` (typically larger than the
         // main trace itself) alive across the same window.
-        // The expensive piece here is `trace.clone()` per circuit, so we
-        // parallelise the construction. `log_degrees` is written into a
-        // pre-sized slice in parallel rather than `push`ed.
         let _g = tracing::info_span!("stark/stage1_commit").entered();
-        let mut log_degrees = vec![0usize; witness.traces.len()];
+        let mut log_degrees = vec![];
         let evaluations: Vec<_> = witness
             .traces
-            .par_iter()
-            .zip(log_degrees.par_iter_mut())
-            .map(|(trace, log_d)| {
+            .iter()
+            .map(|trace| {
                 let degree = trace.height();
-                *log_d = log2_strict_usize(degree);
+                let log_degree = log2_strict_usize(degree);
                 let trace_domain =
                     <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
+                log_degrees.push(log_degree);
                 (trace_domain, trace.clone())
             })
             .collect();

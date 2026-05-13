@@ -131,214 +131,151 @@ impl Lookup<SymbolicExpression<Val>> {
         fingerprint_challenge: &ExtVal,
         initial_accumulator: ExtVal,
     ) -> (Vec<RowMajorMatrix<ExtVal>>, Vec<ExtVal>) {
-        // Per-circuit intermediate state produced by Phase A. Phase C writes
-        // the final accumulator column into `stage_2_buf` after the
-        // sequential cross-circuit combine has fixed each circuit's global
-        // starting offset.
-        struct CircuitData {
-            stage_2_buf: Vec<ExtVal>,
-            /// `row_sums` after Phase 2a: local inclusive prefix within each
-            /// scan chunk, seeded at zero (no circuit offset applied yet).
-            row_sums: Vec<ExtVal>,
-            /// Per-scan-chunk offsets *within the circuit*, seeded at zero.
-            /// The global offset (carrying the inter-circuit accumulator) is
-            /// added in Phase C.
-            chunk_offsets: Vec<ExtVal>,
-            scan_chunk: usize,
-            width: usize,
-            /// Total contribution of this circuit to the running sum.
-            circuit_total: ExtVal,
-        }
+        // Process circuits sequentially so the running accumulator can chain
+        // directly across them. Within each circuit, Phase 1 (chunked-fused
+        // denom build / batch invert / inverse-write / row-sum) and Phase 2a
+        // (local inclusive prefix scan) still run in parallel via rayon.
+        let mut accumulator = initial_accumulator;
+        let mut intermediate_accumulators = Vec::with_capacity(circuits.len());
+        let mut traces = Vec::with_capacity(circuits.len());
 
-        // ── Phase A (parallel across circuits + within each circuit) ──
-        //
-        // Each circuit's denom build / invert / row-sum / local prefix scan
-        // runs independently because we defer the inter-circuit accumulator
-        // chain to the sequential combine below.
-        let _g = tracing::info_span!("stark/stage_2_phase_a").entered();
-        let per_circuit: Vec<CircuitData> = circuits
-            .par_iter()
-            .map(|circuit| {
-                let num_rows = circuit.main.height();
-                let k = circuit.lookups.len();
-                let width = 1 + k;
-                let mut stage_2_buf = ExtVal::zero_vec(num_rows * width);
+        for circuit in circuits {
+            let num_rows = circuit.main.height();
+            let k = circuit.lookups.len();
+            let width = 1 + k;
 
-                // Fast path: circuit has no lookups. Phase 1 / 2 are noops;
-                // Phase C will fill column 0 with the constant global offset.
-                if k == 0 {
-                    return CircuitData {
-                        stage_2_buf,
-                        row_sums: Vec::new(),
-                        chunk_offsets: vec![ExtVal::ZERO],
-                        scan_chunk: num_rows.max(1),
-                        width,
-                        circuit_total: ExtVal::ZERO,
-                    };
-                }
+            // Stage 2 output buffer. Column 0 = accumulator (filled in
+            // phase 2). Columns 1..=K = message inverses (filled in
+            // phase 1).
+            let mut stage_2 = ExtVal::zero_vec(num_rows * width);
 
-                // Per-row partial sums: row_sums[r] = Σ_s mult[r,s] · inv[r,s]
-                let mut row_sums = ExtVal::zero_vec(num_rows);
+            // Fast path: no lookups → accumulator column is constant.
+            if k == 0 {
+                stage_2
+                    .chunks_exact_mut(width)
+                    .for_each(|row| row[0] = accumulator);
+                intermediate_accumulators.push(accumulator);
+                traces.push(RowMajorMatrix::new(stage_2, width));
+                continue;
+            }
 
-                // ── Phase 1: chunked fused denom build / batch invert ──
-                row_sums
-                    .par_chunks_mut(STAGE_2_INVERT_CHUNK_ROWS)
-                    .zip(stage_2_buf.par_chunks_mut(STAGE_2_INVERT_CHUNK_ROWS * width))
-                    .enumerate()
-                    .for_each(|(chunk_idx, (row_sums_chunk, stage_2_chunk))| {
-                        let chunk_rows = row_sums_chunk.len();
-                        let start_row = chunk_idx * STAGE_2_INVERT_CHUNK_ROWS;
+            // Per-row partial sums: row_sums[r] = Σ_s mult[r,s] · inv[r,s]
+            let mut row_sums = ExtVal::zero_vec(num_rows);
 
-                        // Thread-local denominator and multiplicity buffers for
-                        // this chunk. Dropped before the row-sum pass to
-                        // release memory back to the allocator promptly.
-                        let mut denoms: Vec<ExtVal> = ExtVal::zero_vec(chunk_rows * k);
-                        let mut mults: Vec<Val> = Val::zero_vec(chunk_rows * k);
+            // ── Phase 1: chunked fused denom build / batch invert ──
+            row_sums
+                .par_chunks_mut(STAGE_2_INVERT_CHUNK_ROWS)
+                .zip(stage_2.par_chunks_mut(STAGE_2_INVERT_CHUNK_ROWS * width))
+                .enumerate()
+                .for_each(|(chunk_idx, (row_sums_chunk, stage_2_chunk))| {
+                    let chunk_rows = row_sums_chunk.len();
+                    let start_row = chunk_idx * STAGE_2_INVERT_CHUNK_ROWS;
 
-                        // 1a. Resolve symbolic args + multiplicity against each
-                        // row of the main (and preprocessed) trace.
-                        //
-                        // Trailing-zero invariant: rows whose effective args are
-                        // shorter than the AIR-side max width (e.g., the
-                        // unselected side of a match branch where selectors
-                        // zero out trailing contributions) still produce the
-                        // correct message — `fingerprint` is reverse-Horner
-                        // from zero, so trailing zeros fold out.
-                        for local_r in 0..chunk_rows {
-                            let r = start_row + local_r;
-                            let main_row = circuit.main.row_slice(r).unwrap();
-                            let prep_row = circuit.preprocessed.map(|p| p.row_slice(r).unwrap());
-                            let prep_ref = prep_row.as_deref();
+                    // Thread-local denominator and multiplicity buffers for
+                    // this chunk. Dropped before the row-sum pass to
+                    // release memory back to the allocator promptly.
+                    let mut denoms: Vec<ExtVal> = ExtVal::zero_vec(chunk_rows * k);
+                    let mut mults: Vec<Val> = Val::zero_vec(chunk_rows * k);
 
-                            for (s, lookup) in circuit.lookups.iter().enumerate() {
-                                // Interpret args in the base field; fingerprint
-                                // then lifts each via `Into<ExtVal>`. This keeps
-                                // the per-arg work in the cheap base-field path
-                                // and only the Horner fold runs in the extension.
-                                let fp: ExtVal = fingerprint(
-                                    fingerprint_challenge,
-                                    lookup
-                                        .args
-                                        .iter()
-                                        .map(|arg| arg.interpret::<Val, _>(&main_row, prep_ref)),
-                                );
-                                denoms[local_r * k + s] = lookup_challenge + fp;
-                                mults[local_r * k + s] =
-                                    lookup.multiplicity.interpret(&main_row, prep_ref);
-                            }
+                    // 1a. Resolve symbolic args + multiplicity against each
+                    // row of the main (and preprocessed) trace.
+                    //
+                    // Trailing-zero invariant: rows whose effective args are
+                    // shorter than the AIR-side max width (e.g., the
+                    // unselected side of a match branch where selectors zero
+                    // out trailing contributions) still produce the correct
+                    // message — `fingerprint` is reverse-Horner from zero,
+                    // so trailing zeros fold out.
+                    for local_r in 0..chunk_rows {
+                        let r = start_row + local_r;
+                        let main_row = circuit.main.row_slice(r).unwrap();
+                        let prep_row = circuit.preprocessed.map(|p| p.row_slice(r).unwrap());
+                        let prep_ref = prep_row.as_deref();
+
+                        for (s, lookup) in circuit.lookups.iter().enumerate() {
+                            // Interpret args in the base field; fingerprint
+                            // then lifts each via `Into<ExtVal>`. This keeps
+                            // the per-arg work in the cheap base-field path
+                            // and only the Horner fold runs in the extension.
+                            let fp: ExtVal = fingerprint(
+                                fingerprint_challenge,
+                                lookup
+                                    .args
+                                    .iter()
+                                    .map(|arg| arg.interpret::<Val, _>(&main_row, prep_ref)),
+                            );
+                            denoms[local_r * k + s] = lookup_challenge + fp;
+                            mults[local_r * k + s] =
+                                lookup.multiplicity.interpret(&main_row, prep_ref);
                         }
+                    }
 
-                        // 1b. Batch invert this chunk's denominators.
-                        let inverses = batch_multiplicative_inverse(&denoms);
-                        drop(denoms);
+                    // 1b. Batch invert this chunk's denominators.
+                    let inverses = batch_multiplicative_inverse(&denoms);
+                    drop(denoms);
 
-                        // 1c. Write inverses into stage 2 cols 1..=K and
-                        // accumulate per-row partial sums.
-                        for local_r in 0..chunk_rows {
-                            let mut row_sum = ExtVal::ZERO;
-                            let row_off = local_r * width;
-                            for s in 0..k {
-                                let inv = inverses[local_r * k + s];
-                                let m = mults[local_r * k + s];
-                                stage_2_chunk[row_off + 1 + s] = inv;
-                                row_sum += ExtVal::from(m) * inv;
-                            }
-                            row_sums_chunk[local_r] = row_sum;
+                    // 1c. Write inverses into stage 2 cols 1..=K and
+                    // accumulate per-row partial sums.
+                    for local_r in 0..chunk_rows {
+                        let mut row_sum = ExtVal::ZERO;
+                        let row_off = local_r * width;
+                        for s in 0..k {
+                            let inv = inverses[local_r * k + s];
+                            let m = mults[local_r * k + s];
+                            stage_2_chunk[row_off + 1 + s] = inv;
+                            row_sum += ExtVal::from(m) * inv;
                         }
-                    });
-
-                // ── Phase 2a: parallel local inclusive prefix per scan chunk ──
-                let num_threads = current_num_threads().max(1);
-                let scan_chunk = num_rows.div_ceil(num_threads);
-                row_sums.par_chunks_mut(scan_chunk).for_each(|c| {
-                    for i in 1..c.len() {
-                        let prev = c[i - 1];
-                        c[i] += prev;
+                        row_sums_chunk[local_r] = row_sum;
                     }
                 });
 
-                // ── Phase 2b (zero-seeded): per-scan-chunk offsets within
-                // this circuit. The global circuit offset is folded in
-                // during Phase C; here we only resolve the local layout.
-                let num_chunks = num_rows.div_ceil(scan_chunk);
-                let mut chunk_offsets = ExtVal::zero_vec(num_chunks);
-                for c in 1..num_chunks {
-                    let prev_chunk_end = (c * scan_chunk).min(num_rows);
-                    chunk_offsets[c] = chunk_offsets[c - 1] + row_sums[prev_chunk_end - 1];
-                }
-                let circuit_total = chunk_offsets[num_chunks - 1] + row_sums[num_rows - 1];
+            // ── Phase 2: parallel exclusive prefix scan of row_sums ──
+            //
+            // After this, stage_2[r, 0] = accumulator + Σ_{i<r} row_sums[i].
+            let num_threads = current_num_threads().max(1);
+            let scan_chunk = num_rows.div_ceil(num_threads);
 
-                CircuitData {
-                    stage_2_buf,
-                    row_sums,
-                    chunk_offsets,
-                    scan_chunk,
-                    width,
-                    circuit_total,
+            // 2a. Local inclusive prefix per chunk.
+            row_sums.par_chunks_mut(scan_chunk).for_each(|c| {
+                for i in 1..c.len() {
+                    let prev = c[i - 1];
+                    c[i] += prev;
                 }
-            })
-            .collect();
-        drop(_g);
+            });
 
-        // ── Sequential combine across circuits ──
-        //
-        // Compute each circuit's global starting offset and final
-        // intermediate accumulator. Tiny — one add per circuit.
-        let _g = tracing::info_span!("stark/stage_2_combine").entered();
-        let mut global_offsets = Vec::with_capacity(per_circuit.len());
-        let mut intermediate_accumulators = Vec::with_capacity(per_circuit.len());
-        let mut acc = initial_accumulator;
-        for cd in &per_circuit {
-            global_offsets.push(acc);
-            acc += cd.circuit_total;
-            intermediate_accumulators.push(acc);
+            // 2b. Sequential combine of chunk totals → per-chunk start
+            // offsets in the global exclusive prefix.
+            let num_chunks = num_rows.div_ceil(scan_chunk);
+            let mut chunk_offsets = ExtVal::zero_vec(num_chunks);
+            chunk_offsets[0] = accumulator;
+            for c in 1..num_chunks {
+                let prev_chunk_end = (c * scan_chunk).min(num_rows);
+                chunk_offsets[c] = chunk_offsets[c - 1] + row_sums[prev_chunk_end - 1];
+            }
+            // Running-sum value at the end of this circuit.
+            accumulator = chunk_offsets[num_chunks - 1] + row_sums[num_rows - 1];
+
+            // 2c. Write the exclusive prefix into stage 2 column 0 in
+            // parallel.
+            stage_2
+                .par_chunks_mut(scan_chunk * width)
+                .enumerate()
+                .for_each(|(c, chunk)| {
+                    let chunk_start = c * scan_chunk;
+                    let off = chunk_offsets[c];
+                    for (p, row) in chunk.chunks_exact_mut(width).enumerate() {
+                        let excl = if p == 0 {
+                            ExtVal::ZERO
+                        } else {
+                            row_sums[chunk_start + p - 1]
+                        };
+                        row[0] = off + excl;
+                    }
+                });
+
+            intermediate_accumulators.push(accumulator);
+            traces.push(RowMajorMatrix::new(stage_2, width));
         }
-        drop(_g);
-
-        // ── Phase C (parallel across circuits + within each circuit) ──
-        //
-        // Fold each circuit's global offset into stage 2 column 0.
-        let _g = tracing::info_span!("stark/stage_2_phase_c").entered();
-        let traces: Vec<RowMajorMatrix<ExtVal>> = per_circuit
-            .into_par_iter()
-            .zip(global_offsets.into_par_iter())
-            .map(|(cd, global_offset)| {
-                let CircuitData {
-                    mut stage_2_buf,
-                    row_sums,
-                    chunk_offsets,
-                    scan_chunk,
-                    width,
-                    circuit_total: _,
-                } = cd;
-
-                if row_sums.is_empty() {
-                    // k == 0 path: column 0 is the constant global offset.
-                    stage_2_buf
-                        .par_chunks_mut(width)
-                        .for_each(|row| row[0] = global_offset);
-                } else {
-                    stage_2_buf
-                        .par_chunks_mut(scan_chunk * width)
-                        .enumerate()
-                        .for_each(|(c, chunk)| {
-                            let chunk_start = c * scan_chunk;
-                            let chunk_off = chunk_offsets[c];
-                            for (p, row) in chunk.chunks_exact_mut(width).enumerate() {
-                                let excl = if p == 0 {
-                                    ExtVal::ZERO
-                                } else {
-                                    row_sums[chunk_start + p - 1]
-                                };
-                                row[0] = global_offset + chunk_off + excl;
-                            }
-                        });
-                }
-
-                RowMajorMatrix::new(stage_2_buf, width)
-            })
-            .collect();
-        drop(_g);
 
         (traces, intermediate_accumulators)
     }
