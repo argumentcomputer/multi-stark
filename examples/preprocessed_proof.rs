@@ -125,11 +125,8 @@ fn main() {
         query_proof_of_work_bits: 0,
     };
 
-    let no_claims: &[&[Val]] = &[];
-    let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
-    system
-        .verify_multiple_claims(fri_parameters, no_claims, &proof)
-        .unwrap();
+    let proof = system.prove(fri_parameters, &key, vec![], witness);
+    system.verify(fri_parameters, &proof).unwrap();
     println!("Preprocessed proof verified successfully!");
 
     let bytes = proof.to_bytes().expect("serialization failed");

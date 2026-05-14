@@ -141,7 +141,7 @@ fn main() {
     );
 
     // Claim: [even_index=0, input=4, expected_output=1] — is_even(4) should be 1
-    let claim = &[f(0), f(4), f(1)];
+    let claim = vec![f(0), f(4), f(1)];
     let fri_parameters = FriParameters {
         log_final_poly_len: 0,
         max_log_arity: 1,
@@ -150,8 +150,8 @@ fn main() {
         query_proof_of_work_bits: 0,
     };
 
-    let proof = system.prove(fri_parameters, &key, claim, witness);
-    system.verify(fri_parameters, claim, &proof).unwrap();
+    let proof = system.prove(fri_parameters, &key, vec![claim], witness);
+    system.verify(fri_parameters, &proof).unwrap();
     println!("Lookup proof verified successfully!");
 
     let bytes = proof.to_bytes().expect("serialization failed");

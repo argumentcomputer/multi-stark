@@ -2321,9 +2321,6 @@ mod tests {
 
         let (_traces, witness) = claims.witness(&system);
 
-        let claims_slice: Vec<&[Val]> = claims.claims.iter().map(|v| v.as_slice()).collect();
-        let claims_slice: &[&[Val]] = &claims_slice;
-
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
             max_log_arity: 1,
@@ -2332,10 +2329,9 @@ mod tests {
             query_proof_of_work_bits: 0,
         };
 
-        let proof =
-            system.prove_multiple_claims(fri_parameters, &prover_key, claims_slice, witness);
+        let proof = system.prove(fri_parameters, &prover_key, claims.claims, witness);
         system
-            .verify_multiple_claims(fri_parameters, claims_slice, &proof)
+            .verify(fri_parameters, &proof)
             .expect("verification issue");
     }
 
@@ -2495,9 +2491,7 @@ mod tests {
             );
 
             let (_traces, witness) = claims.witness(&system);
-
-            let claims_slice: Vec<&[Val]> = claims.claims.iter().map(|v| v.as_slice()).collect();
-            let claims_slice: &[&[Val]] = &claims_slice;
+            let claim_vecs = claims.claims.clone();
 
             let fri_parameters = FriParameters {
                 log_final_poly_len: 0,
@@ -2507,10 +2501,9 @@ mod tests {
                 query_proof_of_work_bits: 0,
             };
 
-            let proof =
-                system.prove_multiple_claims(fri_parameters, &prover_key, claims_slice, witness);
+            let proof = system.prove(fri_parameters, &prover_key, claim_vecs, witness);
             system
-                .verify_multiple_claims(fri_parameters, claims_slice, &proof)
+                .verify(fri_parameters, &proof)
                 .expect("verification issue");
         }
 

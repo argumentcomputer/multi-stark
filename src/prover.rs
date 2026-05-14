@@ -203,6 +203,9 @@ pub struct Proof {
     pub preprocessed_opened_values: Option<OpenedValuesForRound<ExtVal>>,
     pub stage_1_opened_values: OpenedValuesForRound<ExtVal>,
     pub stage_2_opened_values: OpenedValuesForRound<ExtVal>,
+    /// Claims bound to this proof, observed into the Fiat-Shamir transcript before
+    /// lookup challenges are sampled. The verifier reads claims directly from here.
+    pub claims: Vec<Vec<Val>>,
 }
 
 impl Proof {
@@ -223,29 +226,15 @@ impl Proof {
 }
 
 impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
-    /// Generates a STARK proof for the system with a single claim.
+    /// Generates a STARK proof for the system.
     ///
-    /// This is a convenience wrapper around [`Self::prove_multiple_claims`].
+    /// Each claim is a vector of field elements observed by the challenger before
+    /// lookup challenges are sampled, binding the proof to the claimed values.
     pub fn prove(
         &self,
         fri_parameters: FriParameters,
         key: &ProverKey,
-        claim: &[Val],
-        witness: SystemWitness,
-    ) -> Proof {
-        self.prove_multiple_claims(fri_parameters, key, &[claim], witness)
-    }
-
-    /// Generates a STARK proof for the system with multiple claims.
-    ///
-    /// Each claim is a slice of field elements that is observed by the challenger
-    /// before lookup challenges are sampled, binding the proof to the claimed values.
-    #[tracing::instrument(level = "info", skip_all, name = "stark/prove")]
-    pub fn prove_multiple_claims(
-        &self,
-        fri_parameters: FriParameters,
-        key: &ProverKey,
-        claims: &[&[Val]],
+        claims: Vec<Vec<Val>>,
         witness: SystemWitness,
     ) -> Proof {
         // initialize pcs and challenger
@@ -282,7 +271,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         // observe the claims
         // this has to be done before generating the lookup argument challenge
         // otherwise the lookup argument can be attacked
-        for claim in claims {
+        for claim in &claims {
             challenger.observe_slice(claim);
         }
 
@@ -294,7 +283,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
 
         // construct the accumulator from the claims
         let mut acc = ExtVal::ZERO;
-        for claim in claims {
+        for claim in &claims {
             let message = lookup_argument_challenge
                 + fingerprint(&fingerprint_challenge, claim.iter().cloned());
             acc += message.inverse();
@@ -477,6 +466,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             preprocessed_opened_values,
             stage_1_opened_values,
             stage_2_opened_values,
+            claims,
         }
     }
 }

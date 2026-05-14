@@ -176,7 +176,7 @@ fn build_witness(num_adds: usize, system: &System<U32CS>) -> SystemWitness {
 }
 
 /// Build claims for the first `num_adds` additions (same PRNG seed as `build_witness`).
-fn build_claims(num_adds: usize) -> Vec<[Val; 4]> {
+fn build_claims(num_adds: usize) -> Vec<Vec<Val>> {
     let f = Val::from_u32;
     let mut a: u32 = 0xdead_beef;
     let mut b: u32 = 0xcafe_babe;
@@ -191,7 +191,7 @@ fn build_claims(num_adds: usize) -> Vec<[Val; 4]> {
         let x = a;
         let y = b;
         let (z, _carry) = x.overflowing_add(y);
-        claims.push([f(1), f(x), f(y), f(z)]);
+        claims.push(vec![f(1), f(x), f(y), f(z)]);
     }
     claims
 }
@@ -223,15 +223,12 @@ fn bench_prove(c: &mut Criterion) {
     for log_height in [12, 13, 14] {
         let num_adds = 1 << log_height;
         let claims = build_claims(num_adds);
-        let claim_refs: Vec<&[Val]> = claims.iter().map(|c| c.as_slice()).collect();
         group.bench_function(
             BenchmarkId::new("u32_add", format!("2^{log_height}")),
             |b| {
                 b.iter_batched(
-                    || build_witness(num_adds, &system),
-                    |witness| {
-                        system.prove_multiple_claims(fri_parameters, &key, &claim_refs, witness)
-                    },
+                    || (build_witness(num_adds, &system), claims.clone()),
+                    |(witness, claims)| system.prove(fri_parameters, &key, claims, witness),
                     criterion::BatchSize::LargeInput,
                 );
             },
@@ -263,17 +260,12 @@ fn bench_verify(c: &mut Criterion) {
     for log_height in [12, 13, 14] {
         let num_adds = 1 << log_height;
         let claims = build_claims(num_adds);
-        let claim_refs: Vec<&[Val]> = claims.iter().map(|c| c.as_slice()).collect();
         let witness = build_witness(num_adds, &system);
-        let proof = system.prove_multiple_claims(fri_parameters, &key, &claim_refs, witness);
+        let proof = system.prove(fri_parameters, &key, claims, witness);
         group.bench_function(
             BenchmarkId::new("u32_add", format!("2^{log_height}")),
             |b| {
-                b.iter(|| {
-                    system
-                        .verify_multiple_claims(fri_parameters, &claim_refs, &proof)
-                        .unwrap()
-                });
+                b.iter(|| system.verify(fri_parameters, &proof).unwrap());
             },
         );
     }

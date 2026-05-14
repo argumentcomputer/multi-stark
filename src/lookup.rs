@@ -414,7 +414,7 @@ mod tests {
             ],
             &system,
         );
-        let claim = &[f(0), f(4), f(1)];
+        let claims = vec![vec![f(0), f(4), f(1)]];
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
             max_log_arity: 1,
@@ -422,7 +422,7 @@ mod tests {
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,
         };
-        let proof = system.prove(fri_parameters, &key, claim, witness);
-        system.verify(fri_parameters, claim, &proof).unwrap();
+        let proof = system.prove(fri_parameters, &key, claims, witness);
+        system.verify(fri_parameters, &proof).unwrap();
     }
 }

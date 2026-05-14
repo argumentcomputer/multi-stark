@@ -140,24 +140,13 @@ pub enum VerificationError<PcsErr> {
 }
 
 impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
-    /// Verifies a STARK proof against a single claim.
+    /// Verifies a STARK proof. Claims are read from [`Proof::claims`].
     ///
     /// Returns `Ok(())` if the proof is valid, or a [`VerificationError`] describing
     /// the first check that failed.
     pub fn verify(
         &self,
         fri_parameters: FriParameters,
-        claim: &[Val],
-        proof: &Proof,
-    ) -> Result<(), VerificationError<PcsError>> {
-        self.verify_multiple_claims(fri_parameters, &[claim], proof)
-    }
-
-    /// Verifies a STARK proof against multiple claims.
-    pub fn verify_multiple_claims(
-        &self,
-        fri_parameters: FriParameters,
-        claims: &[&[Val]],
         proof: &Proof,
     ) -> Result<(), VerificationError<PcsError>> {
         let Proof {
@@ -169,6 +158,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
             preprocessed_opened_values,
             stage_1_opened_values,
             stage_2_opened_values,
+            claims,
         } = proof;
         // first, verify the proof shape
         let quotient_degrees = self.verify_shape(proof)?;
@@ -649,11 +639,8 @@ mod tests {
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,
         };
-        let no_claims = &[];
-        let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
-        system
-            .verify_multiple_claims(fri_parameters, no_claims, &proof)
-            .unwrap();
+        let proof = system.prove(fri_parameters, &key, vec![], witness);
+        system.verify(fri_parameters, &proof).unwrap();
     }
 
     #[test]
@@ -685,14 +672,11 @@ mod tests {
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,
         };
-        let no_claims = &[];
-        let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
+        let proof = system.prove(fri_parameters, &key, vec![], witness);
         // Serialization round-trip
         let proof_bytes = proof.to_bytes().expect("Failed to serialize proof");
         let proof2 = Proof::from_bytes(&proof_bytes).expect("Failed to deserialize proof");
-        system
-            .verify_multiple_claims(fri_parameters, no_claims, &proof2)
-            .unwrap();
+        system.verify(fri_parameters, &proof2).unwrap();
     }
 
     // -- Negative / adversarial tests --
@@ -722,17 +706,17 @@ mod tests {
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,
         };
-        let no_claims = &[];
-        let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
+        let proof = system.prove(fri_parameters, &key, vec![], witness);
         (system, fri_parameters, proof)
     }
 
     #[test]
     fn test_wrong_claim_rejected() {
-        let (system, fri_parameters, proof) = small_system_and_proof();
+        let (system, fri_parameters, mut proof) = small_system_and_proof();
         let f = Val::from_u32;
-        // Verify with a bogus claim — the prover used no claims, so any claim should fail.
-        let result = system.verify(fri_parameters, &[f(42)], &proof);
+        // Tamper with the proof's claims — verifier transcript diverges from prover's.
+        proof.claims = vec![vec![f(42)]];
+        let result = system.verify(fri_parameters, &proof);
         assert!(result.is_err());
     }
 
@@ -741,8 +725,7 @@ mod tests {
         let (system, fri_parameters, mut proof) = small_system_and_proof();
         // Mutate a value in the stage 1 opened values — FRI should catch this.
         proof.stage_1_opened_values[0][0][0] += ExtVal::ONE;
-        let no_claims: &[&[Val]] = &[];
-        let result = system.verify_multiple_claims(fri_parameters, no_claims, &proof);
+        let result = system.verify(fri_parameters, &proof);
         assert!(result.is_err());
     }
 
@@ -752,8 +735,7 @@ mod tests {
         // Set the last intermediate accumulator to non-zero.
         let last = proof.intermediate_accumulators.len() - 1;
         proof.intermediate_accumulators[last] = ExtVal::ONE;
-        let no_claims: &[&[Val]] = &[];
-        let result = system.verify_multiple_claims(fri_parameters, no_claims, &proof);
+        let result = system.verify(fri_parameters, &proof);
         assert!(result.is_err());
     }
 
@@ -762,8 +744,7 @@ mod tests {
         let (system, fri_parameters, mut proof) = small_system_and_proof();
         // Remove a quotient opened value — shape check should fail.
         proof.quotient_opened_values.pop();
-        let no_claims: &[&[Val]] = &[];
-        let result = system.verify_multiple_claims(fri_parameters, no_claims, &proof);
+        let result = system.verify(fri_parameters, &proof);
         assert!(result.is_err());
     }
 
@@ -772,9 +753,6 @@ mod tests {
         let (system, fri_parameters, proof) = small_system_and_proof();
         let bytes = proof.to_bytes().expect("serialize");
         let proof2 = Proof::from_bytes(&bytes).expect("deserialize");
-        let no_claims: &[&[Val]] = &[];
-        system
-            .verify_multiple_claims(fri_parameters, no_claims, &proof2)
-            .unwrap();
+        system.verify(fri_parameters, &proof2).unwrap();
     }
 }

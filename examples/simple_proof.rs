@@ -83,13 +83,10 @@ fn main() {
     };
 
     // Prove
-    let no_claims = &[];
-    let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
+    let proof = system.prove(fri_parameters, &key, vec![], witness);
 
     // Verify
-    system
-        .verify_multiple_claims(fri_parameters, no_claims, &proof)
-        .unwrap();
+    system.verify(fri_parameters, &proof).unwrap();
     println!("Proof verified successfully!");
 
     // Show proof size
