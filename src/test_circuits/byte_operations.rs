@@ -139,11 +139,12 @@ mod tests {
         };
         let witness = calls.witness(&system);
         let f = Val::from_u32;
-        let claim1 = &[f(0), f(10), f(5), f(10 ^ 5)];
-        let claim2 = &[f(1), f(30), f(20), f(30 & 20)];
-        let claim3 = &[f(2), f(100), f(40), f(100 | 40)];
-        let claim4 = &[f(3), f(200), f(100)];
-        let claims: &[&[Val]] = &[claim1, claim2, claim3, claim4];
+        let claims = vec![
+            vec![f(0), f(10), f(5), f(10 ^ 5)],
+            vec![f(1), f(30), f(20), f(30 & 20)],
+            vec![f(2), f(100), f(40), f(100 | 40)],
+            vec![f(3), f(200), f(100)],
+        ];
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
             max_log_arity: 1,
@@ -151,9 +152,7 @@ mod tests {
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,
         };
-        let proof = system.prove_multiple_claims(fri_parameters, &key, claims, witness);
-        system
-            .verify_multiple_claims(fri_parameters, claims, &proof)
-            .unwrap();
+        let proof = system.prove(fri_parameters, &key, claims, witness);
+        system.verify(fri_parameters, &proof).unwrap();
     }
 }

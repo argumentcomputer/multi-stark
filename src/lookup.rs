@@ -1,5 +1,5 @@
 use p3_air::{Air, BaseAir, ExtensionBuilder, WindowAccess};
-use p3_field::{PrimeCharacteristicRing, batch_multiplicative_inverse};
+use p3_field::{Field, PrimeCharacteristicRing, batch_multiplicative_inverse};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 
@@ -72,6 +72,24 @@ impl<A: BaseAir<Val>> LookupAir<A> {
     pub fn stage_2_width(&self) -> usize {
         1 + self.lookups.len()
     }
+}
+
+/// Computes the accumulator contribution from a list of claims with multiplicities.
+///
+/// Both the prover and verifier use this to initialize the lookup accumulator from
+/// external claims before running the circuit-level lookup argument.
+pub(crate) fn claims_accumulator(
+    lookup_argument_challenge: ExtVal,
+    fingerprint_challenge: ExtVal,
+    claims: &[(Vec<Val>, u64)],
+) -> ExtVal {
+    let mut acc = ExtVal::ZERO;
+    for (claim, multiplicity) in claims {
+        let message =
+            lookup_argument_challenge + fingerprint(&fingerprint_challenge, claim.iter().cloned());
+        acc += message.inverse() * ExtVal::from_u64(*multiplicity);
+    }
+    acc
 }
 
 /// Computes a fingerprint of the coefficients using Horner's method.
@@ -414,7 +432,7 @@ mod tests {
             ],
             &system,
         );
-        let claim = &[f(0), f(4), f(1)];
+        let claims = vec![vec![f(0), f(4), f(1)]];
         let fri_parameters = FriParameters {
             log_final_poly_len: 0,
             max_log_arity: 1,
@@ -422,7 +440,7 @@ mod tests {
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,
         };
-        let proof = system.prove(fri_parameters, &key, claim, witness);
-        system.verify(fri_parameters, claim, &proof).unwrap();
+        let proof = system.prove(fri_parameters, &key, claims, witness);
+        system.verify(fri_parameters, &proof).unwrap();
     }
 }
