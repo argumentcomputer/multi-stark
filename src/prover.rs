@@ -154,7 +154,7 @@ use std::ops::Deref;
 
 use crate::{
     builder::folder::ProverConstraintFolder,
-    lookup::{Lookup, fingerprint},
+    lookup::{Lookup, claims_accumulator},
     system::{ProverKey, System, SystemWitness},
     types::{
         Challenger, Commitment, Domain, EvaluationsOnDomain, ExtVal, FriParameters, PackedExtVal,
@@ -170,8 +170,7 @@ use p3_air::{Air, BaseAir, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{LagrangeSelectors, OpenedValuesForRound, Pcs as PcsTrait, PolynomialSpace};
 use p3_field::{
-    BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing,
-    extension::BinomialExtensionField,
+    BasedVectorSpace, PackedValue, PrimeCharacteristicRing, extension::BinomialExtensionField,
 };
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
@@ -203,9 +202,13 @@ pub struct Proof {
     pub preprocessed_opened_values: Option<OpenedValuesForRound<ExtVal>>,
     pub stage_1_opened_values: OpenedValuesForRound<ExtVal>,
     pub stage_2_opened_values: OpenedValuesForRound<ExtVal>,
-    /// Claims bound to this proof, observed into the Fiat-Shamir transcript before
-    /// lookup challenges are sampled. The verifier reads claims directly from here.
-    pub claims: Vec<Vec<Val>>,
+    /// Claims with multiplicities bound to this proof. Observed into the Fiat-Shamir
+    /// transcript before lookup challenges are sampled. The verifier reads them directly.
+    pub claims: Vec<(Vec<Val>, u64)>,
+    /// Remaining claims with multiplicities that must become the `claims` of the next
+    /// proof shard. The final lookup accumulator equals the accumulator derived from these,
+    /// and the next shard's initial accumulator (from its own claims) must match.
+    pub remaining_claims: Vec<(Vec<Val>, u64)>,
 }
 
 impl Proof {
@@ -226,15 +229,30 @@ impl Proof {
 }
 
 impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
-    /// Generates a STARK proof for the system.
-    ///
-    /// Each claim is a vector of field elements observed by the challenger before
-    /// lookup challenges are sampled, binding the proof to the claimed values.
+    /// Generates a full STARK proof binding the given claims (all with multiplicity 1).
     pub fn prove(
         &self,
         fri_parameters: FriParameters,
         key: &ProverKey,
         claims: Vec<Vec<Val>>,
+        witness: SystemWitness,
+    ) -> Proof {
+        let claims = claims.into_iter().map(|c| (c, 1u64)).collect();
+        self.partially_prove(fri_parameters, key, claims, vec![], witness)
+    }
+
+    /// Generates a partial STARK proof (proof shard).
+    ///
+    /// `claims` with multiplicities are observed into the Fiat-Shamir transcript before
+    /// lookup challenges are sampled. `remaining_claims` encode the obligations passed to
+    /// the next shard: the next shard's `claims` must equal these (so their accumulators
+    /// match), and this shard's final accumulator equals the accumulator derived from them.
+    pub fn partially_prove(
+        &self,
+        fri_parameters: FriParameters,
+        key: &ProverKey,
+        claims: Vec<(Vec<Val>, u64)>,
+        remaining_claims: Vec<(Vec<Val>, u64)>,
         witness: SystemWitness,
     ) -> Proof {
         // initialize pcs and challenger
@@ -268,11 +286,15 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             challenger.observe(Val::from_usize(*log_degree));
         }
 
-        // observe the claims
-        // this has to be done before generating the lookup argument challenge
-        // otherwise the lookup argument can be attacked
-        for claim in &claims {
-            challenger.observe_slice(claim);
+        // observe claims and remaining claims before lookup challenges are sampled;
+        // this is required for soundness of the lookup argument
+        for (values, multiplicity) in &claims {
+            challenger.observe_slice(values);
+            challenger.observe(Val::from_u64(*multiplicity));
+        }
+        for (values, multiplicity) in &remaining_claims {
+            challenger.observe_slice(values);
+            challenger.observe(Val::from_u64(*multiplicity));
         }
 
         // generate lookup challenges
@@ -281,13 +303,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         let fingerprint_challenge: ExtVal = challenger.sample_algebra_element();
         challenger.observe_algebra_element(fingerprint_challenge);
 
-        // construct the accumulator from the claims
-        let mut acc = ExtVal::ZERO;
-        for claim in &claims {
-            let message = lookup_argument_challenge
-                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
-            acc += message.inverse();
-        }
+        let acc = claims_accumulator(lookup_argument_challenge, fingerprint_challenge, &claims);
 
         // Cost: "Lookup trace construction" — fingerprint (Horner), batch
         // inversion, and accumulator update. Total: Σ n_i·L_i extension field ops.
@@ -324,6 +340,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         debug_assert_eq!(intermediate_accumulators.len(), self.circuits.len());
         debug_assert_eq!(log_degrees.len(), self.circuits.len());
         let mut quotient_degrees = vec![];
+        let mut curr_acc = acc;
         let quotient_evaluations = self
             .circuits
             .iter()
@@ -373,7 +390,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
                 let stage_2_public_values = [
                     lookup_argument_challenge,
                     fingerprint_challenge,
-                    acc,
+                    curr_acc,
                     *next_acc,
                 ];
                 let quotient_values = quotient_values(
@@ -397,7 +414,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
                 let quotient_sub_domains = quotient_domain.split_domains(quotient_degree);
                 // need to save the quotient degree for later
                 quotient_degrees.push(quotient_degree);
-                acc = *next_acc;
+                curr_acc = *next_acc;
                 quotient_sub_domains
                     .into_iter()
                     .zip(quotient_sub_evaluations)
@@ -467,6 +484,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             stage_1_opened_values,
             stage_2_opened_values,
             claims,
+            remaining_claims,
         }
     }
 }

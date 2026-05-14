@@ -107,7 +107,7 @@
 use crate::{
     builder::folder::VerifierConstraintFolder,
     ensure, ensure_eq,
-    lookup::fingerprint,
+    lookup::claims_accumulator,
     prover::Proof,
     system::System,
     types::{Challenger, ExtVal, FriParameters, Pcs, PcsError, StarkConfig, Val},
@@ -133,18 +133,41 @@ pub enum VerificationError<PcsErr> {
     InvalidProofShape,
     /// The system configuration is invalid (e.g. no circuits).
     InvalidSystem,
+    /// The proof is not a full proof: either some claim has multiplicity ≠ 1
+    /// or `remaining_claims` is non-empty. Use [`System::partially_verify`] instead.
+    NotFullProof,
     /// The recomputed composition polynomial does not match the quotient.
     OodEvaluationMismatch,
-    /// The lookup accumulator did not balance to zero.
+    /// The lookup accumulator did not reach the expected value.
     UnbalancedChannel,
 }
 
 impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
-    /// Verifies a STARK proof. Claims are read from [`Proof::claims`].
+    /// Verifies a complete STARK proof (all claim multiplicities 1, no remaining claims).
     ///
-    /// Returns `Ok(())` if the proof is valid, or a [`VerificationError`] describing
-    /// the first check that failed.
+    /// Checks that every claim has multiplicity 1 and that `remaining_claims` is empty,
+    /// then delegates to [`Self::partially_verify`].
     pub fn verify(
+        &self,
+        fri_parameters: FriParameters,
+        proof: &Proof,
+    ) -> Result<(), VerificationError<PcsError>> {
+        ensure!(
+            proof.claims.iter().all(|(_, m)| *m == 1) && proof.remaining_claims.is_empty(),
+            VerificationError::NotFullProof
+        );
+        self.partially_verify(fri_parameters, proof)
+    }
+
+    /// Verifies a STARK proof shard. Claims and remaining claims are read from the proof.
+    ///
+    /// The final lookup accumulator must equal the accumulator derived from
+    /// `proof.remaining_claims`. The next shard's `claims` must equal these
+    /// `remaining_claims` — it is the initial accumulator of the next shard (derived
+    /// from its own claims) that must match, not its final accumulator.
+    /// Use [`Self::verify`] for complete proofs where all multiplicities are 1 and
+    /// `remaining_claims` is empty.
+    pub fn partially_verify(
         &self,
         fri_parameters: FriParameters,
         proof: &Proof,
@@ -159,20 +182,10 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
             stage_1_opened_values,
             stage_2_opened_values,
             claims,
+            remaining_claims,
         } = proof;
         // first, verify the proof shape
         let quotient_degrees = self.verify_shape(proof)?;
-
-        // Soundness: lookup argument. The accumulator was computed by the prover
-        // under challenges (β, γ) that were sampled after the traces and claims were
-        // committed. If the pushed and pulled multisets differ, the accumulator is a
-        // nonzero rational function of (β, γ) and evaluates to zero with probability
-        // ≤ N / |F_ext| (Schwartz-Zippel on the numerator polynomial).
-        ensure_eq!(
-            intermediate_accumulators.last(),
-            Some(&ExtVal::ZERO),
-            VerificationError::UnbalancedChannel
-        );
 
         // Soundness: Fiat-Shamir. All challenges below are derived deterministically
         // from the transcript via Keccak-256 (random oracle model). The verifier
@@ -194,11 +207,15 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
             challenger.observe(Val::from_u8(*log_degree));
         }
 
-        // Soundness: claims must be observed BEFORE lookup challenges are sampled.
-        // Otherwise, the prover could choose claims adaptively after seeing the
-        // challenges, breaking the lookup argument's binding property.
-        for claim in claims {
-            challenger.observe_slice(claim);
+        // Soundness: claims and remaining_claims must be observed BEFORE lookup
+        // challenges are sampled, otherwise the prover could choose them adaptively.
+        for (values, multiplicity) in claims {
+            challenger.observe_slice(values);
+            challenger.observe(Val::from_u64(*multiplicity));
+        }
+        for (values, multiplicity) in remaining_claims {
+            challenger.observe_slice(values);
+            challenger.observe(Val::from_u64(*multiplicity));
         }
 
         // Soundness: lookup argument. The challenges are random elements of F_ext.
@@ -213,13 +230,21 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         // observe stage_2 commitment
         challenger.observe(commitments.stage_2_trace.clone());
 
-        // construct the accumulator from the claims
-        let mut acc = ExtVal::ZERO;
-        for claim in claims {
-            let message = lookup_argument_challenge
-                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
-            acc += message.inverse();
-        }
+        // initial accumulator from claims; target accumulator from remaining_claims
+        let acc = claims_accumulator(lookup_argument_challenge, fingerprint_challenge, claims);
+        let remaining_acc = claims_accumulator(
+            lookup_argument_challenge,
+            fingerprint_challenge,
+            remaining_claims,
+        );
+
+        // Soundness: the final intermediate accumulator must equal the remaining_acc.
+        // With no remaining_claims, this is zero (fully balanced lookup argument).
+        ensure_eq!(
+            intermediate_accumulators.last(),
+            Some(&remaining_acc),
+            VerificationError::UnbalancedChannel
+        );
 
         // Soundness: constraint folding. All k constraints are combined via powers
         // of α. The folded sum has degree k-1 in α, so by Schwartz-Zippel a violated
@@ -237,6 +262,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         let mut stage_2_trace_evaluations = vec![];
         let mut quotient_chunks_evaluations = vec![];
         let mut last_quotient_i = 0;
+        let mut curr_acc = acc;
         for i in 0..self.circuits.len() {
             let log_degree = log_degrees[i];
             let quotient_degree = quotient_degrees[i];
@@ -365,7 +391,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
             let stage_2_public_values = &[
                 lookup_argument_challenge,
                 fingerprint_challenge,
-                acc,
+                curr_acc,
                 next_acc,
             ];
             let mut folder = VerifierConstraintFolder {
@@ -420,7 +446,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                 VerificationError::OodEvaluationMismatch
             );
             // the accumulator must become the next accumulator for the next iteration
-            acc = next_acc;
+            curr_acc = next_acc;
         }
 
         Ok(())
@@ -715,7 +741,7 @@ mod tests {
         let (system, fri_parameters, mut proof) = small_system_and_proof();
         let f = Val::from_u32;
         // Tamper with the proof's claims — verifier transcript diverges from prover's.
-        proof.claims = vec![vec![f(42)]];
+        proof.claims = vec![(vec![f(42)], 1)];
         let result = system.verify(fri_parameters, &proof);
         assert!(result.is_err());
     }
@@ -754,5 +780,51 @@ mod tests {
         let bytes = proof.to_bytes().expect("serialize");
         let proof2 = Proof::from_bytes(&bytes).expect("deserialize");
         system.verify(fri_parameters, &proof2).unwrap();
+    }
+
+    #[test]
+    fn test_partial_proof_extra_claim_cancels() {
+        // A claim in remaining_claims sets the target accumulator for this shard.
+        // The same claim in claims means this shard's initial accumulator already equals
+        // that target, so with no circuit lookups the final accumulator matches and
+        // partially_verify accepts. This simulates passing the claim to the next shard.
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        };
+        let (system, key) = system(commitment_parameters);
+        let f = Val::from_u32;
+        let witness = SystemWitness::from_stage_1(
+            vec![
+                RowMajorMatrix::new(
+                    [3, 4, 5, 5, 12, 13, 8, 15, 17, 7, 24, 25].map(f).to_vec(),
+                    3,
+                ),
+                RowMajorMatrix::new([4, 2, 3, 1, 10, 10, 3, 2, 5, 1, 13, 13].map(f).to_vec(), 6),
+            ],
+            &system,
+        );
+        let fri_parameters = FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 64,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        };
+        let extra_claim = vec![f(42), f(43)];
+        let proof = system.partially_prove(
+            fri_parameters,
+            &key,
+            vec![(extra_claim.clone(), 1)],
+            vec![(extra_claim, 1)],
+            witness,
+        );
+        // partially_verify must accept — claim and remaining cancel
+        system.partially_verify(fri_parameters, &proof).unwrap();
+        // verify must reject — remaining_claims is non-empty
+        assert!(matches!(
+            system.verify(fri_parameters, &proof),
+            Err(VerificationError::NotFullProof)
+        ));
     }
 }
