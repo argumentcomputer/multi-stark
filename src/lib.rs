@@ -1,5 +1,6 @@
 pub mod builder;
 pub mod lookup;
+pub mod manual_codec;
 pub mod prover;
 pub mod system;
 #[cfg(test)]
