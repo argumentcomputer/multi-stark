@@ -5,9 +5,11 @@ use crate::{
 };
 use p3_air::{Air, BaseAir};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
+use serde::{Deserialize, Serialize};
 
 /// A multi-circuit STARK system. Contains all circuits together with their
 /// shared preprocessed commitment and commitment parameters.
+#[derive(Serialize, Deserialize)]
 pub struct System<A> {
     pub commitment_parameters: CommitmentParameters,
     pub circuits: Vec<Circuit<A>>,
@@ -64,6 +66,7 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> System<A> {
 
 /// A single circuit within the system, wrapping an AIR together with
 /// precomputed metadata used by the prover and verifier.
+#[derive(Serialize, Deserialize)]
 pub struct Circuit<A> {
     pub air: LookupAir<A>,
     pub constraint_count: usize,

@@ -8,11 +8,13 @@ use std::iter::{Product, Sum};
 use std::marker::PhantomData;
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
+use serde::{Deserialize, Serialize};
+
 use crate::types::{ExtVal, Val};
 
 use super::TwoStagedBuilder;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Entry {
     Preprocessed { offset: usize },
     Main { offset: usize },
@@ -23,7 +25,8 @@ pub enum Entry {
 }
 
 /// A variable within the evaluation window, i.e. a column in either the local or next row.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct SymbolicVariable<F> {
     pub entry: Entry,
     pub index: usize,
@@ -87,7 +90,8 @@ where
 }
 
 /// An expression over `SymbolicVariable`s.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "F: Serialize + serde::de::DeserializeOwned")]
 pub enum SymbolicExpression<F> {
     Variable(SymbolicVariable<F>),
     IsFirstRow,

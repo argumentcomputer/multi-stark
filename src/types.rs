@@ -88,7 +88,7 @@ impl Committer {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct CommitmentParameters {
     pub log_blowup: usize,
     /// Height of the Merkle cap (number of top layers included in the commitment).

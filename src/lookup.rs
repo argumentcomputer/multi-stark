@@ -3,6 +3,8 @@ use p3_field::{PrimeCharacteristicRing, batch_multiplicative_inverse};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     builder::{TwoStagedBuilder, symbolic::SymbolicExpression},
     types::{ExtVal, Val},
@@ -13,7 +15,7 @@ use crate::{
 /// accumulator.
 pub const LOOKUP_PUBLIC_SIZE: usize = 4;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Lookup<Expr> {
     pub multiplicity: Expr,
     pub args: Vec<Expr>,
@@ -51,9 +53,13 @@ impl<Expr> Lookup<Expr> {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct LookupAir<A> {
     pub inner_air: A,
     pub lookups: Vec<Lookup<SymbolicExpression<Val>>>,
+    // The preprocessed trace is large (gadget tables) and prover-only; the
+    // verifier reconstructs/commits it separately, so it is not serialized.
+    #[serde(skip)]
     pub preprocessed: Option<RowMajorMatrix<Val>>,
 }
 
