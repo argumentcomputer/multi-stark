@@ -22,7 +22,7 @@ lookup arguments for shared state.
 
 The protocol (`system`, `prover`, `verifier` modules) is generic over
 [`StarkGenericConfig`](src/config.rs). The crate ships one production
-configuration, `GoldilocksKeccakConfig` in [`types`](src/types.rs):
+configuration, `GoldilocksBlake3Config` in [`types`](src/types.rs):
 
 | Component | Choice                                        |
 |-----------|-----------------------------------------------|

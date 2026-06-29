@@ -16,7 +16,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use multi_stark::builder::symbolic::{SymbolicExpression, preprocessed_var, var};
 use multi_stark::lookup::{Lookup, LookupAir};
 use multi_stark::system::{System, SystemWitness};
-use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val};
+use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
 use multi_stark::{
     p3_air::{Air, AirBuilder, BaseAir, WindowAccess},
     p3_field::{Field, PrimeCharacteristicRing},
@@ -129,7 +129,7 @@ impl U32CS {
 
 fn build_witness(
     num_adds: usize,
-    system: &System<GoldilocksKeccakConfig, U32CS>,
+    system: &System<GoldilocksBlake3Config, U32CS>,
 ) -> SystemWitness<Val> {
     let byte_width = 1;
     let add_width = 14;
@@ -204,7 +204,7 @@ fn build_claims(num_adds: usize) -> Vec<[Val; 4]> {
 // ---------------------------------------------------------------------------
 
 fn bench_prove(c: &mut Criterion) {
-    let config = GoldilocksKeccakConfig::new(
+    let config = GoldilocksBlake3Config::new(
         CommitmentParameters {
             log_blowup: 1,
             cap_height: 0,
@@ -244,7 +244,7 @@ fn bench_prove(c: &mut Criterion) {
 }
 
 fn bench_verify(c: &mut Criterion) {
-    let config = GoldilocksKeccakConfig::new(
+    let config = GoldilocksBlake3Config::new(
         CommitmentParameters {
             log_blowup: 1,
             cap_height: 0,

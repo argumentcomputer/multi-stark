@@ -9,7 +9,7 @@ mod tests {
         builder::symbolic::{preprocessed_var, var},
         lookup::{Lookup, LookupAir},
         system::{ProverKey, System, SystemWitness},
-        types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val},
+        types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val},
     };
 
     enum U32CS {
@@ -126,10 +126,10 @@ mod tests {
     }
 
     fn byte_system(
-        config: GoldilocksKeccakConfig,
+        config: GoldilocksBlake3Config,
     ) -> (
-        System<GoldilocksKeccakConfig, U32CS>,
-        ProverKey<GoldilocksKeccakConfig>,
+        System<GoldilocksBlake3Config, U32CS>,
+        ProverKey<GoldilocksBlake3Config>,
     ) {
         let byte_table = LookupAir::new(U32CS::ByteTable, U32CS::ByteTable.lookups());
         let u32_add = LookupAir::new(U32CS::U32Add, U32CS::U32Add.lookups());
@@ -141,7 +141,7 @@ mod tests {
     }
 
     impl AddCalls {
-        fn witness(&self, system: &System<GoldilocksKeccakConfig, U32CS>) -> SystemWitness<Val> {
+        fn witness(&self, system: &System<GoldilocksBlake3Config, U32CS>) -> SystemWitness<Val> {
             let byte_width = 1;
             let add_width = 14;
             let mut byte_trace = RowMajorMatrix::new(vec![Val::ZERO; byte_width * 256], byte_width);
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn u32_add_proof() {
-        let config = GoldilocksKeccakConfig::new(
+        let config = GoldilocksBlake3Config::new(
             CommitmentParameters {
                 log_blowup: 1,
                 cap_height: 0,

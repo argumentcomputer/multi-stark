@@ -5,7 +5,7 @@
 //! field, and the Fiat-Shamir challenger. The base field is determined
 //! transitively by the PCS ([`Val`]). The prover, verifier and system are
 //! generic over an implementation of this trait; see
-//! [`crate::types::GoldilocksKeccakConfig`] for the reference instantiation.
+//! [`crate::types::GoldilocksBlake3Config`] for the reference instantiation.
 
 use p3_challenger::{CanObserve, CanSample, FieldChallenger};
 use p3_commit::{Pcs, PolynomialSpace};

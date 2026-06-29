@@ -11,7 +11,7 @@
 
 use multi_stark::lookup::LookupAir;
 use multi_stark::system::{System, SystemWitness};
-use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val};
+use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
 use multi_stark::{
     p3_air::{Air, AirBuilder, BaseAir, WindowAccess},
     p3_field::PrimeCharacteristicRing,
@@ -44,7 +44,7 @@ where
 }
 
 fn main() {
-    let config = GoldilocksKeccakConfig::new(
+    let config = GoldilocksBlake3Config::new(
         CommitmentParameters {
             log_blowup: 1,
             cap_height: 0,
