@@ -52,7 +52,10 @@ impl StarkConfig {
 
     pub fn new(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Self {
         let pcs = new_pcs(commitment_parameters, fri_parameters);
-        let challenger = Challenger::from_hasher(vec![], Keccak256Hash {});
+        // Seed the challenger with a protocol tag for domain separation, so
+        // transcripts cannot collide with those of other protocols built on
+        // the same hash.
+        let challenger = Challenger::from_hasher(b"multi-stark/v0".to_vec(), Keccak256Hash {});
         Self { pcs, challenger }
     }
 }

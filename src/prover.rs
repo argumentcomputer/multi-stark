@@ -253,6 +253,9 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         let pcs = config.pcs();
         let mut challenger = config.initialise_challenger();
 
+        // bind the protocol parameters and system shape into the transcript
+        self.observe_shape(&fri_parameters, &mut challenger);
+
         // Cost: "Stage 1 commit" — coset LDE (FFT) of each trace from n_i to
         // n_i·B rows, then Merkle tree. FFT work: Σ w_i · n_i · B · log₂(n_i·B).
         let _g = tracing::info_span!("stark/stage1_commit").entered();
@@ -274,15 +277,20 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
         }
         challenger.observe(stage_1_trace_commit.clone());
 
-        // observe the traces' heights. TODO: is this necessary?
+        // Observe the traces' heights. This binds the proof to specific domain
+        // sizes; the verifier reads these from the (untrusted) proof, so they
+        // must influence every subsequent challenge.
         for log_degree in &log_degrees {
             challenger.observe(Val::from_usize(*log_degree));
         }
 
-        // observe the claims
-        // this has to be done before generating the lookup argument challenge
-        // otherwise the lookup argument can be attacked
+        // Observe the claims, length-prefixed so that distinct claim
+        // structures (e.g. [[a, b]] vs [[a], [b]]) yield distinct transcripts.
+        // This has to be done before generating the lookup argument challenge,
+        // otherwise the lookup argument can be attacked.
+        challenger.observe(Val::from_usize(claims.len()));
         for claim in claims {
+            challenger.observe(Val::from_usize(claim.len()));
             challenger.observe_slice(claim);
         }
 
@@ -324,6 +332,13 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
         drop(_g);
         challenger.observe(stage_2_trace_commit.clone());
+
+        // Observe the intermediate accumulators. They enter the constraints as
+        // public values, so later challenges (α, ζ) must depend on them
+        // directly rather than only through the quotient commitment.
+        for acc in &intermediate_accumulators {
+            challenger.observe_algebra_element(*acc);
+        }
 
         // generate constraint challenge
         let constraint_challenge: ExtVal = challenger.sample_algebra_element();

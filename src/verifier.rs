@@ -193,6 +193,9 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         let pcs = config.pcs();
         let mut challenger = config.initialise_challenger();
 
+        // bind the protocol parameters and system shape into the transcript
+        self.observe_shape(&fri_parameters, &mut challenger);
+
         // observe preprocessed and stage_1 commitment
         if let Some(commit) = &self.preprocessed_commit {
             challenger.observe(commit);
@@ -206,8 +209,12 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
 
         // Soundness: claims must be observed BEFORE lookup challenges are sampled.
         // Otherwise, the prover could choose claims adaptively after seeing the
-        // challenges, breaking the lookup argument's binding property.
+        // challenges, breaking the lookup argument's binding property. The claims
+        // are length-prefixed so that distinct claim structures (e.g. [[a, b]]
+        // vs [[a], [b]]) yield distinct transcripts.
+        challenger.observe(Val::from_usize(claims.len()));
         for claim in claims {
+            challenger.observe(Val::from_usize(claim.len()));
             challenger.observe_slice(claim);
         }
 
@@ -222,6 +229,13 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
 
         // observe stage_2 commitment
         challenger.observe(commitments.stage_2_trace.clone());
+
+        // Observe the intermediate accumulators. They enter the constraints as
+        // public values, so later challenges (α, ζ) must depend on them
+        // directly rather than only through the quotient commitment.
+        for acc in intermediate_accumulators {
+            challenger.observe_algebra_element(*acc);
+        }
 
         // construct the accumulator from the claims
         let mut acc = ExtVal::ZERO;

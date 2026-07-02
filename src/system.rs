@@ -1,9 +1,13 @@
 use crate::{
     builder::symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
     lookup::{LOOKUP_PUBLIC_SIZE, Lookup, LookupAir},
-    types::{Commitment, CommitmentParameters, Committer, ProverData, Val},
+    types::{
+        Challenger, Commitment, CommitmentParameters, Committer, FriParameters, ProverData, Val,
+    },
 };
 use p3_air::{Air, BaseAir};
+use p3_challenger::CanObserve;
+use p3_field::PrimeCharacteristicRing;
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 /// A multi-circuit STARK system. Contains all circuits together with their
@@ -59,6 +63,32 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> System<A> {
         };
         let key = ProverKey { preprocessed_data };
         (system, key)
+    }
+}
+
+impl<A> System<A> {
+    /// Binds the protocol parameters and the system shape into the Fiat-Shamir
+    /// transcript. The prover and the verifier must call this identically,
+    /// before observing any commitment, so that transcripts of systems with
+    /// different parameters or circuit shapes never collide.
+    pub fn observe_shape(&self, fri_parameters: &FriParameters, challenger: &mut Challenger) {
+        let mut observe_usize = |x: usize| challenger.observe(Val::from_usize(x));
+        observe_usize(self.commitment_parameters.log_blowup);
+        observe_usize(self.commitment_parameters.cap_height);
+        observe_usize(fri_parameters.log_final_poly_len);
+        observe_usize(fri_parameters.max_log_arity);
+        observe_usize(fri_parameters.num_queries);
+        observe_usize(fri_parameters.commit_proof_of_work_bits);
+        observe_usize(fri_parameters.query_proof_of_work_bits);
+        observe_usize(self.circuits.len());
+        for circuit in &self.circuits {
+            observe_usize(circuit.constraint_count);
+            observe_usize(circuit.max_constraint_degree);
+            observe_usize(circuit.preprocessed_height);
+            observe_usize(circuit.preprocessed_width);
+            observe_usize(circuit.stage_1_width);
+            observe_usize(circuit.stage_2_width);
+        }
     }
 }
 

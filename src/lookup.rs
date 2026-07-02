@@ -374,13 +374,7 @@ mod tests {
         System::new(commitment_parameters, [even, odd])
     }
 
-    #[test]
-    fn lookup_test() {
-        let commitment_parameters = CommitmentParameters {
-            log_blowup: 1,
-            cap_height: 0,
-        };
-        let (system, key) = system(commitment_parameters);
+    fn witness(system: &System<CS>) -> SystemWitness {
         let f = Val::from_u32;
         #[rustfmt::skip]
         let witness = SystemWitness::from_stage_1(
@@ -412,17 +406,49 @@ mod tests {
                     6,
                 ),
             ],
-            &system,
+            system,
         );
-        let claim = &[f(0), f(4), f(1)];
-        let fri_parameters = FriParameters {
-            log_final_poly_len: 0,
-            max_log_arity: 1,
-            num_queries: 64,
-            commit_proof_of_work_bits: 0,
-            query_proof_of_work_bits: 0,
+        witness
+    }
+
+    const FRI_PARAMETERS: FriParameters = FriParameters {
+        log_final_poly_len: 0,
+        max_log_arity: 1,
+        num_queries: 64,
+        commit_proof_of_work_bits: 0,
+        query_proof_of_work_bits: 0,
+    };
+
+    #[test]
+    fn lookup_test() {
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
         };
-        let proof = system.prove(fri_parameters, &key, claim, witness);
-        system.verify(fri_parameters, claim, &proof).unwrap();
+        let (system, key) = system(commitment_parameters);
+        let witness = witness(&system);
+        let f = Val::from_u32;
+        let claim = &[f(0), f(4), f(1)];
+        let proof = system.prove(FRI_PARAMETERS, &key, claim, witness);
+        system.verify(FRI_PARAMETERS, claim, &proof).unwrap();
+    }
+
+    #[test]
+    fn test_claim_split_rejected() {
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        };
+        let (system, key) = system(commitment_parameters);
+        let witness = witness(&system);
+        let f = Val::from_u32;
+        // Prove a single claim, then attempt to verify with the same values
+        // regrouped into two claims. The transcript is length-prefixed, so the
+        // regrouped claims must yield different challenges and fail.
+        let claim = &[f(0), f(4), f(1)];
+        let proof = system.prove(FRI_PARAMETERS, &key, claim, witness);
+        let split_claims: &[&[Val]] = &[&[f(0), f(4)], &[f(1)]];
+        let result = system.verify_multiple_claims(FRI_PARAMETERS, split_claims, &proof);
+        assert!(result.is_err());
     }
 }
