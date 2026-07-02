@@ -115,7 +115,7 @@ use crate::{
 use p3_air::{Air, BaseAir, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs as PcsTrait, PolynomialSpace};
-use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
+use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 use p3_util::log2_strict_usize;
 
@@ -441,6 +441,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
     pub fn verify_shape(&self, proof: &Proof) -> Result<Vec<usize>, VerificationError<PcsError>> {
         let Proof {
             intermediate_accumulators,
+            log_degrees,
             quotient_opened_values,
             preprocessed_opened_values,
             stage_1_opened_values,
@@ -451,6 +452,12 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         let num_circuits = self.circuits.len();
         // there must be at least one circuit
         ensure!(num_circuits > 0, VerificationError::InvalidSystem);
+        // there must be one log degree per circuit
+        ensure_eq!(
+            log_degrees.len(),
+            num_circuits,
+            VerificationError::InvalidProofShape
+        );
         // the preprocessed commitment is empty if and only if there are zero preprocessed circuits
         let num_preprocessed = self
             .preprocessed_indices
@@ -519,8 +526,19 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         }
         // quotient round
         let mut quotient_degrees = vec![];
-        for circuit in self.circuits.iter() {
+        for (circuit, log_degree) in self.circuits.iter().zip(log_degrees) {
             let quotient_degree = (circuit.max_constraint_degree.max(2) - 1).next_power_of_two();
+            // The claimed log degree must be small enough that the blown-up
+            // quotient domain still fits within the two-adic subgroup of the
+            // field. This also guards the `1 << log_degree` shifts used during
+            // verification against overflow on adversarial proofs.
+            ensure!(
+                usize::from(*log_degree)
+                    + log2_strict_usize(quotient_degree)
+                    + self.commitment_parameters.log_blowup
+                    <= Val::TWO_ADICITY,
+                VerificationError::InvalidProofShape
+            );
             quotient_degrees.push(quotient_degree);
         }
         let quotient_size: usize = quotient_degrees.iter().sum();
@@ -752,6 +770,28 @@ mod tests {
         // Set the last intermediate accumulator to non-zero.
         let last = proof.intermediate_accumulators.len() - 1;
         proof.intermediate_accumulators[last] = ExtVal::ONE;
+        let no_claims: &[&[Val]] = &[];
+        let result = system.verify_multiple_claims(fri_parameters, no_claims, &proof);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_truncated_log_degrees_rejected() {
+        let (system, fri_parameters, mut proof) = small_system_and_proof();
+        // Remove a log degree — the shape check must reject this instead of
+        // the verifier panicking on an out-of-bounds index.
+        proof.log_degrees.pop();
+        let no_claims: &[&[Val]] = &[];
+        let result = system.verify_multiple_claims(fri_parameters, no_claims, &proof);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_oversized_log_degree_rejected() {
+        let (system, fri_parameters, mut proof) = small_system_and_proof();
+        // A log degree beyond the field's two-adicity must be rejected instead
+        // of causing a shift overflow or a panic inside the PCS.
+        proof.log_degrees[0] = 200;
         let no_claims: &[&[Val]] = &[];
         let result = system.verify_multiple_claims(fri_parameters, no_claims, &proof);
         assert!(result.is_err());
