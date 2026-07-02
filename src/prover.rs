@@ -3,8 +3,8 @@
 //! The proving protocol proceeds in several stages:
 //!
 //! 1. **Stage 1 — Main traces**: Each circuit's execution trace is committed via the
-//!    PCS (FRI-based polynomial commitment over Goldilocks with degree-2 extension and
-//!    Keccak-256 hashing). The preprocessed commitment (if any), stage-1 commitment,
+//!    configuration's PCS (FRI over Goldilocks with Keccak-256 hashing in the
+//!    reference config). The preprocessed commitment (if any), stage-1 commitment,
 //!    trace heights, and claims are observed into the Fiat-Shamir challenger. Claims
 //!    must be observed before lookup challenges are sampled; otherwise the prover could
 //!    choose claims adaptively to balance the lookup accumulator.
@@ -47,7 +47,8 @@
 //! - k_i — number of constraints in circuit i (after lookup expansion)
 //! - d_i — maximum constraint degree multiple of circuit i
 //! - q_i = next_pow2(max(d_i, 2) − 1) — quotient polynomial degree
-//! - D = 2 — extension field dimension (`BinomialExtensionField<Goldilocks, 2>`)
+//! - D — extension field dimension (2 in the reference config:
+//!   `BinomialExtensionField<Goldilocks, 2>`)
 //! - B = 2^log_blowup — FRI blowup factor
 //! - Q = num_queries — FRI query repetitions
 //! - a = max_log_arity — FRI folding arity (log₂)

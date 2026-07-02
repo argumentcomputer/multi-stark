@@ -24,13 +24,18 @@
 //!
 //! # Soundness argument
 //!
-//! The protocol is sound in the random oracle model (instantiated by Keccak-256 via
-//! the Fiat-Shamir challenger). Informally: if a prover produces a proof that the
-//! verifier accepts, then with overwhelming probability the claimed computation is
-//! correct.
+//! The protocol is sound in the random oracle model, instantiated by the
+//! configuration's Fiat-Shamir challenger (Keccak-256 in the reference config).
+//! Informally: if a prover produces a proof that the verifier accepts, then with
+//! overwhelming probability the claimed computation is correct.
 //!
 //! We use the following notation throughout:
-//! - |F_ext| ≈ 2^128 — size of the extension field (GoldilocksBinomialExtension<2>)
+//! - |F_ext| — size of the challenge (extension) field. All Schwartz-Zippel
+//!   terms below scale with 1/|F_ext|, so the configuration must pick an
+//!   extension large enough for the target security level: the reference
+//!   config's degree-2 Goldilocks extension gives |F_ext| ≈ 2^128; a degree-4
+//!   BabyBear extension gives ≈ 2^124; a degree-2 BabyBear extension (≈ 2^62)
+//!   would be far too small.
 //! - ρ = 2^(-log_blowup) — FRI rate parameter (inverse of the blowup factor)
 //! - n — number of FRI queries (`num_queries`)
 //! - k — number of AIR constraints (after lookup expansion)
@@ -67,7 +72,7 @@
 //! k - 1 in α. By the Schwartz-Zippel lemma, if any individual constraint C_i is
 //! nonzero, the folded sum is nonzero with probability at least
 //! **1 - (k - 1) / |F_ext|**, which is negligible for practical constraint counts
-//! since |F_ext| ≈ 2^128.
+//! when |F_ext| is around 2^128.
 //!
 //! ## Out-of-domain evaluation (ζ)
 //!
@@ -93,8 +98,9 @@
 //!
 //! ## Fiat-Shamir (random oracle model)
 //!
-//! All challenges (α, ζ, β, γ) are derived from the transcript via Keccak-256.
-//! Security relies on Keccak-256 behaving as a random oracle. The ordering of
+//! All challenges (α, ζ, β, γ) are derived from the transcript via the
+//! configuration's challenger. Security relies on the underlying hash behaving
+//! as a random oracle. The ordering of
 //! observations is critical: in particular, claims must be observed *before* lookup
 //! challenges are sampled, otherwise the prover could choose claims adaptively to
 //! make the accumulator balance.
@@ -108,8 +114,9 @@
 //! ```
 //!
 //! where ε_FRI is the FRI soundness error (see above for the conjectured vs proven
-//! regimes). The second term is negligible for any practical parameters since
-//! |F_ext| ≈ 2^128, so **FRI dominates**. With `log_blowup = 1` and
+//! regimes). With a sufficiently large challenge field (|F_ext| ≈ 2^128) the
+//! second term is negligible for any practical parameters, so **FRI dominates**.
+//! With `log_blowup = 1` and
 //! `num_queries = 100`, the protocol provides approximately 100 bits of conjectured
 //! security (≈ 50 bits proven) from FRI alone, plus additional grinding cost from
 //! PoW.

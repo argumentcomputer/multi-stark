@@ -12,10 +12,17 @@ lookup arguments for shared state.
 - **Lookup arguments** — push/pull interactions of arbitrary length between
   circuits, enforced via accumulator-based multiset checks
 - **Preprocessed tables** — commit to fixed tables once, reuse across proofs
+- **Generic over field, hash, and PCS** — the protocol is parameterized by a
+  `StarkGenericConfig` (base field via the PCS, challenge field, challenger);
+  a batteries-included Goldilocks/Keccak instantiation is provided
 - **Serialization** — `Proof::to_bytes` / `Proof::from_bytes` via bincode
 - **Parallel proving** — opt-in via the `parallel` feature flag
 
-## Cryptographic setup
+## Reference configuration
+
+The protocol (`system`, `prover`, `verifier` modules) is generic over
+[`StarkGenericConfig`](src/config.rs). The crate ships one production
+configuration, `GoldilocksKeccakConfig` in [`types`](src/types.rs):
 
 | Component | Choice                                        |
 |-----------|-----------------------------------------------|
@@ -23,6 +30,12 @@ lookup arguments for shared state.
 | Extension | Degree-2 binomial extension (~2^128 elements) |
 | Hash      | Keccak-256                                    |
 | PCS       | FRI over Merkle trees                         |
+
+A second instantiation (BabyBear field, degree-4 extension, Poseidon2
+hashing) lives in the test suite to keep the protocol honest about its
+genericity. When writing your own configuration, pick a challenge field
+large enough for the target security level — the Schwartz-Zippel terms of
+the soundness error scale with 1/|challenge field|.
 
 Security level is configurable via `FriParameters`. With `log_blowup = 1` and
 `num_queries = 100`, FRI provides ~2^(-100) *conjectured* soundness error
