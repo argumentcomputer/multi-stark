@@ -115,12 +115,31 @@ pub struct SystemWitness {
 }
 
 impl SystemWitness {
+    /// Builds the witness from the stage 1 traces, computing the concrete
+    /// lookup values for each row of each circuit.
+    ///
+    /// # Panics
+    /// Panics if the number of traces differs from the number of circuits, or
+    /// if a circuit with a preprocessed trace receives a main trace of a
+    /// different height (both traces are opened on the same domain, so their
+    /// heights must match; the rows would otherwise be silently truncated).
     pub fn from_stage_1<A>(traces: Vec<RowMajorMatrix<Val>>, system: &System<A>) -> Self {
+        assert_eq!(
+            traces.len(),
+            system.circuits.len(),
+            "expected one trace per circuit"
+        );
         let lookups = traces
             .iter()
             .zip(system.circuits.iter())
-            .map(|(trace, circuit)| {
+            .enumerate()
+            .map(|(circuit_idx, (trace, circuit))| {
                 if let Some(preprocessed) = &circuit.air.preprocessed {
+                    assert_eq!(
+                        trace.height(),
+                        preprocessed.height(),
+                        "circuit {circuit_idx}: main trace height must equal preprocessed trace height"
+                    );
                     trace
                         .row_slices()
                         .zip(preprocessed.row_slices())
@@ -181,5 +200,48 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> Circuit<A> {
             stage_2_width,
         };
         (circuit, preprocessed_trace)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p3_air::AirBuilder;
+
+    /// A trivial AIR with a preprocessed trace of 4 rows and no constraints.
+    struct Preprocessed;
+
+    impl<F: p3_field::Field> BaseAir<F> for Preprocessed {
+        fn width(&self) -> usize {
+            1
+        }
+
+        fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
+            Some(RowMajorMatrix::new(vec![F::ZERO; 4], 1))
+        }
+    }
+
+    impl<AB: AirBuilder> Air<AB> for Preprocessed
+    where
+        AB::F: p3_field::Field,
+    {
+        fn eval(&self, _builder: &mut AB) {}
+    }
+
+    #[test]
+    #[should_panic(expected = "preprocessed trace height")]
+    fn mismatched_preprocessed_height_panics() {
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        };
+        let (system, _key) = System::new(
+            commitment_parameters,
+            [LookupAir::new(Preprocessed, vec![])],
+        );
+        // The main trace has 8 rows but the preprocessed trace has 4. This
+        // must panic instead of silently truncating the lookup rows.
+        let trace = RowMajorMatrix::new(vec![Val::ZERO; 8], 1);
+        SystemWitness::from_stage_1(vec![trace], &system);
     }
 }
