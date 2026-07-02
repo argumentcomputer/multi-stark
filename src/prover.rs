@@ -222,7 +222,7 @@ impl Proof {
     }
 }
 
-impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
+impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> System<A> {
     /// Generates a STARK proof for the system with a single claim.
     ///
     /// This is a convenience wrapper around [`Self::prove_multiple_claims`].
@@ -508,7 +508,7 @@ fn quotient_values<A>(
     constraint_count: usize,
 ) -> Vec<ExtVal>
 where
-    A: for<'a> Air<ProverConstraintFolder<'a>>,
+    A: for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>,
 {
     let quotient_size = quotient_domain.size();
     let stage_1_width = stage_1_on_quotient_domain.width();
@@ -611,7 +611,7 @@ fn quotient_values_inner<A>(
     i_start: usize,
 ) -> impl Iterator<Item = BinomialExtensionField<Val, 2>>
 where
-    A: for<'a> Air<ProverConstraintFolder<'a>>,
+    A: for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>,
 {
     let i_range = i_start..i_start + PackedVal::WIDTH;
 

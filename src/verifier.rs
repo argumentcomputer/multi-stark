@@ -156,7 +156,7 @@ pub enum VerificationError<PcsErr> {
     UnbalancedChannel,
 }
 
-impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
+impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> System<A> {
     /// Verifies a STARK proof against a single claim.
     ///
     /// Returns `Ok(())` if the proof is valid, or a [`VerificationError`] describing

@@ -2,7 +2,8 @@ use crate::{
     builder::symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
     lookup::{LOOKUP_PUBLIC_SIZE, Lookup, LookupAir},
     types::{
-        Challenger, Commitment, CommitmentParameters, Committer, FriParameters, ProverData, Val,
+        Challenger, Commitment, CommitmentParameters, Committer, ExtVal, FriParameters, ProverData,
+        Val,
     },
 };
 use p3_air::{Air, BaseAir};
@@ -28,7 +29,7 @@ pub struct ProverKey {
     pub preprocessed_data: Option<ProverData>,
 }
 
-impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> System<A> {
+impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val, ExtVal>>> System<A> {
     #[inline]
     pub fn new(
         commitment_parameters: CommitmentParameters,
@@ -181,7 +182,7 @@ impl SystemWitness {
     }
 }
 
-impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> Circuit<A> {
+impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val, ExtVal>>> Circuit<A> {
     pub fn from_air(air: LookupAir<A>) -> (Self, Option<RowMajorMatrix<Val>>) {
         // as of now, we assume no public values apart from the lookup values
         let io_size = 0;
@@ -190,7 +191,7 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> Circuit<A> {
         let preprocessed_trace = air.preprocessed_trace();
         let preprocessed_height = preprocessed_trace.as_ref().map_or(0, |mat| mat.height());
         let preprocessed_width = preprocessed_trace.as_ref().map_or(0, |mat| mat.width());
-        let symbolic_constraints = get_symbolic_constraints(
+        let symbolic_constraints = get_symbolic_constraints::<Val, ExtVal, _>(
             &air,
             preprocessed_width,
             stage_1_width,
