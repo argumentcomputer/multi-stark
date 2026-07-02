@@ -11,7 +11,7 @@
 
 use multi_stark::lookup::LookupAir;
 use multi_stark::system::{System, SystemWitness};
-use multi_stark::types::{CommitmentParameters, FriParameters, Val};
+use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val};
 use multi_stark::{
     p3_air::{Air, AirBuilder, BaseAir, WindowAccess},
     p3_field::PrimeCharacteristicRing,
@@ -44,14 +44,23 @@ where
 }
 
 fn main() {
-    let commitment_parameters = CommitmentParameters {
-        log_blowup: 1,
-        cap_height: 0,
-    };
+    let config = GoldilocksKeccakConfig::new(
+        CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        },
+        FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 64,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        },
+    );
 
     // Wrap the AIR with empty lookups
     let air = LookupAir::new(PythagoreanAir, vec![]);
-    let (system, key) = System::new(commitment_parameters, [air]);
+    let (system, key) = System::new(config, [air]);
 
     // Build a trace with 4 rows of Pythagorean triples
     let f = Val::from_u32;
@@ -74,22 +83,12 @@ fn main() {
     );
     let witness = SystemWitness::from_stage_1(vec![trace], &system);
 
-    let fri_parameters = FriParameters {
-        log_final_poly_len: 0,
-        max_log_arity: 1,
-        num_queries: 64,
-        commit_proof_of_work_bits: 0,
-        query_proof_of_work_bits: 0,
-    };
-
     // Prove
     let no_claims = &[];
-    let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
+    let proof = system.prove_multiple_claims(&key, no_claims, witness);
 
     // Verify
-    system
-        .verify_multiple_claims(fri_parameters, no_claims, &proof)
-        .unwrap();
+    system.verify_multiple_claims(no_claims, &proof).unwrap();
     println!("Proof verified successfully!");
 
     // Show proof size

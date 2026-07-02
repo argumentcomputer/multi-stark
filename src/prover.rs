@@ -154,11 +154,12 @@ use std::ops::Deref;
 
 use crate::{
     builder::folder::ProverConstraintFolder,
+    config::StarkGenericConfig,
     lookup::{Lookup, fingerprint},
     system::{ProverKey, System, SystemWitness},
     types::{
-        Challenger, Commitment, Domain, EvaluationsOnDomain, ExtVal, FriParameters, PackedExtVal,
-        PackedVal, Pcs, PcsProof, StarkConfig, Val,
+        Challenger, Commitment, Domain, EvaluationsOnDomain, ExtVal, PackedExtVal, PackedVal, Pcs,
+        PcsProof, Val,
     },
 };
 use bincode::{
@@ -226,14 +227,8 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
     /// Generates a STARK proof for the system with a single claim.
     ///
     /// This is a convenience wrapper around [`Self::prove_multiple_claims`].
-    pub fn prove(
-        &self,
-        fri_parameters: FriParameters,
-        key: &ProverKey,
-        claim: &[Val],
-        witness: SystemWitness,
-    ) -> Proof {
-        self.prove_multiple_claims(fri_parameters, key, &[claim], witness)
+    pub fn prove(&self, key: &ProverKey, claim: &[Val], witness: SystemWitness) -> Proof {
+        self.prove_multiple_claims(key, &[claim], witness)
     }
 
     /// Generates a STARK proof for the system with multiple claims.
@@ -243,18 +238,17 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
     #[tracing::instrument(level = "info", skip_all, name = "stark/prove")]
     pub fn prove_multiple_claims(
         &self,
-        fri_parameters: FriParameters,
         key: &ProverKey,
         claims: &[&[Val]],
         witness: SystemWitness,
     ) -> Proof {
         // initialize pcs and challenger
-        let config = StarkConfig::new(self.commitment_parameters, fri_parameters);
-        let pcs = config.pcs();
-        let mut challenger = config.initialise_challenger();
+        let pcs = self.config.pcs();
+        let mut challenger = self.config.initialise_challenger();
 
-        // bind the protocol parameters and system shape into the transcript
-        self.observe_shape(&fri_parameters, &mut challenger);
+        // Bind the system shape into the transcript. The protocol parameters
+        // are already bound via the challenger seed.
+        self.observe_shape(&mut challenger);
 
         // Cost: "Stage 1 commit" — coset LDE (FFT) of each trace from n_i to
         // n_i·B rows, then Merkle tree. FFT work: Σ w_i · n_i · B · log₂(n_i·B).
@@ -453,7 +447,9 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
                 pcs,
                 1 << log_degree,
             );
-            let zeta_next = zeta * trace_domain.subgroup_generator();
+            let zeta_next = trace_domain
+                .next_point(zeta)
+                .expect("domain has no next point");
             round1_openings.push(vec![zeta, zeta_next]);
             round2_openings.push(vec![zeta, zeta_next]);
             round3_openings.extend(vec![vec![zeta]; quotient_degree]);

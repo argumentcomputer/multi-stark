@@ -1,20 +1,19 @@
 use crate::{
     builder::symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
+    config::StarkGenericConfig,
     lookup::{LOOKUP_PUBLIC_SIZE, Lookup, LookupAir},
-    types::{
-        Challenger, Commitment, CommitmentParameters, Committer, ExtVal, FriParameters, ProverData,
-        Val,
-    },
+    types::{Challenger, Commitment, ExtVal, GoldilocksKeccakConfig, Pcs, ProverData, Val},
 };
 use p3_air::{Air, BaseAir};
 use p3_challenger::CanObserve;
+use p3_commit::Pcs as PcsTrait;
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 /// A multi-circuit STARK system. Contains all circuits together with their
-/// shared preprocessed commitment and commitment parameters.
+/// shared preprocessed commitment and the protocol configuration.
 pub struct System<A> {
-    pub commitment_parameters: CommitmentParameters,
+    pub config: GoldilocksKeccakConfig,
     pub circuits: Vec<Circuit<A>>,
     /// Commitment to all preprocessed traces (if any circuit has one).
     pub preprocessed_commit: Option<Commitment>,
@@ -32,10 +31,10 @@ pub struct ProverKey {
 impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val, ExtVal>>> System<A> {
     #[inline]
     pub fn new(
-        commitment_parameters: CommitmentParameters,
+        config: GoldilocksKeccakConfig,
         airs: impl IntoIterator<Item = LookupAir<A, Val>>,
     ) -> (Self, ProverKey) {
-        let committer = Committer::new(commitment_parameters);
+        let pcs = config.pcs();
         let mut circuits = vec![];
         let mut preprocessed_traces = vec![];
         let mut preprocessed_indices = vec![];
@@ -44,20 +43,24 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val, ExtVal>>> System<A> {
             circuits.push(circuit);
             if let Some(preprocessed_trace) = maybe_preprocessed_trace {
                 preprocessed_indices.push(Some(preprocessed_traces.len()));
-                let domain = committer.natural_domain_for_degree(preprocessed_trace.height());
+                let domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
+                    pcs,
+                    preprocessed_trace.height(),
+                );
                 preprocessed_traces.push((domain, preprocessed_trace));
             } else {
                 preprocessed_indices.push(None);
             }
         }
         let (preprocessed_commit, preprocessed_data) = if !preprocessed_traces.is_empty() {
-            let (commit, data) = committer.commit(preprocessed_traces);
+            let (commit, data) =
+                <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, preprocessed_traces);
             (Some(commit), Some(data))
         } else {
             (None, None)
         };
         let system = Self {
-            commitment_parameters,
+            config,
             circuits,
             preprocessed_commit,
             preprocessed_indices,
@@ -68,19 +71,14 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val, ExtVal>>> System<A> {
 }
 
 impl<A> System<A> {
-    /// Binds the protocol parameters and the system shape into the Fiat-Shamir
-    /// transcript. The prover and the verifier must call this identically,
-    /// before observing any commitment, so that transcripts of systems with
-    /// different parameters or circuit shapes never collide.
-    pub fn observe_shape(&self, fri_parameters: &FriParameters, challenger: &mut Challenger) {
+    /// Binds the system shape into the Fiat-Shamir transcript. The prover and
+    /// the verifier must call this identically, before observing any
+    /// commitment, so that transcripts of systems with different circuit
+    /// shapes never collide. The protocol parameters are bound separately,
+    /// via the challenger seed (see
+    /// [`StarkGenericConfig::initialise_challenger`]).
+    pub fn observe_shape(&self, challenger: &mut Challenger) {
         let mut observe_usize = |x: usize| challenger.observe(Val::from_usize(x));
-        observe_usize(self.commitment_parameters.log_blowup);
-        observe_usize(self.commitment_parameters.cap_height);
-        observe_usize(fri_parameters.log_final_poly_len);
-        observe_usize(fri_parameters.max_log_arity);
-        observe_usize(fri_parameters.num_queries);
-        observe_usize(fri_parameters.commit_proof_of_work_bits);
-        observe_usize(fri_parameters.query_proof_of_work_bits);
         observe_usize(self.circuits.len());
         for circuit in &self.circuits {
             observe_usize(circuit.constraint_count);
@@ -217,6 +215,7 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val, ExtVal>>> Circuit<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{CommitmentParameters, FriParameters};
     use p3_air::AirBuilder;
 
     /// A trivial AIR with a preprocessed trace of 4 rows and no constraints.
@@ -246,10 +245,15 @@ mod tests {
             log_blowup: 1,
             cap_height: 0,
         };
-        let (system, _key) = System::new(
-            commitment_parameters,
-            [LookupAir::new(Preprocessed, vec![])],
-        );
+        let fri_parameters = FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 64,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        };
+        let config = GoldilocksKeccakConfig::new(commitment_parameters, fri_parameters);
+        let (system, _key) = System::new(config, [LookupAir::new(Preprocessed, vec![])]);
         // The main trace has 8 rows but the preprocessed trace has 4. This
         // must panic instead of silently truncating the lookup rows.
         let trace = RowMajorMatrix::new(vec![Val::ZERO; 8], 1);

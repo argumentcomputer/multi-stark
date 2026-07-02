@@ -4,7 +4,7 @@ mod tests {
     use crate::lookup::{Lookup, LookupAir};
     use crate::system::{System, SystemWitness};
     use crate::test_circuits::SymbExpr;
-    use crate::types::{CommitmentParameters, FriParameters, Val};
+    use crate::types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val};
     use p3_air::{Air, AirBuilder, BaseAir};
     use p3_field::{Field, PrimeCharacteristicRing};
     use p3_matrix::dense::RowMajorMatrix;
@@ -123,12 +123,21 @@ mod tests {
 
     #[test]
     fn byte_test() {
-        let commitment_parameters = CommitmentParameters {
-            log_blowup: 1,
-            cap_height: 0,
-        };
+        let config = GoldilocksKeccakConfig::new(
+            CommitmentParameters {
+                log_blowup: 1,
+                cap_height: 0,
+            },
+            FriParameters {
+                log_final_poly_len: 0,
+                max_log_arity: 1,
+                num_queries: 64,
+                commit_proof_of_work_bits: 0,
+                query_proof_of_work_bits: 0,
+            },
+        );
         let circuit = LookupAir::new(ByteCS {}, ByteCS {}.lookups());
-        let (system, key) = System::new(commitment_parameters, vec![circuit]);
+        let (system, key) = System::new(config, vec![circuit]);
         let calls = ByteCalls {
             calls: vec![
                 (ByteOperation::Xor, 10, 5),
@@ -144,16 +153,7 @@ mod tests {
         let claim3 = &[f(2), f(100), f(40), f(100 | 40)];
         let claim4 = &[f(3), f(200), f(100)];
         let claims: &[&[Val]] = &[claim1, claim2, claim3, claim4];
-        let fri_parameters = FriParameters {
-            log_final_poly_len: 0,
-            max_log_arity: 1,
-            num_queries: 64,
-            commit_proof_of_work_bits: 0,
-            query_proof_of_work_bits: 0,
-        };
-        let proof = system.prove_multiple_claims(fri_parameters, &key, claims, witness);
-        system
-            .verify_multiple_claims(fri_parameters, claims, &proof)
-            .unwrap();
+        let proof = system.prove_multiple_claims(&key, claims, witness);
+        system.verify_multiple_claims(claims, &proof).unwrap();
     }
 }

@@ -290,7 +290,7 @@ mod tests {
     use crate::{
         builder::symbolic::var,
         system::{ProverKey, System, SystemWitness},
-        types::{CommitmentParameters, FriParameters, Val},
+        types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val},
     };
 
     use super::*;
@@ -371,10 +371,24 @@ mod tests {
                 .assert_one(input * input_inverse);
         }
     }
-    fn system(commitment_parameters: CommitmentParameters) -> (System<CS>, ProverKey) {
+    const COMMITMENT_PARAMETERS: CommitmentParameters = CommitmentParameters {
+        log_blowup: 1,
+        cap_height: 0,
+    };
+
+    const FRI_PARAMETERS: FriParameters = FriParameters {
+        log_final_poly_len: 0,
+        max_log_arity: 1,
+        num_queries: 64,
+        commit_proof_of_work_bits: 0,
+        query_proof_of_work_bits: 0,
+    };
+
+    fn system() -> (System<CS>, ProverKey) {
+        let config = GoldilocksKeccakConfig::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
         let even = LookupAir::new(CS::Even, CS::Even.lookups());
         let odd = LookupAir::new(CS::Odd, CS::Odd.lookups());
-        System::new(commitment_parameters, [even, odd])
+        System::new(config, [even, odd])
     }
 
     fn witness(system: &System<CS>) -> SystemWitness {
@@ -414,44 +428,28 @@ mod tests {
         witness
     }
 
-    const FRI_PARAMETERS: FriParameters = FriParameters {
-        log_final_poly_len: 0,
-        max_log_arity: 1,
-        num_queries: 64,
-        commit_proof_of_work_bits: 0,
-        query_proof_of_work_bits: 0,
-    };
-
     #[test]
     fn lookup_test() {
-        let commitment_parameters = CommitmentParameters {
-            log_blowup: 1,
-            cap_height: 0,
-        };
-        let (system, key) = system(commitment_parameters);
+        let (system, key) = system();
         let witness = witness(&system);
         let f = Val::from_u32;
         let claim = &[f(0), f(4), f(1)];
-        let proof = system.prove(FRI_PARAMETERS, &key, claim, witness);
-        system.verify(FRI_PARAMETERS, claim, &proof).unwrap();
+        let proof = system.prove(&key, claim, witness);
+        system.verify(claim, &proof).unwrap();
     }
 
     #[test]
     fn test_claim_split_rejected() {
-        let commitment_parameters = CommitmentParameters {
-            log_blowup: 1,
-            cap_height: 0,
-        };
-        let (system, key) = system(commitment_parameters);
+        let (system, key) = system();
         let witness = witness(&system);
         let f = Val::from_u32;
         // Prove a single claim, then attempt to verify with the same values
         // regrouped into two claims. The transcript is length-prefixed, so the
         // regrouped claims must yield different challenges and fail.
         let claim = &[f(0), f(4), f(1)];
-        let proof = system.prove(FRI_PARAMETERS, &key, claim, witness);
+        let proof = system.prove(&key, claim, witness);
         let split_claims: &[&[Val]] = &[&[f(0), f(4)], &[f(1)]];
-        let result = system.verify_multiple_claims(FRI_PARAMETERS, split_claims, &proof);
+        let result = system.verify_multiple_claims(split_claims, &proof);
         assert!(result.is_err());
     }
 }

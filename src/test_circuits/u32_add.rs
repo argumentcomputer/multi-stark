@@ -9,7 +9,7 @@ mod tests {
         builder::symbolic::{preprocessed_var, var},
         lookup::{Lookup, LookupAir},
         system::{ProverKey, System, SystemWitness},
-        types::{CommitmentParameters, FriParameters, Val},
+        types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val},
     };
 
     enum U32CS {
@@ -125,10 +125,10 @@ mod tests {
         }
     }
 
-    fn byte_system(commitment_parameters: CommitmentParameters) -> (System<U32CS>, ProverKey) {
+    fn byte_system(config: GoldilocksKeccakConfig) -> (System<U32CS>, ProverKey) {
         let byte_table = LookupAir::new(U32CS::ByteTable, U32CS::ByteTable.lookups());
         let u32_add = LookupAir::new(U32CS::U32Add, U32CS::U32Add.lookups());
-        System::new(commitment_parameters, [byte_table, u32_add])
+        System::new(config, [byte_table, u32_add])
     }
 
     struct AddCalls {
@@ -187,11 +187,20 @@ mod tests {
 
     #[test]
     fn u32_add_proof() {
-        let commitment_parameters = CommitmentParameters {
-            log_blowup: 1,
-            cap_height: 0,
-        };
-        let (system, key) = byte_system(commitment_parameters);
+        let config = GoldilocksKeccakConfig::new(
+            CommitmentParameters {
+                log_blowup: 1,
+                cap_height: 0,
+            },
+            FriParameters {
+                log_final_poly_len: 0,
+                max_log_arity: 1,
+                num_queries: 64,
+                commit_proof_of_work_bits: 0,
+                query_proof_of_work_bits: 0,
+            },
+        );
+        let (system, key) = byte_system(config);
         let calls = AddCalls {
             calls: vec![(10, 5), (30, 20), (100, 100), (8000, 10000)],
         };
@@ -202,16 +211,7 @@ mod tests {
         let claim3 = &[f(1), f(100), f(100), f(200)];
         let claim4 = &[f(1), f(8000), f(10000), f(18000)];
         let claims: &[&[Val]] = &[claim1, claim2, claim3, claim4];
-        let fri_parameters = FriParameters {
-            log_final_poly_len: 0,
-            max_log_arity: 1,
-            num_queries: 64,
-            commit_proof_of_work_bits: 0,
-            query_proof_of_work_bits: 0,
-        };
-        let proof = system.prove_multiple_claims(fri_parameters, &key, claims, witness);
-        system
-            .verify_multiple_claims(fri_parameters, claims, &proof)
-            .unwrap();
+        let proof = system.prove_multiple_claims(&key, claims, witness);
+        system.verify_multiple_claims(claims, &proof).unwrap();
     }
 }

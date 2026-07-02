@@ -123,16 +123,17 @@
 
 use crate::{
     builder::folder::VerifierConstraintFolder,
+    config::StarkGenericConfig,
     ensure, ensure_eq,
     lookup::fingerprint,
     prover::Proof,
     system::System,
-    types::{Challenger, ExtVal, FriParameters, Pcs, PcsError, StarkConfig, Val},
+    types::{Challenger, ExtVal, Pcs, PcsError, Val},
 };
 use p3_air::{Air, BaseAir, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs as PcsTrait, PolynomialSpace};
-use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing, TwoAdicField};
+use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 use p3_util::log2_strict_usize;
 
@@ -161,19 +162,13 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
     ///
     /// Returns `Ok(())` if the proof is valid, or a [`VerificationError`] describing
     /// the first check that failed.
-    pub fn verify(
-        &self,
-        fri_parameters: FriParameters,
-        claim: &[Val],
-        proof: &Proof,
-    ) -> Result<(), VerificationError<PcsError>> {
-        self.verify_multiple_claims(fri_parameters, &[claim], proof)
+    pub fn verify(&self, claim: &[Val], proof: &Proof) -> Result<(), VerificationError<PcsError>> {
+        self.verify_multiple_claims(&[claim], proof)
     }
 
     /// Verifies a STARK proof against multiple claims.
     pub fn verify_multiple_claims(
         &self,
-        fri_parameters: FriParameters,
         claims: &[&[Val]],
         proof: &Proof,
     ) -> Result<(), VerificationError<PcsError>> {
@@ -206,12 +201,12 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
         // replays exactly the same observations as the prover, so any divergence
         // (e.g. different commitments) produces different challenges, making it
         // infeasible for a cheating prover to predict them.
-        let config = StarkConfig::new(self.commitment_parameters, fri_parameters);
-        let pcs = config.pcs();
-        let mut challenger = config.initialise_challenger();
+        let pcs = self.config.pcs();
+        let mut challenger = self.config.initialise_challenger();
 
-        // bind the protocol parameters and system shape into the transcript
-        self.observe_shape(&fri_parameters, &mut challenger);
+        // Bind the system shape into the transcript. The protocol parameters
+        // are already bound via the challenger seed.
+        self.observe_shape(&mut challenger);
 
         // observe preprocessed and stage_1 commitment
         if let Some(commit) = &self.preprocessed_commit {
@@ -298,7 +293,9 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
                     )
                 })
                 .collect::<Vec<_>>();
-            let zeta_next = zeta * trace_domain.subgroup_generator();
+            let zeta_next = trace_domain
+                .next_point(zeta)
+                .ok_or(VerificationError::InvalidProofShape)?;
             if let Some(i) = self.preprocessed_indices[i] {
                 let preprocessed_opened_values = preprocessed_opened_values.as_ref().unwrap();
                 preprocessed_trace_evaluations.push((
@@ -559,15 +556,13 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
         let mut quotient_degrees = vec![];
         for (circuit, log_degree) in self.circuits.iter().zip(log_degrees) {
             let quotient_degree = circuit.quotient_degree();
-            // The claimed log degree must be small enough that the blown-up
-            // quotient domain still fits within the two-adic subgroup of the
-            // field. This also guards the `1 << log_degree` shifts used during
-            // verification against overflow on adversarial proofs.
+            // The claimed log degree must be small enough that the quotient
+            // domain can still be committed and opened by the PCS. This also
+            // guards the `1 << log_degree` shifts used during verification
+            // against overflow on adversarial proofs.
             ensure!(
-                usize::from(*log_degree)
-                    + log2_strict_usize(quotient_degree)
-                    + self.commitment_parameters.log_blowup
-                    <= Val::TWO_ADICITY,
+                usize::from(*log_degree) + log2_strict_usize(quotient_degree)
+                    <= self.config.max_log_degree(),
                 VerificationError::InvalidProofShape
             );
             quotient_degrees.push(quotient_degree);
@@ -618,7 +613,7 @@ mod tests {
         lookup::LookupAir,
         prover::Proof,
         system::{ProverKey, SystemWitness},
-        types::{CommitmentParameters, FriParameters},
+        types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig},
     };
     use p3_air::{AirBuilder, BaseAir, WindowAccess};
     use p3_matrix::dense::RowMajorMatrix;
@@ -664,22 +659,29 @@ mod tests {
             }
         }
     }
-    fn system(commitment_parameters: CommitmentParameters) -> (System<CS>, ProverKey) {
+    const COMMITMENT_PARAMETERS: CommitmentParameters = CommitmentParameters {
+        log_blowup: 1,
+        cap_height: 0,
+    };
+
+    const FRI_PARAMETERS: FriParameters = FriParameters {
+        log_final_poly_len: 0,
+        max_log_arity: 1,
+        num_queries: 64,
+        commit_proof_of_work_bits: 0,
+        query_proof_of_work_bits: 0,
+    };
+
+    fn system() -> (System<CS>, ProverKey) {
+        let config = GoldilocksKeccakConfig::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
         let pythagorean_circuit = LookupAir::new(CS::Pythagorean, vec![]);
         let complex_circuit = LookupAir::new(CS::Complex, vec![]);
-        System::new(
-            commitment_parameters,
-            [pythagorean_circuit, complex_circuit],
-        )
+        System::new(config, [pythagorean_circuit, complex_circuit])
     }
 
     #[test]
     fn multi_stark_test() {
-        let commitment_parameters = CommitmentParameters {
-            log_blowup: 1,
-            cap_height: 0,
-        };
-        let (system, key) = system(commitment_parameters);
+        let (system, key) = system();
         let f = Val::from_u32;
         let witness = SystemWitness::from_stage_1(
             vec![
@@ -691,27 +693,14 @@ mod tests {
             ],
             &system,
         );
-        let fri_parameters = FriParameters {
-            log_final_poly_len: 0,
-            max_log_arity: 1,
-            num_queries: 64,
-            commit_proof_of_work_bits: 0,
-            query_proof_of_work_bits: 0,
-        };
         let no_claims = &[];
-        let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
-        system
-            .verify_multiple_claims(fri_parameters, no_claims, &proof)
-            .unwrap();
+        let proof = system.prove_multiple_claims(&key, no_claims, witness);
+        system.verify_multiple_claims(no_claims, &proof).unwrap();
     }
 
     #[test]
     fn multi_stark_prove_verify_serialize() {
-        let commitment_parameters = CommitmentParameters {
-            log_blowup: 1,
-            cap_height: 0,
-        };
-        let (system, key) = system(commitment_parameters);
+        let (system, key) = system();
         let f = Val::from_u32;
         // 2^4 = 16 rows — small enough for fast CI
         let mut pythagorean_trace = [3, 4, 5].map(f).to_vec();
@@ -727,32 +716,19 @@ mod tests {
             ],
             &system,
         );
-        let fri_parameters = FriParameters {
-            log_final_poly_len: 0,
-            max_log_arity: 1,
-            num_queries: 64,
-            commit_proof_of_work_bits: 0,
-            query_proof_of_work_bits: 0,
-        };
         let no_claims = &[];
-        let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
+        let proof = system.prove_multiple_claims(&key, no_claims, witness);
         // Serialization round-trip
         let proof_bytes = proof.to_bytes().expect("Failed to serialize proof");
         let proof2 = Proof::from_bytes(&proof_bytes).expect("Failed to deserialize proof");
-        system
-            .verify_multiple_claims(fri_parameters, no_claims, &proof2)
-            .unwrap();
+        system.verify_multiple_claims(no_claims, &proof2).unwrap();
     }
 
     // -- Negative / adversarial tests --
 
     /// Helper: creates a small system and valid proof for negative tests.
-    fn small_system_and_proof() -> (System<CS>, FriParameters, Proof) {
-        let commitment_parameters = CommitmentParameters {
-            log_blowup: 1,
-            cap_height: 0,
-        };
-        let (system, key) = system(commitment_parameters);
+    fn small_system_and_proof() -> (System<CS>, Proof) {
+        let (system, key) = system();
         let f = Val::from_u32;
         let witness = SystemWitness::from_stage_1(
             vec![
@@ -764,88 +740,79 @@ mod tests {
             ],
             &system,
         );
-        let fri_parameters = FriParameters {
-            log_final_poly_len: 0,
-            max_log_arity: 1,
-            num_queries: 64,
-            commit_proof_of_work_bits: 0,
-            query_proof_of_work_bits: 0,
-        };
         let no_claims = &[];
-        let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
-        (system, fri_parameters, proof)
+        let proof = system.prove_multiple_claims(&key, no_claims, witness);
+        (system, proof)
     }
 
     #[test]
     fn test_wrong_claim_rejected() {
-        let (system, fri_parameters, proof) = small_system_and_proof();
+        let (system, proof) = small_system_and_proof();
         let f = Val::from_u32;
         // Verify with a bogus claim — the prover used no claims, so any claim should fail.
-        let result = system.verify(fri_parameters, &[f(42)], &proof);
+        let result = system.verify(&[f(42)], &proof);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_tampered_stage_1_values_rejected() {
-        let (system, fri_parameters, mut proof) = small_system_and_proof();
+        let (system, mut proof) = small_system_and_proof();
         // Mutate a value in the stage 1 opened values — FRI should catch this.
         proof.stage_1_opened_values[0][0][0] += ExtVal::ONE;
         let no_claims: &[&[Val]] = &[];
-        let result = system.verify_multiple_claims(fri_parameters, no_claims, &proof);
+        let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_tampered_accumulator_rejected() {
-        let (system, fri_parameters, mut proof) = small_system_and_proof();
+        let (system, mut proof) = small_system_and_proof();
         // Set the last intermediate accumulator to non-zero.
         let last = proof.intermediate_accumulators.len() - 1;
         proof.intermediate_accumulators[last] = ExtVal::ONE;
         let no_claims: &[&[Val]] = &[];
-        let result = system.verify_multiple_claims(fri_parameters, no_claims, &proof);
+        let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_truncated_log_degrees_rejected() {
-        let (system, fri_parameters, mut proof) = small_system_and_proof();
+        let (system, mut proof) = small_system_and_proof();
         // Remove a log degree — the shape check must reject this instead of
         // the verifier panicking on an out-of-bounds index.
         proof.log_degrees.pop();
         let no_claims: &[&[Val]] = &[];
-        let result = system.verify_multiple_claims(fri_parameters, no_claims, &proof);
+        let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_oversized_log_degree_rejected() {
-        let (system, fri_parameters, mut proof) = small_system_and_proof();
+        let (system, mut proof) = small_system_and_proof();
         // A log degree beyond the field's two-adicity must be rejected instead
         // of causing a shift overflow or a panic inside the PCS.
         proof.log_degrees[0] = 200;
         let no_claims: &[&[Val]] = &[];
-        let result = system.verify_multiple_claims(fri_parameters, no_claims, &proof);
+        let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_truncated_proof_rejected() {
-        let (system, fri_parameters, mut proof) = small_system_and_proof();
+        let (system, mut proof) = small_system_and_proof();
         // Remove a quotient opened value — shape check should fail.
         proof.quotient_opened_values.pop();
         let no_claims: &[&[Val]] = &[];
-        let result = system.verify_multiple_claims(fri_parameters, no_claims, &proof);
+        let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_serialization_round_trip() {
-        let (system, fri_parameters, proof) = small_system_and_proof();
+        let (system, proof) = small_system_and_proof();
         let bytes = proof.to_bytes().expect("serialize");
         let proof2 = Proof::from_bytes(&bytes).expect("deserialize");
         let no_claims: &[&[Val]] = &[];
-        system
-            .verify_multiple_claims(fri_parameters, no_claims, &proof2)
-            .unwrap();
+        system.verify_multiple_claims(no_claims, &proof2).unwrap();
     }
 }
