@@ -33,7 +33,7 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val, ExtVal>>> System<A> {
     #[inline]
     pub fn new(
         commitment_parameters: CommitmentParameters,
-        airs: impl IntoIterator<Item = LookupAir<A>>,
+        airs: impl IntoIterator<Item = LookupAir<A, Val>>,
     ) -> (Self, ProverKey) {
         let committer = Committer::new(commitment_parameters);
         let mut circuits = vec![];
@@ -96,7 +96,7 @@ impl<A> System<A> {
 /// A single circuit within the system, wrapping an AIR together with
 /// precomputed metadata used by the prover and verifier.
 pub struct Circuit<A> {
-    pub air: LookupAir<A>,
+    pub air: LookupAir<A, Val>,
     pub constraint_count: usize,
     pub max_constraint_degree: usize,
     pub preprocessed_height: usize,
@@ -183,7 +183,7 @@ impl SystemWitness {
 }
 
 impl<A: BaseAir<Val> + Air<SymbolicAirBuilder<Val, ExtVal>>> Circuit<A> {
-    pub fn from_air(air: LookupAir<A>) -> (Self, Option<RowMajorMatrix<Val>>) {
+    pub fn from_air(air: LookupAir<A, Val>) -> (Self, Option<RowMajorMatrix<Val>>) {
         // as of now, we assume no public values apart from the lookup values
         let io_size = 0;
         let stage_1_width = air.inner_air.width();
