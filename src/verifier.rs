@@ -40,12 +40,20 @@
 //! ## FRI proximity test
 //!
 //! The FRI-based PCS guarantees that committed polynomials are close to polynomials
-//! of the claimed degree. The exact soundness bound depends on the proximity
-//! parameter, number of folding rounds, and folding arity; a commonly cited
-//! approximation is **ρ^n** (each of the n queries independently catches a cheating
-//! prover with probability ≈ 1 - ρ). With `log_blowup = 1` and `num_queries = 100`,
-//! this gives ≈ 2^(-100). For the precise bound, see the FRI soundness analysis in
-//! the Plonky3 documentation.
+//! of the claimed degree. Two regimes must be distinguished when picking parameters:
+//!
+//! - **Conjectured soundness** (up to list-decoding capacity): each query catches a
+//!   cheating prover with probability ≈ 1 - ρ, giving a query-phase error of ≈ **ρ^n**.
+//!   With `log_blowup = 1` and `num_queries = 100`, this is ≈ 2^(-100).
+//! - **Proven soundness** (Johnson bound): each query only provably catches a
+//!   cheating prover with probability ≈ 1 - √ρ, giving ≈ **(√ρ)^n** — roughly half
+//!   the bits of the conjectured bound. The same parameters provably give only
+//!   ≈ 2^(-50).
+//!
+//! Like most production STARKs, parameters here are typically chosen against the
+//! conjectured bound; be aware of the distinction when quoting a security level.
+//! For the precise bounds, see the FRI soundness analysis in the Plonky3
+//! documentation.
 //!
 //! The proof-of-work (PoW) phases add grinding cost: a cheating prover must perform
 //! 2^(commit_proof_of_work_bits) work per batching challenge and
@@ -99,10 +107,19 @@
 //! ε ≤ ε_FRI + (k - 1 + D + N) / |F_ext|
 //! ```
 //!
-//! where ε_FRI ≈ ρ^n is the FRI soundness error. The second term is negligible
-//! for any practical parameters since |F_ext| ≈ 2^128, so **FRI dominates**. With
-//! `log_blowup = 1` and `num_queries = 100`, the protocol provides approximately
-//! 100 bits of security from FRI alone, plus additional grinding cost from PoW.
+//! where ε_FRI is the FRI soundness error (see above for the conjectured vs proven
+//! regimes). The second term is negligible for any practical parameters since
+//! |F_ext| ≈ 2^128, so **FRI dominates**. With `log_blowup = 1` and
+//! `num_queries = 100`, the protocol provides approximately 100 bits of conjectured
+//! security (≈ 50 bits proven) from FRI alone, plus additional grinding cost from
+//! PoW.
+//!
+//! ## Not zero-knowledge
+//!
+//! This protocol is a succinct argument of knowledge, **not** a zero-knowledge
+//! proof: traces are committed without blinding, and FRI query responses reveal
+//! actual low-degree-extension values of the witness. Do not use it when the
+//! witness must remain hidden from the verifier.
 
 use crate::{
     builder::folder::VerifierConstraintFolder,

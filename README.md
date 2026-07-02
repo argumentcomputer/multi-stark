@@ -25,8 +25,14 @@ lookup arguments for shared state.
 | PCS       | FRI over Merkle trees                         |
 
 Security level is configurable via `FriParameters`. With `log_blowup = 1` and
-`num_queries = 100`, FRI provides ~2^(-100) soundness error. See the
+`num_queries = 100`, FRI provides ~2^(-100) *conjectured* soundness error
+(~2^(-50) under the proven Johnson bound). See the
 [verifier module docs](src/verifier.rs) for the full soundness argument.
+
+> :warning: **Not zero-knowledge.** Proofs are succinct arguments of
+> knowledge, but traces are committed without blinding — FRI query responses
+> reveal witness data. Do not use this when the witness must remain hidden
+> from the verifier.
 
 ## Examples
 
