@@ -127,7 +127,10 @@ impl U32CS {
 // Witness generation
 // ---------------------------------------------------------------------------
 
-fn build_witness(num_adds: usize, system: &System<U32CS>) -> SystemWitness {
+fn build_witness(
+    num_adds: usize,
+    system: &System<GoldilocksKeccakConfig, U32CS>,
+) -> SystemWitness<Val> {
     let byte_width = 1;
     let add_width = 14;
     let add_height = num_adds.next_power_of_two();

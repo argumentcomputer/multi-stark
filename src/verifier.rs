@@ -123,17 +123,16 @@
 
 use crate::{
     builder::folder::VerifierConstraintFolder,
-    config::StarkGenericConfig,
+    config::{PcsError, StarkGenericConfig, Val},
     ensure, ensure_eq,
     lookup::fingerprint,
     prover::Proof,
     system::System,
-    types::{Challenger, ExtVal, Pcs, PcsError, Val},
 };
 use p3_air::{Air, BaseAir, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
-use p3_commit::{Pcs as PcsTrait, PolynomialSpace};
-use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
+use p3_commit::{Pcs, PolynomialSpace};
+use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 use p3_util::log2_strict_usize;
 
@@ -157,21 +156,29 @@ pub enum VerificationError<PcsErr> {
     UnbalancedChannel,
 }
 
-impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> System<A> {
+impl<SC, A> System<SC, A>
+where
+    SC: StarkGenericConfig,
+    A: BaseAir<Val<SC>> + for<'a> Air<VerifierConstraintFolder<'a, Val<SC>, SC::Challenge>>,
+{
     /// Verifies a STARK proof against a single claim.
     ///
     /// Returns `Ok(())` if the proof is valid, or a [`VerificationError`] describing
     /// the first check that failed.
-    pub fn verify(&self, claim: &[Val], proof: &Proof) -> Result<(), VerificationError<PcsError>> {
+    pub fn verify(
+        &self,
+        claim: &[Val<SC>],
+        proof: &Proof<SC>,
+    ) -> Result<(), VerificationError<PcsError<SC>>> {
         self.verify_multiple_claims(&[claim], proof)
     }
 
     /// Verifies a STARK proof against multiple claims.
     pub fn verify_multiple_claims(
         &self,
-        claims: &[&[Val]],
-        proof: &Proof,
-    ) -> Result<(), VerificationError<PcsError>> {
+        claims: &[&[Val<SC>]],
+        proof: &Proof<SC>,
+    ) -> Result<(), VerificationError<PcsError<SC>>> {
         let Proof {
             commitments,
             intermediate_accumulators,
@@ -192,7 +199,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
         // ≤ N / |F_ext| (Schwartz-Zippel on the numerator polynomial).
         ensure_eq!(
             intermediate_accumulators.last(),
-            Some(&ExtVal::ZERO),
+            Some(&SC::Challenge::ZERO),
             VerificationError::UnbalancedChannel
         );
 
@@ -210,13 +217,13 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
 
         // observe preprocessed and stage_1 commitment
         if let Some(commit) = &self.preprocessed_commit {
-            challenger.observe(commit);
+            challenger.observe(commit.clone());
         }
         challenger.observe(commitments.stage_1_trace.clone());
 
         // Observe trace heights to bind the proof to specific domain sizes.
         for log_degree in log_degrees {
-            challenger.observe(Val::from_u8(*log_degree));
+            challenger.observe(Val::<SC>::from_u8(*log_degree));
         }
 
         // Soundness: claims must be observed BEFORE lookup challenges are sampled.
@@ -224,9 +231,9 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
         // challenges, breaking the lookup argument's binding property. The claims
         // are length-prefixed so that distinct claim structures (e.g. [[a, b]]
         // vs [[a], [b]]) yield distinct transcripts.
-        challenger.observe(Val::from_usize(claims.len()));
+        challenger.observe(Val::<SC>::from_usize(claims.len()));
         for claim in claims {
-            challenger.observe(Val::from_usize(claim.len()));
+            challenger.observe(Val::<SC>::from_usize(claim.len()));
             challenger.observe_slice(claim);
         }
 
@@ -234,9 +241,9 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
         // The message m_i = lookup_challenge + fingerprint(fingerprint_challenge, args_i)
         // is an affine function of the challenges, ensuring that distinct argument
         // tuples produce distinct messages with probability ≥ 1 - 1/|F_ext|.
-        let lookup_argument_challenge: ExtVal = challenger.sample_algebra_element();
+        let lookup_argument_challenge: SC::Challenge = challenger.sample_algebra_element();
         challenger.observe_algebra_element(lookup_argument_challenge);
-        let fingerprint_challenge: ExtVal = challenger.sample_algebra_element();
+        let fingerprint_challenge: SC::Challenge = challenger.sample_algebra_element();
         challenger.observe_algebra_element(fingerprint_challenge);
 
         // observe stage_2 commitment
@@ -250,7 +257,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
         }
 
         // construct the accumulator from the claims
-        let mut acc = ExtVal::ZERO;
+        let mut acc = SC::Challenge::ZERO;
         for claim in claims {
             let message = lookup_argument_challenge
                 + fingerprint(&fingerprint_challenge, claim.iter().cloned());
@@ -260,14 +267,14 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
         // Soundness: constraint folding. All k constraints are combined via powers
         // of α. The folded sum has degree k-1 in α, so by Schwartz-Zippel a violated
         // constraint survives folding with probability ≥ 1 - (k-1)/|F_ext|.
-        let constraint_challenge: ExtVal = challenger.sample_algebra_element();
+        let constraint_challenge: SC::Challenge = challenger.sample_algebra_element();
 
         // observe quotient commitment
         challenger.observe(commitments.quotient_chunks.clone());
 
         // Soundness: OOD evaluation. ζ is sampled after all commitments are fixed.
         // A nonzero polynomial of degree ≤ D vanishes at ζ with probability ≤ D/|F_ext|.
-        let zeta: ExtVal = challenger.sample_algebra_element();
+        let zeta: SC::Challenge = challenger.sample_algebra_element();
         let mut preprocessed_trace_evaluations = vec![];
         let mut stage_1_trace_evaluations = vec![];
         let mut stage_2_trace_evaluations = vec![];
@@ -277,21 +284,13 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
             let log_degree = log_degrees[i];
             let quotient_degree = quotient_degrees[i];
             let log_quotient_degree = log2_strict_usize(quotient_degree);
-            let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
-                pcs,
-                1 << log_degree,
-            );
+            let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
             let quotient_domain =
                 trace_domain.create_disjoint_domain((1 << log_degree) << log_quotient_degree);
             let quotient_chunks_domains = quotient_domain.split_domains(quotient_degree);
             let unshifted_quotient_chunks_domains = quotient_chunks_domains
                 .iter()
-                .map(|domain| {
-                    <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
-                        pcs,
-                        domain.size(),
-                    )
-                })
+                .map(|domain| pcs.natural_domain_for_degree(domain.size()))
                 .collect::<Vec<_>>();
             let zeta_next = trace_domain
                 .next_point(zeta)
@@ -371,8 +370,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
             last_quotient_i += quotient_degree;
 
             // compute the composition polynomial evaluation
-            let trace_domain =
-                <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
+            let trace_domain = pcs.natural_domain_for_degree(degree);
             let sels = trace_domain.selectors_at_point(zeta);
             let preprocessed = if let Some(i) = self.preprocessed_indices[i] {
                 let preprocessed_opened_values = preprocessed_opened_values.as_ref().unwrap();
@@ -386,14 +384,14 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
                 RowMajorMatrixView::new_row(stage_1_row),
                 RowMajorMatrixView::new_row(stage_1_next_row),
             );
-            let extension_d = <ExtVal as BasedVectorSpace<Val>>::DIMENSION;
+            let extension_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
             let stage_2_row = &stage_2_row
                 .chunks_exact(extension_d)
-                .map(from_ext_basis)
+                .map(from_ext_basis::<Val<SC>, SC::Challenge>)
                 .collect::<Vec<_>>();
             let stage_2_next_row = &stage_2_next_row
                 .chunks_exact(extension_d)
-                .map(from_ext_basis)
+                .map(from_ext_basis::<Val<SC>, SC::Challenge>)
                 .collect::<Vec<_>>();
             let stage_2 = VerticalPair::new(
                 RowMajorMatrixView::new_row(stage_2_row),
@@ -416,7 +414,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
                 is_last_row: sels.is_last_row,
                 is_transition: sels.is_transition,
                 alpha: constraint_challenge,
-                accumulator: ExtVal::ZERO,
+                accumulator: SC::Challenge::ZERO,
             };
             circuit.air.eval(&mut folder);
             let composition_polynomial = folder.accumulator;
@@ -437,13 +435,13 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
                                     .vanishing_poly_at_point(domain.first_point())
                                     .inverse()
                         })
-                        .product::<ExtVal>()
+                        .product::<SC::Challenge>()
                 })
                 .collect::<Vec<_>>();
             let quotient = quotient_chunks
                 .enumerate()
-                .map(|(ch_i, ch)| zps[ch_i] * from_ext_basis(ch))
-                .sum::<ExtVal>();
+                .map(|(ch_i, ch)| zps[ch_i] * from_ext_basis::<Val<SC>, SC::Challenge>(ch))
+                .sum::<SC::Challenge>();
 
             // Soundness: OOD check. If any constraint is violated on the trace
             // domain, the composition polynomial is not divisible by the vanishing
@@ -466,7 +464,10 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
 
     /// Validates the structural shape of the proof without checking any cryptographic
     /// properties. Returns the quotient degrees per circuit on success.
-    pub fn verify_shape(&self, proof: &Proof) -> Result<Vec<usize>, VerificationError<PcsError>> {
+    pub fn verify_shape(
+        &self,
+        proof: &Proof<SC>,
+    ) -> Result<Vec<usize>, VerificationError<PcsError<SC>>> {
         let Proof {
             intermediate_accumulators,
             log_degrees,
@@ -544,7 +545,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
                     circuit.stage_1_width,
                     VerificationError::InvalidProofShape
                 );
-                let extension_d = <ExtVal as BasedVectorSpace<Val>>::DIMENSION;
+                let extension_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
                 ensure_eq!(
                     stage_2_opened_values[i][j].len(),
                     circuit.stage_2_width * extension_d,
@@ -584,7 +585,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
             );
             ensure_eq!(
                 quotient_opened_values[i][0].len(),
-                <ExtVal as BasedVectorSpace<Val>>::DIMENSION,
+                <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION,
                 VerificationError::InvalidProofShape
             );
         }
@@ -598,11 +599,11 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a, Val, ExtVal>>> S
     }
 }
 
-fn from_ext_basis(coeffs: &[ExtVal]) -> ExtVal {
+fn from_ext_basis<F: Field, EF: ExtensionField<F>>(coeffs: &[EF]) -> EF {
     coeffs
         .iter()
         .enumerate()
-        .map(|(i, c)| *c * <ExtVal as BasedVectorSpace<Val>>::ith_basis_element(i).unwrap())
+        .map(|(i, c)| *c * <EF as BasedVectorSpace<F>>::ith_basis_element(i).unwrap())
         .sum()
 }
 
@@ -613,7 +614,7 @@ mod tests {
         lookup::LookupAir,
         prover::Proof,
         system::{ProverKey, SystemWitness},
-        types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig},
+        types::{CommitmentParameters, ExtVal, FriParameters, GoldilocksKeccakConfig, Val},
     };
     use p3_air::{AirBuilder, BaseAir, WindowAccess};
     use p3_matrix::dense::RowMajorMatrix;
@@ -672,7 +673,10 @@ mod tests {
         query_proof_of_work_bits: 0,
     };
 
-    fn system() -> (System<CS>, ProverKey) {
+    fn system() -> (
+        System<GoldilocksKeccakConfig, CS>,
+        ProverKey<GoldilocksKeccakConfig>,
+    ) {
         let config = GoldilocksKeccakConfig::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
         let pythagorean_circuit = LookupAir::new(CS::Pythagorean, vec![]);
         let complex_circuit = LookupAir::new(CS::Complex, vec![]);
@@ -727,7 +731,10 @@ mod tests {
     // -- Negative / adversarial tests --
 
     /// Helper: creates a small system and valid proof for negative tests.
-    fn small_system_and_proof() -> (System<CS>, Proof) {
+    fn small_system_and_proof() -> (
+        System<GoldilocksKeccakConfig, CS>,
+        Proof<GoldilocksKeccakConfig>,
+    ) {
         let (system, key) = system();
         let f = Val::from_u32;
         let witness = SystemWitness::from_stage_1(

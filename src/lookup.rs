@@ -384,14 +384,17 @@ mod tests {
         query_proof_of_work_bits: 0,
     };
 
-    fn system() -> (System<CS>, ProverKey) {
+    fn system() -> (
+        System<GoldilocksKeccakConfig, CS>,
+        ProverKey<GoldilocksKeccakConfig>,
+    ) {
         let config = GoldilocksKeccakConfig::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
         let even = LookupAir::new(CS::Even, CS::Even.lookups());
         let odd = LookupAir::new(CS::Odd, CS::Odd.lookups());
         System::new(config, [even, odd])
     }
 
-    fn witness(system: &System<CS>) -> SystemWitness {
+    fn witness(system: &System<GoldilocksKeccakConfig, CS>) -> SystemWitness<Val> {
         let f = Val::from_u32;
         #[rustfmt::skip]
         let witness = SystemWitness::from_stage_1(

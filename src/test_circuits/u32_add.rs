@@ -125,7 +125,12 @@ mod tests {
         }
     }
 
-    fn byte_system(config: GoldilocksKeccakConfig) -> (System<U32CS>, ProverKey) {
+    fn byte_system(
+        config: GoldilocksKeccakConfig,
+    ) -> (
+        System<GoldilocksKeccakConfig, U32CS>,
+        ProverKey<GoldilocksKeccakConfig>,
+    ) {
         let byte_table = LookupAir::new(U32CS::ByteTable, U32CS::ByteTable.lookups());
         let u32_add = LookupAir::new(U32CS::U32Add, U32CS::U32Add.lookups());
         System::new(config, [byte_table, u32_add])
@@ -136,7 +141,7 @@ mod tests {
     }
 
     impl AddCalls {
-        fn witness(&self, system: &System<U32CS>) -> SystemWitness {
+        fn witness(&self, system: &System<GoldilocksKeccakConfig, U32CS>) -> SystemWitness<Val> {
             let byte_width = 1;
             let add_width = 14;
             let mut byte_trace = RowMajorMatrix::new(vec![Val::ZERO; byte_width * 256], byte_width);

@@ -107,7 +107,7 @@ mod tests {
     }
 
     impl ByteCalls {
-        fn witness(&self, system: &System<ByteCS>) -> SystemWitness {
+        fn witness(&self, system: &System<GoldilocksKeccakConfig, ByteCS>) -> SystemWitness<Val> {
             let mut byte_trace =
                 RowMajorMatrix::new(vec![Val::ZERO; TRACE_WIDTH * 256 * 256], TRACE_WIDTH);
             for (op, x, y) in self.calls.iter() {

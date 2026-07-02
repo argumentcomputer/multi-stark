@@ -1515,8 +1515,8 @@ mod tests {
     impl Blake3CompressionClaims {
         fn witness(
             &self,
-            system: &System<Blake3CompressionCircuit>,
-        ) -> (Vec<RowMajorMatrix<Val>>, SystemWitness) {
+            system: &System<GoldilocksKeccakConfig, Blake3CompressionCircuit>,
+        ) -> (Vec<RowMajorMatrix<Val>>, SystemWitness<Val>) {
             // Grabbing values from a claims
 
             let mut u32_xor_values_from_claims = vec![];

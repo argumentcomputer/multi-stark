@@ -154,13 +154,12 @@ use std::ops::Deref;
 
 use crate::{
     builder::folder::ProverConstraintFolder,
-    config::StarkGenericConfig,
+    config::{
+        Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsProof, StarkGenericConfig,
+        Val,
+    },
     lookup::{Lookup, fingerprint},
     system::{ProverKey, System, SystemWitness},
-    types::{
-        Challenger, Commitment, Domain, EvaluationsOnDomain, ExtVal, PackedExtVal, PackedVal, Pcs,
-        PcsProof, Val,
-    },
 };
 use bincode::{
     config::{Configuration, Fixint, LittleEndian, standard},
@@ -169,11 +168,8 @@ use bincode::{
 };
 use p3_air::{Air, BaseAir, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
-use p3_commit::{LagrangeSelectors, OpenedValuesForRound, Pcs as PcsTrait, PolynomialSpace};
-use p3_field::{
-    BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing,
-    extension::BinomialExtensionField,
-};
+use p3_commit::{LagrangeSelectors, OpenedValuesForRound, Pcs, PolynomialSpace};
+use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
@@ -181,32 +177,33 @@ use serde::{Deserialize, Serialize};
 
 /// Polynomial commitments included in the proof.
 #[derive(Serialize, Deserialize)]
-pub struct Commitments {
+pub struct Commitments<Com> {
     /// Commitment to the stage 1 (main) execution traces.
-    pub stage_1_trace: Commitment,
+    pub stage_1_trace: Com,
     /// Commitment to the stage 2 (lookup) execution traces.
-    pub stage_2_trace: Commitment,
+    pub stage_2_trace: Com,
     /// Commitment to the quotient polynomial chunks.
-    pub quotient_chunks: Commitment,
+    pub quotient_chunks: Com,
 }
 
 /// A STARK proof for a multi-circuit system.
 #[derive(Serialize, Deserialize)]
-pub struct Proof {
-    pub commitments: Commitments,
+#[serde(bound = "")]
+pub struct Proof<SC: StarkGenericConfig> {
+    pub commitments: Commitments<Com<SC>>,
     /// Per-circuit intermediate accumulator values for the lookup argument.
-    pub intermediate_accumulators: Vec<ExtVal>,
+    pub intermediate_accumulators: Vec<SC::Challenge>,
     /// Log2 of the trace degree for each circuit.
     pub log_degrees: Vec<u8>,
     /// PCS opening proof covering all rounds.
-    pub opening_proof: PcsProof,
-    pub quotient_opened_values: OpenedValuesForRound<ExtVal>,
-    pub preprocessed_opened_values: Option<OpenedValuesForRound<ExtVal>>,
-    pub stage_1_opened_values: OpenedValuesForRound<ExtVal>,
-    pub stage_2_opened_values: OpenedValuesForRound<ExtVal>,
+    pub opening_proof: PcsProof<SC>,
+    pub quotient_opened_values: OpenedValuesForRound<SC::Challenge>,
+    pub preprocessed_opened_values: Option<OpenedValuesForRound<SC::Challenge>>,
+    pub stage_1_opened_values: OpenedValuesForRound<SC::Challenge>,
+    pub stage_2_opened_values: OpenedValuesForRound<SC::Challenge>,
 }
 
-impl Proof {
+impl<SC: StarkGenericConfig> Proof<SC> {
     fn serde_config() -> Configuration<LittleEndian, Fixint> {
         standard().with_little_endian().with_fixed_int_encoding()
     }
@@ -223,11 +220,20 @@ impl Proof {
     }
 }
 
-impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> System<A> {
+impl<SC, A> System<SC, A>
+where
+    SC: StarkGenericConfig,
+    A: BaseAir<Val<SC>> + for<'a> Air<ProverConstraintFolder<'a, Val<SC>, SC::Challenge>>,
+{
     /// Generates a STARK proof for the system with a single claim.
     ///
     /// This is a convenience wrapper around [`Self::prove_multiple_claims`].
-    pub fn prove(&self, key: &ProverKey, claim: &[Val], witness: SystemWitness) -> Proof {
+    pub fn prove(
+        &self,
+        key: &ProverKey<SC>,
+        claim: &[Val<SC>],
+        witness: SystemWitness<Val<SC>>,
+    ) -> Proof<SC> {
         self.prove_multiple_claims(key, &[claim], witness)
     }
 
@@ -238,10 +244,10 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
     #[tracing::instrument(level = "info", skip_all, name = "stark/prove")]
     pub fn prove_multiple_claims(
         &self,
-        key: &ProverKey,
-        claims: &[&[Val]],
-        witness: SystemWitness,
-    ) -> Proof {
+        key: &ProverKey<SC>,
+        claims: &[&[Val<SC>]],
+        witness: SystemWitness<Val<SC>>,
+    ) -> Proof<SC> {
         // initialize pcs and challenger
         let pcs = self.config.pcs();
         let mut challenger = self.config.initialise_challenger();
@@ -257,17 +263,15 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
         let evaluations = witness.traces.into_iter().map(|trace| {
             let degree = trace.height();
             let log_degree = log2_strict_usize(degree);
-            let trace_domain =
-                <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
+            let trace_domain = pcs.natural_domain_for_degree(degree);
             log_degrees.push(log_degree);
             (trace_domain, trace)
         });
-        let (stage_1_trace_commit, stage_1_trace_data) =
-            <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
+        let (stage_1_trace_commit, stage_1_trace_data) = pcs.commit(evaluations);
         drop(_g);
 
         if let Some(commit) = &self.preprocessed_commit {
-            challenger.observe(commit);
+            challenger.observe(commit.clone());
         }
         challenger.observe(stage_1_trace_commit.clone());
 
@@ -275,27 +279,27 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
         // sizes; the verifier reads these from the (untrusted) proof, so they
         // must influence every subsequent challenge.
         for log_degree in &log_degrees {
-            challenger.observe(Val::from_usize(*log_degree));
+            challenger.observe(Val::<SC>::from_usize(*log_degree));
         }
 
         // Observe the claims, length-prefixed so that distinct claim
         // structures (e.g. [[a, b]] vs [[a], [b]]) yield distinct transcripts.
         // This has to be done before generating the lookup argument challenge,
         // otherwise the lookup argument can be attacked.
-        challenger.observe(Val::from_usize(claims.len()));
+        challenger.observe(Val::<SC>::from_usize(claims.len()));
         for claim in claims {
-            challenger.observe(Val::from_usize(claim.len()));
+            challenger.observe(Val::<SC>::from_usize(claim.len()));
             challenger.observe_slice(claim);
         }
 
         // generate lookup challenges
-        let lookup_argument_challenge: ExtVal = challenger.sample_algebra_element();
+        let lookup_argument_challenge: SC::Challenge = challenger.sample_algebra_element();
         challenger.observe_algebra_element(lookup_argument_challenge);
-        let fingerprint_challenge: ExtVal = challenger.sample_algebra_element();
+        let fingerprint_challenge: SC::Challenge = challenger.sample_algebra_element();
         challenger.observe_algebra_element(fingerprint_challenge);
 
         // construct the accumulator from the claims
-        let mut acc = ExtVal::ZERO;
+        let mut acc = SC::Challenge::ZERO;
         for claim in claims {
             let message = lookup_argument_challenge
                 + fingerprint(&fingerprint_challenge, claim.iter().cloned());
@@ -318,12 +322,10 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
         let _g = tracing::info_span!("stark/stage2_commit").entered();
         let evaluations = stage_2_traces.into_iter().map(|trace| {
             let degree = trace.height();
-            let trace_domain =
-                <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
+            let trace_domain = pcs.natural_domain_for_degree(degree);
             (trace_domain, trace.flatten_to_base())
         });
-        let (stage_2_trace_commit, stage_2_trace_data) =
-            <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, evaluations);
+        let (stage_2_trace_commit, stage_2_trace_data) = pcs.commit(evaluations);
         drop(_g);
         challenger.observe(stage_2_trace_commit.clone());
 
@@ -335,7 +337,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
         }
 
         // generate constraint challenge
-        let constraint_challenge: ExtVal = challenger.sample_algebra_element();
+        let constraint_challenge: SC::Challenge = challenger.sample_algebra_element();
 
         // Cost: "Quotient computation and commit" — constraint evaluation on the
         // quotient domain (Σ n_i·q_i·eval_cost(k_i)) plus LDE + Merkle of the
@@ -354,10 +356,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
                 let air = &circuit.air;
                 let quotient_degree = circuit.quotient_degree();
                 let log_quotient_degree = log2_strict_usize(quotient_degree);
-                let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
-                    pcs,
-                    1 << log_degree,
-                );
+                let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
                 let quotient_domain =
                     trace_domain.create_disjoint_domain(1 << (log_degree + log_quotient_degree));
                 let preprocessed_trace_on_quotient_domain = key
@@ -365,36 +364,25 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
                     .as_ref()
                     .zip(self.preprocessed_indices[idx])
                     .map(|(preprocessed_trace_data, preprocessed_idx)| {
-                        <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
-                            pcs,
+                        pcs.get_evaluations_on_domain(
                             preprocessed_trace_data,
                             preprocessed_idx,
                             quotient_domain,
                         )
                     });
                 let stage_1_trace_on_quotient_domain =
-                    <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
-                        pcs,
-                        &stage_1_trace_data,
-                        idx,
-                        quotient_domain,
-                    );
+                    pcs.get_evaluations_on_domain(&stage_1_trace_data, idx, quotient_domain);
                 let stage_2_trace_on_quotient_domain =
-                    <Pcs as PcsTrait<ExtVal, Challenger>>::get_evaluations_on_domain(
-                        pcs,
-                        &stage_2_trace_data,
-                        idx,
-                        quotient_domain,
-                    );
+                    pcs.get_evaluations_on_domain(&stage_2_trace_data, idx, quotient_domain);
                 // compute the quotient values which are elements of the extension field and flatten it to the base field
-                let public_values = [];
+                let public_values: [Val<SC>; 0] = [];
                 let stage_2_public_values = [
                     lookup_argument_challenge,
                     fingerprint_challenge,
                     acc,
                     *next_acc,
                 ];
-                let quotient_values = quotient_values(
+                let quotient_values = quotient_values::<SC, _>(
                     air,
                     &public_values,
                     &stage_2_public_values,
@@ -407,7 +395,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
                     circuit.constraint_count,
                 );
                 let quotient_flat =
-                    RowMajorMatrix::new_col(quotient_values).flatten_to_base::<Val>();
+                    RowMajorMatrix::new_col(quotient_values).flatten_to_base::<Val<SC>>();
                 // note that, in general, the quotients have a degree that is greater than the trace polynomials,
                 // so for FRI to work so we must split into smaller polynomials
                 let quotient_sub_evaluations =
@@ -420,8 +408,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
                     .into_iter()
                     .zip(quotient_sub_evaluations)
             });
-        let (quotient_commit, quotient_data) =
-            <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, quotient_evaluations);
+        let (quotient_commit, quotient_data) = pcs.commit(quotient_evaluations);
         challenger.observe(quotient_commit.clone());
         drop(_g);
 
@@ -435,7 +422,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
         // Cost: "FRI opening" — barycentric interpolation (Σ n_i·B·W_i),
         // FRI folding (≈ H), and FRI queries (Q·R·log₂ H hash ops).
         let _g = tracing::info_span!("stark/fri_open").entered();
-        let zeta: ExtVal = challenger.sample_algebra_element();
+        let zeta: SC::Challenge = challenger.sample_algebra_element();
         let mut round0_openings = vec![];
         let mut round1_openings = vec![];
         let mut round2_openings = vec![];
@@ -443,10 +430,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
         for i in 0..self.circuits.len() {
             let log_degree = log_degrees[i];
             let quotient_degree = quotient_degrees[i];
-            let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
-                pcs,
-                1 << log_degree,
-            );
+            let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
             let zeta_next = trace_domain
                 .next_point(zeta)
                 .expect("domain has no next point");
@@ -491,20 +475,21 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>> Sys
 }
 
 #[allow(clippy::too_many_arguments)]
-fn quotient_values<A>(
+fn quotient_values<SC, A>(
     air: &A,
-    public_values: &[Val],
-    stage_2_public_values: &[ExtVal],
-    trace_domain: Domain,
-    quotient_domain: Domain,
-    preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_>>,
-    stage_1_on_quotient_domain: &EvaluationsOnDomain<'_>,
-    stage_2_on_quotient_domain: &EvaluationsOnDomain<'_>,
-    alpha: ExtVal,
+    public_values: &[Val<SC>],
+    stage_2_public_values: &[SC::Challenge],
+    trace_domain: Domain<SC>,
+    quotient_domain: Domain<SC>,
+    preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_, SC>>,
+    stage_1_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
+    stage_2_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
+    alpha: SC::Challenge,
     constraint_count: usize,
-) -> Vec<ExtVal>
+) -> Vec<SC::Challenge>
 where
-    A: for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>,
+    SC: StarkGenericConfig,
+    A: for<'a> Air<ProverConstraintFolder<'a, Val<SC>, SC::Challenge>>,
 {
     let quotient_size = quotient_domain.size();
     let stage_1_width = stage_1_on_quotient_domain.width();
@@ -517,17 +502,18 @@ where
     let qdb = log2_strict_usize(quotient_domain.size()) - log2_strict_usize(trace_domain.size());
     let next_step = 1 << qdb;
 
-    for _ in quotient_size..PackedVal::WIDTH {
-        sels.is_first_row.push(Val::default());
-        sels.is_last_row.push(Val::default());
-        sels.is_transition.push(Val::default());
-        sels.inv_vanishing.push(Val::default());
+    for _ in quotient_size..PackedVal::<SC>::WIDTH {
+        sels.is_first_row.push(Val::<SC>::default());
+        sels.is_last_row.push(Val::<SC>::default());
+        sels.is_transition.push(Val::<SC>::default());
+        sels.inv_vanishing.push(Val::<SC>::default());
     }
 
     let mut alpha_powers = alpha.powers().collect_n(constraint_count);
     alpha_powers.reverse();
 
-    let decomposed_alpha_powers: Vec<_> = (0..<ExtVal as BasedVectorSpace<Val>>::DIMENSION)
+    let decomposed_alpha_powers: Vec<_> = (0
+        ..<SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION)
         .map(|i| {
             alpha_powers
                 .iter()
@@ -539,9 +525,9 @@ where
     {
         (0..quotient_size)
             .into_par_iter()
-            .step_by(PackedVal::WIDTH)
+            .step_by(PackedVal::<SC>::WIDTH)
             .flat_map_iter(|i_start| {
-                quotient_values_inner(
+                quotient_values_inner::<SC, A>(
                     air,
                     public_values,
                     stage_2_public_values,
@@ -564,9 +550,9 @@ where
     #[cfg(not(feature = "parallel"))]
     {
         (0..quotient_size)
-            .step_by(PackedVal::WIDTH)
+            .step_by(PackedVal::<SC>::WIDTH)
             .flat_map_iter(|i_start| {
-                quotient_values_inner(
+                quotient_values_inner::<SC, A>(
                     air,
                     public_values,
                     stage_2_public_values,
@@ -589,32 +575,33 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn quotient_values_inner<A>(
+fn quotient_values_inner<SC, A>(
     air: &A,
-    stage_1_public_values: &[Val],
-    stage_2_public_values: &[ExtVal],
-    sels: &LagrangeSelectors<Vec<Val>>,
+    stage_1_public_values: &[Val<SC>],
+    stage_2_public_values: &[SC::Challenge],
+    sels: &LagrangeSelectors<Vec<Val<SC>>>,
     quotient_size: usize,
-    preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_>>,
-    stage_1_on_quotient_domain: &EvaluationsOnDomain<'_>,
-    stage_2_on_quotient_domain: &EvaluationsOnDomain<'_>,
+    preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_, SC>>,
+    stage_1_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
+    stage_2_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
     stage_1_width: usize,
     stage_2_width: usize,
     preprocessed_width: usize,
-    alpha_powers: &[BinomialExtensionField<Val, 2>],
-    decomposed_alpha_powers: &[Vec<Val>],
+    alpha_powers: &[SC::Challenge],
+    decomposed_alpha_powers: &[Vec<Val<SC>>],
     next_step: usize,
     i_start: usize,
-) -> impl Iterator<Item = BinomialExtensionField<Val, 2>>
+) -> impl Iterator<Item = SC::Challenge>
 where
-    A: for<'a> Air<ProverConstraintFolder<'a, Val, ExtVal>>,
+    SC: StarkGenericConfig,
+    A: for<'a> Air<ProverConstraintFolder<'a, Val<SC>, SC::Challenge>>,
 {
-    let i_range = i_start..i_start + PackedVal::WIDTH;
+    let i_range = i_start..i_start + PackedVal::<SC>::WIDTH;
 
-    let is_first_row = *PackedVal::from_slice(&sels.is_first_row[i_range.clone()]);
-    let is_last_row = *PackedVal::from_slice(&sels.is_last_row[i_range.clone()]);
-    let is_transition = *PackedVal::from_slice(&sels.is_transition[i_range.clone()]);
-    let inv_vanishing = *PackedVal::from_slice(&sels.inv_vanishing[i_range]);
+    let is_first_row = *PackedVal::<SC>::from_slice(&sels.is_first_row[i_range.clone()]);
+    let is_last_row = *PackedVal::<SC>::from_slice(&sels.is_last_row[i_range.clone()]);
+    let is_transition = *PackedVal::<SC>::from_slice(&sels.is_transition[i_range.clone()]);
+    let inv_vanishing = *PackedVal::<SC>::from_slice(&sels.inv_vanishing[i_range]);
 
     let preprocessed = preprocessed_on_quotient_domain
         .as_ref()
@@ -625,24 +612,25 @@ where
             )
         });
     let stage_1 = RowMajorMatrix::new(
-        stage_1_on_quotient_domain.vertically_packed_row_pair::<PackedVal>(i_start, next_step),
+        stage_1_on_quotient_domain.vertically_packed_row_pair::<PackedVal<SC>>(i_start, next_step),
         stage_1_width,
     );
-    let extension_d = <PackedExtVal as BasedVectorSpace<PackedVal>>::DIMENSION;
+    let extension_d = <PackedChallenge<SC> as BasedVectorSpace<PackedVal<SC>>>::DIMENSION;
     let stage_2 = RowMajorMatrix::new(
-        pack(
+        pack::<SC>(
             stage_2_on_quotient_domain.width(),
-            stage_2_on_quotient_domain.wrapping_row_slices(i_start, PackedVal::WIDTH),
+            stage_2_on_quotient_domain.wrapping_row_slices(i_start, PackedVal::<SC>::WIDTH),
         )
-        .chain(pack(
+        .chain(pack::<SC>(
             stage_2_on_quotient_domain.width(),
-            stage_2_on_quotient_domain.wrapping_row_slices(i_start + next_step, PackedVal::WIDTH),
+            stage_2_on_quotient_domain
+                .wrapping_row_slices(i_start + next_step, PackedVal::<SC>::WIDTH),
         ))
         .collect::<Vec<_>>(),
         stage_2_width / extension_d,
     );
 
-    let accumulator = PackedExtVal::ZERO;
+    let accumulator = PackedChallenge::<SC>::ZERO;
     let mut folder = ProverConstraintFolder {
         preprocessed: match preprocessed.as_ref() {
             Some(mat) => RowWindow::from_view(&mat.as_view()),
@@ -664,18 +652,24 @@ where
 
     let quotient = folder.accumulator * inv_vanishing;
 
-    (0..quotient_size.min(PackedVal::WIDTH)).map(move |idx_in_packing| {
-        ExtVal::from_basis_coefficients_fn(|coeff_idx| {
-            <PackedExtVal as BasedVectorSpace<PackedVal>>::as_basis_coefficients_slice(&quotient)
-                [coeff_idx]
+    (0..quotient_size.min(PackedVal::<SC>::WIDTH)).map(move |idx_in_packing| {
+        SC::Challenge::from_basis_coefficients_fn(|coeff_idx| {
+            <PackedChallenge<SC> as BasedVectorSpace<PackedVal<SC>>>::as_basis_coefficients_slice(
+                &quotient,
+            )[coeff_idx]
                 .as_slice()[idx_in_packing]
         })
     })
 }
 
-fn pack(n: usize, rows: Vec<impl Deref<Target = [Val]>>) -> impl Iterator<Item = PackedExtVal> {
-    let extension_d = <PackedExtVal as BasedVectorSpace<PackedVal>>::DIMENSION;
+fn pack<SC: StarkGenericConfig>(
+    n: usize,
+    rows: Vec<impl Deref<Target = [Val<SC>]>>,
+) -> impl Iterator<Item = PackedChallenge<SC>> {
+    let extension_d = <PackedChallenge<SC> as BasedVectorSpace<PackedVal<SC>>>::DIMENSION;
     (0..n).step_by(extension_d).map(move |c| {
-        PackedExtVal::from_basis_coefficients_fn(|j| PackedVal::from_fn(|i| rows[i][c + j]))
+        PackedChallenge::<SC>::from_basis_coefficients_fn(|j| {
+            PackedVal::<SC>::from_fn(|i| rows[i][c + j])
+        })
     })
 }
