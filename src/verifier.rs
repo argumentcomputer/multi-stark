@@ -541,7 +541,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         // quotient round
         let mut quotient_degrees = vec![];
         for (circuit, log_degree) in self.circuits.iter().zip(log_degrees) {
-            let quotient_degree = (circuit.max_constraint_degree.max(2) - 1).next_power_of_two();
+            let quotient_degree = circuit.quotient_degree();
             // The claimed log degree must be small enough that the blown-up
             // quotient domain still fits within the two-adic subgroup of the
             // field. This also guards the `1 << log_degree` shifts used during

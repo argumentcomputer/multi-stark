@@ -2,7 +2,6 @@
 use p3_air::{Air, AirBuilder, ExtensionBuilder};
 use p3_field::{Algebra, Dup, Field, InjectiveMonomial, PrimeCharacteristicRing};
 use p3_matrix::dense::RowMajorMatrix;
-use p3_util::log2_ceil_usize;
 use std::fmt::Debug;
 use std::iter::{Product, Sum};
 use std::marker::PhantomData;
@@ -357,16 +356,6 @@ pub fn get_max_constraint_degree(constraints: &[SymbolicExpression<ExtVal>]) -> 
         .map(|c| c.degree_multiple())
         .max()
         .unwrap_or(0)
-}
-
-pub fn get_log_quotient_degree(max_constraint_degree: usize, is_zk: bool) -> usize {
-    // We pad to at least degree 2, since a quotient argument doesn't make sense with smaller degrees.
-    let constraint_degree = (max_constraint_degree + usize::from(is_zk)).max(2);
-
-    // The quotient's actual degree is approximately (max_constraint_degree - 1) n,
-    // where subtracting 1 comes from division by the vanishing polynomial.
-    // But we pad it to a power of two so that we can efficiently decompose the quotient.
-    log2_ceil_usize(constraint_degree - 1)
 }
 
 /// An `AirBuilder` for evaluating constraints symbolically, and recording them for later use.

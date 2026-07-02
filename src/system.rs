@@ -104,6 +104,16 @@ pub struct Circuit<A> {
     pub stage_2_width: usize,
 }
 
+impl<A> Circuit<A> {
+    /// Degree of the quotient polynomial as a multiple of the trace degree.
+    /// Division by the vanishing polynomial reduces the composition
+    /// polynomial's degree by 1; the result is padded to a power of two so
+    /// the quotient can be split into equally-sized chunks.
+    pub fn quotient_degree(&self) -> usize {
+        (self.max_constraint_degree.max(2) - 1).next_power_of_two()
+    }
+}
+
 /// Witness data for the multi-circuit system, comprising stage 1 traces and
 /// the concrete lookup values derived from them.
 #[derive(Clone)]

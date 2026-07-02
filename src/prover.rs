@@ -358,9 +358,7 @@ impl<A: BaseAir<Val> + for<'a> Air<ProverConstraintFolder<'a>>> System<A> {
             .enumerate()
             .flat_map(|(idx, ((circuit, log_degree), next_acc))| {
                 let air = &circuit.air;
-                // quotient degree is at most 1 less than the max degree, padded to a power of two
-                let quotient_degree =
-                    (circuit.max_constraint_degree.max(2) - 1).next_power_of_two();
+                let quotient_degree = circuit.quotient_degree();
                 let log_quotient_degree = log2_strict_usize(quotient_degree);
                 let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
                     pcs,
