@@ -45,6 +45,7 @@ struct BabyBearPoseidon2Config {
     /// on [`StarkGenericConfig::initialise_challenger`]).
     challenger_seed: Vec<Val>,
     max_log_degree: usize,
+    max_quotient_degree: usize,
 }
 
 impl BabyBearPoseidon2Config {
@@ -82,11 +83,13 @@ impl BabyBearPoseidon2Config {
             .map(Val::from_usize),
         );
         let max_log_degree = Val::TWO_ADICITY - commitment_parameters.log_blowup;
+        let max_quotient_degree = 1 << commitment_parameters.log_blowup;
         Self {
             pcs,
             perm,
             challenger_seed,
             max_log_degree,
+            max_quotient_degree,
         }
     }
 }
@@ -110,6 +113,10 @@ impl StarkGenericConfig for BabyBearPoseidon2Config {
 
     fn max_log_degree(&self) -> usize {
         self.max_log_degree
+    }
+
+    fn max_quotient_degree(&self) -> usize {
+        self.max_quotient_degree
     }
 }
 

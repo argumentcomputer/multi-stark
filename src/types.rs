@@ -48,6 +48,9 @@ pub struct GoldilocksKeccakConfig {
     challenger_seed: Vec<u8>,
     /// Largest log2 degree the PCS can commit to and open.
     max_log_degree: usize,
+    /// Largest quotient degree the PCS can serve trace evaluations for
+    /// (the FRI blowup factor).
+    max_quotient_degree: usize,
 }
 
 impl GoldilocksKeccakConfig {
@@ -72,10 +75,12 @@ impl GoldilocksKeccakConfig {
             challenger_seed.extend_from_slice(&parameter.to_le_bytes());
         }
         let max_log_degree = Val::TWO_ADICITY - commitment_parameters.log_blowup;
+        let max_quotient_degree = 1 << commitment_parameters.log_blowup;
         Self {
             pcs,
             challenger_seed,
             max_log_degree,
+            max_quotient_degree,
         }
     }
 }
@@ -95,6 +100,10 @@ impl StarkGenericConfig for GoldilocksKeccakConfig {
 
     fn max_log_degree(&self) -> usize {
         self.max_log_degree
+    }
+
+    fn max_quotient_degree(&self) -> usize {
+        self.max_quotient_degree
     }
 }
 

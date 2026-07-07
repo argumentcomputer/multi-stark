@@ -41,8 +41,21 @@ where
         let mut circuits = vec![];
         let mut preprocessed_traces = vec![];
         let mut preprocessed_indices = vec![];
-        for air in airs {
+        for (circuit_idx, air) in airs.into_iter().enumerate() {
             let (circuit, maybe_preprocessed_trace) = Circuit::from_air::<SC::Challenge>(air);
+            // The prover obtains trace evaluations on the quotient domain
+            // from the PCS, which can only serve domains up to
+            // `max_quotient_degree` times the trace domain (the blowup
+            // factor for FRI). Beyond that, proving would silently produce
+            // invalid proofs, so reject the circuit upfront.
+            assert!(
+                circuit.quotient_degree() <= config.max_quotient_degree(),
+                "circuit {circuit_idx}: constraint degree {} needs quotient degree {}, but the \
+                 PCS only supports {}; increase log_blowup or lower the constraint degree",
+                circuit.max_constraint_degree,
+                circuit.quotient_degree(),
+                config.max_quotient_degree(),
+            );
             circuits.push(circuit);
             if let Some(preprocessed_trace) = maybe_preprocessed_trace {
                 preprocessed_indices.push(Some(preprocessed_traces.len()));
@@ -223,7 +236,7 @@ impl<A, F: Field> Circuit<A, F> {
 mod tests {
     use super::*;
     use crate::types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val};
-    use p3_air::AirBuilder;
+    use p3_air::{AirBuilder, WindowAccess};
 
     /// A trivial AIR with a preprocessed trace of 4 rows and no constraints.
     struct Preprocessed;
@@ -243,6 +256,75 @@ mod tests {
         AB::F: Field,
     {
         fn eval(&self, _builder: &mut AB) {}
+    }
+
+    /// A degree-5 constraint: `x^5 == y`.
+    struct HighDegreeAir;
+
+    impl<F> BaseAir<F> for HighDegreeAir {
+        fn width(&self) -> usize {
+            2
+        }
+    }
+
+    impl<AB> Air<AB> for HighDegreeAir
+    where
+        AB: AirBuilder,
+        AB::Var: Copy,
+    {
+        fn eval(&self, builder: &mut AB) {
+            let main = builder.main();
+            let local = main.current_slice();
+            let x = local[0];
+            builder.assert_eq(x * x * x * x * x, local[1]);
+        }
+    }
+
+    /// The prover can only evaluate constraints on a domain `2^log_blowup`
+    /// times the trace domain, so the constraint degree is bounded by
+    /// `2^log_blowup + 1` (degree 3 at `log_blowup = 1`). Exceeding it used
+    /// to silently produce invalid proofs; it must be rejected at setup.
+    #[test]
+    #[should_panic(expected = "needs quotient degree 4, but the PCS only supports 2")]
+    fn excessive_constraint_degree_rejected() {
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        };
+        let fri_parameters = FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 64,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        };
+        let config = GoldilocksKeccakConfig::new(commitment_parameters, fri_parameters);
+        System::new(config, [LookupAir::new(HighDegreeAir, vec![])]);
+    }
+
+    /// The same degree-5 circuit is fine at `log_blowup = 2` (quotient
+    /// degree 4 = blowup factor 4), end to end.
+    #[test]
+    fn high_degree_constraint_with_larger_blowup() {
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 2,
+            cap_height: 0,
+        };
+        let fri_parameters = FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 40,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        };
+        let config = GoldilocksKeccakConfig::new(commitment_parameters, fri_parameters);
+        let (system, key) = System::new(config, [LookupAir::new(HighDegreeAir, vec![])]);
+        let f = Val::from_u32;
+        let trace = RowMajorMatrix::new(vec![f(2), f(32), f(1), f(1), f(3), f(243), f(0), f(0)], 2);
+        let witness = SystemWitness::from_stage_1(vec![trace], &system);
+        let no_claims: &[&[Val]] = &[];
+        let proof = system.prove_multiple_claims(&key, no_claims, witness);
+        system.verify_multiple_claims(no_claims, &proof).unwrap();
     }
 
     #[test]

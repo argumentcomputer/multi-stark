@@ -93,4 +93,20 @@ pub trait StarkGenericConfig {
     /// the quotient degree, exceeds this bound. For a FRI-based PCS this is
     /// the field's two-adicity minus the log blowup.
     fn max_log_degree(&self) -> usize;
+
+    /// The largest quotient degree — as a multiple of the trace degree —
+    /// that the PCS can serve trace evaluations for.
+    ///
+    /// The prover evaluates the constraints on a domain `quotient_degree`
+    /// times larger than the trace domain, obtained from the PCS via
+    /// `get_evaluations_on_domain`. For a FRI-based PCS this only works up
+    /// to the blowup factor: the committed low-degree extension has
+    /// `2^log_blowup · N` evaluations, and asking for a larger domain
+    /// produces invalid proofs. Since the quotient degree is
+    /// `next_power_of_two(max_constraint_degree - 1)`, this bounds the
+    /// constraint degree: `2^log_blowup + 1` (degree 3 at `log_blowup = 1`).
+    ///
+    /// [`System::new`](crate::system::System::new) rejects circuits whose
+    /// constraint degree requires a larger quotient degree.
+    fn max_quotient_degree(&self) -> usize;
 }
