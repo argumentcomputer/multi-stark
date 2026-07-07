@@ -10,8 +10,10 @@
 //!    ensuring that all lookup pushes and pulls cancel out across circuits.
 //!
 //! 3. **Fiat-Shamir replay**: Reconstruct the challenger state identically to the
-//!    prover by observing commitments, trace heights, claims, and sampling the same
-//!    challenges (lookup, fingerprint, constraint alpha, OOD zeta).
+//!    prover: starting from the parameter-seeded challenger, observe the system
+//!    shape, commitments, trace heights, length-prefixed claims, and intermediate
+//!    accumulators, sampling the same challenges (lookup, fingerprint, constraint
+//!    alpha, OOD zeta) at the same points in the transcript.
 //!
 //! 4. **PCS verification**: Verify the FRI opening proofs against the committed
 //!    polynomials at the sampled points.
@@ -25,7 +27,7 @@
 //! # Soundness argument
 //!
 //! The protocol is sound in the random oracle model, instantiated by the
-//! configuration's Fiat-Shamir challenger (Keccak-256 in the reference config).
+//! configuration's Fiat-Shamir challenger.
 //! Informally: if a prover produces a proof that the verifier accepts, then with
 //! overwhelming probability the claimed computation is correct.
 //!
@@ -211,10 +213,11 @@ where
         );
 
         // Soundness: Fiat-Shamir. All challenges below are derived deterministically
-        // from the transcript via Keccak-256 (random oracle model). The verifier
-        // replays exactly the same observations as the prover, so any divergence
-        // (e.g. different commitments) produces different challenges, making it
-        // infeasible for a cheating prover to predict them.
+        // from the transcript via the configuration's challenger, whose hash is
+        // modeled as a random oracle. The verifier replays exactly the same
+        // observations as the prover, so any divergence (e.g. different
+        // commitments) produces different challenges, making it infeasible for a
+        // cheating prover to predict them.
         let pcs = self.config.pcs();
         let mut challenger = self.config.initialise_challenger();
 

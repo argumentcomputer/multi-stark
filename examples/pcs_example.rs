@@ -46,7 +46,7 @@ fn main() {
     let pcs = config.pcs();
 
     // ── Build polynomial evaluations ─────────────────────────────────────────
-    // Commit 4 polynomials over a domain of size 32 (degree ≤ 31).
+    // Commit `num_polys` polynomials over a domain of size 32 (degree ≤ 31).
     // The evaluation matrix has one column per polynomial.
     let log_degree: u32 = 5; // domain size = 2^5 = 32
     let degree = 1usize << log_degree;

@@ -1,13 +1,17 @@
 //! Multi-circuit STARK prover.
 //!
-//! The proving protocol proceeds in several stages:
+//! The proving protocol proceeds in several stages sharing one Fiat-Shamir
+//! transcript. The challenger starts from a seed binding a domain tag and all
+//! protocol parameters (see the transcript contract on
+//! [`StarkGenericConfig::initialise_challenger`]), and the system shape
+//! (circuit count, widths, constraint counts, degrees)
+//! is observed before any commitment.
 //!
 //! 1. **Stage 1 — Main traces**: Each circuit's execution trace is committed via the
-//!    configuration's PCS (FRI over Goldilocks with Keccak-256 hashing in the
-//!    reference config). The preprocessed commitment (if any), stage-1 commitment,
-//!    trace heights, and claims are observed into the Fiat-Shamir challenger. Claims
-//!    must be observed before lookup challenges are sampled; otherwise the prover could
-//!    choose claims adaptively to balance the lookup accumulator.
+//!    configuration's PCS. The preprocessed commitment (if any), stage-1 commitment,
+//!    trace heights, and length-prefixed claims are observed into the challenger.
+//!    Claims must be observed before lookup challenges are sampled; otherwise the
+//!    prover could choose claims adaptively to balance the lookup accumulator.
 //!
 //! 2. **Lookup challenges**: The challenger samples two independent challenges:
 //!    `lookup_argument_challenge` (β) and `fingerprint_challenge` (γ). An initial
@@ -17,7 +21,8 @@
 //! 3. **Stage 2 — Lookup traces**: For each circuit, the lookup traces are computed
 //!    (running accumulator and message inverses per row) and committed via PCS. Each
 //!    circuit produces an intermediate accumulator value recording where its running
-//!    sum ended up; the verifier will check that the last one is zero.
+//!    sum ended up; these are observed into the challenger, and the verifier will
+//!    check that the last one is zero.
 //!
 //! 4. **Quotient polynomial**: A constraint challenge (α) is sampled and used to fold
 //!    all constraints via powers of α. The folded constraint polynomial is divided by
@@ -47,8 +52,8 @@
 //! - k_i — number of constraints in circuit i (after lookup expansion)
 //! - d_i — maximum constraint degree multiple of circuit i
 //! - q_i = next_pow2(max(d_i, 2) − 1) — quotient polynomial degree
-//! - D — extension field dimension (2 in the reference config:
-//!   `BinomialExtensionField<Goldilocks, 2>`)
+//! - D — dimension of the challenge (extension) field over the base field
+//!   (2 in the reference config)
 //! - B = 2^log_blowup — FRI blowup factor
 //! - Q = num_queries — FRI query repetitions
 //! - a = max_log_arity — FRI folding arity (log₂)
