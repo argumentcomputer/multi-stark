@@ -1,22 +1,23 @@
 use p3_air::{Air, AirBuilder, ExtensionBuilder, RowWindow};
-use p3_field::PrimeCharacteristicRing;
 use p3_matrix::Matrix;
 use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixView};
 use p3_matrix::stack::VerticalPair;
 
-use crate::types::{ExtVal, Val};
+use p3_field::{ExtensionField, Field};
 
 use super::TwoStagedBuilder;
 
-pub fn check_constraints<A>(
+pub fn check_constraints<F, EF, A>(
     air: &A,
-    preprocessed: Option<&RowMajorMatrix<Val>>,
-    stage_1: &RowMajorMatrix<Val>,
-    stage_2: &RowMajorMatrix<ExtVal>,
-    public_values: &[Val],
-    stage_2_public_values: &[ExtVal],
+    preprocessed: Option<&RowMajorMatrix<F>>,
+    stage_1: &RowMajorMatrix<F>,
+    stage_2: &RowMajorMatrix<EF>,
+    public_values: &[F],
+    stage_2_public_values: &[EF],
 ) where
-    A: for<'a> Air<DebugConstraintBuilder<'a>>,
+    F: Field,
+    EF: ExtensionField<F>,
+    A: for<'a> Air<DebugConstraintBuilder<'a, F, EF>>,
 {
     let height = stage_1.height();
 
@@ -43,9 +44,9 @@ pub fn check_constraints<A>(
             stage_2,
             public_values,
             stage_2_public_values,
-            is_first_row: Val::from_bool(i == 0),
-            is_last_row: Val::from_bool(i == height - 1),
-            is_transition: Val::from_bool(i != height - 1),
+            is_first_row: F::from_bool(i == 0),
+            is_last_row: F::from_bool(i == height - 1),
+            is_transition: F::from_bool(i != height - 1),
         };
         // We must call `eval` on the same block as the `preprocessed` matrix view, otherwise the borrow checker will complain.
         // Mutation is used to remove code duplication.
@@ -62,31 +63,31 @@ pub fn check_constraints<A>(
 }
 
 #[derive(Debug)]
-pub struct DebugConstraintBuilder<'a> {
+pub struct DebugConstraintBuilder<'a, F: Field, EF: ExtensionField<F>> {
     /// The index of the row currently being evaluated.
     row_index: usize,
     /// A two-row window over the preprocessed trace (current and next row).
-    preprocessed: RowWindow<'a, Val>,
-    stage_1: VerticalPair<RowMajorMatrixView<'a, Val>, RowMajorMatrixView<'a, Val>>,
-    stage_2: VerticalPair<RowMajorMatrixView<'a, ExtVal>, RowMajorMatrixView<'a, ExtVal>>,
+    preprocessed: RowWindow<'a, F>,
+    stage_1: VerticalPair<RowMajorMatrixView<'a, F>, RowMajorMatrixView<'a, F>>,
+    stage_2: VerticalPair<RowMajorMatrixView<'a, EF>, RowMajorMatrixView<'a, EF>>,
     /// The public values provided for constraint validation (e.g. inputs or outputs).
-    public_values: &'a [Val],
-    stage_2_public_values: &'a [ExtVal],
+    public_values: &'a [F],
+    stage_2_public_values: &'a [EF],
     /// A flag indicating whether this is the first row.
-    is_first_row: Val,
+    is_first_row: F,
     /// A flag indicating whether this is the last row.
-    is_last_row: Val,
+    is_last_row: F,
     /// A flag indicating whether this is a transition row (not the last row).
-    is_transition: Val,
+    is_transition: F,
 }
 
-impl<'a> AirBuilder for DebugConstraintBuilder<'a> {
-    type F = Val;
-    type Expr = Val;
-    type Var = Val;
-    type PreprocessedWindow = RowWindow<'a, Val>;
-    type MainWindow = RowWindow<'a, Val>;
-    type PublicVar = Val;
+impl<'a, F: Field, EF: ExtensionField<F>> AirBuilder for DebugConstraintBuilder<'a, F, EF> {
+    type F = F;
+    type Expr = F;
+    type Var = F;
+    type PreprocessedWindow = RowWindow<'a, F>;
+    type MainWindow = RowWindow<'a, F>;
+    type PublicVar = F;
 
     fn main(&self) -> Self::MainWindow {
         RowWindow::from_two_rows(self.stage_1.top.values, self.stage_1.bottom.values)
@@ -117,7 +118,7 @@ impl<'a> AirBuilder for DebugConstraintBuilder<'a> {
     fn assert_zero<I: Into<Self::Expr>>(&mut self, x: I) {
         assert_eq!(
             x.into(),
-            Val::ZERO,
+            F::ZERO,
             "constraints had nonzero value on row {}",
             self.row_index
         );
@@ -138,10 +139,10 @@ impl<'a> AirBuilder for DebugConstraintBuilder<'a> {
     }
 }
 
-impl<'a> ExtensionBuilder for DebugConstraintBuilder<'a> {
-    type EF = ExtVal;
-    type ExprEF = ExtVal;
-    type VarEF = ExtVal;
+impl<F: Field, EF: ExtensionField<F>> ExtensionBuilder for DebugConstraintBuilder<'_, F, EF> {
+    type EF = EF;
+    type ExprEF = EF;
+    type VarEF = EF;
 
     /// Assert that an extension field expression is zero.
     fn assert_zero_ext<I>(&mut self, x: I)
@@ -151,7 +152,7 @@ impl<'a> ExtensionBuilder for DebugConstraintBuilder<'a> {
         let x = x.into();
         assert_eq!(
             x,
-            ExtVal::ZERO,
+            EF::ZERO,
             "constraints had nonzero value on row {}",
             self.row_index
         );
@@ -172,8 +173,8 @@ impl<'a> ExtensionBuilder for DebugConstraintBuilder<'a> {
     }
 }
 
-impl<'a> TwoStagedBuilder for DebugConstraintBuilder<'a> {
-    type MP = VerticalPair<RowMajorMatrixView<'a, ExtVal>, RowMajorMatrixView<'a, ExtVal>>;
+impl<'a, F: Field, EF: ExtensionField<F>> TwoStagedBuilder for DebugConstraintBuilder<'a, F, EF> {
+    type MP = VerticalPair<RowMajorMatrixView<'a, EF>, RowMajorMatrixView<'a, EF>>;
 
     type Stage2PublicVar = Self::EF;
 

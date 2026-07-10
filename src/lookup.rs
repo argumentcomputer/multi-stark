@@ -1,12 +1,9 @@
 use p3_air::{Air, BaseAir, ExtensionBuilder, WindowAccess};
-use p3_field::{PrimeCharacteristicRing, batch_multiplicative_inverse};
+use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, batch_multiplicative_inverse};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 
-use crate::{
-    builder::{TwoStagedBuilder, symbolic::SymbolicExpression},
-    types::{ExtVal, Val},
-};
+use crate::builder::{TwoStagedBuilder, symbolic::SymbolicExpression};
 
 /// Each circuit is required to have 4 arguments for the second stage. Namely,
 /// the lookup challenge, fingerprint challenge, current accumulator and next
@@ -51,14 +48,14 @@ impl<Expr> Lookup<Expr> {
     }
 }
 
-pub struct LookupAir<A> {
+pub struct LookupAir<A, F: Field> {
     pub inner_air: A,
-    pub lookups: Vec<Lookup<SymbolicExpression<Val>>>,
-    pub preprocessed: Option<RowMajorMatrix<Val>>,
+    pub lookups: Vec<Lookup<SymbolicExpression<F>>>,
+    pub preprocessed: Option<RowMajorMatrix<F>>,
 }
 
-impl<A: BaseAir<Val>> LookupAir<A> {
-    pub fn new(inner_air: A, lookups: Vec<Lookup<SymbolicExpression<Val>>>) -> Self {
+impl<A: BaseAir<F>, F: Field> LookupAir<A, F> {
+    pub fn new(inner_air: A, lookups: Vec<Lookup<SymbolicExpression<F>>>) -> Self {
         let preprocessed = inner_air.preprocessed_trace();
         Self {
             inner_air,
@@ -87,10 +84,10 @@ where
         .fold(F::ZERO, |acc, coeff| acc * r.clone() + coeff.into())
 }
 
-impl Lookup<SymbolicExpression<Val>> {
+impl<F: Field> Lookup<SymbolicExpression<F>> {
     /// Computes the concrete lookup attributes for its respective expressions
     /// given a trace row and a preprocessed trace row.
-    pub fn compute_expr(&self, row: &[Val], preprocessed: Option<&[Val]>) -> Lookup<Val> {
+    pub fn compute_expr(&self, row: &[F], preprocessed: Option<&[F]>) -> Lookup<F> {
         let multiplicity = self.multiplicity.interpret(row, preprocessed);
         let args = self
             .args
@@ -101,19 +98,19 @@ impl Lookup<SymbolicExpression<Val>> {
     }
 }
 
-impl Lookup<Val> {
+impl<F: Field> Lookup<F> {
     /// Computes the stage 2 traces and the intermediate accumulators for each
     /// circuit given a lookup challenge, a fingerprint challenge and the current
     /// accumulator value (computed from the initial claims).
     ///
     /// Note: the lookups are expected to be fully padded. That is, for each
     /// circuit, every row must have the exact same number of lookups.
-    pub fn stage_2_traces(
+    pub fn stage_2_traces<EF: ExtensionField<F>>(
         lookups: &[Vec<Vec<Self>>],
-        lookup_challenge: ExtVal,
-        fingerprint_challenge: &ExtVal,
-        mut accumulator: ExtVal,
-    ) -> (Vec<RowMajorMatrix<ExtVal>>, Vec<ExtVal>) {
+        lookup_challenge: EF,
+        fingerprint_challenge: &EF,
+        mut accumulator: EF,
+    ) -> (Vec<RowMajorMatrix<EF>>, Vec<EF>) {
         // Number of lookups per circuit. Every row in a circuit is assumed to
         // have the same number of lookups (the lookups are expected to be fully
         // padded), so this is taken from the first row.
@@ -128,7 +125,7 @@ impl Lookup<Val> {
         // output Vec without tree-reducing worker buffers.
         let _g = tracing::info_span!("stark/lookup_messages").entered();
         let flat: Vec<&Self> = lookups.iter().flatten().flatten().collect();
-        let messages: Vec<ExtVal> = flat
+        let messages: Vec<EF> = flat
             .par_iter()
             .map(|lookup| lookup.compute_message(lookup_challenge, fingerprint_challenge))
             .collect();
@@ -164,7 +161,7 @@ impl Lookup<Val> {
                         row.push(accumulator);
                         row.extend(row_lookups.iter().zip(row_messages_inverses).map(
                             |(lookup, &message_inverse)| {
-                                accumulator += ExtVal::from(lookup.multiplicity) * message_inverse;
+                                accumulator += EF::from(lookup.multiplicity) * message_inverse;
                                 message_inverse
                             },
                         ));
@@ -182,29 +179,35 @@ impl Lookup<Val> {
         (traces, intermediate_accumulators)
     }
 
-    fn compute_message(&self, lookup_challenge: ExtVal, fingerprint_challenge: &ExtVal) -> ExtVal {
+    fn compute_message<EF: ExtensionField<F>>(
+        &self,
+        lookup_challenge: EF,
+        fingerprint_challenge: &EF,
+    ) -> EF {
         let fingerprint = fingerprint(fingerprint_challenge, self.args.iter().cloned());
         lookup_challenge + fingerprint
     }
 }
 
-impl<A> BaseAir<Val> for LookupAir<A>
+impl<A, F> BaseAir<F> for LookupAir<A, F>
 where
-    A: BaseAir<Val>,
+    A: BaseAir<F>,
+    F: Field,
 {
     fn width(&self) -> usize {
         self.inner_air.width()
     }
 
-    fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Val>> {
+    fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
         self.preprocessed.clone()
     }
 }
 
-impl<A, AB> Air<AB> for LookupAir<A>
+impl<A, F, AB> Air<AB> for LookupAir<A, F>
 where
     A: Air<AB>,
-    AB: TwoStagedBuilder<F = Val, EF = ExtVal>,
+    F: Field,
+    AB: TwoStagedBuilder<F = F>,
 {
     fn eval(&self, builder: &mut AB) {
         if self.preprocessed.is_some() {
@@ -217,11 +220,11 @@ where
     }
 }
 
-impl<A> LookupAir<A> {
+impl<A, F: Field> LookupAir<A, F> {
     fn eval_with_preprocessed_row<AB>(&self, builder: &mut AB, preprocessed_row: Option<&[AB::Var]>)
     where
         A: Air<AB>,
-        AB: TwoStagedBuilder<F = Val, EF = ExtVal>,
+        AB: TwoStagedBuilder<F = F>,
     {
         // Call `eval` for regular stage 1 constraints.
         self.inner_air.eval(builder);
@@ -287,7 +290,7 @@ mod tests {
     use crate::{
         builder::symbolic::var,
         system::{ProverKey, System, SystemWitness},
-        types::{CommitmentParameters, FriParameters},
+        types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val},
     };
 
     use super::*;
@@ -368,19 +371,30 @@ mod tests {
                 .assert_one(input * input_inverse);
         }
     }
-    fn system(commitment_parameters: CommitmentParameters) -> (System<CS>, ProverKey) {
+    const COMMITMENT_PARAMETERS: CommitmentParameters = CommitmentParameters {
+        log_blowup: 1,
+        cap_height: 0,
+    };
+
+    const FRI_PARAMETERS: FriParameters = FriParameters {
+        log_final_poly_len: 0,
+        max_log_arity: 1,
+        num_queries: 64,
+        commit_proof_of_work_bits: 0,
+        query_proof_of_work_bits: 0,
+    };
+
+    fn system() -> (
+        System<GoldilocksKeccakConfig, CS>,
+        ProverKey<GoldilocksKeccakConfig>,
+    ) {
+        let config = GoldilocksKeccakConfig::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
         let even = LookupAir::new(CS::Even, CS::Even.lookups());
         let odd = LookupAir::new(CS::Odd, CS::Odd.lookups());
-        System::new(commitment_parameters, [even, odd])
+        System::new(config, [even, odd])
     }
 
-    #[test]
-    fn lookup_test() {
-        let commitment_parameters = CommitmentParameters {
-            log_blowup: 1,
-            cap_height: 0,
-        };
-        let (system, key) = system(commitment_parameters);
+    fn witness(system: &System<GoldilocksKeccakConfig, CS>) -> SystemWitness<Val> {
         let f = Val::from_u32;
         #[rustfmt::skip]
         let witness = SystemWitness::from_stage_1(
@@ -412,17 +426,33 @@ mod tests {
                     6,
                 ),
             ],
-            &system,
+            system,
         );
+        witness
+    }
+
+    #[test]
+    fn lookup_test() {
+        let (system, key) = system();
+        let witness = witness(&system);
+        let f = Val::from_u32;
         let claim = &[f(0), f(4), f(1)];
-        let fri_parameters = FriParameters {
-            log_final_poly_len: 0,
-            max_log_arity: 1,
-            num_queries: 64,
-            commit_proof_of_work_bits: 0,
-            query_proof_of_work_bits: 0,
-        };
-        let proof = system.prove(fri_parameters, &key, claim, witness);
-        system.verify(fri_parameters, claim, &proof).unwrap();
+        let proof = system.prove(&key, claim, witness);
+        system.verify(claim, &proof).unwrap();
+    }
+
+    #[test]
+    fn test_claim_split_rejected() {
+        let (system, key) = system();
+        let witness = witness(&system);
+        let f = Val::from_u32;
+        // Prove a single claim, then attempt to verify with the same values
+        // regrouped into two claims. The transcript is length-prefixed, so the
+        // regrouped claims must yield different challenges and fail.
+        let claim = &[f(0), f(4), f(1)];
+        let proof = system.prove(&key, claim, witness);
+        let split_claims: &[&[Val]] = &[&[f(0), f(4)], &[f(1)]];
+        let result = system.verify_multiple_claims(split_claims, &proof);
+        assert!(result.is_err());
     }
 }

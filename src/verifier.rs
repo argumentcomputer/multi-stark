@@ -10,8 +10,10 @@
 //!    ensuring that all lookup pushes and pulls cancel out across circuits.
 //!
 //! 3. **Fiat-Shamir replay**: Reconstruct the challenger state identically to the
-//!    prover by observing commitments, trace heights, claims, and sampling the same
-//!    challenges (lookup, fingerprint, constraint alpha, OOD zeta).
+//!    prover: starting from the parameter-seeded challenger, observe the system
+//!    shape, commitments, trace heights, length-prefixed claims, and intermediate
+//!    accumulators, sampling the same challenges (lookup, fingerprint, constraint
+//!    alpha, OOD zeta) at the same points in the transcript.
 //!
 //! 4. **PCS verification**: Verify the FRI opening proofs against the committed
 //!    polynomials at the sampled points.
@@ -24,13 +26,18 @@
 //!
 //! # Soundness argument
 //!
-//! The protocol is sound in the random oracle model (instantiated by Keccak-256 via
-//! the Fiat-Shamir challenger). Informally: if a prover produces a proof that the
-//! verifier accepts, then with overwhelming probability the claimed computation is
-//! correct.
+//! The protocol is sound in the random oracle model, instantiated by the
+//! configuration's Fiat-Shamir challenger.
+//! Informally: if a prover produces a proof that the verifier accepts, then with
+//! overwhelming probability the claimed computation is correct.
 //!
 //! We use the following notation throughout:
-//! - |F_ext| ≈ 2^128 — size of the extension field (GoldilocksBinomialExtension<2>)
+//! - |F_ext| — size of the challenge (extension) field. All Schwartz-Zippel
+//!   terms below scale with 1/|F_ext|, so the configuration must pick an
+//!   extension large enough for the target security level: the reference
+//!   config's degree-2 Goldilocks extension gives |F_ext| ≈ 2^128; a degree-4
+//!   BabyBear extension gives ≈ 2^124; a degree-2 BabyBear extension (≈ 2^62)
+//!   would be far too small.
 //! - ρ = 2^(-log_blowup) — FRI rate parameter (inverse of the blowup factor)
 //! - n — number of FRI queries (`num_queries`)
 //! - k — number of AIR constraints (after lookup expansion)
@@ -40,12 +47,20 @@
 //! ## FRI proximity test
 //!
 //! The FRI-based PCS guarantees that committed polynomials are close to polynomials
-//! of the claimed degree. The exact soundness bound depends on the proximity
-//! parameter, number of folding rounds, and folding arity; a commonly cited
-//! approximation is **ρ^n** (each of the n queries independently catches a cheating
-//! prover with probability ≈ 1 - ρ). With `log_blowup = 1` and `num_queries = 100`,
-//! this gives ≈ 2^(-100). For the precise bound, see the FRI soundness analysis in
-//! the Plonky3 documentation.
+//! of the claimed degree. Two regimes must be distinguished when picking parameters:
+//!
+//! - **Conjectured soundness** (up to list-decoding capacity): each query catches a
+//!   cheating prover with probability ≈ 1 - ρ, giving a query-phase error of ≈ **ρ^n**.
+//!   With `log_blowup = 1` and `num_queries = 100`, this is ≈ 2^(-100).
+//! - **Proven soundness** (Johnson bound): each query only provably catches a
+//!   cheating prover with probability ≈ 1 - √ρ, giving ≈ **(√ρ)^n** — roughly half
+//!   the bits of the conjectured bound. The same parameters provably give only
+//!   ≈ 2^(-50).
+//!
+//! Like most production STARKs, parameters here are typically chosen against the
+//! conjectured bound; be aware of the distinction when quoting a security level.
+//! For the precise bounds, see the FRI soundness analysis in the Plonky3
+//! documentation.
 //!
 //! The proof-of-work (PoW) phases add grinding cost: a cheating prover must perform
 //! 2^(commit_proof_of_work_bits) work per batching challenge and
@@ -59,7 +74,7 @@
 //! k - 1 in α. By the Schwartz-Zippel lemma, if any individual constraint C_i is
 //! nonzero, the folded sum is nonzero with probability at least
 //! **1 - (k - 1) / |F_ext|**, which is negligible for practical constraint counts
-//! since |F_ext| ≈ 2^128.
+//! when |F_ext| is around 2^128.
 //!
 //! ## Out-of-domain evaluation (ζ)
 //!
@@ -85,8 +100,9 @@
 //!
 //! ## Fiat-Shamir (random oracle model)
 //!
-//! All challenges (α, ζ, β, γ) are derived from the transcript via Keccak-256.
-//! Security relies on Keccak-256 behaving as a random oracle. The ordering of
+//! All challenges (α, ζ, β, γ) are derived from the transcript via the
+//! configuration's challenger. Security relies on the underlying hash behaving
+//! as a random oracle. The ordering of
 //! observations is critical: in particular, claims must be observed *before* lookup
 //! challenges are sampled, otherwise the prover could choose claims adaptively to
 //! make the accumulator balance.
@@ -99,23 +115,33 @@
 //! ε ≤ ε_FRI + (k - 1 + D + N) / |F_ext|
 //! ```
 //!
-//! where ε_FRI ≈ ρ^n is the FRI soundness error. The second term is negligible
-//! for any practical parameters since |F_ext| ≈ 2^128, so **FRI dominates**. With
-//! `log_blowup = 1` and `num_queries = 100`, the protocol provides approximately
-//! 100 bits of security from FRI alone, plus additional grinding cost from PoW.
+//! where ε_FRI is the FRI soundness error (see above for the conjectured vs proven
+//! regimes). With a sufficiently large challenge field (|F_ext| ≈ 2^128) the
+//! second term is negligible for any practical parameters, so **FRI dominates**.
+//! With `log_blowup = 1` and
+//! `num_queries = 100`, the protocol provides approximately 100 bits of conjectured
+//! security (≈ 50 bits proven) from FRI alone, plus additional grinding cost from
+//! PoW.
+//!
+//! ## Not zero-knowledge
+//!
+//! This protocol is a succinct argument of knowledge, **not** a zero-knowledge
+//! proof: traces are committed without blinding, and FRI query responses reveal
+//! actual low-degree-extension values of the witness. Do not use it when the
+//! witness must remain hidden from the verifier.
 
 use crate::{
     builder::folder::VerifierConstraintFolder,
+    config::{PcsError, StarkGenericConfig, Val},
     ensure, ensure_eq,
     lookup::fingerprint,
     prover::Proof,
     system::System,
-    types::{Challenger, ExtVal, FriParameters, Pcs, PcsError, StarkConfig, Val},
 };
 use p3_air::{Air, BaseAir, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
-use p3_commit::{Pcs as PcsTrait, PolynomialSpace};
-use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
+use p3_commit::{Pcs, PolynomialSpace};
+use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing};
 use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 use p3_util::log2_strict_usize;
 
@@ -139,27 +165,29 @@ pub enum VerificationError<PcsErr> {
     UnbalancedChannel,
 }
 
-impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
+impl<SC, A> System<SC, A>
+where
+    SC: StarkGenericConfig,
+    A: BaseAir<Val<SC>> + for<'a> Air<VerifierConstraintFolder<'a, Val<SC>, SC::Challenge>>,
+{
     /// Verifies a STARK proof against a single claim.
     ///
     /// Returns `Ok(())` if the proof is valid, or a [`VerificationError`] describing
     /// the first check that failed.
     pub fn verify(
         &self,
-        fri_parameters: FriParameters,
-        claim: &[Val],
-        proof: &Proof,
-    ) -> Result<(), VerificationError<PcsError>> {
-        self.verify_multiple_claims(fri_parameters, &[claim], proof)
+        claim: &[Val<SC>],
+        proof: &Proof<SC>,
+    ) -> Result<(), VerificationError<PcsError<SC>>> {
+        self.verify_multiple_claims(&[claim], proof)
     }
 
     /// Verifies a STARK proof against multiple claims.
     pub fn verify_multiple_claims(
         &self,
-        fri_parameters: FriParameters,
-        claims: &[&[Val]],
-        proof: &Proof,
-    ) -> Result<(), VerificationError<PcsError>> {
+        claims: &[&[Val<SC>]],
+        proof: &Proof<SC>,
+    ) -> Result<(), VerificationError<PcsError<SC>>> {
         let Proof {
             commitments,
             intermediate_accumulators,
@@ -180,34 +208,42 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         // ≤ N / |F_ext| (Schwartz-Zippel on the numerator polynomial).
         ensure_eq!(
             intermediate_accumulators.last(),
-            Some(&ExtVal::ZERO),
+            Some(&SC::Challenge::ZERO),
             VerificationError::UnbalancedChannel
         );
 
         // Soundness: Fiat-Shamir. All challenges below are derived deterministically
-        // from the transcript via Keccak-256 (random oracle model). The verifier
-        // replays exactly the same observations as the prover, so any divergence
-        // (e.g. different commitments) produces different challenges, making it
-        // infeasible for a cheating prover to predict them.
-        let config = StarkConfig::new(self.commitment_parameters, fri_parameters);
-        let pcs = config.pcs();
-        let mut challenger = config.initialise_challenger();
+        // from the transcript via the configuration's challenger, whose hash is
+        // modeled as a random oracle. The verifier replays exactly the same
+        // observations as the prover, so any divergence (e.g. different
+        // commitments) produces different challenges, making it infeasible for a
+        // cheating prover to predict them.
+        let pcs = self.config.pcs();
+        let mut challenger = self.config.initialise_challenger();
+
+        // Bind the system shape into the transcript. The protocol parameters
+        // are already bound via the challenger seed.
+        self.observe_shape(&mut challenger);
 
         // observe preprocessed and stage_1 commitment
         if let Some(commit) = &self.preprocessed_commit {
-            challenger.observe(commit);
+            challenger.observe(commit.clone());
         }
         challenger.observe(commitments.stage_1_trace.clone());
 
         // Observe trace heights to bind the proof to specific domain sizes.
         for log_degree in log_degrees {
-            challenger.observe(Val::from_u8(*log_degree));
+            challenger.observe(Val::<SC>::from_u8(*log_degree));
         }
 
         // Soundness: claims must be observed BEFORE lookup challenges are sampled.
         // Otherwise, the prover could choose claims adaptively after seeing the
-        // challenges, breaking the lookup argument's binding property.
+        // challenges, breaking the lookup argument's binding property. The claims
+        // are length-prefixed so that distinct claim structures (e.g. [[a, b]]
+        // vs [[a], [b]]) yield distinct transcripts.
+        challenger.observe(Val::<SC>::from_usize(claims.len()));
         for claim in claims {
+            challenger.observe(Val::<SC>::from_usize(claim.len()));
             challenger.observe_slice(claim);
         }
 
@@ -215,16 +251,23 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         // The message m_i = lookup_challenge + fingerprint(fingerprint_challenge, args_i)
         // is an affine function of the challenges, ensuring that distinct argument
         // tuples produce distinct messages with probability ≥ 1 - 1/|F_ext|.
-        let lookup_argument_challenge: ExtVal = challenger.sample_algebra_element();
+        let lookup_argument_challenge: SC::Challenge = challenger.sample_algebra_element();
         challenger.observe_algebra_element(lookup_argument_challenge);
-        let fingerprint_challenge: ExtVal = challenger.sample_algebra_element();
+        let fingerprint_challenge: SC::Challenge = challenger.sample_algebra_element();
         challenger.observe_algebra_element(fingerprint_challenge);
 
         // observe stage_2 commitment
         challenger.observe(commitments.stage_2_trace.clone());
 
+        // Observe the intermediate accumulators. They enter the constraints as
+        // public values, so later challenges (α, ζ) must depend on them
+        // directly rather than only through the quotient commitment.
+        for acc in intermediate_accumulators {
+            challenger.observe_algebra_element(*acc);
+        }
+
         // construct the accumulator from the claims
-        let mut acc = ExtVal::ZERO;
+        let mut acc = SC::Challenge::ZERO;
         for claim in claims {
             let message = lookup_argument_challenge
                 + fingerprint(&fingerprint_challenge, claim.iter().cloned());
@@ -234,14 +277,14 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         // Soundness: constraint folding. All k constraints are combined via powers
         // of α. The folded sum has degree k-1 in α, so by Schwartz-Zippel a violated
         // constraint survives folding with probability ≥ 1 - (k-1)/|F_ext|.
-        let constraint_challenge: ExtVal = challenger.sample_algebra_element();
+        let constraint_challenge: SC::Challenge = challenger.sample_algebra_element();
 
         // observe quotient commitment
         challenger.observe(commitments.quotient_chunks.clone());
 
         // Soundness: OOD evaluation. ζ is sampled after all commitments are fixed.
         // A nonzero polynomial of degree ≤ D vanishes at ζ with probability ≤ D/|F_ext|.
-        let zeta: ExtVal = challenger.sample_algebra_element();
+        let zeta: SC::Challenge = challenger.sample_algebra_element();
         let mut preprocessed_trace_evaluations = vec![];
         let mut stage_1_trace_evaluations = vec![];
         let mut stage_2_trace_evaluations = vec![];
@@ -251,23 +294,17 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
             let log_degree = log_degrees[i];
             let quotient_degree = quotient_degrees[i];
             let log_quotient_degree = log2_strict_usize(quotient_degree);
-            let trace_domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
-                pcs,
-                1 << log_degree,
-            );
+            let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
             let quotient_domain =
                 trace_domain.create_disjoint_domain((1 << log_degree) << log_quotient_degree);
             let quotient_chunks_domains = quotient_domain.split_domains(quotient_degree);
             let unshifted_quotient_chunks_domains = quotient_chunks_domains
                 .iter()
-                .map(|domain| {
-                    <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
-                        pcs,
-                        domain.size(),
-                    )
-                })
+                .map(|domain| pcs.natural_domain_for_degree(domain.size()))
                 .collect::<Vec<_>>();
-            let zeta_next = zeta * trace_domain.subgroup_generator();
+            let zeta_next = trace_domain
+                .next_point(zeta)
+                .ok_or(VerificationError::InvalidProofShape)?;
             if let Some(i) = self.preprocessed_indices[i] {
                 let preprocessed_opened_values = preprocessed_opened_values.as_ref().unwrap();
                 preprocessed_trace_evaluations.push((
@@ -343,8 +380,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
             last_quotient_i += quotient_degree;
 
             // compute the composition polynomial evaluation
-            let trace_domain =
-                <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
+            let trace_domain = pcs.natural_domain_for_degree(degree);
             let sels = trace_domain.selectors_at_point(zeta);
             let preprocessed = if let Some(i) = self.preprocessed_indices[i] {
                 let preprocessed_opened_values = preprocessed_opened_values.as_ref().unwrap();
@@ -358,14 +394,14 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                 RowMajorMatrixView::new_row(stage_1_row),
                 RowMajorMatrixView::new_row(stage_1_next_row),
             );
-            let extension_d = <ExtVal as BasedVectorSpace<Val>>::DIMENSION;
+            let extension_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
             let stage_2_row = &stage_2_row
                 .chunks_exact(extension_d)
-                .map(from_ext_basis)
+                .map(from_ext_basis::<Val<SC>, SC::Challenge>)
                 .collect::<Vec<_>>();
             let stage_2_next_row = &stage_2_next_row
                 .chunks_exact(extension_d)
-                .map(from_ext_basis)
+                .map(from_ext_basis::<Val<SC>, SC::Challenge>)
                 .collect::<Vec<_>>();
             let stage_2 = VerticalPair::new(
                 RowMajorMatrixView::new_row(stage_2_row),
@@ -388,7 +424,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                 is_last_row: sels.is_last_row,
                 is_transition: sels.is_transition,
                 alpha: constraint_challenge,
-                accumulator: ExtVal::ZERO,
+                accumulator: SC::Challenge::ZERO,
             };
             circuit.air.eval(&mut folder);
             let composition_polynomial = folder.accumulator;
@@ -409,13 +445,13 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                                     .vanishing_poly_at_point(domain.first_point())
                                     .inverse()
                         })
-                        .product::<ExtVal>()
+                        .product::<SC::Challenge>()
                 })
                 .collect::<Vec<_>>();
             let quotient = quotient_chunks
                 .enumerate()
-                .map(|(ch_i, ch)| zps[ch_i] * from_ext_basis(ch))
-                .sum::<ExtVal>();
+                .map(|(ch_i, ch)| zps[ch_i] * from_ext_basis::<Val<SC>, SC::Challenge>(ch))
+                .sum::<SC::Challenge>();
 
             // Soundness: OOD check. If any constraint is violated on the trace
             // domain, the composition polynomial is not divisible by the vanishing
@@ -438,9 +474,13 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
 
     /// Validates the structural shape of the proof without checking any cryptographic
     /// properties. Returns the quotient degrees per circuit on success.
-    pub fn verify_shape(&self, proof: &Proof) -> Result<Vec<usize>, VerificationError<PcsError>> {
+    pub fn verify_shape(
+        &self,
+        proof: &Proof<SC>,
+    ) -> Result<Vec<usize>, VerificationError<PcsError<SC>>> {
         let Proof {
             intermediate_accumulators,
+            log_degrees,
             quotient_opened_values,
             preprocessed_opened_values,
             stage_1_opened_values,
@@ -451,6 +491,12 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         let num_circuits = self.circuits.len();
         // there must be at least one circuit
         ensure!(num_circuits > 0, VerificationError::InvalidSystem);
+        // there must be one log degree per circuit
+        ensure_eq!(
+            log_degrees.len(),
+            num_circuits,
+            VerificationError::InvalidProofShape
+        );
         // the preprocessed commitment is empty if and only if there are zero preprocessed circuits
         let num_preprocessed = self
             .preprocessed_indices
@@ -509,7 +555,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
                     circuit.stage_1_width,
                     VerificationError::InvalidProofShape
                 );
-                let extension_d = <ExtVal as BasedVectorSpace<Val>>::DIMENSION;
+                let extension_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
                 ensure_eq!(
                     stage_2_opened_values[i][j].len(),
                     circuit.stage_2_width * extension_d,
@@ -519,8 +565,17 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
         }
         // quotient round
         let mut quotient_degrees = vec![];
-        for circuit in self.circuits.iter() {
-            let quotient_degree = (circuit.max_constraint_degree.max(2) - 1).next_power_of_two();
+        for (circuit, log_degree) in self.circuits.iter().zip(log_degrees) {
+            let quotient_degree = circuit.quotient_degree();
+            // The claimed log degree must be small enough that the quotient
+            // domain can still be committed and opened by the PCS. This also
+            // guards the `1 << log_degree` shifts used during verification
+            // against overflow on adversarial proofs.
+            ensure!(
+                usize::from(*log_degree) + log2_strict_usize(quotient_degree)
+                    <= self.config.max_log_degree(),
+                VerificationError::InvalidProofShape
+            );
             quotient_degrees.push(quotient_degree);
         }
         let quotient_size: usize = quotient_degrees.iter().sum();
@@ -540,7 +595,7 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
             );
             ensure_eq!(
                 quotient_opened_values[i][0].len(),
-                <ExtVal as BasedVectorSpace<Val>>::DIMENSION,
+                <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION,
                 VerificationError::InvalidProofShape
             );
         }
@@ -554,11 +609,11 @@ impl<A: BaseAir<Val> + for<'a> Air<VerifierConstraintFolder<'a>>> System<A> {
     }
 }
 
-fn from_ext_basis(coeffs: &[ExtVal]) -> ExtVal {
+fn from_ext_basis<F: Field, EF: ExtensionField<F>>(coeffs: &[EF]) -> EF {
     coeffs
         .iter()
         .enumerate()
-        .map(|(i, c)| *c * <ExtVal as BasedVectorSpace<Val>>::ith_basis_element(i).unwrap())
+        .map(|(i, c)| *c * <EF as BasedVectorSpace<F>>::ith_basis_element(i).unwrap())
         .sum()
 }
 
@@ -569,7 +624,7 @@ mod tests {
         lookup::LookupAir,
         prover::Proof,
         system::{ProverKey, SystemWitness},
-        types::{CommitmentParameters, FriParameters},
+        types::{CommitmentParameters, ExtVal, FriParameters, GoldilocksKeccakConfig, Val},
     };
     use p3_air::{AirBuilder, BaseAir, WindowAccess};
     use p3_matrix::dense::RowMajorMatrix;
@@ -615,22 +670,32 @@ mod tests {
             }
         }
     }
-    fn system(commitment_parameters: CommitmentParameters) -> (System<CS>, ProverKey) {
+    const COMMITMENT_PARAMETERS: CommitmentParameters = CommitmentParameters {
+        log_blowup: 1,
+        cap_height: 0,
+    };
+
+    const FRI_PARAMETERS: FriParameters = FriParameters {
+        log_final_poly_len: 0,
+        max_log_arity: 1,
+        num_queries: 64,
+        commit_proof_of_work_bits: 0,
+        query_proof_of_work_bits: 0,
+    };
+
+    fn system() -> (
+        System<GoldilocksKeccakConfig, CS>,
+        ProverKey<GoldilocksKeccakConfig>,
+    ) {
+        let config = GoldilocksKeccakConfig::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
         let pythagorean_circuit = LookupAir::new(CS::Pythagorean, vec![]);
         let complex_circuit = LookupAir::new(CS::Complex, vec![]);
-        System::new(
-            commitment_parameters,
-            [pythagorean_circuit, complex_circuit],
-        )
+        System::new(config, [pythagorean_circuit, complex_circuit])
     }
 
     #[test]
     fn multi_stark_test() {
-        let commitment_parameters = CommitmentParameters {
-            log_blowup: 1,
-            cap_height: 0,
-        };
-        let (system, key) = system(commitment_parameters);
+        let (system, key) = system();
         let f = Val::from_u32;
         let witness = SystemWitness::from_stage_1(
             vec![
@@ -642,27 +707,14 @@ mod tests {
             ],
             &system,
         );
-        let fri_parameters = FriParameters {
-            log_final_poly_len: 0,
-            max_log_arity: 1,
-            num_queries: 64,
-            commit_proof_of_work_bits: 0,
-            query_proof_of_work_bits: 0,
-        };
         let no_claims = &[];
-        let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
-        system
-            .verify_multiple_claims(fri_parameters, no_claims, &proof)
-            .unwrap();
+        let proof = system.prove_multiple_claims(&key, no_claims, witness);
+        system.verify_multiple_claims(no_claims, &proof).unwrap();
     }
 
     #[test]
     fn multi_stark_prove_verify_serialize() {
-        let commitment_parameters = CommitmentParameters {
-            log_blowup: 1,
-            cap_height: 0,
-        };
-        let (system, key) = system(commitment_parameters);
+        let (system, key) = system();
         let f = Val::from_u32;
         // 2^4 = 16 rows — small enough for fast CI
         let mut pythagorean_trace = [3, 4, 5].map(f).to_vec();
@@ -678,32 +730,22 @@ mod tests {
             ],
             &system,
         );
-        let fri_parameters = FriParameters {
-            log_final_poly_len: 0,
-            max_log_arity: 1,
-            num_queries: 64,
-            commit_proof_of_work_bits: 0,
-            query_proof_of_work_bits: 0,
-        };
         let no_claims = &[];
-        let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
+        let proof = system.prove_multiple_claims(&key, no_claims, witness);
         // Serialization round-trip
         let proof_bytes = proof.to_bytes().expect("Failed to serialize proof");
         let proof2 = Proof::from_bytes(&proof_bytes).expect("Failed to deserialize proof");
-        system
-            .verify_multiple_claims(fri_parameters, no_claims, &proof2)
-            .unwrap();
+        system.verify_multiple_claims(no_claims, &proof2).unwrap();
     }
 
     // -- Negative / adversarial tests --
 
     /// Helper: creates a small system and valid proof for negative tests.
-    fn small_system_and_proof() -> (System<CS>, FriParameters, Proof) {
-        let commitment_parameters = CommitmentParameters {
-            log_blowup: 1,
-            cap_height: 0,
-        };
-        let (system, key) = system(commitment_parameters);
+    fn small_system_and_proof() -> (
+        System<GoldilocksKeccakConfig, CS>,
+        Proof<GoldilocksKeccakConfig>,
+    ) {
+        let (system, key) = system();
         let f = Val::from_u32;
         let witness = SystemWitness::from_stage_1(
             vec![
@@ -715,66 +757,79 @@ mod tests {
             ],
             &system,
         );
-        let fri_parameters = FriParameters {
-            log_final_poly_len: 0,
-            max_log_arity: 1,
-            num_queries: 64,
-            commit_proof_of_work_bits: 0,
-            query_proof_of_work_bits: 0,
-        };
         let no_claims = &[];
-        let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
-        (system, fri_parameters, proof)
+        let proof = system.prove_multiple_claims(&key, no_claims, witness);
+        (system, proof)
     }
 
     #[test]
     fn test_wrong_claim_rejected() {
-        let (system, fri_parameters, proof) = small_system_and_proof();
+        let (system, proof) = small_system_and_proof();
         let f = Val::from_u32;
         // Verify with a bogus claim — the prover used no claims, so any claim should fail.
-        let result = system.verify(fri_parameters, &[f(42)], &proof);
+        let result = system.verify(&[f(42)], &proof);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_tampered_stage_1_values_rejected() {
-        let (system, fri_parameters, mut proof) = small_system_and_proof();
+        let (system, mut proof) = small_system_and_proof();
         // Mutate a value in the stage 1 opened values — FRI should catch this.
         proof.stage_1_opened_values[0][0][0] += ExtVal::ONE;
         let no_claims: &[&[Val]] = &[];
-        let result = system.verify_multiple_claims(fri_parameters, no_claims, &proof);
+        let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_tampered_accumulator_rejected() {
-        let (system, fri_parameters, mut proof) = small_system_and_proof();
+        let (system, mut proof) = small_system_and_proof();
         // Set the last intermediate accumulator to non-zero.
         let last = proof.intermediate_accumulators.len() - 1;
         proof.intermediate_accumulators[last] = ExtVal::ONE;
         let no_claims: &[&[Val]] = &[];
-        let result = system.verify_multiple_claims(fri_parameters, no_claims, &proof);
+        let result = system.verify_multiple_claims(no_claims, &proof);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_truncated_log_degrees_rejected() {
+        let (system, mut proof) = small_system_and_proof();
+        // Remove a log degree — the shape check must reject this instead of
+        // the verifier panicking on an out-of-bounds index.
+        proof.log_degrees.pop();
+        let no_claims: &[&[Val]] = &[];
+        let result = system.verify_multiple_claims(no_claims, &proof);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_oversized_log_degree_rejected() {
+        let (system, mut proof) = small_system_and_proof();
+        // A log degree beyond the field's two-adicity must be rejected instead
+        // of causing a shift overflow or a panic inside the PCS.
+        proof.log_degrees[0] = 200;
+        let no_claims: &[&[Val]] = &[];
+        let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_truncated_proof_rejected() {
-        let (system, fri_parameters, mut proof) = small_system_and_proof();
+        let (system, mut proof) = small_system_and_proof();
         // Remove a quotient opened value — shape check should fail.
         proof.quotient_opened_values.pop();
         let no_claims: &[&[Val]] = &[];
-        let result = system.verify_multiple_claims(fri_parameters, no_claims, &proof);
+        let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_serialization_round_trip() {
-        let (system, fri_parameters, proof) = small_system_and_proof();
+        let (system, proof) = small_system_and_proof();
         let bytes = proof.to_bytes().expect("serialize");
         let proof2 = Proof::from_bytes(&bytes).expect("deserialize");
         let no_claims: &[&[Val]] = &[];
-        system
-            .verify_multiple_claims(fri_parameters, no_claims, &proof2)
-            .unwrap();
+        system.verify_multiple_claims(no_claims, &proof2).unwrap();
     }
 }

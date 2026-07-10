@@ -16,7 +16,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use multi_stark::builder::symbolic::{SymbolicExpression, preprocessed_var, var};
 use multi_stark::lookup::{Lookup, LookupAir};
 use multi_stark::system::{System, SystemWitness};
-use multi_stark::types::{CommitmentParameters, FriParameters, Val};
+use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val};
 use multi_stark::{
     p3_air::{Air, AirBuilder, BaseAir, WindowAccess},
     p3_field::{Field, PrimeCharacteristicRing},
@@ -127,7 +127,10 @@ impl U32CS {
 // Witness generation
 // ---------------------------------------------------------------------------
 
-fn build_witness(num_adds: usize, system: &System<U32CS>) -> SystemWitness {
+fn build_witness(
+    num_adds: usize,
+    system: &System<GoldilocksKeccakConfig, U32CS>,
+) -> SystemWitness<Val> {
     let byte_width = 1;
     let add_width = 14;
     let add_height = num_adds.next_power_of_two();
@@ -201,20 +204,22 @@ fn build_claims(num_adds: usize) -> Vec<[Val; 4]> {
 // ---------------------------------------------------------------------------
 
 fn bench_prove(c: &mut Criterion) {
-    let commitment_parameters = CommitmentParameters {
-        log_blowup: 1,
-        cap_height: 0,
-    };
+    let config = GoldilocksKeccakConfig::new(
+        CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        },
+        FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 100,
+            commit_proof_of_work_bits: 10,
+            query_proof_of_work_bits: 10,
+        },
+    );
     let byte_table = LookupAir::new(U32CS::ByteTable, U32CS::ByteTable.lookups());
     let u32_add = LookupAir::new(U32CS::U32Add, U32CS::U32Add.lookups());
-    let (system, key) = System::new(commitment_parameters, [byte_table, u32_add]);
-    let fri_parameters = FriParameters {
-        log_final_poly_len: 0,
-        max_log_arity: 1,
-        num_queries: 100,
-        commit_proof_of_work_bits: 10,
-        query_proof_of_work_bits: 10,
-    };
+    let (system, key) = System::new(config, [byte_table, u32_add]);
 
     let mut group = c.benchmark_group("prove");
     group.sample_size(10);
@@ -229,9 +234,7 @@ fn bench_prove(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || build_witness(num_adds, &system),
-                    |witness| {
-                        system.prove_multiple_claims(fri_parameters, &key, &claim_refs, witness)
-                    },
+                    |witness| system.prove_multiple_claims(&key, &claim_refs, witness),
                     criterion::BatchSize::LargeInput,
                 );
             },
@@ -241,20 +244,22 @@ fn bench_prove(c: &mut Criterion) {
 }
 
 fn bench_verify(c: &mut Criterion) {
-    let commitment_parameters = CommitmentParameters {
-        log_blowup: 1,
-        cap_height: 0,
-    };
+    let config = GoldilocksKeccakConfig::new(
+        CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        },
+        FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 100,
+            commit_proof_of_work_bits: 10,
+            query_proof_of_work_bits: 10,
+        },
+    );
     let byte_table = LookupAir::new(U32CS::ByteTable, U32CS::ByteTable.lookups());
     let u32_add = LookupAir::new(U32CS::U32Add, U32CS::U32Add.lookups());
-    let (system, key) = System::new(commitment_parameters, [byte_table, u32_add]);
-    let fri_parameters = FriParameters {
-        log_final_poly_len: 0,
-        max_log_arity: 1,
-        num_queries: 100,
-        commit_proof_of_work_bits: 10,
-        query_proof_of_work_bits: 10,
-    };
+    let (system, key) = System::new(config, [byte_table, u32_add]);
 
     let mut group = c.benchmark_group("verify");
     group.sample_size(10);
@@ -265,15 +270,11 @@ fn bench_verify(c: &mut Criterion) {
         let claims = build_claims(num_adds);
         let claim_refs: Vec<&[Val]> = claims.iter().map(|c| c.as_slice()).collect();
         let witness = build_witness(num_adds, &system);
-        let proof = system.prove_multiple_claims(fri_parameters, &key, &claim_refs, witness);
+        let proof = system.prove_multiple_claims(&key, &claim_refs, witness);
         group.bench_function(
             BenchmarkId::new("u32_add", format!("2^{log_height}")),
             |b| {
-                b.iter(|| {
-                    system
-                        .verify_multiple_claims(fri_parameters, &claim_refs, &proof)
-                        .unwrap()
-                });
+                b.iter(|| system.verify_multiple_claims(&claim_refs, &proof).unwrap());
             },
         );
     }

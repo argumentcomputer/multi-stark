@@ -1,58 +1,78 @@
 use crate::{
     builder::symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
+    config::{Com, PcsData, StarkGenericConfig, Val},
     lookup::{LOOKUP_PUBLIC_SIZE, Lookup, LookupAir},
-    types::{Commitment, CommitmentParameters, Committer, ProverData, Val},
 };
 use p3_air::{Air, BaseAir};
+use p3_challenger::CanObserve;
+use p3_commit::{Pcs, PolynomialSpace};
+use p3_field::{ExtensionField, Field, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 /// A multi-circuit STARK system. Contains all circuits together with their
-/// shared preprocessed commitment and commitment parameters.
-pub struct System<A> {
-    pub commitment_parameters: CommitmentParameters,
-    pub circuits: Vec<Circuit<A>>,
+/// shared preprocessed commitment and the protocol configuration.
+pub struct System<SC: StarkGenericConfig, A> {
+    pub config: SC,
+    pub circuits: Vec<Circuit<A, Val<SC>>>,
     /// Commitment to all preprocessed traces (if any circuit has one).
-    pub preprocessed_commit: Option<Commitment>,
+    pub preprocessed_commit: Option<Com<SC>>,
     /// Maps each circuit index to its position within the preprocessed commitment.
     /// `None` if that circuit has no preprocessed trace.
     pub preprocessed_indices: Vec<Option<usize>>,
 }
 
 /// Prover-side data that must be retained between system setup and proving.
-pub struct ProverKey {
+pub struct ProverKey<SC: StarkGenericConfig> {
     /// PCS prover data for the preprocessed traces.
-    pub preprocessed_data: Option<ProverData>,
+    pub preprocessed_data: Option<PcsData<SC>>,
 }
 
-impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> System<A> {
+impl<SC, A> System<SC, A>
+where
+    SC: StarkGenericConfig,
+    A: BaseAir<Val<SC>> + Air<SymbolicAirBuilder<Val<SC>, SC::Challenge>>,
+{
     #[inline]
     pub fn new(
-        commitment_parameters: CommitmentParameters,
-        airs: impl IntoIterator<Item = LookupAir<A>>,
-    ) -> (Self, ProverKey) {
-        let committer = Committer::new(commitment_parameters);
+        config: SC,
+        airs: impl IntoIterator<Item = LookupAir<A, Val<SC>>>,
+    ) -> (Self, ProverKey<SC>) {
+        let pcs = config.pcs();
         let mut circuits = vec![];
         let mut preprocessed_traces = vec![];
         let mut preprocessed_indices = vec![];
-        for air in airs {
-            let (circuit, maybe_preprocessed_trace) = Circuit::from_air(air);
+        for (circuit_idx, air) in airs.into_iter().enumerate() {
+            let (circuit, maybe_preprocessed_trace) = Circuit::from_air::<SC::Challenge>(air);
+            // The prover obtains trace evaluations on the quotient domain
+            // from the PCS, which can only serve domains up to
+            // `max_quotient_degree` times the trace domain (the blowup
+            // factor for FRI). Beyond that, proving would silently produce
+            // invalid proofs, so reject the circuit upfront.
+            assert!(
+                circuit.quotient_degree() <= config.max_quotient_degree(),
+                "circuit {circuit_idx}: constraint degree {} needs quotient degree {}, but the \
+                 PCS only supports {}; increase log_blowup or lower the constraint degree",
+                circuit.max_constraint_degree,
+                circuit.quotient_degree(),
+                config.max_quotient_degree(),
+            );
             circuits.push(circuit);
             if let Some(preprocessed_trace) = maybe_preprocessed_trace {
                 preprocessed_indices.push(Some(preprocessed_traces.len()));
-                let domain = committer.natural_domain_for_degree(preprocessed_trace.height());
+                let domain = pcs.natural_domain_for_degree(preprocessed_trace.height());
                 preprocessed_traces.push((domain, preprocessed_trace));
             } else {
                 preprocessed_indices.push(None);
             }
         }
         let (preprocessed_commit, preprocessed_data) = if !preprocessed_traces.is_empty() {
-            let (commit, data) = committer.commit(preprocessed_traces);
+            let (commit, data) = pcs.commit(preprocessed_traces);
             (Some(commit), Some(data))
         } else {
             (None, None)
         };
         let system = Self {
-            commitment_parameters,
+            config,
             circuits,
             preprocessed_commit,
             preprocessed_indices,
@@ -62,10 +82,31 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> System<A> {
     }
 }
 
+impl<SC: StarkGenericConfig, A> System<SC, A> {
+    /// Binds the system shape into the Fiat-Shamir transcript. The prover and
+    /// the verifier must call this identically, before observing any
+    /// commitment, so that transcripts of systems with different circuit
+    /// shapes never collide. The protocol parameters are bound separately,
+    /// via the challenger seed (see
+    /// [`StarkGenericConfig::initialise_challenger`]).
+    pub fn observe_shape(&self, challenger: &mut SC::Challenger) {
+        let mut observe_usize = |x: usize| challenger.observe(Val::<SC>::from_usize(x));
+        observe_usize(self.circuits.len());
+        for circuit in &self.circuits {
+            observe_usize(circuit.constraint_count);
+            observe_usize(circuit.max_constraint_degree);
+            observe_usize(circuit.preprocessed_height);
+            observe_usize(circuit.preprocessed_width);
+            observe_usize(circuit.stage_1_width);
+            observe_usize(circuit.stage_2_width);
+        }
+    }
+}
+
 /// A single circuit within the system, wrapping an AIR together with
 /// precomputed metadata used by the prover and verifier.
-pub struct Circuit<A> {
-    pub air: LookupAir<A>,
+pub struct Circuit<A, F: Field> {
+    pub air: LookupAir<A, F>,
     pub constraint_count: usize,
     pub max_constraint_degree: usize,
     pub preprocessed_height: usize,
@@ -74,23 +115,56 @@ pub struct Circuit<A> {
     pub stage_2_width: usize,
 }
 
+impl<A, F: Field> Circuit<A, F> {
+    /// Degree of the quotient polynomial as a multiple of the trace degree.
+    /// Division by the vanishing polynomial reduces the composition
+    /// polynomial's degree by 1; the result is padded to a power of two so
+    /// the quotient can be split into equally-sized chunks.
+    pub fn quotient_degree(&self) -> usize {
+        (self.max_constraint_degree.max(2) - 1).next_power_of_two()
+    }
+}
+
 /// Witness data for the multi-circuit system, comprising stage 1 traces and
 /// the concrete lookup values derived from them.
 #[derive(Clone)]
-pub struct SystemWitness {
+pub struct SystemWitness<F: Field> {
     /// Stage 1 (main) execution traces, one per circuit.
-    pub traces: Vec<RowMajorMatrix<Val>>,
+    pub traces: Vec<RowMajorMatrix<F>>,
     /// Lookup values per circuit, per row, per lookup.
-    pub lookups: Vec<Vec<Vec<Lookup<Val>>>>,
+    pub lookups: Vec<Vec<Vec<Lookup<F>>>>,
 }
 
-impl SystemWitness {
-    pub fn from_stage_1<A>(traces: Vec<RowMajorMatrix<Val>>, system: &System<A>) -> Self {
+impl<F: Field> SystemWitness<F> {
+    /// Builds the witness from the stage 1 traces, computing the concrete
+    /// lookup values for each row of each circuit.
+    ///
+    /// # Panics
+    /// Panics if the number of traces differs from the number of circuits, or
+    /// if a circuit with a preprocessed trace receives a main trace of a
+    /// different height (both traces are opened on the same domain, so their
+    /// heights must match; the rows would otherwise be silently truncated).
+    pub fn from_stage_1<SC, A>(traces: Vec<RowMajorMatrix<F>>, system: &System<SC, A>) -> Self
+    where
+        SC: StarkGenericConfig,
+        SC::Pcs: Pcs<SC::Challenge, SC::Challenger, Domain: PolynomialSpace<Val = F>>,
+    {
+        assert_eq!(
+            traces.len(),
+            system.circuits.len(),
+            "expected one trace per circuit"
+        );
         let lookups = traces
             .iter()
             .zip(system.circuits.iter())
-            .map(|(trace, circuit)| {
+            .enumerate()
+            .map(|(circuit_idx, (trace, circuit))| {
                 if let Some(preprocessed) = &circuit.air.preprocessed {
+                    assert_eq!(
+                        trace.height(),
+                        preprocessed.height(),
+                        "circuit {circuit_idx}: main trace height must equal preprocessed trace height"
+                    );
                     trace
                         .row_slices()
                         .zip(preprocessed.row_slices())
@@ -122,8 +196,12 @@ impl SystemWitness {
     }
 }
 
-impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> Circuit<A> {
-    pub fn from_air(air: LookupAir<A>) -> (Self, Option<RowMajorMatrix<Val>>) {
+impl<A, F: Field> Circuit<A, F> {
+    pub fn from_air<EF>(air: LookupAir<A, F>) -> (Self, Option<RowMajorMatrix<F>>)
+    where
+        EF: ExtensionField<F>,
+        A: BaseAir<F> + Air<SymbolicAirBuilder<F, EF>>,
+    {
         // as of now, we assume no public values apart from the lookup values
         let io_size = 0;
         let stage_1_width = air.inner_air.width();
@@ -131,7 +209,7 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> Circuit<A> {
         let preprocessed_trace = air.preprocessed_trace();
         let preprocessed_height = preprocessed_trace.as_ref().map_or(0, |mat| mat.height());
         let preprocessed_width = preprocessed_trace.as_ref().map_or(0, |mat| mat.width());
-        let symbolic_constraints = get_symbolic_constraints(
+        let symbolic_constraints = get_symbolic_constraints::<F, EF, _>(
             &air,
             preprocessed_width,
             stage_1_width,
@@ -151,5 +229,123 @@ impl<A: BaseAir<Val> + Air<SymbolicAirBuilder>> Circuit<A> {
             stage_2_width,
         };
         (circuit, preprocessed_trace)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val};
+    use p3_air::{AirBuilder, WindowAccess};
+
+    /// A trivial AIR with a preprocessed trace of 4 rows and no constraints.
+    struct Preprocessed;
+
+    impl<F: Field> BaseAir<F> for Preprocessed {
+        fn width(&self) -> usize {
+            1
+        }
+
+        fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
+            Some(RowMajorMatrix::new(vec![F::ZERO; 4], 1))
+        }
+    }
+
+    impl<AB: AirBuilder> Air<AB> for Preprocessed
+    where
+        AB::F: Field,
+    {
+        fn eval(&self, _builder: &mut AB) {}
+    }
+
+    /// A degree-5 constraint: `x^5 == y`.
+    struct HighDegreeAir;
+
+    impl<F> BaseAir<F> for HighDegreeAir {
+        fn width(&self) -> usize {
+            2
+        }
+    }
+
+    impl<AB> Air<AB> for HighDegreeAir
+    where
+        AB: AirBuilder,
+        AB::Var: Copy,
+    {
+        fn eval(&self, builder: &mut AB) {
+            let main = builder.main();
+            let local = main.current_slice();
+            let x = local[0];
+            builder.assert_eq(x * x * x * x * x, local[1]);
+        }
+    }
+
+    /// The prover can only evaluate constraints on a domain `2^log_blowup`
+    /// times the trace domain, so the constraint degree is bounded by
+    /// `2^log_blowup + 1` (degree 3 at `log_blowup = 1`). Exceeding it used
+    /// to silently produce invalid proofs; it must be rejected at setup.
+    #[test]
+    #[should_panic(expected = "needs quotient degree 4, but the PCS only supports 2")]
+    fn excessive_constraint_degree_rejected() {
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        };
+        let fri_parameters = FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 64,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        };
+        let config = GoldilocksKeccakConfig::new(commitment_parameters, fri_parameters);
+        System::new(config, [LookupAir::new(HighDegreeAir, vec![])]);
+    }
+
+    /// The same degree-5 circuit is fine at `log_blowup = 2` (quotient
+    /// degree 4 = blowup factor 4), end to end.
+    #[test]
+    fn high_degree_constraint_with_larger_blowup() {
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 2,
+            cap_height: 0,
+        };
+        let fri_parameters = FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 40,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        };
+        let config = GoldilocksKeccakConfig::new(commitment_parameters, fri_parameters);
+        let (system, key) = System::new(config, [LookupAir::new(HighDegreeAir, vec![])]);
+        let f = Val::from_u32;
+        let trace = RowMajorMatrix::new(vec![f(2), f(32), f(1), f(1), f(3), f(243), f(0), f(0)], 2);
+        let witness = SystemWitness::from_stage_1(vec![trace], &system);
+        let no_claims: &[&[Val]] = &[];
+        let proof = system.prove_multiple_claims(&key, no_claims, witness);
+        system.verify_multiple_claims(no_claims, &proof).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "preprocessed trace height")]
+    fn mismatched_preprocessed_height_panics() {
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        };
+        let fri_parameters = FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 64,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        };
+        let config = GoldilocksKeccakConfig::new(commitment_parameters, fri_parameters);
+        let (system, _key) = System::new(config, [LookupAir::new(Preprocessed, vec![])]);
+        // The main trace has 8 rows but the preprocessed trace has 4. This
+        // must panic instead of silently truncating the lookup rows.
+        let trace = RowMajorMatrix::new(vec![Val::ZERO; 8], 1);
+        SystemWitness::from_stage_1(vec![trace], &system);
     }
 }
