@@ -95,8 +95,9 @@ allow = [
     "Apache-2.0",
     "Unicode-3.0",
     "CC0-1.0",
+    # blake3 → arrayref; also allowed in ix's deny.toml
+    "BSD-2-Clause",
     #"Apache-2.0 WITH LLVM-exception",
-    #"BSD-2-Clause",
 ]
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the
