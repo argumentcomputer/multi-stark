@@ -10,7 +10,7 @@ use p3_blake3::Blake3;
 use p3_challenger::{HashChallenger, SerializingChallenger64};
 use p3_commit::{ExtensionMmcs, Pcs as PcsTrait};
 use p3_dft::Radix2DitParallel;
-use p3_field::{extension::BinomialExtensionField, ExtensionField, Field, TwoAdicField};
+use p3_field::{ExtensionField, Field, TwoAdicField, extension::BinomialExtensionField};
 use p3_fri::{FriParameters as InnerFriParameters, TwoAdicFriPcs};
 use p3_goldilocks::Goldilocks;
 use p3_merkle_tree::MerkleTreeMmcs;
@@ -230,7 +230,10 @@ mod pcs_ref_gen {
         // sample_bits_test: observe 0x0102030405060708, sample_bits(20).
         let mut ch = Challenger::from_hasher(vec![], Blake3);
         ch.observe(g(0x0102030405060708));
-        println!("SAMPLE_BITS {}", CanSampleBits::<usize>::sample_bits(&mut ch, 20));
+        println!(
+            "SAMPLE_BITS {}",
+            CanSampleBits::<usize>::sample_bits(&mut ch, 20)
+        );
         // pcs_challenger4_test: the α_pcs/α_fri/β/index continuation.
         let mut ch = Challenger::from_hasher(vec![], Blake3);
         ch.observe(g(0x0102030405060708));
@@ -244,6 +247,9 @@ mod pcs_ref_gen {
         println!("BETA {:?}", el(beta));
         ch.observe(g(0x0a0b0c0d01020304));
         ch.observe(g(0x0000000000000002));
-        println!("SAMPLE_BITS2 {}", CanSampleBits::<usize>::sample_bits(&mut ch, 20));
+        println!(
+            "SAMPLE_BITS2 {}",
+            CanSampleBits::<usize>::sample_bits(&mut ch, 20)
+        );
     }
 }
