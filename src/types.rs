@@ -1,34 +1,28 @@
 //! The reference STARK configuration: Goldilocks field with a degree-2
-//! binomial extension, Keccak-256 hashing, and a FRI-based PCS.
+//! binomial extension, Blake3 hashing, and a FRI-based PCS.
 //!
 //! The generic protocol lives in [`crate::config`], [`crate::system`],
 //! [`crate::prover`] and [`crate::verifier`]; this module only provides a
 //! concrete, batteries-included instantiation.
 
 use crate::config::StarkGenericConfig;
+use p3_blake3::Blake3;
 use p3_challenger::{HashChallenger, SerializingChallenger64};
 use p3_commit::{ExtensionMmcs, Pcs as PcsTrait};
 use p3_dft::Radix2DitParallel;
 use p3_field::{ExtensionField, Field, TwoAdicField, extension::BinomialExtensionField};
 use p3_fri::{FriParameters as InnerFriParameters, TwoAdicFriPcs};
 use p3_goldilocks::Goldilocks;
-use p3_keccak::{Keccak256Hash, KeccakF};
 use p3_merkle_tree::MerkleTreeMmcs;
-use p3_symmetric::{CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher};
+use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
 
 pub type Val = Goldilocks;
 pub type PackedVal = <Val as Field>::Packing;
 pub type ExtVal = BinomialExtensionField<Val, 2>;
 pub type PackedExtVal = <ExtVal as ExtensionField<Val>>::ExtensionPacking;
-pub type Challenger = SerializingChallenger64<Val, HashChallenger<u8, Keccak256Hash, 32>>;
-pub type Mmcs = MerkleTreeMmcs<
-    [Val; p3_keccak::VECTOR_LEN],
-    [u64; p3_keccak::VECTOR_LEN],
-    SerializingHasher<PaddingFreeSponge<KeccakF, 25, 17, 4>>,
-    KeccakCompressionFunction,
-    2,
-    4,
->;
+pub type Challenger = SerializingChallenger64<Val, HashChallenger<u8, Blake3, 32>>;
+pub type Mmcs =
+    MerkleTreeMmcs<Val, u8, SerializingHasher<Blake3>, Blake3CompressionFunction, 2, 32>;
 pub type ExtMmcs = ExtensionMmcs<Val, ExtVal, Mmcs>;
 pub type Pcs = TwoAdicFriPcs<Val, Dft, Mmcs, ExtMmcs>;
 
@@ -40,7 +34,7 @@ pub type PcsError = <Pcs as PcsTrait<ExtVal, Challenger>>::Error;
 pub type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
 
 /// The reference [`StarkGenericConfig`] implementation.
-pub struct GoldilocksKeccakConfig {
+pub struct GoldilocksBlake3Config {
     /// The PCS used to commit polynomials and prove opening proofs.
     pcs: Pcs,
     /// Seed for fresh challengers: a domain-separation tag followed by a
@@ -53,7 +47,7 @@ pub struct GoldilocksKeccakConfig {
     max_quotient_degree: usize,
 }
 
-impl GoldilocksKeccakConfig {
+impl GoldilocksBlake3Config {
     pub fn new(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Self {
         let pcs = new_pcs(commitment_parameters, fri_parameters);
         // Seed the challenger with a protocol tag for domain separation,
@@ -85,7 +79,7 @@ impl GoldilocksKeccakConfig {
     }
 }
 
-impl StarkGenericConfig for GoldilocksKeccakConfig {
+impl StarkGenericConfig for GoldilocksBlake3Config {
     type Pcs = Pcs;
     type Challenge = ExtVal;
     type Challenger = Challenger;
@@ -95,7 +89,7 @@ impl StarkGenericConfig for GoldilocksKeccakConfig {
     }
 
     fn initialise_challenger(&self) -> Challenger {
-        Challenger::from_hasher(self.challenger_seed.clone(), Keccak256Hash {})
+        Challenger::from_hasher(self.challenger_seed.clone(), Blake3)
     }
 
     fn max_log_degree(&self) -> usize {
@@ -137,14 +131,13 @@ pub struct FriParameters {
     pub query_proof_of_work_bits: usize,
 }
 
-type KeccakCompressionFunction =
-    CompressionFunctionFromHasher<PaddingFreeSponge<KeccakF, 25, 17, 4>, 2, 4>;
+type Blake3CompressionFunction = CompressionFunctionFromHasher<Blake3, 2, 32>;
 type Dft = Radix2DitParallel<Val>;
 
 fn new_mmcs(cap_height: usize) -> Mmcs {
-    let u64_hash = PaddingFreeSponge::<KeccakF, 25, 17, 4>::new(KeccakF {});
-    let field_hash = SerializingHasher::new(u64_hash);
-    let compress = KeccakCompressionFunction::new(u64_hash);
+    let byte_hash = Blake3;
+    let field_hash = SerializingHasher::new(byte_hash);
+    let compress = Blake3CompressionFunction::new(byte_hash);
     Mmcs::new(field_hash, compress, cap_height)
 }
 
@@ -162,4 +155,101 @@ fn new_pcs(commitment_parameters: CommitmentParameters, fri_parameters: FriParam
     };
     let dft = Dft::default();
     Pcs::new(dft, val_mmcs, inner_parameters)
+}
+
+#[cfg(test)]
+mod pcs_ref_gen {
+    use super::*;
+    use p3_commit::Mmcs as _;
+    use p3_field::PrimeCharacteristicRing;
+    use p3_matrix::dense::RowMajorMatrix;
+    use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
+
+    fn limbs(d: [u8; 32]) -> [u64; 4] {
+        core::array::from_fn(|i| u64::from_le_bytes(d[i * 8..i * 8 + 8].try_into().unwrap()))
+    }
+    fn dig(xs: [u64; 4]) -> [u8; 32] {
+        let mut o = [0u8; 32];
+        for i in 0..4 {
+            o[i * 8..i * 8 + 8].copy_from_slice(&xs[i].to_le_bytes());
+        }
+        o
+    }
+
+    /// Generates the Blake3 reference values asserted by `Ix/MultiStark/Tests.lean`
+    /// (`pcs_hash_test`, `pcs_merkle_test`). Run with `--nocapture` and copy.
+    #[test]
+    fn gen_pcs_refs() {
+        let f = Val::from_u32;
+        let fh = SerializingHasher::new(Blake3);
+        for n in [3u32, 17, 22, 20] {
+            let row: Vec<Val> = (1..=n).map(f).collect();
+            println!("LEAF{} {:?}", n, limbs(fh.hash_iter(row)));
+        }
+        let comp = Blake3CompressionFunction::new(Blake3);
+        println!(
+            "COMPRESS {:?}",
+            limbs(comp.compress([dig([1, 2, 3, 4]), dig([5, 6, 7, 8])]))
+        );
+
+        // Merkle tree: matrices of heights 8/4/2 and widths 2/3/1, opened at index 5.
+        let mut m0 = vec![f(0); 16];
+        m0[10] = f(11);
+        m0[11] = f(12); // row 5 = [11, 12]
+        let mut m1 = vec![f(0); 12];
+        m1[6] = f(107);
+        m1[7] = f(108);
+        m1[8] = f(109); // row 2 = [107, 108, 109]
+        let mut m2 = vec![f(0); 2];
+        m2[1] = f(202); // row 1 = [202]
+        let mmcs = new_mmcs(0);
+        let (commit, pd) = mmcs.commit(vec![
+            RowMajorMatrix::new(m0, 2),
+            RowMajorMatrix::new(m1, 3),
+            RowMajorMatrix::new(m2, 1),
+        ]);
+        let bo = mmcs.open_batch(5, &pd);
+        println!("OPENED {:?}", bo.opened_values);
+        for (i, s) in bo.opening_proof.iter().enumerate() {
+            println!("SIB{} {:?}", i, limbs(*s));
+        }
+        println!("COMMIT {:?}", commit);
+    }
+
+    /// Regenerates the Blake3-challenger reference values for `sample_bits_test`
+    /// and `pcs_challenger4_test`.
+    #[test]
+    fn gen_challenger_refs() {
+        use p3_challenger::{CanObserve, CanSampleBits, FieldChallenger};
+        use p3_field::{BasedVectorSpace, PrimeField64};
+        let g = Val::from_u64;
+        fn el(e: ExtVal) -> (u64, u64) {
+            let s: &[Val] = e.as_basis_coefficients_slice();
+            (s[0].as_canonical_u64(), s[1].as_canonical_u64())
+        }
+        // sample_bits_test: observe 0x0102030405060708, sample_bits(20).
+        let mut ch = Challenger::from_hasher(vec![], Blake3);
+        ch.observe(g(0x0102030405060708));
+        println!(
+            "SAMPLE_BITS {}",
+            CanSampleBits::<usize>::sample_bits(&mut ch, 20)
+        );
+        // pcs_challenger4_test: the α_pcs/α_fri/β/index continuation.
+        let mut ch = Challenger::from_hasher(vec![], Blake3);
+        ch.observe(g(0x0102030405060708));
+        ch.observe(g(0x1122334455667788));
+        let apcs: ExtVal = ch.sample_algebra_element();
+        let afri: ExtVal = ch.sample_algebra_element();
+        println!("APCS {:?}", el(apcs));
+        println!("AFRI {:?}", el(afri));
+        ch.observe(g(0x00000000deadbeef));
+        let beta: ExtVal = ch.sample_algebra_element();
+        println!("BETA {:?}", el(beta));
+        ch.observe(g(0x0a0b0c0d01020304));
+        ch.observe(g(0x0000000000000002));
+        println!(
+            "SAMPLE_BITS2 {}",
+            CanSampleBits::<usize>::sample_bits(&mut ch, 20)
+        );
+    }
 }

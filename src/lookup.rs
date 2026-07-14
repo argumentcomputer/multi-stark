@@ -290,7 +290,7 @@ mod tests {
     use crate::{
         builder::symbolic::var,
         system::{ProverKey, System, SystemWitness},
-        types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val},
+        types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val},
     };
 
     use super::*;
@@ -385,16 +385,16 @@ mod tests {
     };
 
     fn system() -> (
-        System<GoldilocksKeccakConfig, CS>,
-        ProverKey<GoldilocksKeccakConfig>,
+        System<GoldilocksBlake3Config, CS>,
+        ProverKey<GoldilocksBlake3Config>,
     ) {
-        let config = GoldilocksKeccakConfig::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
+        let config = GoldilocksBlake3Config::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
         let even = LookupAir::new(CS::Even, CS::Even.lookups());
         let odd = LookupAir::new(CS::Odd, CS::Odd.lookups());
         System::new(config, [even, odd])
     }
 
-    fn witness(system: &System<GoldilocksKeccakConfig, CS>) -> SystemWitness<Val> {
+    fn witness(system: &System<GoldilocksBlake3Config, CS>) -> SystemWitness<Val> {
         let f = Val::from_u32;
         #[rustfmt::skip]
         let witness = SystemWitness::from_stage_1(

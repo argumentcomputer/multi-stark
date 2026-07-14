@@ -18,7 +18,7 @@ use bincode::{config::standard, serde::encode_to_vec};
 use multi_stark::config::StarkGenericConfig;
 use multi_stark::types::{
     Challenger, Commitment, CommitmentParameters, Domain, ExtVal, FriParameters,
-    GoldilocksKeccakConfig, Pcs, PcsProof, ProverData, Val,
+    GoldilocksBlake3Config, Pcs, PcsProof, ProverData, Val,
 };
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{OpenedValues, Pcs as PcsTrait};
@@ -42,7 +42,7 @@ fn main() {
         query_proof_of_work_bits: 0,
     };
 
-    let config = GoldilocksKeccakConfig::new(commitment_params, fri_params);
+    let config = GoldilocksBlake3Config::new(commitment_params, fri_params);
     let pcs = config.pcs();
 
     // ── Build polynomial evaluations ─────────────────────────────────────────

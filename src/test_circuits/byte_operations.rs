@@ -4,7 +4,7 @@ mod tests {
     use crate::lookup::{Lookup, LookupAir};
     use crate::system::{System, SystemWitness};
     use crate::test_circuits::SymbExpr;
-    use crate::types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val};
+    use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
     use p3_air::{Air, AirBuilder, BaseAir};
     use p3_field::{Field, PrimeCharacteristicRing};
     use p3_matrix::dense::RowMajorMatrix;
@@ -107,7 +107,7 @@ mod tests {
     }
 
     impl ByteCalls {
-        fn witness(&self, system: &System<GoldilocksKeccakConfig, ByteCS>) -> SystemWitness<Val> {
+        fn witness(&self, system: &System<GoldilocksBlake3Config, ByteCS>) -> SystemWitness<Val> {
             let mut byte_trace =
                 RowMajorMatrix::new(vec![Val::ZERO; TRACE_WIDTH * 256 * 256], TRACE_WIDTH);
             for (op, x, y) in self.calls.iter() {
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn byte_test() {
-        let config = GoldilocksKeccakConfig::new(
+        let config = GoldilocksBlake3Config::new(
             CommitmentParameters {
                 log_blowup: 1,
                 cap_height: 0,

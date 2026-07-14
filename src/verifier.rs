@@ -624,7 +624,7 @@ mod tests {
         lookup::LookupAir,
         prover::Proof,
         system::{ProverKey, SystemWitness},
-        types::{CommitmentParameters, ExtVal, FriParameters, GoldilocksKeccakConfig, Val},
+        types::{CommitmentParameters, ExtVal, FriParameters, GoldilocksBlake3Config, Val},
     };
     use p3_air::{AirBuilder, BaseAir, WindowAccess};
     use p3_matrix::dense::RowMajorMatrix;
@@ -684,10 +684,10 @@ mod tests {
     };
 
     fn system() -> (
-        System<GoldilocksKeccakConfig, CS>,
-        ProverKey<GoldilocksKeccakConfig>,
+        System<GoldilocksBlake3Config, CS>,
+        ProverKey<GoldilocksBlake3Config>,
     ) {
-        let config = GoldilocksKeccakConfig::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
+        let config = GoldilocksBlake3Config::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
         let pythagorean_circuit = LookupAir::new(CS::Pythagorean, vec![]);
         let complex_circuit = LookupAir::new(CS::Complex, vec![]);
         System::new(config, [pythagorean_circuit, complex_circuit])
@@ -742,8 +742,8 @@ mod tests {
 
     /// Helper: creates a small system and valid proof for negative tests.
     fn small_system_and_proof() -> (
-        System<GoldilocksKeccakConfig, CS>,
-        Proof<GoldilocksKeccakConfig>,
+        System<GoldilocksBlake3Config, CS>,
+        Proof<GoldilocksBlake3Config>,
     ) {
         let (system, key) = system();
         let f = Val::from_u32;

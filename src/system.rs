@@ -235,7 +235,7 @@ impl<A, F: Field> Circuit<A, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val};
+    use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
     use p3_air::{AirBuilder, WindowAccess};
 
     /// A trivial AIR with a preprocessed trace of 4 rows and no constraints.
@@ -298,7 +298,7 @@ mod tests {
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,
         };
-        let config = GoldilocksKeccakConfig::new(commitment_parameters, fri_parameters);
+        let config = GoldilocksBlake3Config::new(commitment_parameters, fri_parameters);
         System::new(config, [LookupAir::new(HighDegreeAir, vec![])]);
     }
 
@@ -317,7 +317,7 @@ mod tests {
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,
         };
-        let config = GoldilocksKeccakConfig::new(commitment_parameters, fri_parameters);
+        let config = GoldilocksBlake3Config::new(commitment_parameters, fri_parameters);
         let (system, key) = System::new(config, [LookupAir::new(HighDegreeAir, vec![])]);
         let f = Val::from_u32;
         let trace = RowMajorMatrix::new(vec![f(2), f(32), f(1), f(1), f(3), f(243), f(0), f(0)], 2);
@@ -341,7 +341,7 @@ mod tests {
             commit_proof_of_work_bits: 0,
             query_proof_of_work_bits: 0,
         };
-        let config = GoldilocksKeccakConfig::new(commitment_parameters, fri_parameters);
+        let config = GoldilocksBlake3Config::new(commitment_parameters, fri_parameters);
         let (system, _key) = System::new(config, [LookupAir::new(Preprocessed, vec![])]);
         // The main trace has 8 rows but the preprocessed trace has 4. This
         // must panic instead of silently truncating the lookup rows.

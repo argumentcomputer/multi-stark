@@ -4,7 +4,7 @@ mod tests {
     use crate::lookup::{Lookup, LookupAir};
     use crate::system::{System, SystemWitness};
     use crate::test_circuits::SymbExpr;
-    use crate::types::{CommitmentParameters, FriParameters, GoldilocksKeccakConfig, Val};
+    use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
     use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
     use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
     use p3_matrix::Matrix;
@@ -1515,7 +1515,7 @@ mod tests {
     impl Blake3CompressionClaims {
         fn witness(
             &self,
-            system: &System<GoldilocksKeccakConfig, Blake3CompressionCircuit>,
+            system: &System<GoldilocksBlake3Config, Blake3CompressionCircuit>,
         ) -> (Vec<RowMajorMatrix<Val>>, SystemWitness<Val>) {
             // Grabbing values from a claims
 
@@ -2249,7 +2249,7 @@ mod tests {
         assert_eq!(actual, expected.to_vec());
 
         // circuit testing
-        let config = GoldilocksKeccakConfig::new(
+        let config = GoldilocksBlake3Config::new(
             CommitmentParameters {
                 log_blowup: 1,
                 cap_height: 0,
@@ -2437,7 +2437,7 @@ mod tests {
 
         fn run_test(claims: &Blake3CompressionClaims) {
             // circuit testing
-            let config = GoldilocksKeccakConfig::new(
+            let config = GoldilocksBlake3Config::new(
                 CommitmentParameters {
                     log_blowup: 1,
                     cap_height: 0,
