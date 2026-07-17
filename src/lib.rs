@@ -1,3 +1,4 @@
+pub mod baby_bear_blake3;
 pub mod builder;
 pub mod config;
 pub mod koala_bear_poseidon2;
@@ -10,6 +11,7 @@ pub mod types;
 pub mod verifier;
 
 pub use p3_air;
+pub use p3_baby_bear;
 pub use p3_field;
 pub use p3_goldilocks;
 pub use p3_koala_bear;

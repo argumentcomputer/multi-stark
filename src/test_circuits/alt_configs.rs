@@ -1,8 +1,10 @@
 //! Smoke tests for the alternative [`StarkGenericConfig`] instantiations
-//! shipped by the crate ([`crate::koala_bear_poseidon2`]), sharing a single
-//! config-generic harness: a minimal multiplication circuit is proven and
-//! verified, and a tampered proof must be rejected.
+//! shipped by the crate ([`crate::koala_bear_poseidon2`],
+//! [`crate::baby_bear_blake3`]), sharing a single config-generic harness: a
+//! minimal multiplication circuit is proven and verified, and a tampered
+//! proof must be rejected.
 
+use crate::baby_bear_blake3::BabyBearBlake3Config;
 use crate::builder::symbolic::{SymbolicExpression, var};
 use crate::config::{StarkGenericConfig, Val};
 use crate::koala_bear_poseidon2::KoalaBearPoseidon2Config;
@@ -95,6 +97,15 @@ fn test_parameters() -> (CommitmentParameters, FriParameters) {
 fn koala_bear_poseidon2_smoke_test() {
     let (commitment_parameters, fri_parameters) = test_parameters();
     smoke_test(KoalaBearPoseidon2Config::new(
+        commitment_parameters,
+        fri_parameters,
+    ));
+}
+
+#[test]
+fn baby_bear_blake3_smoke_test() {
+    let (commitment_parameters, fri_parameters) = test_parameters();
+    smoke_test(BabyBearBlake3Config::new(
         commitment_parameters,
         fri_parameters,
     ));
