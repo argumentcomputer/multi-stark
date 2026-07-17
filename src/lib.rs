@@ -1,5 +1,6 @@
 pub mod builder;
 pub mod config;
+pub mod koala_bear_poseidon2;
 pub mod lookup;
 pub mod prover;
 pub mod system;
@@ -11,6 +12,7 @@ pub mod verifier;
 pub use p3_air;
 pub use p3_field;
 pub use p3_goldilocks;
+pub use p3_koala_bear;
 pub use p3_matrix;
 
 #[macro_export]
