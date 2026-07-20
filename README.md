@@ -14,7 +14,7 @@ lookup arguments for shared state.
 - **Preprocessed tables** — commit to fixed tables once, reuse across proofs
 - **Generic over field, hash, and PCS** — the protocol is parameterized by a
   `StarkGenericConfig` (base field via the PCS, challenge field, challenger);
-  a batteries-included Goldilocks/Keccak instantiation is provided
+  a batteries-included Goldilocks/Blake3 instantiation is provided
 - **Serialization** — `Proof::to_bytes` / `Proof::from_bytes` via bincode
 - **Parallel proving** — opt-in via the `parallel` feature flag
 
@@ -28,7 +28,7 @@ configuration, `GoldilocksBlake3Config` in [`types`](src/types.rs):
 |-----------|-----------------------------------------------|
 | Field     | Goldilocks (p = 2^64 - 2^32 + 1)              |
 | Extension | Degree-2 binomial extension (~2^128 elements) |
-| Hash      | Keccak-256                                    |
+| Hash      | Blake3                                        |
 | PCS       | FRI over Merkle trees                         |
 
 A second instantiation (BabyBear field, degree-4 extension, Poseidon2
