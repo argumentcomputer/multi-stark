@@ -7,6 +7,12 @@
 //! (circuit count, widths, constraint counts, degrees)
 //! is observed before any commitment.
 //!
+//! 0. **Sparse activation**: circuits whose stage-1 trace is empty are
+//!    deactivated for this proof — skipped by every stage below — and the
+//!    activation bitmap over the canonical circuit set is observed
+//!    immediately after the shape, before any commitment or challenge. See
+//!    [`Proof::active`] for the soundness contract.
+//!
 //! 1. **Stage 1 — Main traces**: Each circuit's execution trace is committed via the
 //!    configuration's PCS. The preprocessed commitment (if any), stage-1 commitment,
 //!    trace heights, and length-prefixed claims are observed into the challenger.
@@ -196,10 +202,21 @@ pub struct Commitments<Com> {
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Proof<SC: StarkGenericConfig> {
+    /// Activation bitmap over the system's canonical circuit set: circuit i
+    /// is covered by this proof iff `active[i]`. Inactive circuits (empty
+    /// execution traces) are not committed, opened, accumulated, or
+    /// constraint-evaluated; the lookup accumulator polices dishonest
+    /// deactivation (an omitted-but-needed circuit leaves an unmatched
+    /// channel send, so the final accumulator cannot be zero). Bound into
+    /// the Fiat-Shamir transcript before any commitment or challenge.
+    /// Every other per-circuit sequence in this proof (accumulators,
+    /// log_degrees, opened values) is indexed by ACTIVE position.
+    pub active: Vec<bool>,
     pub commitments: Commitments<Com<SC>>,
-    /// Per-circuit intermediate accumulator values for the lookup argument.
+    /// Per-active-circuit intermediate accumulator values for the lookup
+    /// argument.
     pub intermediate_accumulators: Vec<SC::Challenge>,
-    /// Log2 of the trace degree for each circuit.
+    /// Log2 of the trace degree for each active circuit.
     pub log_degrees: Vec<u8>,
     /// PCS opening proof covering all rounds.
     pub opening_proof: PcsProof<SC>,
@@ -247,6 +264,14 @@ where
     ///
     /// Each claim is a slice of field elements that is observed by the challenger
     /// before lookup challenges are sampled, binding the proof to the claimed values.
+    ///
+    /// Circuits whose stage-1 trace is empty are deactivated for this proof:
+    /// they are neither committed, opened, accumulated, nor
+    /// constraint-evaluated, and the activation bitmap is recorded in
+    /// [`Proof::active`].
+    ///
+    /// # Panics
+    /// Panics if every circuit's trace is empty (nothing to prove).
     #[tracing::instrument(level = "info", skip_all, name = "stark/prove")]
     pub fn prove_multiple_claims(
         &self,
@@ -262,17 +287,52 @@ where
         // are already bound via the challenger seed.
         self.observe_shape(&mut challenger);
 
+        // Sparse activation: a circuit whose stage-1 trace is empty is
+        // INACTIVE for this proof — nothing of it is committed, opened,
+        // accumulated, or constraint-evaluated. Soundness of the omission
+        // rests on the lookup accumulator: an inactive circuit has no rows,
+        // hence no sends or receives, so omitting it leaves the global
+        // balance unchanged — while dishonestly deactivating a circuit the
+        // execution needs leaves an unmatched channel send and the final
+        // accumulator cannot be zero. The activation bitmap is bound into
+        // the transcript here, before any commitment or challenge.
+        let active: Vec<bool> = witness.traces.iter().map(|t| t.height() > 0).collect();
+        for &is_active in &active {
+            challenger.observe(Val::<SC>::from_bool(is_active));
+        }
+        // Canonical index of each active circuit, in order; matrix position
+        // within every per-proof commitment == position in this list.
+        let active_indices: Vec<usize> = active
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &a)| a.then_some(i))
+            .collect();
+        assert!(
+            !active_indices.is_empty(),
+            "cannot prove with every circuit deactivated (all traces empty)"
+        );
+        // Canonical index -> active position (None = inactive).
+        let mut active_pos: Vec<Option<usize>> = vec![None; active.len()];
+        for (pos, &ci) in active_indices.iter().enumerate() {
+            active_pos[ci] = Some(pos);
+        }
+
         // Cost: "Stage 1 commit" — coset LDE (FFT) of each trace from n_i to
         // n_i·B rows, then Merkle tree. FFT work: Σ w_i · n_i · B · log₂(n_i·B).
         let _g = tracing::info_span!("stark/stage1_commit").entered();
         let mut log_degrees = vec![];
-        let evaluations = witness.traces.into_iter().map(|trace| {
-            let degree = trace.height();
-            let log_degree = log2_strict_usize(degree);
-            let trace_domain = pcs.natural_domain_for_degree(degree);
-            log_degrees.push(log_degree);
-            (trace_domain, trace)
-        });
+        let evaluations = witness
+            .traces
+            .into_iter()
+            .zip(active.clone())
+            .filter_map(|(trace, is_active)| is_active.then_some(trace))
+            .map(|trace| {
+                let degree = trace.height();
+                let log_degree = log2_strict_usize(degree);
+                let trace_domain = pcs.natural_domain_for_degree(degree);
+                log_degrees.push(log_degree);
+                (trace_domain, trace)
+            });
         let (stage_1_trace_commit, stage_1_trace_data) = pcs.commit(evaluations);
         drop(_g);
 
@@ -315,8 +375,16 @@ where
         // Cost: "Lookup trace construction" — fingerprint (Horner), batch
         // inversion, and accumulator update. Total: Σ n_i·L_i extension field ops.
         let _g = tracing::info_span!("stark/lookup_construction").entered();
+        // Only active circuits enter the accumulator chain; the chain (and
+        // `intermediate_accumulators`) is indexed by active position.
+        let active_lookups: Vec<_> = witness
+            .lookups
+            .into_iter()
+            .zip(&active)
+            .filter_map(|(l, &is_active)| is_active.then_some(l))
+            .collect();
         let (stage_2_traces, intermediate_accumulators) = Lookup::stage_2_traces(
-            &witness.lookups,
+            &active_lookups,
             lookup_argument_challenge,
             &fingerprint_challenge,
             acc,
@@ -349,16 +417,16 @@ where
         // quotient domain (Σ n_i·q_i·eval_cost(k_i)) plus LDE + Merkle of the
         // quotient sub-polynomials (Σ q_i·D·n_i·B·log₂(n_i·B)).
         let _g = tracing::info_span!("stark/quotient").entered();
-        debug_assert_eq!(intermediate_accumulators.len(), self.circuits.len());
-        debug_assert_eq!(log_degrees.len(), self.circuits.len());
+        debug_assert_eq!(intermediate_accumulators.len(), active_indices.len());
+        debug_assert_eq!(log_degrees.len(), active_indices.len());
         let mut quotient_degrees = vec![];
-        let quotient_evaluations = self
-            .circuits
+        let quotient_evaluations = active_indices
             .iter()
             .zip(log_degrees.iter())
             .zip(intermediate_accumulators.iter())
             .enumerate()
-            .flat_map(|(idx, ((circuit, log_degree), next_acc))| {
+            .flat_map(|(pos, ((&ci, log_degree), next_acc))| {
+                let circuit = &self.circuits[ci];
                 let air = &circuit.air;
                 let quotient_degree = circuit.quotient_degree();
                 let log_quotient_degree = log2_strict_usize(quotient_degree);
@@ -368,7 +436,7 @@ where
                 let preprocessed_trace_on_quotient_domain = key
                     .preprocessed_data
                     .as_ref()
-                    .zip(self.preprocessed_indices[idx])
+                    .zip(self.preprocessed_indices[ci])
                     .map(|(preprocessed_trace_data, preprocessed_idx)| {
                         pcs.get_evaluations_on_domain(
                             preprocessed_trace_data,
@@ -377,9 +445,9 @@ where
                         )
                     });
                 let stage_1_trace_on_quotient_domain =
-                    pcs.get_evaluations_on_domain(&stage_1_trace_data, idx, quotient_domain);
+                    pcs.get_evaluations_on_domain(&stage_1_trace_data, pos, quotient_domain);
                 let stage_2_trace_on_quotient_domain =
-                    pcs.get_evaluations_on_domain(&stage_2_trace_data, idx, quotient_domain);
+                    pcs.get_evaluations_on_domain(&stage_2_trace_data, pos, quotient_domain);
                 // compute the quotient values which are elements of the extension field and flatten it to the base field
                 let public_values: [Val<SC>; 0] = [];
                 let stage_2_public_values = [
@@ -433,9 +501,9 @@ where
         let mut round1_openings = vec![];
         let mut round2_openings = vec![];
         let mut round3_openings = vec![];
-        for i in 0..self.circuits.len() {
-            let log_degree = log_degrees[i];
-            let quotient_degree = quotient_degrees[i];
+        for pos in 0..active_indices.len() {
+            let log_degree = log_degrees[pos];
+            let quotient_degree = quotient_degrees[pos];
             let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
             let zeta_next = trace_domain
                 .next_point(zeta)
@@ -443,8 +511,23 @@ where
             round1_openings.push(vec![zeta, zeta_next]);
             round2_openings.push(vec![zeta, zeta_next]);
             round3_openings.extend(vec![vec![zeta]; quotient_degree]);
-            if self.preprocessed_indices[i].is_some() {
-                round0_openings.push(vec![zeta, zeta_next]);
+        }
+        // The preprocessed commitment is built once over ALL preprocessed
+        // traces at system construction, so its round must carry one entry
+        // per preprocessed matrix regardless of activation: an inactive
+        // circuit's preprocessed matrix is opened at no points.
+        for (prep_index, &pos) in self.preprocessed_indices.iter().zip(&active_pos) {
+            if prep_index.is_some() {
+                match pos {
+                    Some(pos) => {
+                        let trace_domain = pcs.natural_domain_for_degree(1 << log_degrees[pos]);
+                        let zeta_next = trace_domain
+                            .next_point(zeta)
+                            .expect("domain has no next point");
+                        round0_openings.push(vec![zeta, zeta_next]);
+                    }
+                    None => round0_openings.push(vec![]),
+                }
             }
         }
         let mut rounds = vec![
@@ -468,6 +551,7 @@ where
             .map(|n| n.try_into().unwrap())
             .collect();
         Proof {
+            active,
             commitments,
             intermediate_accumulators,
             log_degrees,

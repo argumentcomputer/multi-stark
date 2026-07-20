@@ -298,6 +298,9 @@ mod tests {
     enum CS {
         Even,
         Odd,
+        /// A circuit on its own channel that nothing references; used by the
+        /// sparse-activation tests as the deactivated table.
+        Dead,
     }
     impl<F> BaseAir<F> for CS {
         fn width(&self) -> usize {
@@ -344,6 +347,10 @@ mod tests {
                         vec![even_index, input - one, recursion_output],
                     ),
                 ],
+                Self::Dead => vec![Lookup::pull(
+                    multiplicity,
+                    vec![Val::from_u32(2).into(), input],
+                )],
             }
         }
     }
@@ -394,41 +401,42 @@ mod tests {
         System::new(config, [even, odd])
     }
 
-    fn witness(system: &System<GoldilocksBlake3Config, CS>) -> SystemWitness<Val> {
+    fn witness_traces() -> Vec<RowMajorMatrix<Val>> {
         let f = Val::from_u32;
         #[rustfmt::skip]
-        let witness = SystemWitness::from_stage_1(
-            vec![
-                RowMajorMatrix::new(
-                    vec![
-                        // row 1
-                        f(1), f(4), f(4).inverse(), f(0), f(1), f(1),
-                        // row 2
-                        f(1), f(2), f(2).inverse(), f(0), f(1), f(1),
-                        // row 3
-                        f(1), f(0), f(0), f(1), f(0), f(0),
-                        // row 4
-                        f(0), f(0), f(0), f(0), f(0), f(0),
-                    ],
-                    6,
-                ),
-                RowMajorMatrix::new(
-                    vec![
-                        // row 1
-                        f(1), f(3), f(3).inverse(), f(0), f(1), f(1),
-                        // row 2
-                        f(1), f(1), f(1).inverse(), f(0), f(1), f(1),
-                        // row 3
-                        f(0), f(0), f(0), f(0), f(0), f(0),
-                        // row 4
-                        f(0), f(0), f(0), f(0), f(0), f(0),
-                    ],
-                    6,
-                ),
-            ],
-            system,
-        );
-        witness
+        let traces = vec![
+            RowMajorMatrix::new(
+                vec![
+                    // row 1
+                    f(1), f(4), f(4).inverse(), f(0), f(1), f(1),
+                    // row 2
+                    f(1), f(2), f(2).inverse(), f(0), f(1), f(1),
+                    // row 3
+                    f(1), f(0), f(0), f(1), f(0), f(0),
+                    // row 4
+                    f(0), f(0), f(0), f(0), f(0), f(0),
+                ],
+                6,
+            ),
+            RowMajorMatrix::new(
+                vec![
+                    // row 1
+                    f(1), f(3), f(3).inverse(), f(0), f(1), f(1),
+                    // row 2
+                    f(1), f(1), f(1).inverse(), f(0), f(1), f(1),
+                    // row 3
+                    f(0), f(0), f(0), f(0), f(0), f(0),
+                    // row 4
+                    f(0), f(0), f(0), f(0), f(0), f(0),
+                ],
+                6,
+            ),
+        ];
+        traces
+    }
+
+    fn witness(system: &System<GoldilocksBlake3Config, CS>) -> SystemWitness<Val> {
+        SystemWitness::from_stage_1(witness_traces(), system)
     }
 
     #[test]
@@ -439,6 +447,70 @@ mod tests {
         let claim = &[f(0), f(4), f(1)];
         let proof = system.prove(&key, claim, witness);
         system.verify(claim, &proof).unwrap();
+    }
+
+    /// A three-circuit system where the third circuit (`Dead`, its own
+    /// channel, referenced by nothing) gets an empty trace: the prover must
+    /// deactivate it, the proof must carry per-circuit data for the two
+    /// active circuits only, and verification must accept.
+    #[test]
+    fn sparse_inactive_circuit_accepted() {
+        let config = GoldilocksBlake3Config::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
+        let even = LookupAir::new(CS::Even, CS::Even.lookups());
+        let odd = LookupAir::new(CS::Odd, CS::Odd.lookups());
+        let dead = LookupAir::new(CS::Dead, CS::Dead.lookups());
+        let (system, key) = System::new(config, [even, odd, dead]);
+        let mut witness = witness_traces();
+        witness.push(RowMajorMatrix::new(vec![], 6));
+        let witness = SystemWitness::from_stage_1(witness, &system);
+        let f = Val::from_u32;
+        let claim = &[f(0), f(4), f(1)];
+        let proof = system.prove(&key, claim, witness);
+        assert_eq!(proof.active, vec![true, true, false]);
+        assert_eq!(proof.log_degrees.len(), 2);
+        assert_eq!(proof.intermediate_accumulators.len(), 2);
+        assert_eq!(proof.stage_1_opened_values.len(), 2);
+        system.verify(claim, &proof).unwrap();
+    }
+
+    /// Tampering with the activation bitmap must be rejected: activating a
+    /// circuit the proof carries no data for, or deactivating one it does.
+    #[test]
+    fn sparse_bitmap_tamper_rejected() {
+        let config = GoldilocksBlake3Config::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
+        let even = LookupAir::new(CS::Even, CS::Even.lookups());
+        let odd = LookupAir::new(CS::Odd, CS::Odd.lookups());
+        let dead = LookupAir::new(CS::Dead, CS::Dead.lookups());
+        let (system, key) = System::new(config, [even, odd, dead]);
+        let mut witness = witness_traces();
+        witness.push(RowMajorMatrix::new(vec![], 6));
+        let witness = SystemWitness::from_stage_1(witness, &system);
+        let f = Val::from_u32;
+        let claim = &[f(0), f(4), f(1)];
+        let mut proof = system.prove(&key, claim, witness);
+        proof.active[2] = true;
+        assert!(system.verify(claim, &proof).is_err());
+        proof.active[2] = false;
+        proof.active[1] = false;
+        assert!(system.verify(claim, &proof).is_err());
+    }
+
+    /// Deactivating a circuit the claim's execution NEEDS (here: emptying the
+    /// Odd table while Even still pushes into the odd channel) must leave the
+    /// lookup accumulator unbalanced and be rejected.
+    #[test]
+    fn sparse_needed_circuit_rejected() {
+        let (system, key) = system();
+        let mut traces = witness_traces();
+        // Empty the Odd table: Even's pushes into the odd channel and the
+        // claim's pull can no longer be matched.
+        traces[1] = RowMajorMatrix::new(vec![], 6);
+        let witness = SystemWitness::from_stage_1(traces, &system);
+        let f = Val::from_u32;
+        let claim = &[f(0), f(4), f(1)];
+        let proof = system.prove(&key, claim, witness);
+        assert_eq!(proof.active, vec![true, false]);
+        assert!(system.verify(claim, &proof).is_err());
     }
 
     #[test]
