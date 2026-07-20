@@ -2,24 +2,26 @@
 //!
 //! # Verification steps
 //!
-//! 1. **Shape check** ([`System::verify_shape`]): Validate that the proof's array
-//!    dimensions (opened values, accumulators, quotient chunks) match the system's
-//!    circuit count and column widths.
+//! 1. **Shape check** ([`System::verify_shape`]): Validate the activation bitmap
+//!    (it must cover the canonical circuit set and activate at least one circuit)
+//!    and that the proof's array dimensions (opened values, accumulators, quotient
+//!    chunks) match the ACTIVE circuit count and the canonical column widths.
 //!
 //! 2. **Accumulator balance**: Assert that the last intermediate accumulator is zero,
 //!    ensuring that all lookup pushes and pulls cancel out across circuits.
 //!
 //! 3. **Fiat-Shamir replay**: Reconstruct the challenger state identically to the
 //!    prover: starting from the parameter-seeded challenger, observe the system
-//!    shape, commitments, trace heights, length-prefixed claims, and intermediate
-//!    accumulators, sampling the same challenges (lookup, fingerprint, constraint
-//!    alpha, OOD zeta) at the same points in the transcript.
+//!    shape, the activation bitmap, commitments, trace heights, length-prefixed
+//!    claims, and intermediate accumulators, sampling the same challenges (lookup,
+//!    fingerprint, constraint alpha, OOD zeta) at the same points in the
+//!    transcript.
 //!
 //! 4. **PCS verification**: Verify the FRI opening proofs against the committed
 //!    polynomials at the sampled points.
 //!
-//! 5. **OOD evaluation**: For each circuit, recompute the composition polynomial at
-//!    zeta from the opened values and verify that
+//! 5. **OOD evaluation**: For each ACTIVE circuit, recompute the composition
+//!    polynomial at zeta from the opened values and verify that
 //!    `composition(zeta) * inv_vanishing(zeta) == quotient(zeta)`.
 //!
 //! See [`VerificationError`] for the possible failure modes.
@@ -123,6 +125,26 @@
 //! security (≈ 50 bits proven) from FRI alone, plus additional grinding cost from
 //! PoW.
 //!
+//! ## Sparse activation
+//!
+//! A proof covers only the circuits its activation bitmap marks active
+//! ([`Proof::active`]); inactive circuits are neither committed, opened,
+//! accumulated, nor constraint-evaluated. An accepted sparse proof is
+//! equivalent to a dense proof in which every inactive circuit has an empty
+//! table: an inactive circuit contributes no lookup sends or receives, so
+//! honest deactivation leaves the global balance unchanged, while
+//! dishonestly deactivating a circuit the execution needs leaves an
+//! unmatched channel message and the final accumulator is a nonzero
+//! rational function of (β, γ) — caught by the balance check with the same
+//! N / |F_ext| bound as above. The bitmap cannot be chosen adaptively: it
+//! is observed before any commitment or challenge, and the verifier takes
+//! every active circuit's widths, constraints, and lookup structure from
+//! the canonical system by bitmap index. The one contract change relative
+//! to dense proofs: an AIR can no longer force its own presence through
+//! must-hold padding rows — sparse verification guarantees the constraints
+//! of ACTIVE circuits plus global lookup balance, and nothing about
+//! inactive ones.
+//!
 //! ## Not zero-knowledge
 //!
 //! This protocol is a succinct argument of knowledge, **not** a zero-knowledge
@@ -189,6 +211,7 @@ where
         proof: &Proof<SC>,
     ) -> Result<(), VerificationError<PcsError<SC>>> {
         let Proof {
+            active,
             commitments,
             intermediate_accumulators,
             log_degrees,
@@ -198,8 +221,15 @@ where
             stage_1_opened_values,
             stage_2_opened_values,
         } = proof;
-        // first, verify the proof shape
+        // first, verify the proof shape (also validates the activation bitmap)
         let quotient_degrees = self.verify_shape(proof)?;
+        // Canonical index of each active circuit; every per-circuit sequence
+        // in the proof is indexed by position in this list.
+        let active_indices: Vec<usize> = active
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &a)| a.then_some(i))
+            .collect();
 
         // Soundness: lookup argument. The accumulator was computed by the prover
         // under challenges (β, γ) that were sampled after the traces and claims were
@@ -224,6 +254,12 @@ where
         // Bind the system shape into the transcript. The protocol parameters
         // are already bound via the challenger seed.
         self.observe_shape(&mut challenger);
+
+        // Bind the activation bitmap — before any commitment or challenge, so
+        // every sample depends on which circuits this proof covers.
+        for &is_active in active {
+            challenger.observe(Val::<SC>::from_bool(is_active));
+        }
 
         // observe preprocessed and stage_1 commitment
         if let Some(commit) = &self.preprocessed_commit {
@@ -285,14 +321,13 @@ where
         // Soundness: OOD evaluation. ζ is sampled after all commitments are fixed.
         // A nonzero polynomial of degree ≤ D vanishes at ζ with probability ≤ D/|F_ext|.
         let zeta: SC::Challenge = challenger.sample_algebra_element();
-        let mut preprocessed_trace_evaluations = vec![];
         let mut stage_1_trace_evaluations = vec![];
         let mut stage_2_trace_evaluations = vec![];
         let mut quotient_chunks_evaluations = vec![];
         let mut last_quotient_i = 0;
-        for i in 0..self.circuits.len() {
-            let log_degree = log_degrees[i];
-            let quotient_degree = quotient_degrees[i];
+        for pos in 0..active_indices.len() {
+            let log_degree = log_degrees[pos];
+            let quotient_degree = quotient_degrees[pos];
             let log_quotient_degree = log2_strict_usize(quotient_degree);
             let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
             let quotient_domain =
@@ -305,28 +340,18 @@ where
             let zeta_next = trace_domain
                 .next_point(zeta)
                 .ok_or(VerificationError::InvalidProofShape)?;
-            if let Some(i) = self.preprocessed_indices[i] {
-                let preprocessed_opened_values = preprocessed_opened_values.as_ref().unwrap();
-                preprocessed_trace_evaluations.push((
-                    trace_domain,
-                    vec![
-                        (zeta, preprocessed_opened_values[i][0].clone()),
-                        (zeta_next, preprocessed_opened_values[i][1].clone()),
-                    ],
-                ));
-            }
             stage_1_trace_evaluations.push((
                 trace_domain,
                 vec![
-                    (zeta, stage_1_opened_values[i][0].clone()),
-                    (zeta_next, stage_1_opened_values[i][1].clone()),
+                    (zeta, stage_1_opened_values[pos][0].clone()),
+                    (zeta_next, stage_1_opened_values[pos][1].clone()),
                 ],
             ));
             stage_2_trace_evaluations.push((
                 trace_domain,
                 vec![
-                    (zeta, stage_2_opened_values[i][0].clone()),
-                    (zeta_next, stage_2_opened_values[i][1].clone()),
+                    (zeta, stage_2_opened_values[pos][0].clone()),
+                    (zeta_next, stage_2_opened_values[pos][1].clone()),
                 ],
             ));
             let iter = unshifted_quotient_chunks_domains
@@ -338,6 +363,42 @@ where
                 .map(|(domain, opened_values)| (domain, vec![(zeta, opened_values[0].clone())]));
             quotient_chunks_evaluations.extend(iter);
             last_quotient_i += quotient_degree;
+        }
+        // The preprocessed commitment covers ALL preprocessed matrices, in
+        // canonical slot order; inactive circuits' matrices are opened at no
+        // points (mirroring the prover's round construction).
+        let mut preprocessed_trace_evaluations = vec![];
+        {
+            let mut active_pos: Vec<Option<usize>> = vec![None; active.len()];
+            for (pos, &ci) in active_indices.iter().enumerate() {
+                active_pos[ci] = Some(pos);
+            }
+            for (ci, &slot) in self.preprocessed_indices.iter().enumerate() {
+                if let Some(slot) = slot {
+                    match active_pos[ci] {
+                        Some(pos) => {
+                            let trace_domain = pcs.natural_domain_for_degree(1 << log_degrees[pos]);
+                            let zeta_next = trace_domain
+                                .next_point(zeta)
+                                .ok_or(VerificationError::InvalidProofShape)?;
+                            let preprocessed_opened_values =
+                                preprocessed_opened_values.as_ref().unwrap();
+                            preprocessed_trace_evaluations.push((
+                                trace_domain,
+                                vec![
+                                    (zeta, preprocessed_opened_values[slot][0].clone()),
+                                    (zeta_next, preprocessed_opened_values[slot][1].clone()),
+                                ],
+                            ));
+                        }
+                        None => {
+                            let domain = pcs
+                                .natural_domain_for_degree(self.circuits[ci].preprocessed_height);
+                            preprocessed_trace_evaluations.push((domain, vec![]));
+                        }
+                    }
+                }
+            }
         }
         let mut coms_to_verify = vec![
             (commitments.stage_1_trace.clone(), stage_1_trace_evaluations),
@@ -364,15 +425,15 @@ where
         // and check that the evaluation of the composition polynomial equals the
         // product of the zerofier with the quotient
         let mut last_quotient_i = 0;
-        for i in 0..self.circuits.len() {
-            let circuit = &self.circuits[i];
-            let degree = 1 << log_degrees[i];
-            let quotient_degree = quotient_degrees[i];
-            let next_acc = intermediate_accumulators[i];
-            let stage_1_row = &stage_1_opened_values[i][0];
-            let stage_1_next_row = &stage_1_opened_values[i][1];
-            let stage_2_row = &stage_2_opened_values[i][0];
-            let stage_2_next_row = &stage_2_opened_values[i][1];
+        for (pos, &ci) in active_indices.iter().enumerate() {
+            let circuit = &self.circuits[ci];
+            let degree = 1 << log_degrees[pos];
+            let quotient_degree = quotient_degrees[pos];
+            let next_acc = intermediate_accumulators[pos];
+            let stage_1_row = &stage_1_opened_values[pos][0];
+            let stage_1_next_row = &stage_1_opened_values[pos][1];
+            let stage_2_row = &stage_2_opened_values[pos][0];
+            let stage_2_next_row = &stage_2_opened_values[pos][1];
             let quotient_chunks = quotient_opened_values
                 [last_quotient_i..last_quotient_i + quotient_degree]
                 .iter()
@@ -382,10 +443,10 @@ where
             // compute the composition polynomial evaluation
             let trace_domain = pcs.natural_domain_for_degree(degree);
             let sels = trace_domain.selectors_at_point(zeta);
-            let preprocessed = if let Some(i) = self.preprocessed_indices[i] {
+            let preprocessed = if let Some(slot) = self.preprocessed_indices[ci] {
                 let preprocessed_opened_values = preprocessed_opened_values.as_ref().unwrap();
-                let preprocessed_row = &preprocessed_opened_values[i][0];
-                let preprocessed_next_row = &preprocessed_opened_values[i][1];
+                let preprocessed_row = &preprocessed_opened_values[slot][0];
+                let preprocessed_next_row = &preprocessed_opened_values[slot][1];
                 RowWindow::from_two_rows(preprocessed_row, preprocessed_next_row)
             } else {
                 RowWindow::from_two_rows(&[], &[])
@@ -479,6 +540,7 @@ where
         proof: &Proof<SC>,
     ) -> Result<Vec<usize>, VerificationError<PcsError<SC>>> {
         let Proof {
+            active,
             intermediate_accumulators,
             log_degrees,
             quotient_opened_values,
@@ -491,10 +553,24 @@ where
         let num_circuits = self.circuits.len();
         // there must be at least one circuit
         ensure!(num_circuits > 0, VerificationError::InvalidSystem);
-        // there must be one log degree per circuit
+        // the activation bitmap covers the canonical circuit set
+        ensure_eq!(
+            active.len(),
+            num_circuits,
+            VerificationError::InvalidProofShape
+        );
+        let active_indices: Vec<usize> = active
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &a)| a.then_some(i))
+            .collect();
+        let num_active = active_indices.len();
+        // an empty activation proves nothing
+        ensure!(num_active > 0, VerificationError::InvalidProofShape);
+        // there must be one log degree per active circuit
         ensure_eq!(
             log_degrees.len(),
-            num_circuits,
+            num_active,
             VerificationError::InvalidProofShape
         );
         // the preprocessed commitment is empty if and only if there are zero preprocessed circuits
@@ -508,7 +584,10 @@ where
             num_preprocessed == 0,
             VerificationError::InvalidSystem
         );
-        // stage 0 round
+        // Stage 0 round: the preprocessed commitment is built once over ALL
+        // preprocessed traces at system construction, so its round carries one
+        // entry per preprocessed matrix regardless of activation; an inactive
+        // circuit's matrix must be opened at no points.
         ensure_eq!(
             preprocessed_opened_values
                 .as_ref()
@@ -516,57 +595,76 @@ where
             num_preprocessed,
             VerificationError::InvalidProofShape
         );
-        // stage 1 round
+        for (&prep_index, &is_active) in self.preprocessed_indices.iter().zip(active) {
+            if let Some(slot) = prep_index
+                && !is_active
+            {
+                ensure_eq!(
+                    preprocessed_opened_values.as_ref().unwrap()[slot].len(),
+                    0,
+                    VerificationError::InvalidProofShape
+                );
+            }
+        }
+        // stage 1 round: one entry per active circuit
         ensure_eq!(
             stage_1_opened_values.len(),
-            num_circuits,
+            num_active,
             VerificationError::InvalidProofShape
         );
-        // stage 2 round
+        // stage 2 round: one entry per active circuit
         ensure_eq!(
             stage_2_opened_values.len(),
-            num_circuits,
+            num_active,
             VerificationError::InvalidProofShape
         );
-        for (i, circuit) in self.circuits.iter().enumerate() {
-            let preprocessed_i = self.preprocessed_indices[i];
+        for (pos, &ci) in active_indices.iter().enumerate() {
+            let circuit = &self.circuits[ci];
+            let preprocessed_i = self.preprocessed_indices[ci];
             // zeta and zeta_next
             let num_openings = 2;
             ensure_eq!(
-                stage_1_opened_values[i].len(),
+                stage_1_opened_values[pos].len(),
                 num_openings,
                 VerificationError::InvalidProofShape
             );
             ensure_eq!(
-                stage_2_opened_values[i].len(),
+                stage_2_opened_values[pos].len(),
                 num_openings,
                 VerificationError::InvalidProofShape
             );
+            if let Some(slot) = preprocessed_i {
+                ensure_eq!(
+                    preprocessed_opened_values.as_ref().unwrap()[slot].len(),
+                    num_openings,
+                    VerificationError::InvalidProofShape
+                );
+            }
             for j in 0..num_openings {
-                if let Some(i) = preprocessed_i {
+                if let Some(slot) = preprocessed_i {
                     ensure_eq!(
-                        preprocessed_opened_values.as_ref().unwrap()[i][j].len(),
+                        preprocessed_opened_values.as_ref().unwrap()[slot][j].len(),
                         circuit.preprocessed_width,
                         VerificationError::InvalidProofShape
                     );
                 }
                 ensure_eq!(
-                    stage_1_opened_values[i][j].len(),
+                    stage_1_opened_values[pos][j].len(),
                     circuit.stage_1_width,
                     VerificationError::InvalidProofShape
                 );
                 let extension_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
                 ensure_eq!(
-                    stage_2_opened_values[i][j].len(),
+                    stage_2_opened_values[pos][j].len(),
                     circuit.stage_2_width * extension_d,
                     VerificationError::InvalidProofShape
                 );
             }
         }
-        // quotient round
+        // quotient round: per active circuit
         let mut quotient_degrees = vec![];
-        for (circuit, log_degree) in self.circuits.iter().zip(log_degrees) {
-            let quotient_degree = circuit.quotient_degree();
+        for (&ci, log_degree) in active_indices.iter().zip(log_degrees) {
+            let quotient_degree = self.circuits[ci].quotient_degree();
             // The claimed log degree must be small enough that the quotient
             // domain can still be committed and opened by the PCS. This also
             // guards the `1 << log_degree` shifts used during verification
@@ -599,10 +697,10 @@ where
                 VerificationError::InvalidProofShape
             );
         }
-        // there must be as many intermediate accumulators as circuits
+        // there must be as many intermediate accumulators as active circuits
         ensure_eq!(
             intermediate_accumulators.len(),
-            self.circuits.len(),
+            num_active,
             VerificationError::InvalidProofShape
         );
         Ok(quotient_degrees)
