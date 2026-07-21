@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::builder::symbolic::{preprocessed_var, var};
-    use crate::lookup::{Lookup, LookupAir};
+    use crate::lookup::{Interaction, LookupAir};
     use crate::system::{System, SystemWitness};
     use crate::test_circuits::SymbExpr;
     use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
@@ -69,7 +69,7 @@ mod tests {
     }
 
     impl ByteCS {
-        fn lookups(&self) -> Vec<Lookup<SymbExpr>> {
+        fn lookups(&self) -> Vec<Interaction<Val>> {
             let xor_idx = ByteOperation::Xor.position();
             let and_idx = ByteOperation::And.position();
             let or_idx = ByteOperation::Or.position();
@@ -78,7 +78,7 @@ mod tests {
             let mut lookups = [xor_idx, and_idx, or_idx]
                 .into_iter()
                 .map(|i| {
-                    Lookup::pull(
+                    Interaction::provide(
                         var(i),
                         vec![
                             SymbExpr::from_usize(i),
@@ -90,7 +90,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             // Range checks do not have a return value
-            lookups.push(Lookup::pull(
+            lookups.push(Interaction::provide(
                 var(pair_range_check_idx),
                 vec![
                     SymbExpr::from_usize(pair_range_check_idx),

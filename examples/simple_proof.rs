@@ -9,7 +9,7 @@
 //! cargo run --example simple_proof --release
 //! ```
 
-use multi_stark::lookup::LookupAir;
+use multi_stark::logup::LogUpAir;
 use multi_stark::system::{System, SystemWitness};
 use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
 use multi_stark::{
@@ -59,7 +59,7 @@ fn main() {
     );
 
     // Wrap the AIR with empty lookups
-    let air = LookupAir::new(PythagoreanAir, vec![]);
+    let air = LogUpAir::new(PythagoreanAir, vec![]);
     let (system, key) = System::new(config, [air]);
 
     // Build a trace with 4 rows of Pythagorean triples

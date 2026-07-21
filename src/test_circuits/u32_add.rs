@@ -7,7 +7,7 @@ mod tests {
     use crate::test_circuits::SymbExpr;
     use crate::{
         builder::symbolic::{preprocessed_var, var},
-        lookup::{Lookup, LookupAir},
+        lookup::{Interaction, LookupAir},
         system::{ProverKey, System, SystemWitness},
         types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val},
     };
@@ -87,16 +87,19 @@ mod tests {
     }
 
     impl U32CS {
-        fn lookups(&self) -> Vec<Lookup<SymbExpr>> {
+        fn lookups(&self) -> Vec<Interaction<Val>> {
             let byte_index = SymbExpr::from_u8(0);
             let u32_index = SymbExpr::from_u8(1);
             match self {
                 Self::ByteTable => {
-                    vec![Lookup::pull(var(0), vec![byte_index, preprocessed_var(0)])]
+                    vec![Interaction::provide(
+                        var(0),
+                        vec![byte_index, preprocessed_var(0)],
+                    )]
                 }
                 Self::U32Add => {
                     // Pull
-                    let mut lookups = vec![Lookup::pull(
+                    let mut lookups = vec![Interaction::provide(
                         var(13),
                         vec![
                             u32_index,
@@ -115,10 +118,9 @@ mod tests {
                         ],
                     )];
                     // Push
-                    lookups
-                        .extend((0..12).map(|i| {
-                            Lookup::push(SymbExpr::ONE, vec![byte_index.clone(), var(i)])
-                        }));
+                    lookups.extend((0..12).map(|i| {
+                        Interaction::require(SymbExpr::ONE, vec![byte_index.clone(), var(i)])
+                    }));
                     lookups
                 }
             }

@@ -13,7 +13,8 @@
 //! ```
 
 use multi_stark::builder::symbolic::{SymbolicExpression, var};
-use multi_stark::lookup::{Lookup, LookupAir};
+use multi_stark::logup::LogUpAir;
+use multi_stark::lookup::Interaction;
 use multi_stark::system::{System, SystemWitness};
 use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
 use multi_stark::{
@@ -30,7 +31,7 @@ enum ParityAir {
 }
 
 impl ParityAir {
-    fn lookups(&self) -> Vec<Lookup<SymbolicExpression<Val>>> {
+    fn lookups(&self) -> Vec<Interaction<Val>> {
         let multiplicity = var(0);
         let input = var(1);
         let input_is_zero = var(3);
@@ -41,7 +42,7 @@ impl ParityAir {
         let one: SymbolicExpression<_> = Val::ONE.into();
         match self {
             Self::Even => vec![
-                Lookup::pull(
+                Interaction::provide(
                     multiplicity,
                     vec![
                         even_index,
@@ -49,13 +50,13 @@ impl ParityAir {
                         input_not_zero.clone() * recursion_output.clone() + input_is_zero,
                     ],
                 ),
-                Lookup::push(
+                Interaction::require(
                     input_not_zero,
                     vec![odd_index, input - one, recursion_output],
                 ),
             ],
             Self::Odd => vec![
-                Lookup::pull(
+                Interaction::provide(
                     multiplicity,
                     vec![
                         odd_index,
@@ -63,7 +64,7 @@ impl ParityAir {
                         input_not_zero.clone() * recursion_output.clone(),
                     ],
                 ),
-                Lookup::push(
+                Interaction::require(
                     input_not_zero,
                     vec![even_index, input - one, recursion_output],
                 ),
@@ -117,8 +118,8 @@ fn main() {
         },
     );
 
-    let even = LookupAir::new(ParityAir::Even, ParityAir::Even.lookups());
-    let odd = LookupAir::new(ParityAir::Odd, ParityAir::Odd.lookups());
+    let even = LogUpAir::new(ParityAir::Even, ParityAir::Even.lookups());
+    let odd = LogUpAir::new(ParityAir::Odd, ParityAir::Odd.lookups());
     let (system, key) = System::new(config, [even, odd]);
 
     let f = Val::from_u32;

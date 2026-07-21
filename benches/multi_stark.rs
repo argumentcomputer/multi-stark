@@ -14,7 +14,7 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use multi_stark::builder::symbolic::{SymbolicExpression, preprocessed_var, var};
-use multi_stark::lookup::{Lookup, LookupAir};
+use multi_stark::lookup::{Interaction, LookupAir};
 use multi_stark::system::{System, SystemWitness};
 use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
 use multi_stark::{
@@ -90,13 +90,16 @@ where
 }
 
 impl U32CS {
-    fn lookups(&self) -> Vec<Lookup<SymbExpr>> {
+    fn lookups(&self) -> Vec<Interaction<Val>> {
         let byte_index = SymbExpr::from_u8(0);
         let u32_index = SymbExpr::from_u8(1);
         match self {
-            Self::ByteTable => vec![Lookup::pull(var(0), vec![byte_index, preprocessed_var(0)])],
+            Self::ByteTable => vec![Interaction::provide(
+                var(0),
+                vec![byte_index, preprocessed_var(0)],
+            )],
             Self::U32Add => {
-                let mut lookups = vec![Lookup::pull(
+                let mut lookups = vec![Interaction::provide(
                     var(13),
                     vec![
                         u32_index,
@@ -114,9 +117,9 @@ impl U32CS {
                             + var(11) * SymbExpr::from_u32(256 * 256 * 256),
                     ],
                 )];
-                lookups.extend(
-                    (0..12).map(|i| Lookup::push(SymbExpr::ONE, vec![byte_index.clone(), var(i)])),
-                );
+                lookups.extend((0..12).map(|i| {
+                    Interaction::require(SymbExpr::ONE, vec![byte_index.clone(), var(i)])
+                }));
                 lookups
             }
         }

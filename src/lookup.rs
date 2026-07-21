@@ -1,7 +1,27 @@
-use p3_air::{Air, BaseAir, ExtensionBuilder, WindowAccess};
-use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, batch_multiplicative_inverse};
-use p3_matrix::{Matrix, dense::RowMajorMatrix};
-use p3_maybe_rayon::prelude::*;
+//! Generic surface of the two-staged lookup protocol.
+//!
+//! Circuits describe their lookups as a list of [`Interaction`]s — a
+//! scheme-independent frontend vocabulary. The [`LookupArgument`] trait
+//! abstracts the lookup argument scheme that lowers those interactions into
+//! committed claims and proves that the claim multiset balances across all
+//! circuits (and the public claims). The surrounding protocol is
+//! scheme-independent and fixes:
+//!
+//! - two extension-field challenges (the lookup challenge and the fingerprint
+//!   challenge), sampled after the stage 1 traces and the public claims are
+//!   bound to the transcript;
+//! - one stage 2 trace per circuit, committed after the challenges are
+//!   sampled, whose width and contents are scheme-defined;
+//! - a per-circuit accumulator chain: each circuit receives an incoming
+//!   accumulator value and produces an outgoing one. The chain is seeded by
+//!   folding the public claims ([`LookupArgument::fold_claims`]) and must end
+//!   at the scheme's balance target ([`LookupArgument::balance_target`]).
+//!
+//! [`LogUp`](crate::logup::LogUp) is the reference implementation.
+
+use p3_air::{Air, BaseAir, WindowAccess};
+use p3_field::{ExtensionField, Field, PrimeCharacteristicRing};
+use p3_matrix::dense::RowMajorMatrix;
 
 use crate::builder::{TwoStagedBuilder, symbolic::SymbolicExpression};
 
@@ -10,70 +30,194 @@ use crate::builder::{TwoStagedBuilder, symbolic::SymbolicExpression};
 /// accumulator.
 pub const LOOKUP_PUBLIC_SIZE: usize = 4;
 
-#[derive(Clone)]
-pub struct Lookup<Expr> {
-    pub multiplicity: Expr,
-    pub args: Vec<Expr>,
+/// One lookup interaction of a circuit, as described by its frontend.
+///
+/// Interactions come in two channels:
+///
+/// - **Permutation channel** ([`Push`](Interaction::Push)/
+///   [`Pull`](Interaction::Pull)): claims are added and removed one at a
+///   time; the multiset of pushed claims must equal the multiset of pulled
+///   claims. `guard` switches the claim on and off (e.g. for padding or
+///   branch rows) and is expected to be boolean; circuits should constrain
+///   it.
+/// - **Multiplicity channel** ([`Provide`](Interaction::Provide)/
+///   [`Require`](Interaction::Require)): a claim required `n` times in total
+///   must be provided with total multiplicity `n`, so a single trace row can
+///   serve a claim made by many rows.
+///
+/// The two channels are semantically distinct: match pushes with pulls and
+/// requires with provides. Whether claims can also match *across* channels
+/// (a push cancelling a provide), or with a non-boolean guard, is
+/// scheme-defined behavior: logUp folds everything into one signed
+/// accumulator (so it happens to work), while other schemes may separate the
+/// channels structurally or rely on guard booleanity for soundness. Portable
+/// circuits must not depend on it.
+pub enum Interaction<F: Field> {
+    /// Adds a claim to the permutation channel once (when `guard` is one).
+    Push {
+        guard: SymbolicExpression<F>,
+        args: Vec<SymbolicExpression<F>>,
+    },
+    /// Removes a claim from the permutation channel once (when `guard` is one).
+    Pull {
+        guard: SymbolicExpression<F>,
+        args: Vec<SymbolicExpression<F>>,
+    },
+    /// Serves `multiplicity` matching requires in the multiplicity channel.
+    Provide {
+        multiplicity: SymbolicExpression<F>,
+        args: Vec<SymbolicExpression<F>>,
+    },
+    /// Makes a claim served by a provide, `multiplicity` times.
+    Require {
+        multiplicity: SymbolicExpression<F>,
+        args: Vec<SymbolicExpression<F>>,
+    },
 }
 
-impl<Expr> Lookup<Expr> {
-    /// Returns a [`Lookup`] with multiplicity zero and no arguments.
+impl<F: Field> Interaction<F> {
+    /// An unconditional [`Interaction::Push`].
     #[inline]
-    pub fn empty() -> Self
-    where
-        Expr: PrimeCharacteristicRing,
-    {
-        Self {
-            multiplicity: Expr::ZERO,
-            args: vec![],
-        }
-    }
-
-    /// "Pushing" has the semantics of adding a claim to the claim set.
-    #[inline]
-    pub fn push(multiplicity: Expr, args: Vec<Expr>) -> Self {
-        Self { multiplicity, args }
-    }
-
-    /// "Pulling" has the semantics of removing a claim from the claim set.
-    #[inline]
-    pub fn pull(multiplicity: Expr, args: Vec<Expr>) -> Self
-    where
-        Expr: std::ops::Neg<Output = Expr>,
-    {
-        Self {
-            multiplicity: -multiplicity,
+    pub fn push(args: Vec<SymbolicExpression<F>>) -> Self {
+        Self::Push {
+            guard: SymbolicExpression::ONE,
             args,
         }
     }
+
+    /// An [`Interaction::Push`] switched by a boolean guard.
+    #[inline]
+    pub fn push_when(guard: SymbolicExpression<F>, args: Vec<SymbolicExpression<F>>) -> Self {
+        Self::Push { guard, args }
+    }
+
+    /// An unconditional [`Interaction::Pull`].
+    #[inline]
+    pub fn pull(args: Vec<SymbolicExpression<F>>) -> Self {
+        Self::Pull {
+            guard: SymbolicExpression::ONE,
+            args,
+        }
+    }
+
+    /// An [`Interaction::Pull`] switched by a boolean guard.
+    #[inline]
+    pub fn pull_when(guard: SymbolicExpression<F>, args: Vec<SymbolicExpression<F>>) -> Self {
+        Self::Pull { guard, args }
+    }
+
+    /// An [`Interaction::Provide`].
+    #[inline]
+    pub fn provide(multiplicity: SymbolicExpression<F>, args: Vec<SymbolicExpression<F>>) -> Self {
+        Self::Provide { multiplicity, args }
+    }
+
+    /// An [`Interaction::Require`].
+    #[inline]
+    pub fn require(multiplicity: SymbolicExpression<F>, args: Vec<SymbolicExpression<F>>) -> Self {
+        Self::Require { multiplicity, args }
+    }
 }
 
-pub struct LookupAir<A, F: Field> {
+/// A circuit's claim set, main trace and optional preprocessed trace, as
+/// consumed by [`LookupArgument::compute_witness`].
+pub type CircuitWitnessInput<'a, F, L> =
+    (&'a L, &'a RowMajorMatrix<F>, Option<&'a RowMajorMatrix<F>>);
+
+/// A lookup argument scheme.
+///
+/// A value of an implementing type holds the scheme's *entire* claim set for
+/// one circuit, lowered from the circuit's [`Interaction`]s by
+/// [`LookupArgument::new`]. Lowering is not one-to-one in general: logUp maps
+/// every interaction to a single signed-multiplicity term, while a
+/// grand-product scheme may expand a provide/require into several raw claims
+/// plus counter bookkeeping.
+///
+/// The remaining items drive the scheme-specific parts of the protocol:
+/// stage 2 shape ([`stage_2_width`](Self::stage_2_width)), witness generation
+/// ([`compute_witness`](Self::compute_witness)), stage 2 trace construction
+/// ([`stage_2_traces`](Self::stage_2_traces)), stage 2 constraint evaluation
+/// ([`eval`](Self::eval)), and the claim-folding/balance bookkeeping shared by
+/// the prover and the verifier.
+pub trait LookupArgument<F: Field>: Send + Sync + Sized {
+    /// Concrete lookup data of one circuit, computed from its committed
+    /// traces during witness generation.
+    type Witness: Clone + Send + Sync;
+
+    /// Lowers a circuit's interactions into the scheme's claim set.
+    fn new(interactions: Vec<Interaction<F>>) -> Self;
+
+    /// Width, in extension field columns, of this circuit's stage 2 trace.
+    fn stage_2_width(&self) -> usize;
+
+    /// Computes the concrete lookup data of every circuit, given each
+    /// circuit's claim set, main trace and optional preprocessed trace.
+    ///
+    /// This is a single pass over all circuits (rather than a per-circuit
+    /// function) so that schemes with globally ordered witness state — such
+    /// as the counters of an offline-memory-checking lowering — can assign it
+    /// consistently across circuits.
+    fn compute_witness(circuits: &[CircuitWitnessInput<'_, F, Self>]) -> Vec<Self::Witness>;
+
+    /// Computes the stage 2 traces and the outgoing accumulator value of each
+    /// circuit, given the lookup challenges and the incoming accumulator of
+    /// the first circuit (obtained from [`LookupArgument::fold_claims`]).
+    fn stage_2_traces<EF: ExtensionField<F>>(
+        witnesses: &[Self::Witness],
+        lookup_challenge: EF,
+        fingerprint_challenge: &EF,
+        claims_accumulator: EF,
+    ) -> (Vec<RowMajorMatrix<EF>>, Vec<EF>);
+
+    /// Folds the public claims into the accumulator value that seeds the
+    /// accumulator chain. Both the prover and the verifier compute this from
+    /// public data.
+    fn fold_claims<EF: ExtensionField<F>>(
+        lookup_challenge: EF,
+        fingerprint_challenge: &EF,
+        claims: &[&[F]],
+    ) -> EF;
+
+    /// The value the final outgoing accumulator must equal for the claim
+    /// multiset to balance: zero for logUp (a running sum), one for a
+    /// grand-product argument (a running product).
+    fn balance_target<EF: ExtensionField<F>>() -> EF;
+
+    /// Evaluates the scheme's stage 2 constraints for this circuit. The four
+    /// stage 2 public values are, in order: the lookup challenge, the
+    /// fingerprint challenge, the circuit's incoming accumulator and its
+    /// outgoing accumulator (see [`LOOKUP_PUBLIC_SIZE`]).
+    fn eval<AB>(&self, builder: &mut AB, preprocessed_row: Option<&[AB::Var]>)
+    where
+        AB: TwoStagedBuilder<F = F>;
+}
+
+/// An AIR bundled with its lookup claim set under a lookup argument scheme `L`.
+pub struct LookupAir<A, F: Field, L> {
     pub inner_air: A,
-    pub lookups: Vec<Lookup<SymbolicExpression<F>>>,
+    pub lookups: L,
     pub preprocessed: Option<RowMajorMatrix<F>>,
 }
 
-impl<A: BaseAir<F>, F: Field> LookupAir<A, F> {
-    pub fn new(inner_air: A, lookups: Vec<Lookup<SymbolicExpression<F>>>) -> Self {
+impl<A: BaseAir<F>, F: Field, L: LookupArgument<F>> LookupAir<A, F, L> {
+    pub fn new(inner_air: A, interactions: Vec<Interaction<F>>) -> Self {
         let preprocessed = inner_air.preprocessed_trace();
         Self {
             inner_air,
-            lookups,
+            lookups: L::new(interactions),
             preprocessed,
         }
     }
 
-    /// One column for the accumulator and one column for the inverse of the
-    /// message associated with each lookup.
+    /// Width of the circuit's stage 2 trace, as defined by the scheme.
     pub fn stage_2_width(&self) -> usize {
-        1 + self.lookups.len()
+        self.lookups.stage_2_width()
     }
 }
 
 /// Computes a fingerprint of the coefficients using Horner's method.
 #[inline]
-pub(crate) fn fingerprint<F, I, Iter>(r: &F, coeffs: Iter) -> F
+pub fn fingerprint<F, I, Iter>(r: &F, coeffs: Iter) -> F
 where
     F: PrimeCharacteristicRing,
     I: Into<F>,
@@ -84,115 +228,11 @@ where
         .fold(F::ZERO, |acc, coeff| acc * r.clone() + coeff.into())
 }
 
-impl<F: Field> Lookup<SymbolicExpression<F>> {
-    /// Computes the concrete lookup attributes for its respective expressions
-    /// given a trace row and a preprocessed trace row.
-    pub fn compute_expr(&self, row: &[F], preprocessed: Option<&[F]>) -> Lookup<F> {
-        let multiplicity = self.multiplicity.interpret(row, preprocessed);
-        let args = self
-            .args
-            .iter()
-            .map(|arg| arg.interpret(row, preprocessed))
-            .collect();
-        Lookup { multiplicity, args }
-    }
-}
-
-impl<F: Field> Lookup<F> {
-    /// Computes the stage 2 traces and the intermediate accumulators for each
-    /// circuit given a lookup challenge, a fingerprint challenge and the current
-    /// accumulator value (computed from the initial claims).
-    ///
-    /// Note: the lookups are expected to be fully padded. That is, for each
-    /// circuit, every row must have the exact same number of lookups.
-    pub fn stage_2_traces<EF: ExtensionField<F>>(
-        lookups: &[Vec<Vec<Self>>],
-        lookup_challenge: EF,
-        fingerprint_challenge: &EF,
-        mut accumulator: EF,
-    ) -> (Vec<RowMajorMatrix<EF>>, Vec<EF>) {
-        // Number of lookups per circuit. Every row in a circuit is assumed to
-        // have the same number of lookups (the lookups are expected to be fully
-        // padded), so this is taken from the first row.
-        let num_lookups_per_circuit: Vec<usize> = lookups
-            .iter()
-            .map(|circuit_lookups| circuit_lookups.len() * circuit_lookups[0].len())
-            .collect();
-
-        // Compute the message for each lookup, in flat circuit-major order.
-        // Flatten the references serially first so the parallel map operates
-        // on an indexed slice and `collect` can write straight into the
-        // output Vec without tree-reducing worker buffers.
-        let _g = tracing::info_span!("stark/lookup_messages").entered();
-        let flat: Vec<&Self> = lookups.iter().flatten().flatten().collect();
-        let messages: Vec<EF> = flat
-            .par_iter()
-            .map(|lookup| lookup.compute_message(lookup_challenge, fingerprint_challenge))
-            .collect();
-        drop(_g);
-
-        // Compute the inverses of all messages in batch.
-        let messages_inverses = tracing::info_span!("stark/batch_inverse")
-            .in_scope(|| batch_multiplicative_inverse(&messages));
-
-        // Compute and collect intermediate accumulators and traces.
-        let _g = tracing::info_span!("stark/lookup_traces").entered();
-        let mut intermediate_accumulators = Vec::with_capacity(lookups.len());
-        let mut traces = Vec::with_capacity(lookups.len());
-        let mut offset = 0;
-        for (circuit_lookups, num_circuit_messages) in lookups.iter().zip(num_lookups_per_circuit) {
-            // Get the slice containing the messages inverses for the current circuit.
-            let circuit_messages_inverses =
-                &messages_inverses[offset..offset + num_circuit_messages];
-            offset += num_circuit_messages;
-
-            let num_row_lookups = circuit_lookups[0].len();
-            let vec = if num_row_lookups == 0 {
-                // No row lookup. Just repeat the accumulator for each row.
-                vec![accumulator; circuit_lookups.len()]
-            } else {
-                // Flatten each row accumulator followed by the inverse of the message
-                // associated with each row lookup.
-                circuit_lookups
-                    .iter()
-                    .zip(circuit_messages_inverses.chunks_exact(num_row_lookups))
-                    .flat_map(|(row_lookups, row_messages_inverses)| {
-                        let mut row = Vec::with_capacity(1 + row_lookups.len());
-                        row.push(accumulator);
-                        row.extend(row_lookups.iter().zip(row_messages_inverses).map(
-                            |(lookup, &message_inverse)| {
-                                accumulator += EF::from(lookup.multiplicity) * message_inverse;
-                                message_inverse
-                            },
-                        ));
-                        row
-                    })
-                    .collect()
-            };
-            let width = 1 + num_row_lookups;
-            debug_assert_eq!(vec.len() % width, 0);
-            let trace = RowMajorMatrix::new(vec, width);
-            intermediate_accumulators.push(accumulator);
-            traces.push(trace);
-        }
-        drop(_g);
-        (traces, intermediate_accumulators)
-    }
-
-    fn compute_message<EF: ExtensionField<F>>(
-        &self,
-        lookup_challenge: EF,
-        fingerprint_challenge: &EF,
-    ) -> EF {
-        let fingerprint = fingerprint(fingerprint_challenge, self.args.iter().cloned());
-        lookup_challenge + fingerprint
-    }
-}
-
-impl<A, F> BaseAir<F> for LookupAir<A, F>
+impl<A, F, L> BaseAir<F> for LookupAir<A, F, L>
 where
     A: BaseAir<F>,
     F: Field,
+    L: Send + Sync,
 {
     fn width(&self) -> usize {
         self.inner_air.width()
@@ -203,256 +243,24 @@ where
     }
 }
 
-impl<A, F, AB> Air<AB> for LookupAir<A, F>
+impl<A, F, L, AB> Air<AB> for LookupAir<A, F, L>
 where
     A: Air<AB>,
     F: Field,
+    L: LookupArgument<F>,
     AB: TwoStagedBuilder<F = F>,
 {
     fn eval(&self, builder: &mut AB) {
-        if self.preprocessed.is_some() {
-            let preprocessed = builder.preprocessed().clone();
-            let preprocessed_row = preprocessed.current_slice();
-            self.eval_with_preprocessed_row(builder, Some(preprocessed_row))
-        } else {
-            self.eval_with_preprocessed_row(builder, None)
-        }
-    }
-}
-
-impl<A, F: Field> LookupAir<A, F> {
-    fn eval_with_preprocessed_row<AB>(&self, builder: &mut AB, preprocessed_row: Option<&[AB::Var]>)
-    where
-        A: Air<AB>,
-        AB: TwoStagedBuilder<F = F>,
-    {
         // Call `eval` for regular stage 1 constraints.
         self.inner_air.eval(builder);
 
-        // Extract challenges and accumulators from stage 2 public values.
-        let stage_2_public_values = builder.stage_2_public_values();
-        debug_assert_eq!(stage_2_public_values.len(), LOOKUP_PUBLIC_SIZE);
-        let lookup_challenge = stage_2_public_values[0].into();
-        let fingerprint_challenge = stage_2_public_values[1].into();
-        let acc = stage_2_public_values[2];
-        let next_acc = stage_2_public_values[3];
-
-        // Bind relevant variables to construct the stage 2 constraints.
-        let stage_2 = builder.stage_2();
-        let stage_2_row = stage_2.row_slice(0).unwrap();
-        let stage_2_next_row = stage_2.row_slice(1).unwrap();
-        let acc_col = stage_2_row[0];
-        let next_acc_col = stage_2_next_row[0];
-        let messages_inverses = &stage_2_row[1..];
-        let lookups = &self.lookups;
-        debug_assert_eq!(messages_inverses.len(), lookups.len());
-
-        // Compute the final accumulator for the current row with the inverses
-        // of the messages from the stage 2 trace while asserting that these
-        // inverses are indeed the inverses of the messages computed on the main
-        // trace.
-        let main = builder.main();
-        let row = main.current_slice();
-        let mut acc_expr = acc_col.into();
-        for (lookup, &message_inverse) in lookups.iter().zip(messages_inverses) {
-            let multiplicity: AB::ExprEF =
-                lookup.multiplicity.interpret(row, preprocessed_row).into();
-            let args = lookup
-                .args
-                .iter()
-                .map(|arg| arg.interpret(row, preprocessed_row));
-            let fingerprint = fingerprint(&fingerprint_challenge, args);
-            let message: AB::ExprEF = lookup_challenge.clone() + fingerprint;
-            let message_inverse = message_inverse.into();
-            builder.assert_one_ext(message * message_inverse.clone());
-            acc_expr += multiplicity * message_inverse;
+        // Then the scheme's stage 2 constraints.
+        if self.preprocessed.is_some() {
+            let preprocessed = builder.preprocessed().clone();
+            let preprocessed_row = preprocessed.current_slice();
+            self.lookups.eval(builder, Some(preprocessed_row));
+        } else {
+            self.lookups.eval(builder, None);
         }
-
-        // The initial accumulator value must be set correctly.
-        builder.when_first_row().assert_eq_ext(acc_col, acc);
-
-        // The accumulator computed on the main trace for the current row must
-        // equal the accumulator of the next row from the stage 2 trace.
-        builder
-            .when_transition()
-            .assert_eq_ext(acc_expr.clone(), next_acc_col);
-
-        // The final accumulator must match the expected value.
-        builder.when_last_row().assert_eq_ext(acc_expr, next_acc);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use p3_air::{AirBuilder, WindowAccess};
-    use p3_field::Field;
-
-    use crate::{
-        builder::symbolic::var,
-        system::{ProverKey, System, SystemWitness},
-        types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val},
-    };
-
-    use super::*;
-
-    enum CS {
-        Even,
-        Odd,
-    }
-    impl<F> BaseAir<F> for CS {
-        fn width(&self) -> usize {
-            6
-        }
-    }
-    impl CS {
-        fn lookups(&self) -> Vec<Lookup<SymbolicExpression<Val>>> {
-            // provide removes multiplicity
-            let multiplicity = var(0);
-            let input = var(1);
-            let input_is_zero = var(3);
-            let input_not_zero = var(4);
-            let recursion_output = var(5);
-            let even_index = Val::ZERO.into();
-            let odd_index = Val::ONE.into();
-            let one: SymbolicExpression<_> = Val::ONE.into();
-            match self {
-                Self::Even => vec![
-                    Lookup::pull(
-                        multiplicity,
-                        vec![
-                            even_index,
-                            input.clone(),
-                            input_not_zero.clone() * recursion_output.clone() + input_is_zero,
-                        ],
-                    ),
-                    Lookup::push(
-                        input_not_zero,
-                        vec![odd_index, input - one, recursion_output],
-                    ),
-                ],
-                Self::Odd => vec![
-                    Lookup::pull(
-                        multiplicity,
-                        vec![
-                            odd_index,
-                            input.clone(),
-                            input_not_zero.clone() * recursion_output.clone(),
-                        ],
-                    ),
-                    Lookup::push(
-                        input_not_zero,
-                        vec![even_index, input - one, recursion_output],
-                    ),
-                ],
-            }
-        }
-    }
-    impl<AB> Air<AB> for CS
-    where
-        AB: AirBuilder,
-        AB::Var: Copy,
-    {
-        fn eval(&self, builder: &mut AB) {
-            // both even and odd have the same constraints, they only differ on the lookups
-            let main = builder.main();
-            let local = main.current_slice();
-            let multiplicity = local[0];
-            let input = local[1];
-            let input_inverse = local[2];
-            let input_is_zero = local[3];
-            let input_not_zero = local[4];
-            builder.assert_bools([input_is_zero, input_not_zero]);
-            builder
-                .when(multiplicity)
-                .assert_one(input_is_zero + input_not_zero);
-            builder.when(input_is_zero).assert_zero(input);
-            builder
-                .when(input_not_zero)
-                .assert_one(input * input_inverse);
-        }
-    }
-    const COMMITMENT_PARAMETERS: CommitmentParameters = CommitmentParameters {
-        log_blowup: 1,
-        cap_height: 0,
-    };
-
-    const FRI_PARAMETERS: FriParameters = FriParameters {
-        log_final_poly_len: 0,
-        max_log_arity: 1,
-        num_queries: 64,
-        commit_proof_of_work_bits: 0,
-        query_proof_of_work_bits: 0,
-    };
-
-    fn system() -> (
-        System<GoldilocksBlake3Config, CS>,
-        ProverKey<GoldilocksBlake3Config>,
-    ) {
-        let config = GoldilocksBlake3Config::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
-        let even = LookupAir::new(CS::Even, CS::Even.lookups());
-        let odd = LookupAir::new(CS::Odd, CS::Odd.lookups());
-        System::new(config, [even, odd])
-    }
-
-    fn witness(system: &System<GoldilocksBlake3Config, CS>) -> SystemWitness<Val> {
-        let f = Val::from_u32;
-        #[rustfmt::skip]
-        let witness = SystemWitness::from_stage_1(
-            vec![
-                RowMajorMatrix::new(
-                    vec![
-                        // row 1
-                        f(1), f(4), f(4).inverse(), f(0), f(1), f(1),
-                        // row 2
-                        f(1), f(2), f(2).inverse(), f(0), f(1), f(1),
-                        // row 3
-                        f(1), f(0), f(0), f(1), f(0), f(0),
-                        // row 4
-                        f(0), f(0), f(0), f(0), f(0), f(0),
-                    ],
-                    6,
-                ),
-                RowMajorMatrix::new(
-                    vec![
-                        // row 1
-                        f(1), f(3), f(3).inverse(), f(0), f(1), f(1),
-                        // row 2
-                        f(1), f(1), f(1).inverse(), f(0), f(1), f(1),
-                        // row 3
-                        f(0), f(0), f(0), f(0), f(0), f(0),
-                        // row 4
-                        f(0), f(0), f(0), f(0), f(0), f(0),
-                    ],
-                    6,
-                ),
-            ],
-            system,
-        );
-        witness
-    }
-
-    #[test]
-    fn lookup_test() {
-        let (system, key) = system();
-        let witness = witness(&system);
-        let f = Val::from_u32;
-        let claim = &[f(0), f(4), f(1)];
-        let proof = system.prove(&key, claim, witness);
-        system.verify(claim, &proof).unwrap();
-    }
-
-    #[test]
-    fn test_claim_split_rejected() {
-        let (system, key) = system();
-        let witness = witness(&system);
-        let f = Val::from_u32;
-        // Prove a single claim, then attempt to verify with the same values
-        // regrouped into two claims. The transcript is length-prefixed, so the
-        // regrouped claims must yield different challenges and fail.
-        let claim = &[f(0), f(4), f(1)];
-        let proof = system.prove(&key, claim, witness);
-        let split_claims: &[&[Val]] = &[&[f(0), f(4)], &[f(1)]];
-        let result = system.verify_multiple_claims(split_claims, &proof);
-        assert!(result.is_err());
     }
 }

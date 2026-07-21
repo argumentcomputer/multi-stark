@@ -6,8 +6,9 @@
 //!    dimensions (opened values, accumulators, quotient chunks) match the system's
 //!    circuit count and column widths.
 //!
-//! 2. **Accumulator balance**: Assert that the last intermediate accumulator is zero,
-//!    ensuring that all lookup pushes and pulls cancel out across circuits.
+//! 2. **Accumulator balance**: Assert that the last intermediate accumulator equals
+//!    the lookup scheme's balance target (zero for logUp), ensuring that all lookup
+//!    pushes and pulls cancel out across circuits.
 //!
 //! 3. **Fiat-Shamir replay**: Reconstruct the challenger state identically to the
 //!    prover: starting from the parameter-seeded challenger, observe the system
@@ -134,7 +135,7 @@ use crate::{
     builder::folder::VerifierConstraintFolder,
     config::{PcsError, StarkGenericConfig, Val},
     ensure, ensure_eq,
-    lookup::fingerprint,
+    lookup::LookupArgument,
     prover::Proof,
     system::System,
 };
@@ -165,10 +166,11 @@ pub enum VerificationError<PcsErr> {
     UnbalancedChannel,
 }
 
-impl<SC, A> System<SC, A>
+impl<SC, A, L> System<SC, A, L>
 where
     SC: StarkGenericConfig,
     A: BaseAir<Val<SC>> + for<'a> Air<VerifierConstraintFolder<'a, Val<SC>, SC::Challenge>>,
+    L: LookupArgument<Val<SC>>,
 {
     /// Verifies a STARK proof against a single claim.
     ///
@@ -204,11 +206,12 @@ where
         // Soundness: lookup argument. The accumulator was computed by the prover
         // under challenges (β, γ) that were sampled after the traces and claims were
         // committed. If the pushed and pulled multisets differ, the accumulator is a
-        // nonzero rational function of (β, γ) and evaluates to zero with probability
-        // ≤ N / |F_ext| (Schwartz-Zippel on the numerator polynomial).
+        // nonzero rational function of (β, γ) and evaluates to the balance target
+        // with probability ≤ N / |F_ext| (Schwartz-Zippel on the numerator
+        // polynomial).
         ensure_eq!(
             intermediate_accumulators.last(),
-            Some(&SC::Challenge::ZERO),
+            Some(&L::balance_target()),
             VerificationError::UnbalancedChannel
         );
 
@@ -267,12 +270,7 @@ where
         }
 
         // construct the accumulator from the claims
-        let mut acc = SC::Challenge::ZERO;
-        for claim in claims {
-            let message = lookup_argument_challenge
-                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
-            acc += message.inverse();
-        }
+        let mut acc = L::fold_claims(lookup_argument_challenge, &fingerprint_challenge, claims);
 
         // Soundness: constraint folding. All k constraints are combined via powers
         // of α. The folded sum has degree k-1 in α, so by Schwartz-Zippel a violated

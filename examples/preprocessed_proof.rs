@@ -11,8 +11,9 @@
 //! cargo run --example preprocessed_proof --release
 //! ```
 
-use multi_stark::builder::symbolic::{SymbolicExpression, preprocessed_var, var};
-use multi_stark::lookup::{Lookup, LookupAir};
+use multi_stark::builder::symbolic::{preprocessed_var, var};
+use multi_stark::logup::LogUpAir;
+use multi_stark::lookup::Interaction;
 use multi_stark::system::{System, SystemWitness};
 use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
 use multi_stark::{
@@ -20,8 +21,6 @@ use multi_stark::{
     p3_field::{Field, PrimeCharacteristicRing},
     p3_matrix::dense::RowMajorMatrix,
 };
-
-type SymbExpr = SymbolicExpression<Val>;
 
 /// Two-circuit system: a preprocessed range table and a squaring circuit.
 enum SquaresCS {
@@ -73,14 +72,14 @@ where
 }
 
 impl SquaresCS {
-    fn lookups(&self) -> Vec<Lookup<SymbExpr>> {
+    fn lookups(&self) -> Vec<Interaction<Val>> {
         match self {
             // RangeTable pulls: multiplicity × (preprocessed byte value)
-            Self::RangeTable => vec![Lookup::pull(var(0), vec![preprocessed_var(0)])],
+            Self::RangeTable => vec![Interaction::provide(var(0), vec![preprocessed_var(0)])],
             // Squares pushes each byte into the range table for validation
             Self::Squares => vec![
-                Lookup::push(var(4), vec![var(2)]), // low byte
-                Lookup::push(var(4), vec![var(3)]), // high byte
+                Interaction::require(var(4), vec![var(2)]), // low byte
+                Interaction::require(var(4), vec![var(3)]), // high byte
             ],
         }
     }
@@ -101,8 +100,8 @@ fn main() {
         },
     );
 
-    let range_table = LookupAir::new(SquaresCS::RangeTable, SquaresCS::RangeTable.lookups());
-    let squares = LookupAir::new(SquaresCS::Squares, SquaresCS::Squares.lookups());
+    let range_table = LogUpAir::new(SquaresCS::RangeTable, SquaresCS::RangeTable.lookups());
+    let squares = LogUpAir::new(SquaresCS::Squares, SquaresCS::Squares.lookups());
     let (system, key) = System::new(config, [range_table, squares]);
 
     // Build traces: square every value 0..16

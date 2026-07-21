@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::builder::symbolic::{preprocessed_var, var};
-    use crate::lookup::{Lookup, LookupAir};
+    use crate::lookup::{Interaction, LookupAir};
     use crate::system::{System, SystemWitness};
     use crate::test_circuits::SymbExpr;
     use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
@@ -772,7 +772,7 @@ mod tests {
     }
 
     impl Blake3CompressionCircuit {
-        fn lookups(&self) -> Vec<Lookup<SymbExpr>> {
+        fn lookups(&self) -> Vec<Interaction<Val>> {
             let u8_xor_idx = Self::U8Xor.position();
             let u32_xor_idx = Self::U32Xor.position();
             let u32_add_idx = Self::U32Add.position();
@@ -790,7 +790,7 @@ mod tests {
                 state_in_range: Range<usize>,
                 state_out_range: Range<usize>,
                 var: fn(usize) -> SymbExpr,
-            ) -> Lookup<SymbExpr> {
+            ) -> Interaction<Val> {
                 assert_eq!(state_in_range.len(), 128);
                 assert_eq!(state_out_range.len(), 64);
 
@@ -818,7 +818,7 @@ mod tests {
                     })
                     .collect::<Vec<SymbExpr>>();
 
-                Lookup::pull(
+                Interaction::provide(
                     multiplicity,
                     [vec![SymbExpr::from_usize(circuit_idx)], state_in, state_out].concat(),
                 )
@@ -829,12 +829,12 @@ mod tests {
                 circuit_idx: usize,
                 v_ind: Range<usize>,
                 var: fn(usize) -> SymbExpr,
-            ) -> Lookup<SymbExpr> {
+            ) -> Interaction<Val> {
                 assert_eq!(v_ind.len(), 40);
 
                 let i = v_ind.collect::<Vec<usize>>();
 
-                Lookup::push(
+                Interaction::require(
                     multiplicity,
                     vec![
                         SymbExpr::from_usize(circuit_idx),
@@ -887,8 +887,8 @@ mod tests {
                 circuit_idx: usize,
                 v_ind: Range<usize>,
                 var: fn(usize) -> SymbExpr,
-            ) -> Lookup<SymbExpr> {
-                lookup_u32_inner(Lookup::push, multiplicity, circuit_idx, v_ind, var)
+            ) -> Interaction<Val> {
+                lookup_u32_inner(Interaction::require, multiplicity, circuit_idx, v_ind, var)
             }
 
             fn pull_u32(
@@ -896,17 +896,17 @@ mod tests {
                 circuit_idx: usize,
                 v_ind: Range<usize>,
                 var: fn(usize) -> SymbExpr,
-            ) -> Lookup<SymbExpr> {
-                lookup_u32_inner(Lookup::pull, multiplicity, circuit_idx, v_ind, var)
+            ) -> Interaction<Val> {
+                lookup_u32_inner(Interaction::provide, multiplicity, circuit_idx, v_ind, var)
             }
 
             fn lookup_u32_inner(
-                lookup_fn: fn(SymbExpr, Vec<SymbExpr>) -> Lookup<SymbExpr>,
+                lookup_fn: fn(SymbExpr, Vec<SymbExpr>) -> Interaction<Val>,
                 multiplicity: SymbExpr,
                 circuit_idx: usize,
                 v_ind: Range<usize>,
                 var: fn(usize) -> SymbExpr,
-            ) -> Lookup<SymbExpr> {
+            ) -> Interaction<Val> {
                 assert_eq!(v_ind.len(), 12);
 
                 let i = v_ind.collect::<Vec<usize>>();
@@ -934,7 +934,7 @@ mod tests {
             match self {
                 Self::U8Xor | Self::U8PairRangeCheck => {
                     vec![
-                        Lookup::pull(
+                        Interaction::provide(
                             var(0),
                             vec![
                                 SymbExpr::from_usize(u8_xor_idx),
@@ -943,7 +943,7 @@ mod tests {
                                 preprocessed_var(2),
                             ],
                         ),
-                        Lookup::pull(
+                        Interaction::provide(
                             var(1),
                             vec![
                                 SymbExpr::from_usize(u8_pair_range_check_idx),
@@ -960,7 +960,7 @@ mod tests {
 
                     // push (A, B, A^B) tuples to U8Xor circuit for verification
                     lookups.extend((0..4).map(|i| {
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u8_xor_idx).clone(),
@@ -980,7 +980,7 @@ mod tests {
 
                     // push (A, B) tuples to U8PairRangeCheck circuit for verification
                     lookups.extend((0..4).map(|i| {
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u8_pair_range_check_idx).clone(),
@@ -992,7 +992,7 @@ mod tests {
 
                     // push (A + B, 0) tuples to U8PairRangeCheck circuit for verification. 0 is used just as a stub
                     lookups.extend((0..4).map(|i| {
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u8_pair_range_check_idx).clone(),
@@ -1006,7 +1006,7 @@ mod tests {
 
                 // (2 push lookups to pair_range_check)
                 Self::U32RightRotate8 => {
-                    let mut lookups = vec![Lookup::pull(
+                    let mut lookups = vec![Interaction::provide(
                         var(0),
                         vec![
                             SymbExpr::from_usize(u32_right_rotate_8_idx),
@@ -1024,7 +1024,7 @@ mod tests {
 
                     // range check only input u32 word (since output is constructed exactly from the same bytes)
                     lookups.extend((0..2).map(|i| {
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u8_pair_range_check_idx).clone(),
@@ -1039,7 +1039,7 @@ mod tests {
 
                 // (2 push lookups to pair_range_check)
                 Self::U32RightRotate16 => {
-                    let mut lookups = vec![Lookup::pull(
+                    let mut lookups = vec![Interaction::provide(
                         var(0),
                         vec![
                             SymbExpr::from_usize(u32_right_rotate_16_idx),
@@ -1057,7 +1057,7 @@ mod tests {
 
                     // range check only input u32 word (since output is constructed exactly from the same 4 bytes)
                     lookups.extend((0..2).map(|i| {
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u8_pair_range_check_idx).clone(),
@@ -1071,7 +1071,7 @@ mod tests {
                 }
 
                 Self::U32RightRotate12 => {
-                    vec![Lookup::pull(
+                    vec![Interaction::provide(
                         var(0),
                         vec![
                             SymbExpr::from_usize(u32_right_rotate_12_idx),
@@ -1088,7 +1088,7 @@ mod tests {
                 }
 
                 Self::U32RightRotate7 => {
-                    vec![Lookup::pull(
+                    vec![Interaction::provide(
                         var(0),
                         vec![
                             SymbExpr::from_usize(u32_right_rotate_7_idx),
@@ -1111,7 +1111,7 @@ mod tests {
                 Self::GFunction => {
                     vec![
                         // balancing the initial claim
-                        Lookup::pull(
+                        Interaction::provide(
                             var(0),
                             vec![
                                 SymbExpr::from_usize(g_function_idx),
@@ -1161,7 +1161,7 @@ mod tests {
                         // interacting with lower-level circuits that constrain operations used in G function
 
                         // a_in + b_in = a_0_tmp
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u32_add_idx),
@@ -1180,7 +1180,7 @@ mod tests {
                             ],
                         ),
                         // a_0_tmp + mx_in = a_0
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u32_add_idx),
@@ -1199,7 +1199,7 @@ mod tests {
                             ],
                         ),
                         // d_in ^ a_0 = d_0_tmp
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u32_xor_idx),
@@ -1218,7 +1218,7 @@ mod tests {
                             ],
                         ),
                         // d_0_tmp >> 16 = d_0
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u32_right_rotate_16_idx),
@@ -1233,7 +1233,7 @@ mod tests {
                             ],
                         ),
                         // c_in + d_0 = c_0
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u32_add_idx),
@@ -1252,7 +1252,7 @@ mod tests {
                             ],
                         ),
                         // b_in ^ c_0 = b_0_tmp
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u32_xor_idx),
@@ -1271,7 +1271,7 @@ mod tests {
                             ],
                         ),
                         // b_0_tmp >> 12 = b_0
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u32_right_rotate_12_idx),
@@ -1286,7 +1286,7 @@ mod tests {
                             ],
                         ),
                         // a_0 + b_0 = a_1_tmp
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u32_add_idx),
@@ -1305,7 +1305,7 @@ mod tests {
                             ],
                         ),
                         // a_1_tmp, my_in, a_1
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u32_add_idx),
@@ -1324,7 +1324,7 @@ mod tests {
                             ],
                         ),
                         // d_0 ^ a_1 = d_1_tmp
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u32_xor_idx),
@@ -1343,7 +1343,7 @@ mod tests {
                             ],
                         ),
                         // d_1_tmp >> 8 = d_1
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u32_right_rotate_8_idx),
@@ -1358,7 +1358,7 @@ mod tests {
                             ],
                         ),
                         // c_0 + d_1 = c_1
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u32_add_idx),
@@ -1377,7 +1377,7 @@ mod tests {
                             ],
                         ),
                         //b_0 ^ c_1 = b_1_tmp
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u32_xor_idx),
@@ -1396,7 +1396,7 @@ mod tests {
                             ],
                         ),
                         // b_1_tmp >> 7 = b_1
-                        Lookup::push(
+                        Interaction::require(
                             SymbExpr::ONE,
                             vec![
                                 SymbExpr::from_usize(u32_right_rotate_7_idx),

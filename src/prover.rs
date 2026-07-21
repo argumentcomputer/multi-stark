@@ -22,7 +22,7 @@
 //!    (running accumulator and message inverses per row) and committed via PCS. Each
 //!    circuit produces an intermediate accumulator value recording where its running
 //!    sum ended up; these are observed into the challenger, and the verifier will
-//!    check that the last one is zero.
+//!    check that the last one equals the scheme's balance target (zero for logUp).
 //!
 //! 4. **Quotient polynomial**: A constraint challenge (α) is sampled and used to fold
 //!    all constraints via powers of α. The folded constraint polynomial is divided by
@@ -164,7 +164,7 @@ use crate::{
         Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsProof, StarkGenericConfig,
         Val,
     },
-    lookup::{Lookup, fingerprint},
+    lookup::LookupArgument,
     system::{ProverKey, System, SystemWitness},
 };
 use bincode::{
@@ -175,7 +175,7 @@ use bincode::{
 use p3_air::{Air, BaseAir, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{LagrangeSelectors, OpenedValuesForRound, Pcs, PolynomialSpace};
-use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
+use p3_field::{BasedVectorSpace, PackedValue, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
@@ -226,10 +226,11 @@ impl<SC: StarkGenericConfig> Proof<SC> {
     }
 }
 
-impl<SC, A> System<SC, A>
+impl<SC, A, L> System<SC, A, L>
 where
     SC: StarkGenericConfig,
     A: BaseAir<Val<SC>> + for<'a> Air<ProverConstraintFolder<'a, Val<SC>, SC::Challenge>>,
+    L: LookupArgument<Val<SC>>,
 {
     /// Generates a STARK proof for the system with a single claim.
     ///
@@ -238,7 +239,7 @@ where
         &self,
         key: &ProverKey<SC>,
         claim: &[Val<SC>],
-        witness: SystemWitness<Val<SC>>,
+        witness: SystemWitness<Val<SC>, L::Witness>,
     ) -> Proof<SC> {
         self.prove_multiple_claims(key, &[claim], witness)
     }
@@ -252,7 +253,7 @@ where
         &self,
         key: &ProverKey<SC>,
         claims: &[&[Val<SC>]],
-        witness: SystemWitness<Val<SC>>,
+        witness: SystemWitness<Val<SC>, L::Witness>,
     ) -> Proof<SC> {
         // initialize pcs and challenger
         let pcs = self.config.pcs();
@@ -305,17 +306,12 @@ where
         challenger.observe_algebra_element(fingerprint_challenge);
 
         // construct the accumulator from the claims
-        let mut acc = SC::Challenge::ZERO;
-        for claim in claims {
-            let message = lookup_argument_challenge
-                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
-            acc += message.inverse();
-        }
+        let mut acc = L::fold_claims(lookup_argument_challenge, &fingerprint_challenge, claims);
 
         // Cost: "Lookup trace construction" — fingerprint (Horner), batch
         // inversion, and accumulator update. Total: Σ n_i·L_i extension field ops.
         let _g = tracing::info_span!("stark/lookup_construction").entered();
-        let (stage_2_traces, intermediate_accumulators) = Lookup::stage_2_traces(
+        let (stage_2_traces, intermediate_accumulators) = L::stage_2_traces(
             &witness.lookups,
             lookup_argument_challenge,
             &fingerprint_challenge,

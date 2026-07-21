@@ -1,7 +1,8 @@
 use crate::{
     builder::symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
     config::{Com, PcsData, StarkGenericConfig, Val},
-    lookup::{LOOKUP_PUBLIC_SIZE, Lookup, LookupAir},
+    logup::{LogUp, LogUpWitness},
+    lookup::{LOOKUP_PUBLIC_SIZE, LookupAir, LookupArgument},
 };
 use p3_air::{Air, BaseAir};
 use p3_challenger::CanObserve;
@@ -11,9 +12,12 @@ use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 /// A multi-circuit STARK system. Contains all circuits together with their
 /// shared preprocessed commitment and the protocol configuration.
-pub struct System<SC: StarkGenericConfig, A> {
+///
+/// The system is generic over the lookup argument scheme `L`, which defaults
+/// to [`LogUp`].
+pub struct System<SC: StarkGenericConfig, A, L = LogUp<Val<SC>>> {
     pub config: SC,
-    pub circuits: Vec<Circuit<A, Val<SC>>>,
+    pub circuits: Vec<Circuit<A, Val<SC>, L>>,
     /// Commitment to all preprocessed traces (if any circuit has one).
     pub preprocessed_commit: Option<Com<SC>>,
     /// Maps each circuit index to its position within the preprocessed commitment.
@@ -27,15 +31,16 @@ pub struct ProverKey<SC: StarkGenericConfig> {
     pub preprocessed_data: Option<PcsData<SC>>,
 }
 
-impl<SC, A> System<SC, A>
+impl<SC, A, L> System<SC, A, L>
 where
     SC: StarkGenericConfig,
     A: BaseAir<Val<SC>> + Air<SymbolicAirBuilder<Val<SC>, SC::Challenge>>,
+    L: LookupArgument<Val<SC>>,
 {
     #[inline]
     pub fn new(
         config: SC,
-        airs: impl IntoIterator<Item = LookupAir<A, Val<SC>>>,
+        airs: impl IntoIterator<Item = LookupAir<A, Val<SC>, L>>,
     ) -> (Self, ProverKey<SC>) {
         let pcs = config.pcs();
         let mut circuits = vec![];
@@ -82,7 +87,7 @@ where
     }
 }
 
-impl<SC: StarkGenericConfig, A> System<SC, A> {
+impl<SC: StarkGenericConfig, A, L> System<SC, A, L> {
     /// Binds the system shape into the Fiat-Shamir transcript. The prover and
     /// the verifier must call this identically, before observing any
     /// commitment, so that transcripts of systems with different circuit
@@ -105,8 +110,8 @@ impl<SC: StarkGenericConfig, A> System<SC, A> {
 
 /// A single circuit within the system, wrapping an AIR together with
 /// precomputed metadata used by the prover and verifier.
-pub struct Circuit<A, F: Field> {
-    pub air: LookupAir<A, F>,
+pub struct Circuit<A, F: Field, L = LogUp<F>> {
+    pub air: LookupAir<A, F, L>,
     pub constraint_count: usize,
     pub max_constraint_degree: usize,
     pub preprocessed_height: usize,
@@ -115,7 +120,7 @@ pub struct Circuit<A, F: Field> {
     pub stage_2_width: usize,
 }
 
-impl<A, F: Field> Circuit<A, F> {
+impl<A, F: Field, L> Circuit<A, F, L> {
     /// Degree of the quotient polynomial as a multiple of the trace degree.
     /// Division by the vanishing polynomial reduces the composition
     /// polynomial's degree by 1; the result is padded to a power of two so
@@ -126,16 +131,17 @@ impl<A, F: Field> Circuit<A, F> {
 }
 
 /// Witness data for the multi-circuit system, comprising stage 1 traces and
-/// the concrete lookup values derived from them.
+/// the concrete lookup values derived from them. `W` is the lookup scheme's
+/// witness type ([`LookupArgument::Witness`]).
 #[derive(Clone)]
-pub struct SystemWitness<F: Field> {
+pub struct SystemWitness<F: Field, W = LogUpWitness<F>> {
     /// Stage 1 (main) execution traces, one per circuit.
     pub traces: Vec<RowMajorMatrix<F>>,
-    /// Lookup values per circuit, per row, per lookup.
-    pub lookups: Vec<Vec<Vec<Lookup<F>>>>,
+    /// Concrete lookup data, one witness per circuit.
+    pub lookups: Vec<W>,
 }
 
-impl<F: Field> SystemWitness<F> {
+impl<F: Field, W> SystemWitness<F, W> {
     /// Builds the witness from the stage 1 traces, computing the concrete
     /// lookup values for each row of each circuit.
     ///
@@ -144,17 +150,18 @@ impl<F: Field> SystemWitness<F> {
     /// if a circuit with a preprocessed trace receives a main trace of a
     /// different height (both traces are opened on the same domain, so their
     /// heights must match; the rows would otherwise be silently truncated).
-    pub fn from_stage_1<SC, A>(traces: Vec<RowMajorMatrix<F>>, system: &System<SC, A>) -> Self
+    pub fn from_stage_1<SC, A, L>(traces: Vec<RowMajorMatrix<F>>, system: &System<SC, A, L>) -> Self
     where
         SC: StarkGenericConfig,
         SC::Pcs: Pcs<SC::Challenge, SC::Challenger, Domain: PolynomialSpace<Val = F>>,
+        L: LookupArgument<F, Witness = W>,
     {
         assert_eq!(
             traces.len(),
             system.circuits.len(),
             "expected one trace per circuit"
         );
-        let lookups = traces
+        let circuits = traces
             .iter()
             .zip(system.circuits.iter())
             .enumerate()
@@ -165,39 +172,21 @@ impl<F: Field> SystemWitness<F> {
                         preprocessed.height(),
                         "circuit {circuit_idx}: main trace height must equal preprocessed trace height"
                     );
-                    trace
-                        .row_slices()
-                        .zip(preprocessed.row_slices())
-                        .map(|(row, preprocessed_row)| {
-                            circuit
-                                .air
-                                .lookups
-                                .iter()
-                                .map(|lookup| lookup.compute_expr(row, Some(preprocessed_row)))
-                                .collect::<Vec<_>>()
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    trace
-                        .row_slices()
-                        .map(|row| {
-                            circuit
-                                .air
-                                .lookups
-                                .iter()
-                                .map(|lookup| lookup.compute_expr(row, None))
-                                .collect::<Vec<_>>()
-                        })
-                        .collect::<Vec<_>>()
                 }
+                (
+                    &circuit.air.lookups,
+                    trace,
+                    circuit.air.preprocessed.as_ref(),
+                )
             })
             .collect::<Vec<_>>();
+        let lookups = L::compute_witness(&circuits);
         Self { traces, lookups }
     }
 }
 
-impl<A, F: Field> Circuit<A, F> {
-    pub fn from_air<EF>(air: LookupAir<A, F>) -> (Self, Option<RowMajorMatrix<F>>)
+impl<A, F: Field, L: LookupArgument<F>> Circuit<A, F, L> {
+    pub fn from_air<EF>(air: LookupAir<A, F, L>) -> (Self, Option<RowMajorMatrix<F>>)
     where
         EF: ExtensionField<F>,
         A: BaseAir<F> + Air<SymbolicAirBuilder<F, EF>>,
@@ -235,6 +224,7 @@ impl<A, F: Field> Circuit<A, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logup::LogUpAir;
     use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
     use p3_air::{AirBuilder, WindowAccess};
 
@@ -299,7 +289,7 @@ mod tests {
             query_proof_of_work_bits: 0,
         };
         let config = GoldilocksBlake3Config::new(commitment_parameters, fri_parameters);
-        System::new(config, [LookupAir::new(HighDegreeAir, vec![])]);
+        System::new(config, [LogUpAir::new(HighDegreeAir, vec![])]);
     }
 
     /// The same degree-5 circuit is fine at `log_blowup = 2` (quotient
@@ -318,7 +308,7 @@ mod tests {
             query_proof_of_work_bits: 0,
         };
         let config = GoldilocksBlake3Config::new(commitment_parameters, fri_parameters);
-        let (system, key) = System::new(config, [LookupAir::new(HighDegreeAir, vec![])]);
+        let (system, key) = System::new(config, [LogUpAir::new(HighDegreeAir, vec![])]);
         let f = Val::from_u32;
         let trace = RowMajorMatrix::new(vec![f(2), f(32), f(1), f(1), f(3), f(243), f(0), f(0)], 2);
         let witness = SystemWitness::from_stage_1(vec![trace], &system);
@@ -342,7 +332,7 @@ mod tests {
             query_proof_of_work_bits: 0,
         };
         let config = GoldilocksBlake3Config::new(commitment_parameters, fri_parameters);
-        let (system, _key) = System::new(config, [LookupAir::new(Preprocessed, vec![])]);
+        let (system, _key) = System::new(config, [LogUpAir::new(Preprocessed, vec![])]);
         // The main trace has 8 rows but the preprocessed trace has 4. This
         // must panic instead of silently truncating the lookup rows.
         let trace = RowMajorMatrix::new(vec![Val::ZERO; 8], 1);

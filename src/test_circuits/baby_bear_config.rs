@@ -6,9 +6,10 @@
 //! change compiles only for the reference config, the smoke test here
 //! catches it.
 
-use crate::builder::symbolic::{SymbolicExpression, var};
+use crate::builder::symbolic::var;
 use crate::config::StarkGenericConfig;
-use crate::lookup::{Lookup, LookupAir};
+use crate::logup::LogUpAir;
+use crate::lookup::Interaction;
 use crate::system::{System, SystemWitness};
 use crate::types::{CommitmentParameters, FriParameters};
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
@@ -142,11 +143,10 @@ where
     }
 }
 
-fn lookups() -> Vec<Lookup<SymbolicExpression<Val>>> {
-    let one: SymbolicExpression<Val> = Val::ONE.into();
+fn lookups() -> Vec<Interaction<Val>> {
     vec![
-        Lookup::push(one.clone(), vec![var(0), var(2)]),
-        Lookup::pull(one, vec![var(0), var(2)]),
+        Interaction::push(vec![var(0), var(2)]),
+        Interaction::pull(vec![var(0), var(2)]),
     ]
 }
 
@@ -164,7 +164,7 @@ fn baby_bear_poseidon2_smoke_test() {
         query_proof_of_work_bits: 0,
     };
     let config = BabyBearPoseidon2Config::new(commitment_parameters, fri_parameters);
-    let (system, key) = System::new(config, [LookupAir::new(MulAir, lookups())]);
+    let (system, key) = System::new(config, [LogUpAir::new(MulAir, lookups())]);
     let f = Val::from_u32;
     let trace = RowMajorMatrix::new(
         vec![
