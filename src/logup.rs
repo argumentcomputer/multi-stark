@@ -24,7 +24,7 @@ use p3_maybe_rayon::prelude::*;
 use crate::{
     builder::{TwoStagedBuilder, symbolic::SymbolicExpression},
     lookup::{
-        CircuitWitnessInput, Interaction, LOOKUP_PUBLIC_SIZE, LookupAir, LookupArgument,
+        Branch, CircuitWitnessInput, Interaction, LOOKUP_PUBLIC_SIZE, LookupAir, LookupArgument,
         fingerprint,
     },
 };
@@ -93,23 +93,49 @@ impl<F: Field> LogUpTerm<F> {
     }
 }
 
+impl<F: Field> LogUp<F> {
+    /// Lowers a branch list into a single unsigned term: the multiplicity is
+    /// the sum of the guards and the args are the guard-weighted,
+    /// zero-padded component blend. Under the guard contract (boolean,
+    /// mutually exclusive) the blend's fingerprint equals the active
+    /// branch's fingerprint — by fingerprint linearity — and the zero
+    /// multiplicity kills the term when every guard is off.
+    fn mux_term(branches: Vec<Branch<F>>) -> LogUpTerm<SymbolicExpression<F>> {
+        let width = branches
+            .iter()
+            .map(|(_, args)| args.len())
+            .max()
+            .unwrap_or(0);
+        let mut multiplicity = SymbolicExpression::ZERO;
+        let mut args = vec![SymbolicExpression::ZERO; width];
+        for (guard, branch_args) in branches {
+            for (slot, arg) in args.iter_mut().zip(branch_args) {
+                *slot = slot.clone() + guard.clone() * arg;
+            }
+            multiplicity += guard;
+        }
+        LogUpTerm { multiplicity, args }
+    }
+}
+
 impl<F: Field> LookupArgument<F> for LogUp<F> {
     type Witness = LogUpWitness<F>;
 
-    /// Every interaction lowers to one signed term: the guard/multiplicity,
-    /// negated for the removing directions (pull, provide).
+    /// Every interaction lowers to one signed term — multiplexed branches
+    /// collapse via [`LogUp::mux_term`] — negated for the removing
+    /// directions (pull, provide).
     fn new(interactions: Vec<Interaction<F>>) -> Self {
         let terms = interactions
             .into_iter()
             .map(|interaction| match interaction {
-                Interaction::Push { guard, args } => LogUpTerm {
-                    multiplicity: guard,
-                    args,
-                },
-                Interaction::Pull { guard, args } => LogUpTerm {
-                    multiplicity: -guard,
-                    args,
-                },
+                Interaction::Push { branches } => Self::mux_term(branches),
+                Interaction::Pull { branches } => {
+                    let LogUpTerm { multiplicity, args } = Self::mux_term(branches);
+                    LogUpTerm {
+                        multiplicity: -multiplicity,
+                        args,
+                    }
+                }
                 Interaction::Require { multiplicity, args } => LogUpTerm { multiplicity, args },
                 Interaction::Provide { multiplicity, args } => LogUpTerm {
                     multiplicity: -multiplicity,
@@ -462,6 +488,70 @@ mod tests {
         let claim = &[f(0), f(4), f(1)];
         let proof = system.prove(&key, claim, witness);
         system.verify(claim, &proof).unwrap();
+    }
+
+    /// A circuit with two mutually exclusive selectors whose muxed push is
+    /// balanced by one guarded pull per branch. The branches have different
+    /// arg lengths (exercising the zero-padded blend) and the trace carries
+    /// garbage in the inactive branch's column (exercising that inactive
+    /// args don't leak into the blended fingerprint).
+    struct MuxCS;
+
+    impl<F> BaseAir<F> for MuxCS {
+        fn width(&self) -> usize {
+            4
+        }
+    }
+
+    impl<AB> Air<AB> for MuxCS
+    where
+        AB: AirBuilder,
+        AB::Var: Copy,
+    {
+        fn eval(&self, builder: &mut AB) {
+            let main = builder.main();
+            let local = main.current_slice();
+            let s0 = local[0];
+            let s1 = local[1];
+            builder.assert_bools([s0, s1]);
+            // mutual exclusivity
+            builder.assert_zero(s0 * s1);
+        }
+    }
+
+    fn mux_lookups() -> Vec<Interaction<Val>> {
+        let (s0, s1, x, y) = (var(0), var(1), var(2), var(3));
+        vec![
+            Interaction::push_mux(vec![
+                (s0.clone(), vec![x.clone()]),
+                (s1.clone(), vec![x.clone(), y.clone()]),
+            ]),
+            Interaction::pull_when(s0, vec![x.clone()]),
+            Interaction::pull_when(s1, vec![x, y]),
+        ]
+    }
+
+    #[test]
+    fn muxed_push_pull_test() {
+        let config = GoldilocksBlake3Config::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
+        let (system, key) = System::new(config, [LogUpAir::new(MuxCS, mux_lookups())]);
+        let f = Val::from_u32;
+        #[rustfmt::skip]
+        let trace = RowMajorMatrix::new(
+            vec![
+                // s0,  s1,   x,    y (garbage on s0 rows)
+                f(1), f(0), f(7), f(9),
+                f(0), f(1), f(3), f(5),
+                f(1), f(0), f(2), f(8),
+                // all-off padding row
+                f(0), f(0), f(0), f(0),
+            ],
+            4,
+        );
+        let witness = SystemWitness::from_stage_1(vec![trace], &system);
+        let no_claims: &[&[Val]] = &[];
+        let proof = system.prove_multiple_claims(&key, no_claims, witness);
+        system.verify_multiple_claims(no_claims, &proof).unwrap();
     }
 
     #[test]

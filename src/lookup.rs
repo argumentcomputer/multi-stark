@@ -30,6 +30,10 @@ use crate::builder::{TwoStagedBuilder, symbolic::SymbolicExpression};
 /// accumulator.
 pub const LOOKUP_PUBLIC_SIZE: usize = 4;
 
+/// One branch of a multiplexed permutation-channel claim: a boolean guard
+/// and the claim arguments it selects.
+pub type Branch<F> = (SymbolicExpression<F>, Vec<SymbolicExpression<F>>);
+
 /// One lookup interaction of a circuit, as described by its frontend.
 ///
 /// Interactions come in two channels:
@@ -37,32 +41,34 @@ pub const LOOKUP_PUBLIC_SIZE: usize = 4;
 /// - **Permutation channel** ([`Push`](Interaction::Push)/
 ///   [`Pull`](Interaction::Pull)): claims are added and removed one at a
 ///   time; the multiset of pushed claims must equal the multiset of pulled
-///   claims. `guard` switches the claim on and off (e.g. for padding or
-///   branch rows) and is expected to be boolean; circuits should constrain
-///   it.
+///   claims. Each interaction carries a list of branches `(guard, args)`:
+///   the claim of the single active branch is added/removed, and no claim is
+///   when every guard is zero (e.g. on padding rows). The guards must be
+///   boolean and mutually exclusive (at most one is ever nonzero) — this is
+///   assumed, not enforced; violating it is scheme-defined behavior.
+///   Multiplexing lets mutually exclusive claims (e.g. across execution
+///   branches) share one lookup slot instead of paying one per branch.
 /// - **Multiplicity channel** ([`Provide`](Interaction::Provide)/
 ///   [`Require`](Interaction::Require)): a claim required `n` times in total
 ///   must be provided with total multiplicity `n`, so a single trace row can
-///   serve a claim made by many rows.
+///   serve a claim made by many rows. Counted claims need no branch
+///   structure: they are inert at multiplicity zero, so multiplexing is
+///   expressed directly in the expressions (`multiplicity = Σ bᵢ·mᵢ`,
+///   `args = Σ bᵢ·Aᵢ` component-wise, zero-padded — by fingerprint linearity
+///   this selects the active branch's claim).
 ///
 /// The two channels are semantically distinct: match pushes with pulls and
 /// requires with provides. Whether claims can also match *across* channels
-/// (a push cancelling a provide), or with a non-boolean guard, is
-/// scheme-defined behavior: logUp folds everything into one signed
-/// accumulator (so it happens to work), while other schemes may separate the
-/// channels structurally or rely on guard booleanity for soundness. Portable
-/// circuits must not depend on it.
+/// (a push cancelling a provide), or with guards that are not boolean and
+/// mutually exclusive, is scheme-defined behavior: logUp folds everything
+/// into one signed accumulator (so it happens to work), while other schemes
+/// may separate the channels structurally or rely on the guard contract for
+/// soundness. Portable circuits must not depend on it.
 pub enum Interaction<F: Field> {
-    /// Adds a claim to the permutation channel once (when `guard` is one).
-    Push {
-        guard: SymbolicExpression<F>,
-        args: Vec<SymbolicExpression<F>>,
-    },
-    /// Removes a claim from the permutation channel once (when `guard` is one).
-    Pull {
-        guard: SymbolicExpression<F>,
-        args: Vec<SymbolicExpression<F>>,
-    },
+    /// Adds the active branch's claim to the permutation channel once.
+    Push { branches: Vec<Branch<F>> },
+    /// Removes the active branch's claim from the permutation channel once.
+    Pull { branches: Vec<Branch<F>> },
     /// Serves `multiplicity` matching requires in the multiplicity channel.
     Provide {
         multiplicity: SymbolicExpression<F>,
@@ -76,34 +82,50 @@ pub enum Interaction<F: Field> {
 }
 
 impl<F: Field> Interaction<F> {
-    /// An unconditional [`Interaction::Push`].
+    /// An unconditional single-branch [`Interaction::Push`].
     #[inline]
     pub fn push(args: Vec<SymbolicExpression<F>>) -> Self {
         Self::Push {
-            guard: SymbolicExpression::ONE,
-            args,
+            branches: vec![(SymbolicExpression::ONE, args)],
         }
     }
 
-    /// An [`Interaction::Push`] switched by a boolean guard.
+    /// A single-branch [`Interaction::Push`] switched by a boolean guard.
     #[inline]
     pub fn push_when(guard: SymbolicExpression<F>, args: Vec<SymbolicExpression<F>>) -> Self {
-        Self::Push { guard, args }
+        Self::Push {
+            branches: vec![(guard, args)],
+        }
     }
 
-    /// An unconditional [`Interaction::Pull`].
+    /// A multiplexed [`Interaction::Push`]: pushes the claim of the single
+    /// active branch. Guards must be boolean and mutually exclusive.
+    #[inline]
+    pub fn push_mux(branches: Vec<Branch<F>>) -> Self {
+        Self::Push { branches }
+    }
+
+    /// An unconditional single-branch [`Interaction::Pull`].
     #[inline]
     pub fn pull(args: Vec<SymbolicExpression<F>>) -> Self {
         Self::Pull {
-            guard: SymbolicExpression::ONE,
-            args,
+            branches: vec![(SymbolicExpression::ONE, args)],
         }
     }
 
-    /// An [`Interaction::Pull`] switched by a boolean guard.
+    /// A single-branch [`Interaction::Pull`] switched by a boolean guard.
     #[inline]
     pub fn pull_when(guard: SymbolicExpression<F>, args: Vec<SymbolicExpression<F>>) -> Self {
-        Self::Pull { guard, args }
+        Self::Pull {
+            branches: vec![(guard, args)],
+        }
+    }
+
+    /// A multiplexed [`Interaction::Pull`]: pulls the claim of the single
+    /// active branch. Guards must be boolean and mutually exclusive.
+    #[inline]
+    pub fn pull_mux(branches: Vec<Branch<F>>) -> Self {
+        Self::Pull { branches }
     }
 
     /// An [`Interaction::Provide`].
