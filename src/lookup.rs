@@ -84,92 +84,201 @@ where
         .fold(F::ZERO, |acc, coeff| acc * r.clone() + coeff.into())
 }
 
-impl<F: Field> Lookup<SymbolicExpression<F>> {
-    /// Computes the concrete lookup attributes for its respective expressions
-    /// given a trace row and a preprocessed trace row.
-    pub fn compute_expr(&self, row: &[F], preprocessed: Option<&[F]>) -> Lookup<F> {
-        let multiplicity = self.multiplicity.interpret(row, preprocessed);
-        let args = self
-            .args
-            .iter()
-            .map(|arg| arg.interpret(row, preprocessed))
-            .collect();
-        Lookup { multiplicity, args }
-    }
+/// Concrete lookup values of one circuit, stored flat.
+///
+/// Every row of a circuit has the same lookups (each with a fixed number of
+/// arguments), so all multiplicities and argument values are kept in two
+/// row-major vectors instead of nested per-row, per-lookup allocations.
+#[derive(Clone)]
+pub struct LookupValues<F> {
+    /// Number of trace rows.
+    height: usize,
+    /// Number of lookups per row.
+    num_lookups: usize,
+    /// Multiplicity of each (row, lookup); `height * num_lookups` values.
+    multiplicities: Vec<F>,
+    /// Offset of each lookup's arguments within a row's argument block;
+    /// `num_lookups + 1` entries, the last being the block width.
+    arg_offsets: Vec<usize>,
+    /// Concatenated argument values, row-major; `height * arg_offsets.last()`
+    /// values.
+    args: Vec<F>,
 }
 
-impl<F: Field> Lookup<F> {
+impl<F: Field> LookupValues<F> {
+    /// Evaluates the symbolic lookups of a circuit on every row of its trace.
+    pub fn compute(
+        lookups: &[Lookup<SymbolicExpression<F>>],
+        trace: &RowMajorMatrix<F>,
+        preprocessed: Option<&RowMajorMatrix<F>>,
+    ) -> Self {
+        let height = trace.height();
+        let num_lookups = lookups.len();
+        let mut arg_offsets = Vec::with_capacity(num_lookups + 1);
+        arg_offsets.push(0);
+        for lookup in lookups {
+            arg_offsets.push(arg_offsets.last().unwrap() + lookup.args.len());
+        }
+        let args_width = *arg_offsets.last().unwrap();
+        let mut multiplicities = Vec::with_capacity(height * num_lookups);
+        let mut args = Vec::with_capacity(height * args_width);
+        let mut eval_row = |row: &[F], preprocessed_row: Option<&[F]>| {
+            for lookup in lookups {
+                multiplicities.push(lookup.multiplicity.interpret(row, preprocessed_row));
+                for arg in &lookup.args {
+                    args.push(arg.interpret(row, preprocessed_row));
+                }
+            }
+        };
+        match preprocessed {
+            Some(preprocessed) => trace
+                .row_slices()
+                .zip(preprocessed.row_slices())
+                .for_each(|(row, preprocessed_row)| eval_row(row, Some(preprocessed_row))),
+            None => trace.row_slices().for_each(|row| eval_row(row, None)),
+        }
+        Self {
+            height,
+            num_lookups,
+            multiplicities,
+            arg_offsets,
+            args,
+        }
+    }
+
+    /// Builds flat lookup values from per-row, per-lookup concrete lookups.
+    ///
+    /// Every row must have the same number of lookups. Argument counts may
+    /// vary across rows within a lookup slot (e.g. rows holding
+    /// [`Lookup::empty`]); shorter argument lists are zero-padded to the
+    /// slot's maximum width. Padding is transparent to the protocol: the
+    /// message fingerprint is a Horner evaluation, so trailing zero
+    /// coefficients do not change its value.
+    ///
+    /// # Panics
+    /// Panics if rows have differing numbers of lookups.
+    pub fn from_rows(rows: Vec<Vec<Lookup<F>>>) -> Self {
+        let height = rows.len();
+        let num_lookups = rows.first().map_or(0, |row| row.len());
+        let mut slot_widths = vec![0usize; num_lookups];
+        for row in &rows {
+            assert_eq!(
+                row.len(),
+                num_lookups,
+                "every row must have the same number of lookups"
+            );
+            for (width, lookup) in slot_widths.iter_mut().zip(row) {
+                *width = (*width).max(lookup.args.len());
+            }
+        }
+        let mut arg_offsets = Vec::with_capacity(num_lookups + 1);
+        arg_offsets.push(0);
+        for width in &slot_widths {
+            arg_offsets.push(arg_offsets.last().unwrap() + width);
+        }
+        let args_width = *arg_offsets.last().unwrap();
+        let mut multiplicities = Vec::with_capacity(height * num_lookups);
+        let mut args = Vec::with_capacity(height * args_width);
+        for row in rows {
+            for (lookup, &width) in row.into_iter().zip(&slot_widths) {
+                multiplicities.push(lookup.multiplicity);
+                let padding = width - lookup.args.len();
+                args.extend(lookup.args);
+                args.extend(std::iter::repeat_n(F::ZERO, padding));
+            }
+        }
+        Self {
+            height,
+            num_lookups,
+            multiplicities,
+            arg_offsets,
+            args,
+        }
+    }
+
+    /// Returns an allocation-free builder; see [`LookupValuesBuilder`].
+    pub fn builder(height: usize, slot_arg_widths: &[usize]) -> LookupValuesBuilder<F> {
+        LookupValuesBuilder::new(height, slot_arg_widths)
+    }
+
+    /// The arguments of the given lookup on the given row.
+    #[inline]
+    fn args_at(&self, row: usize, lookup: usize) -> &[F] {
+        let start = row * self.arg_offsets[self.num_lookups];
+        &self.args[start + self.arg_offsets[lookup]..start + self.arg_offsets[lookup + 1]]
+    }
+
     /// Computes the stage 2 traces and the intermediate accumulators for each
     /// circuit given a lookup challenge, a fingerprint challenge and the current
     /// accumulator value (computed from the initial claims).
-    ///
-    /// Note: the lookups are expected to be fully padded. That is, for each
-    /// circuit, every row must have the exact same number of lookups.
     pub fn stage_2_traces<EF: ExtensionField<F>>(
-        lookups: &[Vec<Vec<Self>>],
+        circuits: &[Self],
         lookup_challenge: EF,
         fingerprint_challenge: &EF,
         mut accumulator: EF,
     ) -> (Vec<RowMajorMatrix<EF>>, Vec<EF>) {
-        // Number of lookups per circuit. Every row in a circuit is assumed to
-        // have the same number of lookups (the lookups are expected to be fully
-        // padded), so this is taken from the first row.
-        let num_lookups_per_circuit: Vec<usize> = lookups
-            .iter()
-            .map(|circuit_lookups| circuit_lookups.len() * circuit_lookups[0].len())
-            .collect();
-
         // Compute the message for each lookup, in flat circuit-major order.
-        // Flatten the references serially first so the parallel map operates
-        // on an indexed slice and `collect` can write straight into the
-        // output Vec without tree-reducing worker buffers.
         let _g = tracing::info_span!("stark/lookup_messages").entered();
-        let flat: Vec<&Self> = lookups.iter().flatten().flatten().collect();
-        let messages: Vec<EF> = flat
-            .par_iter()
-            .map(|lookup| lookup.compute_message(lookup_challenge, fingerprint_challenge))
-            .collect();
+        let num_messages = circuits
+            .iter()
+            .map(|circuit| circuit.height * circuit.num_lookups)
+            .sum();
+        let mut messages: Vec<EF> = Vec::with_capacity(num_messages);
+        for circuit in circuits {
+            messages.extend(
+                (0..circuit.height * circuit.num_lookups)
+                    .into_par_iter()
+                    .map(|idx| {
+                        let (row, lookup) = (idx / circuit.num_lookups, idx % circuit.num_lookups);
+                        let args = circuit.args_at(row, lookup);
+                        lookup_challenge + fingerprint(fingerprint_challenge, args.iter().cloned())
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
         drop(_g);
 
         // Compute the inverses of all messages in batch.
         let messages_inverses = tracing::info_span!("stark/batch_inverse")
             .in_scope(|| batch_multiplicative_inverse(&messages));
+        // Only the inverses are consumed below.
+        drop(messages);
 
         // Compute and collect intermediate accumulators and traces.
         let _g = tracing::info_span!("stark/lookup_traces").entered();
-        let mut intermediate_accumulators = Vec::with_capacity(lookups.len());
-        let mut traces = Vec::with_capacity(lookups.len());
+        let mut intermediate_accumulators = Vec::with_capacity(circuits.len());
+        let mut traces = Vec::with_capacity(circuits.len());
         let mut offset = 0;
-        for (circuit_lookups, num_circuit_messages) in lookups.iter().zip(num_lookups_per_circuit) {
+        for circuit in circuits {
             // Get the slice containing the messages inverses for the current circuit.
+            let num_circuit_messages = circuit.height * circuit.num_lookups;
             let circuit_messages_inverses =
                 &messages_inverses[offset..offset + num_circuit_messages];
             offset += num_circuit_messages;
 
-            let num_row_lookups = circuit_lookups[0].len();
-            let vec = if num_row_lookups == 0 {
+            let vec = if circuit.num_lookups == 0 {
                 // No row lookup. Just repeat the accumulator for each row.
-                vec![accumulator; circuit_lookups.len()]
+                vec![accumulator; circuit.height]
             } else {
                 // Flatten each row accumulator followed by the inverse of the message
                 // associated with each row lookup.
-                circuit_lookups
-                    .iter()
-                    .zip(circuit_messages_inverses.chunks_exact(num_row_lookups))
-                    .flat_map(|(row_lookups, row_messages_inverses)| {
-                        let mut row = Vec::with_capacity(1 + row_lookups.len());
-                        row.push(accumulator);
-                        row.extend(row_lookups.iter().zip(row_messages_inverses).map(
-                            |(lookup, &message_inverse)| {
-                                accumulator += EF::from(lookup.multiplicity) * message_inverse;
-                                message_inverse
-                            },
-                        ));
-                        row
-                    })
-                    .collect()
+                let mut vec = Vec::with_capacity(circuit.height * (1 + circuit.num_lookups));
+                for (row_multiplicities, row_messages_inverses) in circuit
+                    .multiplicities
+                    .chunks_exact(circuit.num_lookups)
+                    .zip(circuit_messages_inverses.chunks_exact(circuit.num_lookups))
+                {
+                    vec.push(accumulator);
+                    for (&multiplicity, &message_inverse) in
+                        row_multiplicities.iter().zip(row_messages_inverses)
+                    {
+                        accumulator += EF::from(multiplicity) * message_inverse;
+                        vec.push(message_inverse);
+                    }
+                }
+                vec
             };
-            let width = 1 + num_row_lookups;
+            let width = 1 + circuit.num_lookups;
             debug_assert_eq!(vec.len() % width, 0);
             let trace = RowMajorMatrix::new(vec, width);
             intermediate_accumulators.push(accumulator);
@@ -178,14 +287,124 @@ impl<F: Field> Lookup<F> {
         drop(_g);
         (traces, intermediate_accumulators)
     }
+}
 
-    fn compute_message<EF: ExtensionField<F>>(
-        &self,
-        lookup_challenge: EF,
-        fingerprint_challenge: &EF,
-    ) -> EF {
-        let fingerprint = fingerprint(fingerprint_challenge, self.args.iter().cloned());
-        lookup_challenge + fingerprint
+/// Incremental, allocation-free constructor for [`LookupValues`].
+///
+/// Rows start zeroed — multiplicity zero and zero arguments in every slot,
+/// i.e. [`Lookup::empty`] — and are filled in place through the parallel row
+/// writers of [`Self::par_rows_mut`]. Values are written directly into the
+/// final flat storage, so no per-lookup allocation ever happens.
+pub struct LookupValuesBuilder<F> {
+    height: usize,
+    num_lookups: usize,
+    arg_offsets: Vec<usize>,
+    /// Row stride of `args`: the total argument width, with a minimum of 1
+    /// so row chunking stays well-defined when every slot is argument-less.
+    row_stride: usize,
+    multiplicities: Vec<F>,
+    args: Vec<F>,
+}
+
+impl<F: Field> LookupValuesBuilder<F> {
+    /// `slot_arg_widths[j]` is the maximum number of arguments of lookup
+    /// slot `j`. Rows writing fewer arguments leave zero padding, which does
+    /// not change the message fingerprint (a Horner evaluation).
+    pub fn new(height: usize, slot_arg_widths: &[usize]) -> Self {
+        let num_lookups = slot_arg_widths.len();
+        let mut arg_offsets = Vec::with_capacity(num_lookups + 1);
+        arg_offsets.push(0);
+        for width in slot_arg_widths {
+            arg_offsets.push(arg_offsets.last().unwrap() + width);
+        }
+        let row_stride = (*arg_offsets.last().unwrap()).max(1);
+        Self {
+            height,
+            num_lookups,
+            arg_offsets,
+            row_stride,
+            multiplicities: F::zero_vec(height * num_lookups),
+            args: F::zero_vec(height * row_stride),
+        }
+    }
+
+    /// Row writers, one per row, in row order. Returned as a `Vec` so the
+    /// caller can parallelize with its own runtime (e.g. rayon's
+    /// `into_par_iter`, zipped with a parallel iterator over trace rows)
+    /// regardless of how this crate's `parallel` feature is set.
+    ///
+    /// # Panics
+    /// Panics if the builder has no lookup slots (nothing to write; call
+    /// [`Self::finish`] directly).
+    pub fn rows_mut(&mut self) -> Vec<LookupRowMut<'_, F>> {
+        assert!(self.num_lookups > 0, "builder has no lookup slots");
+        let Self {
+            num_lookups,
+            arg_offsets,
+            row_stride,
+            multiplicities,
+            args,
+            ..
+        } = self;
+        let arg_offsets = arg_offsets.as_slice();
+        multiplicities
+            .chunks_exact_mut(*num_lookups)
+            .zip(args.chunks_exact_mut(*row_stride))
+            .map(|(multiplicities, args)| LookupRowMut {
+                multiplicities,
+                args,
+                arg_offsets,
+            })
+            .collect()
+    }
+
+    /// Finalizes into [`LookupValues`].
+    pub fn finish(mut self) -> LookupValues<F> {
+        if self.arg_offsets[self.num_lookups] == 0 {
+            // Every slot is argument-less; drop the dummy stride storage.
+            self.args = vec![];
+        }
+        LookupValues {
+            height: self.height,
+            num_lookups: self.num_lookups,
+            multiplicities: self.multiplicities,
+            arg_offsets: self.arg_offsets,
+            args: self.args,
+        }
+    }
+}
+
+/// Mutable view of one row of a [`LookupValuesBuilder`].
+pub struct LookupRowMut<'a, F> {
+    multiplicities: &'a mut [F],
+    args: &'a mut [F],
+    arg_offsets: &'a [usize],
+}
+
+impl<F: Field> LookupRowMut<'_, F> {
+    /// Writes lookup slot `slot` with "push" semantics (adds a claim).
+    /// Fewer arguments than the slot's width leave zero padding.
+    ///
+    /// # Panics
+    /// Panics if `args` exceeds the slot's width.
+    #[inline]
+    pub fn push(&mut self, slot: usize, multiplicity: F, args: &[F]) {
+        let start = self.arg_offsets[slot];
+        let end = self.arg_offsets[slot + 1];
+        assert!(
+            args.len() <= end - start,
+            "too many arguments for lookup slot {slot}"
+        );
+        self.multiplicities[slot] = multiplicity;
+        self.args[start..start + args.len()].copy_from_slice(args);
+        self.args[start + args.len()..end].fill(F::ZERO);
+    }
+
+    /// Writes lookup slot `slot` with "pull" semantics (removes a claim):
+    /// same as [`Self::push`] with negated multiplicity.
+    #[inline]
+    pub fn pull(&mut self, slot: usize, multiplicity: F, args: &[F]) {
+        self.push(slot, -multiplicity, args);
     }
 }
 
@@ -437,6 +656,36 @@ mod tests {
 
     fn witness(system: &System<GoldilocksBlake3Config, CS>) -> SystemWitness<Val> {
         SystemWitness::from_stage_1(witness_traces(), system)
+    }
+
+    /// The builder must produce the exact same flat storage as the nested
+    /// conversion, including zero padding for short and empty slots.
+    #[test]
+    fn builder_matches_from_rows() {
+        let f = Val::from_u32;
+        let rows = vec![
+            vec![
+                Lookup::push(f(1), vec![f(2), f(3)]),
+                Lookup::pull(f(4), vec![f(5), f(6), f(7)]),
+            ],
+            vec![Lookup::empty(), Lookup::push(f(8), vec![f(9)])],
+        ];
+        let a = LookupValues::from_rows(rows);
+        let mut builder = LookupValues::builder(2, &[2, 3]);
+        for (i, row) in builder.rows_mut().iter_mut().enumerate() {
+            if i == 0 {
+                row.push(0, f(1), &[f(2), f(3)]);
+                row.pull(1, f(4), &[f(5), f(6), f(7)]);
+            } else {
+                row.push(1, f(8), &[f(9)]);
+            }
+        }
+        let b = builder.finish();
+        assert_eq!(a.height, b.height);
+        assert_eq!(a.num_lookups, b.num_lookups);
+        assert_eq!(a.arg_offsets, b.arg_offsets);
+        assert_eq!(a.multiplicities, b.multiplicities);
+        assert_eq!(a.args, b.args);
     }
 
     #[test]

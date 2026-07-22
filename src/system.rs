@@ -1,7 +1,7 @@
 use crate::{
     builder::symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
     config::{Com, PcsData, StarkGenericConfig, Val},
-    lookup::{LOOKUP_PUBLIC_SIZE, Lookup, LookupAir},
+    lookup::{LOOKUP_PUBLIC_SIZE, LookupAir, LookupValues},
 };
 use p3_air::{Air, BaseAir};
 use p3_challenger::CanObserve;
@@ -131,8 +131,8 @@ impl<A, F: Field> Circuit<A, F> {
 pub struct SystemWitness<F: Field> {
     /// Stage 1 (main) execution traces, one per circuit.
     pub traces: Vec<RowMajorMatrix<F>>,
-    /// Lookup values per circuit, per row, per lookup.
-    pub lookups: Vec<Vec<Vec<Lookup<F>>>>,
+    /// Lookup values per circuit, stored flat.
+    pub lookups: Vec<LookupValues<F>>,
 }
 
 impl<F: Field> SystemWitness<F> {
@@ -159,37 +159,15 @@ impl<F: Field> SystemWitness<F> {
             .zip(system.circuits.iter())
             .enumerate()
             .map(|(circuit_idx, (trace, circuit))| {
-                if let Some(preprocessed) = &circuit.air.preprocessed {
+                let preprocessed = circuit.air.preprocessed.as_ref();
+                if let Some(preprocessed) = preprocessed {
                     assert_eq!(
                         trace.height(),
                         preprocessed.height(),
                         "circuit {circuit_idx}: main trace height must equal preprocessed trace height"
                     );
-                    trace
-                        .row_slices()
-                        .zip(preprocessed.row_slices())
-                        .map(|(row, preprocessed_row)| {
-                            circuit
-                                .air
-                                .lookups
-                                .iter()
-                                .map(|lookup| lookup.compute_expr(row, Some(preprocessed_row)))
-                                .collect::<Vec<_>>()
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    trace
-                        .row_slices()
-                        .map(|row| {
-                            circuit
-                                .air
-                                .lookups
-                                .iter()
-                                .map(|lookup| lookup.compute_expr(row, None))
-                                .collect::<Vec<_>>()
-                        })
-                        .collect::<Vec<_>>()
                 }
+                LookupValues::compute(&circuit.air.lookups, trace, preprocessed)
             })
             .collect::<Vec<_>>();
         Self { traces, lookups }
