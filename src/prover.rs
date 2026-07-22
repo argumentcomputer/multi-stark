@@ -170,7 +170,7 @@ use crate::{
         Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsProof, StarkGenericConfig,
         Val,
     },
-    lookup::{Lookup, fingerprint},
+    lookup::{LookupValues, fingerprint},
     system::{ProverKey, System, SystemWitness},
 };
 use bincode::{
@@ -383,7 +383,7 @@ where
             .zip(&active)
             .filter_map(|(l, &is_active)| is_active.then_some(l))
             .collect();
-        let (stage_2_traces, intermediate_accumulators) = Lookup::stage_2_traces(
+        let (stage_2_traces, intermediate_accumulators) = LookupValues::stage_2_traces(
             &active_lookups,
             lookup_argument_challenge,
             &fingerprint_challenge,
