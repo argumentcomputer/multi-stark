@@ -496,3 +496,308 @@ impl<F: Field, EF: ExtensionField<F>> TwoStagedBuilder for SymbolicAirBuilder<F,
         &self.stage_2_public_values
     }
 }
+
+/// Accumulator for the `x = expr` definitions created by [`trim`], together
+/// with the allocator for the fresh variables: definitions are placed at
+/// `entry`, taking consecutive indices starting from the one given at
+/// construction.
+///
+/// A definition is semantically just the zero constraint `x - expr`, but it
+/// is kept apart so that provers know to fill the column `x` with the value
+/// of `expr` (and so that a Plonkish backend could treat it as a wire
+/// assignment). Definitions may reference variables defined by earlier
+/// entries of the list, never later ones.
+#[derive(Debug)]
+pub struct Definitions<F> {
+    entry: Entry,
+    next_index: usize,
+    pub definitions: Vec<(SymbolicVariable<F>, SymbolicExpression<F>)>,
+}
+
+impl<F: Field> Definitions<F> {
+    pub fn new(entry: Entry, first_index: usize) -> Self {
+        Self {
+            entry,
+            next_index: first_index,
+            definitions: vec![],
+        }
+    }
+
+    /// The index the next extracted variable would take.
+    pub fn next_index(&self) -> usize {
+        self.next_index
+    }
+
+    fn fresh(&mut self) -> SymbolicVariable<F> {
+        let variable = SymbolicVariable::new(self.entry, self.next_index);
+        self.next_index += 1;
+        variable
+    }
+}
+
+/// Trims `expr` to degree (multiple) at most `budget`, assuming constraints
+/// may have degree up to `max_degree`. Subexpressions that cannot be fit
+/// structurally are *extracted*: replaced by a fresh degree-1 variable `x`
+/// whose definition `x = subexpr` is appended to `definitions` (the
+/// definition itself being trimmed to `max_degree`, so that its zero
+/// constraint `x - subexpr` is admissible).
+///
+/// The structural rules are: an addition is trimmed by trimming both sides
+/// to the same budget, and a multiplication by splitting the budget between
+/// its sides (a side of degree zero gets budget zero for free). Among all
+/// ways of interleaving these rules with extraction, the algorithm picks one
+/// minimizing the **number of extractions** — each costs a column and a
+/// constraint — via dynamic programming over the expression tree: every node
+/// gets the minimal cost of reaching each budget in `1..=max_degree`, and
+/// the result is rebuilt following the optimal choices. Ties are broken in
+/// favor of not extracting, and multiplication splits give the left side the
+/// least budget among optimal splits.
+///
+/// The trimmed expression evaluates to the same value as `expr` on any row
+/// extended with the definition values in order.
+///
+/// # Panics
+/// Panics if `max_degree < 2` (extraction could never terminate: a product
+/// of two variables would not even fit a definition) or if `budget` is not
+/// in `1..=max_degree`.
+pub fn trim<F: Field>(
+    expr: &SymbolicExpression<F>,
+    max_degree: usize,
+    budget: usize,
+    definitions: &mut Definitions<F>,
+) -> SymbolicExpression<F> {
+    assert!(max_degree > 1, "the maximum degree must be at least 2");
+    assert!(
+        (1..=max_degree).contains(&budget),
+        "the budget must be in 1..={max_degree}"
+    );
+    let plan = Plan::build(expr, max_degree);
+    plan.rebuild(expr, budget, max_degree, definitions)
+}
+
+/// The cost tables of [`trim`]'s dynamic program, mirroring the expression
+/// tree: `costs[b - 1]` is the minimal number of extractions needed to bring
+/// the node to degree at most `b`.
+struct Plan {
+    costs: Vec<usize>,
+    children: Vec<Plan>,
+}
+
+impl Plan {
+    fn build<F: Field>(expr: &SymbolicExpression<F>, max_degree: usize) -> Self {
+        use SymbolicExpression::{Add, Mul, Neg, Sub};
+        let children = match expr {
+            Add { x, y, .. } | Sub { x, y, .. } | Mul { x, y, .. } => {
+                vec![Self::build(x, max_degree), Self::build(y, max_degree)]
+            }
+            Neg { x, .. } => vec![Self::build(x, max_degree)],
+            _ => vec![],
+        };
+        let mut plan = Self {
+            costs: vec![0; max_degree],
+            children,
+        };
+        let degree = expr.degree_multiple();
+        // Downwards, so that the extraction option (which defines the node at
+        // `max_degree`) can read `costs[max_degree - 1]` already computed. At
+        // `max_degree` itself the option is void: the definition would face
+        // the very same problem.
+        for b in (1..=max_degree).rev() {
+            plan.costs[b - 1] = if degree <= b {
+                0
+            } else {
+                let structural = plan.structural_cost(expr, b);
+                if b < max_degree {
+                    structural.min(1 + plan.costs[max_degree - 1])
+                } else {
+                    structural
+                }
+            };
+        }
+        plan
+    }
+
+    /// Minimal cost of fitting `expr` into `b` without extracting `expr`
+    /// itself (subexpressions may still be extracted). `usize::MAX` when
+    /// impossible (a product at budget 1).
+    fn structural_cost<F: Field>(&self, expr: &SymbolicExpression<F>, b: usize) -> usize {
+        use SymbolicExpression::{Add, Mul, Neg, Sub};
+        match expr {
+            Add { .. } | Sub { .. } => {
+                let x = self.children[0].costs[b - 1];
+                let y = self.children[1].costs[b - 1];
+                x.saturating_add(y)
+            }
+            Neg { .. } => self.children[0].costs[b - 1],
+            Mul { x, y, .. } => self
+                .mul_splits(x, y, b)
+                .map(|(_, _, cost)| cost)
+                .min()
+                .unwrap_or(usize::MAX),
+            // Leaves have degree at most 1 and never reach this point.
+            _ => unreachable!("structural_cost called on a leaf that already fits"),
+        }
+    }
+
+    /// The admissible budget splits `(bx, by)` of a product, with their
+    /// costs. A degree-0 side takes budget 0; any other side needs at least
+    /// budget 1.
+    fn mul_splits<'a, F: Field>(
+        &'a self,
+        x: &SymbolicExpression<F>,
+        y: &SymbolicExpression<F>,
+        b: usize,
+    ) -> impl Iterator<Item = (usize, usize, usize)> + 'a {
+        let lo_x = usize::from(x.degree_multiple() != 0);
+        let lo_y = usize::from(y.degree_multiple() != 0);
+        let hi_x = b.saturating_sub(lo_y);
+        (lo_x..=hi_x).map(move |bx| {
+            let by = b - bx;
+            let cost_x = if bx == 0 {
+                0
+            } else {
+                self.children[0].costs[bx - 1]
+            };
+            let cost_y = if by == 0 {
+                0
+            } else {
+                self.children[1].costs[by - 1]
+            };
+            (bx, by, cost_x.saturating_add(cost_y))
+        })
+    }
+
+    fn rebuild<F: Field>(
+        &self,
+        expr: &SymbolicExpression<F>,
+        b: usize,
+        max_degree: usize,
+        definitions: &mut Definitions<F>,
+    ) -> SymbolicExpression<F> {
+        use SymbolicExpression::{Add, Mul, Neg, Sub};
+        if expr.degree_multiple() <= b {
+            return expr.clone();
+        }
+        let structural = self.structural_cost(expr, b);
+        let extraction = if b < max_degree {
+            1 + self.costs[max_degree - 1]
+        } else {
+            usize::MAX
+        };
+        if extraction < structural {
+            // The definition itself is built at full degree; its inner
+            // extractions are appended first, so definitions stay in
+            // dependency order.
+            let definition = self.rebuild(expr, max_degree, max_degree, definitions);
+            let variable = definitions.fresh();
+            definitions.definitions.push((variable, definition));
+            return variable.into();
+        }
+        match expr {
+            Add { x, y, .. } => {
+                self.children[0].rebuild(x, b, max_degree, definitions)
+                    + self.children[1].rebuild(y, b, max_degree, definitions)
+            }
+            Sub { x, y, .. } => {
+                self.children[0].rebuild(x, b, max_degree, definitions)
+                    - self.children[1].rebuild(y, b, max_degree, definitions)
+            }
+            Neg { x, .. } => -self.children[0].rebuild(x, b, max_degree, definitions),
+            Mul { x, y, .. } => {
+                let (bx, by, _) = self
+                    .mul_splits(x, y, b)
+                    .min_by_key(|&(_, _, cost)| cost)
+                    .expect("a product with no admissible split is always extracted");
+                self.children[0].rebuild(x, bx, max_degree, definitions)
+                    * self.children[1].rebuild(y, by, max_degree, definitions)
+            }
+            _ => unreachable!("leaves always fit their budget"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Val;
+
+    fn definitions_at(width: usize) -> Definitions<Val> {
+        Definitions::new(Entry::Main { offset: 0 }, width)
+    }
+
+    /// Extends a row with the values of the definitions, in order.
+    fn extended_row(mut row: Vec<Val>, definitions: &Definitions<Val>) -> Vec<Val> {
+        for (variable, definition) in &definitions.definitions {
+            assert_eq!(variable.index, row.len(), "unexpected variable index");
+            let value: Val = definition.interpret(&row, None);
+            row.push(value);
+        }
+        row
+    }
+
+    fn assert_trim(
+        expr: &SymbolicExpression<Val>,
+        max_degree: usize,
+        budget: usize,
+        expected_definitions: usize,
+    ) {
+        let width = 4;
+        let mut definitions = definitions_at(width);
+        let trimmed = trim(expr, max_degree, budget, &mut definitions);
+        assert_eq!(definitions.definitions.len(), expected_definitions);
+        assert!(trimmed.degree_multiple() <= budget);
+        for (_, definition) in &definitions.definitions {
+            assert!(definition.degree_multiple() <= max_degree);
+        }
+        // The trimmed expression must evaluate to the same value once the
+        // row is extended with the definition values.
+        let base = [3, 5, 7, 11].map(Val::from_u32).to_vec();
+        let row = extended_row(base.clone(), &definitions);
+        let original: Val = expr.interpret(&row, None);
+        let evaluated: Val = trimmed.interpret(&row, None);
+        assert_eq!(original, evaluated);
+    }
+
+    #[test]
+    fn fitting_expressions_are_untouched() {
+        let expr = var::<Val>(0) * var(1) + var(2) * var(3);
+        let mut definitions = definitions_at(4);
+        let trimmed = trim(&expr, 3, 2, &mut definitions);
+        assert!(definitions.definitions.is_empty());
+        assert_eq!(trimmed.degree_multiple(), 2);
+    }
+
+    #[test]
+    fn product_splits_with_one_extraction() {
+        // Degree 4 at budget 3: extract one side of the top product and keep
+        // the other inline.
+        let expr = (var::<Val>(0) * var(1)) * (var(2) * var(3));
+        assert_trim(&expr, 3, 3, 1);
+    }
+
+    #[test]
+    fn extracting_a_sum_beats_extracting_its_terms() {
+        // Degree 2 at budget 1: extracting each product would cost 2;
+        // extracting the whole sum costs 1.
+        let expr = var::<Val>(0) * var(1) + var(2) * var(3);
+        assert_trim(&expr, 3, 1, 1);
+    }
+
+    #[test]
+    fn degree_zero_factors_are_free() {
+        // The constant costs no budget: the degree-4 right side gets all of
+        // it, needing a single extraction.
+        let expr =
+            SymbolicExpression::from(Val::TWO) * (var::<Val>(0) * (var(1) * (var(2) * var(3))));
+        assert_trim(&expr, 3, 3, 1);
+    }
+
+    #[test]
+    fn nested_extractions_stay_in_dependency_order() {
+        // Degree 4 at budget 1: the whole product is extracted, and its
+        // definition (degree 4 > max 3) needs one inner extraction, appended
+        // before it.
+        let expr = (var::<Val>(0) * var(1)) * (var(2) * var(3));
+        assert_trim(&expr, 3, 1, 2);
+    }
+}
