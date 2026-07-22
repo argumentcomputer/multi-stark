@@ -22,13 +22,23 @@
 //! message, contributing equally to both sides regardless of the values of
 //! its arguments (or of a garbage counter on an inactive row).
 //!
-//! Within each circuit, one stage 2 column carries the running accumulator
-//! `z`, constrained by the division-free transition
-//! `pull_product * z_next = push_product * z`. The row products are built
-//! symbolically from the lookup expressions — whose degrees are arbitrary —
-//! and [trimmed](crate::builder::symbolic::trim) to the configuration's
-//! constraint degree budget, extracting subexpressions into additional
-//! stage 2 columns (*definitions*) when they do not fit.
+//! Within each circuit, stage 2 carries the running accumulator `z` and the
+//! *completed row product* `w` (the value the chain reaches after the row),
+//! tied together by the single ungated, division-free grand-product identity
+//!
+//! ```text
+//! pull_msg_1 · … · pull_msg_L · w − push_msg_1 · … · push_msg_L · z = 0
+//! ```
+//!
+//! on every row. The whole constraint is built symbolically from the lookup
+//! expressions — whose degrees are arbitrary — and handed to
+//! [`trim`](crate::builder::symbolic::trim) at the configuration's full
+//! constraint degree budget, which extracts subexpressions into additional
+//! stage 2 columns (*definitions*) exactly where they do not fit. The
+//! boundary conditions are then linear and row-selector-gated (unnormalized
+//! selectors only ever gate, never enter arithmetic): the chain starts at
+//! the claims' pushed product, steps via `w = z_next` on transition rows,
+//! and ends at `w = z_out` on the last row.
 
 use p3_air::{Air, BaseAir, ExtensionBuilder, WindowAccess};
 use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, batch_multiplicative_inverse};
@@ -174,35 +184,39 @@ pub fn fold_claims<F: Field, EF: ExtensionField<F>>(
     (pushed, pulled)
 }
 
-/// A circuit's lookups lowered for the grand-product argument: the symbolic
-/// per-row products of the pulled and pushed messages, trimmed to the
-/// constraint degree budget, together with the definitions of the stage 2
-/// columns extracted by the trimming.
+/// Index of the running accumulator column in the stage 2 trace.
+pub const ACC_COL: usize = 0;
+/// Index of the completed row product column in the stage 2 trace.
+pub const COMPLETED_COL: usize = 1;
+/// Index of the first extracted definition column in the stage 2 trace.
+pub const DEFINITIONS_START: usize = 2;
+
+/// A circuit's lookups lowered for the grand-product argument: the trimmed
+/// grand-product constraint (see the module docs) together with the
+/// definitions of the stage 2 columns extracted by the trimming.
 pub struct GpaLookups<EF> {
-    /// Product of the row's pulled messages, of degree at most
-    /// `max_degree - 2` (it multiplies an accumulator column inside a
-    /// row-selector-gated constraint).
-    pub pull_product: SymbolicExpression<EF>,
-    /// Product of the row's pushed messages, same degree bound.
-    pub push_product: SymbolicExpression<EF>,
+    /// The grand-product constraint `Q·w − P·z`, trimmed to degree at most
+    /// `max_degree`. It is asserted zero on every row, ungated.
+    pub constraint: SymbolicExpression<EF>,
     /// Extracted definitions: `definitions[i]` defines stage 2 column
-    /// `1 + i` (column 0 is the running accumulator). Definitions only
-    /// reference stage 1 values, the challenges, and *earlier* definitions.
+    /// [`DEFINITIONS_START`]` + i`. Definitions reference stage 1 values,
+    /// the challenges, the accumulator columns, and *earlier* definitions.
     pub definitions: Vec<(SymbolicVariable<EF>, SymbolicExpression<EF>)>,
 }
 
 impl<EF: Field> GpaLookups<EF> {
-    /// Lowers a circuit's lookups, trimming both message products to fit
-    /// constraints of degree at most `max_degree`. Both products share one
-    /// definition list, so common extractions cost a single column.
+    /// Lowers a circuit's lookups: builds the full grand-product constraint
+    /// `Q·w − P·z` — with `Q` and `P` the products of the pulled and pushed
+    /// messages, `z` the running accumulator and `w` the completed row
+    /// product — and trims it to degree at most `max_degree`. Handing trim
+    /// the whole constraint (accumulator factors included) means no degree
+    /// is reserved by hand and a budget of 2 (`trim`'s own minimum) already
+    /// suffices; `Q` and `P` appear exactly once, so nothing is extracted
+    /// twice.
     pub fn lower<F: Field>(lookups: &[Lookup<SymbolicExpression<F>>], max_degree: usize) -> Self
     where
         EF: ExtensionField<F>,
     {
-        assert!(
-            max_degree >= 3,
-            "the grand-product argument needs a constraint degree budget of at least 3"
-        );
         let beta: SymbolicExpression<EF> = SymbolicVariable::new(Entry::Stage2Public, 0).into();
         let gamma: SymbolicExpression<EF> = SymbolicVariable::new(Entry::Stage2Public, 1).into();
         let side = |count_of: fn(&Lookup<SymbolicExpression<F>>) -> &SymbolicExpression<F>| {
@@ -220,24 +234,23 @@ impl<EF: Field> GpaLookups<EF> {
         };
         let pull_product = side(|lookup| &lookup.pull_count);
         let push_product = side(|lookup| &lookup.push_count);
-        // The products multiply a stage 2 column (degree 1) inside a
-        // row-selector-gated constraint (one more degree), so they must fit
-        // in `max_degree - 2`.
-        let budget = max_degree - 2;
-        let mut definitions = Definitions::new(Entry::Stage2 { offset: 0 }, 1);
-        let pull_product = trim(&pull_product, max_degree, budget, &mut definitions);
-        let push_product = trim(&push_product, max_degree, budget, &mut definitions);
+        let acc: SymbolicExpression<EF> =
+            SymbolicVariable::new(Entry::Stage2 { offset: 0 }, ACC_COL).into();
+        let completed: SymbolicExpression<EF> =
+            SymbolicVariable::new(Entry::Stage2 { offset: 0 }, COMPLETED_COL).into();
+        let constraint = pull_product * completed - push_product * acc;
+        let mut definitions = Definitions::new(Entry::Stage2 { offset: 0 }, DEFINITIONS_START);
+        let constraint = trim(&constraint, max_degree, max_degree, &mut definitions);
         Self {
-            pull_product,
-            push_product,
+            constraint,
             definitions: definitions.definitions,
         }
     }
 
-    /// One column for the running accumulator plus one per extracted
-    /// definition.
+    /// The running accumulator and completed product columns plus one per
+    /// extracted definition.
     pub fn stage_2_width(&self) -> usize {
-        1 + self.definitions.len()
+        DEFINITIONS_START + self.definitions.len()
     }
 }
 
@@ -295,15 +308,15 @@ impl<A, F: Field, EF: ExtensionField<F>> GpaAir<'_, A, F, EF> {
         let stage_2_public_values = builder.stage_2_public_values().to_vec();
         debug_assert_eq!(stage_2_public_values.len(), LOOKUP_PUBLIC_SIZE);
         let acc_in = stage_2_public_values[2];
-        let acc_out: AB::ExprEF = stage_2_public_values[3].into();
+        let acc_out = stage_2_public_values[3];
 
         // Bind relevant variables to construct the stage 2 constraints.
         let stage_2 = builder.stage_2();
         let stage_2_row = stage_2.row_slice(0).unwrap();
         let stage_2_next_row = stage_2.row_slice(1).unwrap();
-        let acc = stage_2_row[0];
-        let acc_expr: AB::ExprEF = acc.into();
-        let acc_next: AB::ExprEF = stage_2_next_row[0].into();
+        let acc = stage_2_row[ACC_COL];
+        let completed = stage_2_row[COMPLETED_COL];
+        let acc_next = stage_2_next_row[ACC_COL];
 
         let main = builder.main();
         let main_row = main.current_slice();
@@ -338,28 +351,24 @@ impl<A, F: Field, EF: ExtensionField<F>> GpaAir<'_, A, F, EF> {
                 (column, definition.interpret_with(&resolve))
             })
             .collect::<Vec<_>>();
-        let pull_product: AB::ExprEF = self.gpa.pull_product.interpret_with(&resolve);
-        let push_product: AB::ExprEF = self.gpa.push_product.interpret_with(&resolve);
+        let constraint = self.gpa.constraint.interpret_with(&resolve);
         for (column, definition) in definitions {
             builder.assert_eq_ext(column, definition);
         }
 
-        // The initial accumulator value must be set correctly.
+        // The grand-product identity `Q·w = P·z` holds on every row,
+        // ungated, defining the completed row product `w`.
+        builder.assert_zero_ext(constraint);
+
+        // Boundary conditions, all linear in the columns (the row selectors
+        // only gate — they are unnormalized, so they must never enter the
+        // arithmetic of a constraint): the accumulator enters the circuit at
+        // `acc_in`, each row's completed product is the next row's
+        // accumulator, and the last row's completed product leaves the
+        // circuit at `acc_out`.
         builder.when_first_row().assert_eq_ext(acc, acc_in);
-
-        // Running product transition, division-free by cross-multiplication:
-        // the pulled messages divide the accumulator and the pushed messages
-        // multiply it.
-        builder.when_transition().assert_eq_ext(
-            pull_product.clone() * acc_next,
-            push_product.clone() * acc_expr.clone(),
-        );
-
-        // On the last row the completed product must reach the expected
-        // final accumulator.
-        builder
-            .when_last_row()
-            .assert_eq_ext(pull_product * acc_out, push_product * acc_expr);
+        builder.when_transition().assert_eq_ext(completed, acc_next);
+        builder.when_last_row().assert_eq_ext(completed, acc_out);
     }
 }
 
@@ -532,9 +541,13 @@ pub fn stage_2_traces<F: Field, EF: ExtensionField<F>>(
 
         if lookups.num_lookups == 0 {
             // No lookups: both products are 1 (and there is nothing to
-            // extract), so the accumulator just repeats.
+            // extract), so the accumulator and the completed product just
+            // repeat the incoming value.
             debug_assert_eq!(num_definitions, 0);
-            traces.push(RowMajorMatrix::new(vec![accumulator; height], 1));
+            traces.push(RowMajorMatrix::new(
+                vec![accumulator; height * DEFINITIONS_START],
+                DEFINITIONS_START,
+            ));
             intermediate_accumulators.push(accumulator);
             continue;
         }
@@ -572,7 +585,21 @@ pub fn stage_2_traces<F: Field, EF: ExtensionField<F>>(
             .in_scope(|| batch_multiplicative_inverse(&pull_products));
         drop(pull_products);
 
-        // Values of the extracted definition columns, row-major.
+        // Chain the accumulator: `acc_column[r]` is the value entering row
+        // `r` and `completed_column[r]` the value after it (the completed
+        // row product); the chain leaves the circuit at `acc_out`.
+        let mut acc_column = Vec::with_capacity(height);
+        let mut completed_column = Vec::with_capacity(height);
+        for row in 0..height {
+            acc_column.push(accumulator);
+            accumulator *= push_products[row] * pull_inverses[row];
+            completed_column.push(accumulator);
+        }
+        let acc_out = accumulator;
+
+        // Values of the extracted definition columns, row-major. Definitions
+        // may reference the accumulator columns, the challenges and boundary
+        // accumulators, and earlier definitions.
         let definition_values: Vec<Vec<EF>> = if num_definitions == 0 {
             vec![]
         } else {
@@ -581,7 +608,14 @@ pub fn stage_2_traces<F: Field, EF: ExtensionField<F>>(
                 .main
                 .expect("main trace required to fill definition columns");
             assert_eq!(main.height(), height, "main trace height mismatch");
-            let challenges = [lookup_challenge, *fingerprint_challenge];
+            let stage_2_public = [
+                lookup_challenge,
+                *fingerprint_challenge,
+                acc_column[0],
+                acc_out,
+            ];
+            let acc_column = &acc_column;
+            let completed_column = &completed_column;
             (0..height)
                 .into_par_iter()
                 .map(|row| {
@@ -591,44 +625,47 @@ pub fn stage_2_traces<F: Field, EF: ExtensionField<F>>(
                         .map(|preprocessed| preprocessed.row_slice(row).unwrap());
                     let mut values: Vec<EF> = Vec::with_capacity(num_definitions);
                     for (variable, definition) in &circuit.gpa.definitions {
-                        debug_assert_eq!(variable.index, values.len() + 1);
-                        let value = definition.interpret_with(&|v: &SymbolicVariable<EF>| {
+                        debug_assert_eq!(variable.index, values.len() + DEFINITIONS_START);
+                        let resolve = |v: &SymbolicVariable<EF>| -> EF {
                             match v.entry {
                                 Entry::Main { offset: 0 } => main_row[v.index].into(),
                                 Entry::Preprocessed { offset: 0 } => preprocessed_row
                                     .as_ref()
                                     .expect("circuit has no preprocessed trace")[v.index]
                                     .into(),
-                                // Column 0 is the accumulator; definitions
-                                // only reference earlier definitions.
-                                Entry::Stage2 { offset: 0 } => values[v.index - 1],
-                                Entry::Stage2Public => challenges[v.index],
+                                Entry::Stage2 { offset: 0 } => match v.index {
+                                    ACC_COL => acc_column[row],
+                                    COMPLETED_COL => completed_column[row],
+                                    index => values[index - DEFINITIONS_START],
+                                },
+                                Entry::Stage2Public => stage_2_public[v.index],
                                 _ => unimplemented!(
                                     "unsupported variable entry in lookup expressions"
                                 ),
                             }
-                        });
-                        values.push(value);
+                        };
+                        values.push(definition.interpret_with(&resolve));
                     }
                     values
                 })
                 .collect()
         };
 
-        // Assemble the trace: running accumulator followed by definitions.
+        // Assemble the trace: running accumulator, completed row product,
+        // then the definitions.
         let _g = tracing::info_span!("stark/lookup_traces").entered();
-        let width = 1 + num_definitions;
+        let width = DEFINITIONS_START + num_definitions;
         let mut values = Vec::with_capacity(height * width);
         for row in 0..height {
-            values.push(accumulator);
+            values.push(acc_column[row]);
+            values.push(completed_column[row]);
             if num_definitions != 0 {
                 values.extend_from_slice(&definition_values[row]);
             }
-            accumulator *= push_products[row] * pull_inverses[row];
         }
         drop(_g);
         traces.push(RowMajorMatrix::new(values, width));
-        intermediate_accumulators.push(accumulator);
+        intermediate_accumulators.push(acc_out);
     }
     (traces, intermediate_accumulators)
 }
@@ -976,6 +1013,23 @@ mod tests {
         assert_eq!(a.push_counts, b.push_counts);
         assert_eq!(a.pull_counts, b.pull_counts);
         assert_eq!(a.args, b.args);
+    }
+
+    /// The whole grand-product constraint (message products times
+    /// accumulator columns) is handed to `trim`, so the minimal budget of 2
+    /// already suffices, even with degree-2 lookup arguments; trimming keeps
+    /// the constraint and every definition within the budget.
+    #[test]
+    fn lowering_fits_degree_two() {
+        use crate::types::ExtVal;
+        for max_degree in 2..=4 {
+            let gpa: GpaLookups<ExtVal> = GpaLookups::lower(&CS::Even.lookups(), max_degree);
+            assert!(gpa.constraint.degree_multiple() <= max_degree);
+            for (variable, definition) in &gpa.definitions {
+                assert!(variable.index >= DEFINITIONS_START);
+                assert!(definition.degree_multiple() <= max_degree);
+            }
+        }
     }
 
     #[test]

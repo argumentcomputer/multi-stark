@@ -27,8 +27,8 @@
 //!    `Π (β + fingerprint(γ, [0, claim_i]))`.
 //!
 //! 3. **Stage 2 — Lookup traces**: For each circuit, the lookup traces are computed
-//!    (running grand-product accumulator and extracted definition columns per row)
-//!    and committed via PCS. Each circuit produces an intermediate accumulator value
+//!    (running grand-product accumulator, completed row product, and extracted
+//!    definition columns per row) and committed via PCS. Each circuit produces an intermediate accumulator value
 //!    recording where its running product ended up; these are observed into the
 //!    challenger, and the verifier will check that the last one equals the claims'
 //!    pulled product.
