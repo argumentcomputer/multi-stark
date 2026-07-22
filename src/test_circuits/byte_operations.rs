@@ -78,7 +78,7 @@ mod tests {
             let mut lookups = [xor_idx, and_idx, or_idx]
                 .into_iter()
                 .map(|i| {
-                    Lookup::pull(
+                    Lookup::provide(
                         var(i),
                         vec![
                             SymbExpr::from_usize(i),
@@ -90,7 +90,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             // Range checks do not have a return value
-            lookups.push(Lookup::pull(
+            lookups.push(Lookup::provide(
                 var(pair_range_check_idx),
                 vec![
                     SymbExpr::from_usize(pair_range_check_idx),

@@ -1,48 +1,104 @@
+//! Lookup argument based on a grand product (GPA) with counters.
+//!
+//! Every lookup interaction is expressed with two message *sides*: a **push**
+//! side that multiplies one global grand product and a **pull** side that
+//! multiplies another; the protocol enforces that both products agree. A
+//! message is the lookup challenge plus a fingerprint of the interaction's
+//! arguments *prefixed by a counter*, and the two sides of one interaction
+//! share the arguments but carry different counters:
+//!
+//! - [`Lookup::provide`]`(m, args)` pushes the message at counter `0` and
+//!   pulls it at counter `m`, where `m` is the total number of times the
+//!   claim is required.
+//! - [`Lookup::require`]`(c, m, args)` pulls the message at counter `c` and
+//!   pushes it at counter `c + m`, where `c` is the witnessed number of
+//!   previous requires of the claim.
+//!
+//! For a claim provided once and required `m` times with counters
+//! `0, 1, ..., m - 1`, the pushed multiset is `{0, 1, ..., m}` and the pulled
+//! multiset is `{0, 1, ..., m}` as well — the counter chain telescopes and
+//! the products balance. Counted operations are self-gating: a provide with
+//! `m = 0` or a require with multiplicity `0` pushes and pulls the very same
+//! message, contributing equally to both sides regardless of the values of
+//! its arguments (or of a garbage counter on an inactive row).
+//!
+//! Within each circuit, one stage 2 column carries the running accumulator
+//! `z`, constrained by the division-free transition
+//! `pull_product * z_next = push_product * z`. The row products are built
+//! symbolically from the lookup expressions — whose degrees are arbitrary —
+//! and [trimmed](crate::builder::symbolic::trim) to the configuration's
+//! constraint degree budget, extracting subexpressions into additional
+//! stage 2 columns (*definitions*) when they do not fit.
+
 use p3_air::{Air, BaseAir, ExtensionBuilder, WindowAccess};
 use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, batch_multiplicative_inverse};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 
-use crate::builder::{TwoStagedBuilder, symbolic::SymbolicExpression};
+use crate::builder::{
+    TwoStagedBuilder,
+    symbolic::{Definitions, Entry, SymbolicExpression, SymbolicVariable, trim},
+};
 
 /// Each circuit is required to have 4 arguments for the second stage. Namely,
 /// the lookup challenge, fingerprint challenge, current accumulator and next
 /// accumulator.
 pub const LOOKUP_PUBLIC_SIZE: usize = 4;
 
+/// A lookup interaction in counter form: the same arguments are pushed at
+/// counter `push_count` and pulled at counter `pull_count`. Use
+/// [`Lookup::provide`] and [`Lookup::require`] instead of building the
+/// counters by hand.
 #[derive(Clone)]
 pub struct Lookup<Expr> {
-    pub multiplicity: Expr,
+    pub push_count: Expr,
+    pub pull_count: Expr,
     pub args: Vec<Expr>,
 }
 
 impl<Expr> Lookup<Expr> {
-    /// Returns a [`Lookup`] with multiplicity zero and no arguments.
+    /// Returns a [`Lookup`] with both counters zero and no arguments, whose
+    /// sides cancel each other out.
     #[inline]
     pub fn empty() -> Self
     where
         Expr: PrimeCharacteristicRing,
     {
         Self {
-            multiplicity: Expr::ZERO,
+            push_count: Expr::ZERO,
+            pull_count: Expr::ZERO,
             args: vec![],
         }
     }
 
-    /// "Pushing" has the semantics of adding a claim to the claim set.
+    /// "Providing" creates a claim that can be required `multiplicity`
+    /// times: the message is pushed at counter `0` and pulled back at
+    /// counter `multiplicity`, the value the require chain must reach.
     #[inline]
-    pub fn push(multiplicity: Expr, args: Vec<Expr>) -> Self {
-        Self { multiplicity, args }
-    }
-
-    /// "Pulling" has the semantics of removing a claim from the claim set.
-    #[inline]
-    pub fn pull(multiplicity: Expr, args: Vec<Expr>) -> Self
+    pub fn provide(multiplicity: Expr, args: Vec<Expr>) -> Self
     where
-        Expr: std::ops::Neg<Output = Expr>,
+        Expr: PrimeCharacteristicRing,
     {
         Self {
-            multiplicity: -multiplicity,
+            push_count: Expr::ZERO,
+            pull_count: multiplicity,
+            args,
+        }
+    }
+
+    /// "Requiring" consumes a provided claim: the message is pulled at the
+    /// witnessed counter `count` (the number of previous requires of the
+    /// claim) and pushed back at `count + multiplicity`. A boolean
+    /// `multiplicity` acts as an activation guard: at `0` the two sides
+    /// cancel.
+    #[inline]
+    pub fn require(count: Expr, multiplicity: Expr, args: Vec<Expr>) -> Self
+    where
+        Expr: Clone + std::ops::Add<Output = Expr>,
+    {
+        Self {
+            push_count: count.clone() + multiplicity,
+            pull_count: count,
             args,
         }
     }
@@ -63,12 +119,6 @@ impl<A: BaseAir<F>, F: Field> LookupAir<A, F> {
             preprocessed,
         }
     }
-
-    /// One column for the accumulator and one column for the inverse of the
-    /// message associated with each lookup.
-    pub fn stage_2_width(&self) -> usize {
-        1 + self.lookups.len()
-    }
 }
 
 /// Computes a fingerprint of the coefficients using Horner's method.
@@ -84,19 +134,250 @@ where
         .fold(F::ZERO, |acc, coeff| acc * r.clone() + coeff.into())
 }
 
+/// The message of one side of a lookup: the lookup challenge plus the
+/// fingerprint of the counter followed by the arguments. The counter comes
+/// *first* so that zero padding at the end of the arguments does not change
+/// the message (Horner evaluation is transparent to trailing zeros).
+#[inline]
+fn message<F, EF, I>(lookup_challenge: EF, fingerprint_challenge: &EF, count: F, args: I) -> EF
+where
+    F: Into<EF>,
+    EF: PrimeCharacteristicRing,
+    I: DoubleEndedIterator<Item = F>,
+{
+    lookup_challenge
+        + fingerprint(
+            fingerprint_challenge,
+            std::iter::once(count.into()).chain(args.map(Into::into)),
+        )
+}
+
+/// Folds the claims into the two sides of the grand product. The claim set
+/// behaves as one *require* of each claim at counter zero: the verifier
+/// pulls each claim message at counter `0` and pushes it at counter `1`.
+///
+/// Returns `(initial, expected_final)`: the accumulator chain across the
+/// circuits starts at the pushed product and, when every lookup balances,
+/// must end at the pulled product.
+pub fn fold_claims<F: Field, EF: ExtensionField<F>>(
+    claims: &[&[F]],
+    lookup_challenge: EF,
+    fingerprint_challenge: &EF,
+) -> (EF, EF) {
+    let mut pushed = EF::ONE;
+    let mut pulled = EF::ONE;
+    for claim in claims {
+        let args = || claim.iter().map(|&x| EF::from(x));
+        pulled *= message(lookup_challenge, fingerprint_challenge, EF::ZERO, args());
+        pushed *= message(lookup_challenge, fingerprint_challenge, EF::ONE, args());
+    }
+    (pushed, pulled)
+}
+
+/// A circuit's lookups lowered for the grand-product argument: the symbolic
+/// per-row products of the pulled and pushed messages, trimmed to the
+/// constraint degree budget, together with the definitions of the stage 2
+/// columns extracted by the trimming.
+pub struct GpaLookups<EF> {
+    /// Product of the row's pulled messages, of degree at most
+    /// `max_degree - 2` (it multiplies an accumulator column inside a
+    /// row-selector-gated constraint).
+    pub pull_product: SymbolicExpression<EF>,
+    /// Product of the row's pushed messages, same degree bound.
+    pub push_product: SymbolicExpression<EF>,
+    /// Extracted definitions: `definitions[i]` defines stage 2 column
+    /// `1 + i` (column 0 is the running accumulator). Definitions only
+    /// reference stage 1 values, the challenges, and *earlier* definitions.
+    pub definitions: Vec<(SymbolicVariable<EF>, SymbolicExpression<EF>)>,
+}
+
+impl<EF: Field> GpaLookups<EF> {
+    /// Lowers a circuit's lookups, trimming both message products to fit
+    /// constraints of degree at most `max_degree`. Both products share one
+    /// definition list, so common extractions cost a single column.
+    pub fn lower<F: Field>(lookups: &[Lookup<SymbolicExpression<F>>], max_degree: usize) -> Self
+    where
+        EF: ExtensionField<F>,
+    {
+        assert!(
+            max_degree >= 3,
+            "the grand-product argument needs a constraint degree budget of at least 3"
+        );
+        let beta: SymbolicExpression<EF> = SymbolicVariable::new(Entry::Stage2Public, 0).into();
+        let gamma: SymbolicExpression<EF> = SymbolicVariable::new(Entry::Stage2Public, 1).into();
+        let side = |count_of: fn(&Lookup<SymbolicExpression<F>>) -> &SymbolicExpression<F>| {
+            lookups
+                .iter()
+                .map(|lookup| {
+                    message(
+                        beta.clone(),
+                        &gamma,
+                        count_of(lookup).lift(),
+                        lookup.args.iter().map(SymbolicExpression::lift),
+                    )
+                })
+                .product::<SymbolicExpression<EF>>()
+        };
+        let pull_product = side(|lookup| &lookup.pull_count);
+        let push_product = side(|lookup| &lookup.push_count);
+        // The products multiply a stage 2 column (degree 1) inside a
+        // row-selector-gated constraint (one more degree), so they must fit
+        // in `max_degree - 2`.
+        let budget = max_degree - 2;
+        let mut definitions = Definitions::new(Entry::Stage2 { offset: 0 }, 1);
+        let pull_product = trim(&pull_product, max_degree, budget, &mut definitions);
+        let push_product = trim(&push_product, max_degree, budget, &mut definitions);
+        Self {
+            pull_product,
+            push_product,
+            definitions: definitions.definitions,
+        }
+    }
+
+    /// One column for the running accumulator plus one per extracted
+    /// definition.
+    pub fn stage_2_width(&self) -> usize {
+        1 + self.definitions.len()
+    }
+}
+
+/// A circuit's AIR together with its lowered lookup argument. This is the
+/// AIR the prover and verifier actually evaluate: the inner AIR's stage 1
+/// constraints plus the grand-product constraints over the stage 2 trace.
+pub(crate) struct GpaAir<'a, A, F: Field, EF> {
+    pub air: &'a LookupAir<A, F>,
+    pub gpa: &'a GpaLookups<EF>,
+}
+
+impl<A, F, EF> BaseAir<F> for GpaAir<'_, A, F, EF>
+where
+    A: BaseAir<F>,
+    F: Field,
+    EF: Sync,
+{
+    fn width(&self) -> usize {
+        self.air.inner_air.width()
+    }
+
+    fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
+        self.air.preprocessed.clone()
+    }
+}
+
+impl<A, F, EF, AB> Air<AB> for GpaAir<'_, A, F, EF>
+where
+    A: Air<AB>,
+    F: Field,
+    EF: ExtensionField<F>,
+    AB: TwoStagedBuilder<F = F, EF = EF>,
+{
+    fn eval(&self, builder: &mut AB) {
+        if self.air.preprocessed.is_some() {
+            let preprocessed = builder.preprocessed().clone();
+            let preprocessed_row = preprocessed.current_slice();
+            self.eval_with_preprocessed_row(builder, Some(preprocessed_row))
+        } else {
+            self.eval_with_preprocessed_row(builder, None)
+        }
+    }
+}
+
+impl<A, F: Field, EF: ExtensionField<F>> GpaAir<'_, A, F, EF> {
+    fn eval_with_preprocessed_row<AB>(&self, builder: &mut AB, preprocessed_row: Option<&[AB::Var]>)
+    where
+        A: Air<AB>,
+        AB: TwoStagedBuilder<F = F, EF = EF>,
+    {
+        // Call `eval` for regular stage 1 constraints.
+        self.air.inner_air.eval(builder);
+
+        // Extract challenges and accumulators from stage 2 public values.
+        let stage_2_public_values = builder.stage_2_public_values().to_vec();
+        debug_assert_eq!(stage_2_public_values.len(), LOOKUP_PUBLIC_SIZE);
+        let acc_in = stage_2_public_values[2];
+        let acc_out: AB::ExprEF = stage_2_public_values[3].into();
+
+        // Bind relevant variables to construct the stage 2 constraints.
+        let stage_2 = builder.stage_2();
+        let stage_2_row = stage_2.row_slice(0).unwrap();
+        let stage_2_next_row = stage_2.row_slice(1).unwrap();
+        let acc = stage_2_row[0];
+        let acc_expr: AB::ExprEF = acc.into();
+        let acc_next: AB::ExprEF = stage_2_next_row[0].into();
+
+        let main = builder.main();
+        let main_row = main.current_slice();
+
+        // Resolves the variables of the lowered lookup expressions within
+        // the constraint evaluation windows. Only current-row (offset 0)
+        // entries can appear in lookup expressions and their definitions.
+        let resolve = |variable: &SymbolicVariable<EF>| -> AB::ExprEF {
+            match variable.entry {
+                Entry::Main { offset: 0 } => {
+                    let value: AB::Expr = main_row[variable.index].into();
+                    value.into()
+                }
+                Entry::Preprocessed { offset: 0 } => {
+                    let row = preprocessed_row.expect("circuit has no preprocessed trace");
+                    let value: AB::Expr = row[variable.index].into();
+                    value.into()
+                }
+                Entry::Stage2 { offset: 0 } => stage_2_row[variable.index].into(),
+                Entry::Stage2Public => stage_2_public_values[variable.index].into(),
+                _ => unimplemented!("unsupported variable entry in lookup expressions"),
+            }
+        };
+
+        // Each extracted stage 2 column must equal its definition.
+        let definitions = self
+            .gpa
+            .definitions
+            .iter()
+            .map(|(variable, definition)| {
+                let column: AB::ExprEF = stage_2_row[variable.index].into();
+                (column, definition.interpret_with(&resolve))
+            })
+            .collect::<Vec<_>>();
+        let pull_product: AB::ExprEF = self.gpa.pull_product.interpret_with(&resolve);
+        let push_product: AB::ExprEF = self.gpa.push_product.interpret_with(&resolve);
+        for (column, definition) in definitions {
+            builder.assert_eq_ext(column, definition);
+        }
+
+        // The initial accumulator value must be set correctly.
+        builder.when_first_row().assert_eq_ext(acc, acc_in);
+
+        // Running product transition, division-free by cross-multiplication:
+        // the pulled messages divide the accumulator and the pushed messages
+        // multiply it.
+        builder.when_transition().assert_eq_ext(
+            pull_product.clone() * acc_next,
+            push_product.clone() * acc_expr.clone(),
+        );
+
+        // On the last row the completed product must reach the expected
+        // final accumulator.
+        builder
+            .when_last_row()
+            .assert_eq_ext(pull_product * acc_out, push_product * acc_expr);
+    }
+}
+
 /// Concrete lookup values of one circuit, stored flat.
 ///
 /// Every row of a circuit has the same lookups (each with a fixed number of
-/// arguments), so all multiplicities and argument values are kept in two
-/// row-major vectors instead of nested per-row, per-lookup allocations.
+/// arguments), so all counters and argument values are kept in row-major
+/// vectors instead of nested per-row, per-lookup allocations.
 #[derive(Clone)]
 pub struct LookupValues<F> {
     /// Number of trace rows.
     height: usize,
     /// Number of lookups per row.
     num_lookups: usize,
-    /// Multiplicity of each (row, lookup); `height * num_lookups` values.
-    multiplicities: Vec<F>,
+    /// Push-side counter of each (row, lookup); `height * num_lookups` values.
+    push_counts: Vec<F>,
+    /// Pull-side counter of each (row, lookup); `height * num_lookups` values.
+    pull_counts: Vec<F>,
     /// Offset of each lookup's arguments within a row's argument block;
     /// `num_lookups + 1` entries, the last being the block width.
     arg_offsets: Vec<usize>,
@@ -120,11 +401,13 @@ impl<F: Field> LookupValues<F> {
             arg_offsets.push(arg_offsets.last().unwrap() + lookup.args.len());
         }
         let args_width = *arg_offsets.last().unwrap();
-        let mut multiplicities = Vec::with_capacity(height * num_lookups);
+        let mut push_counts = Vec::with_capacity(height * num_lookups);
+        let mut pull_counts = Vec::with_capacity(height * num_lookups);
         let mut args = Vec::with_capacity(height * args_width);
         let mut eval_row = |row: &[F], preprocessed_row: Option<&[F]>| {
             for lookup in lookups {
-                multiplicities.push(lookup.multiplicity.interpret(row, preprocessed_row));
+                push_counts.push(lookup.push_count.interpret(row, preprocessed_row));
+                pull_counts.push(lookup.pull_count.interpret(row, preprocessed_row));
                 for arg in &lookup.args {
                     args.push(arg.interpret(row, preprocessed_row));
                 }
@@ -140,7 +423,8 @@ impl<F: Field> LookupValues<F> {
         Self {
             height,
             num_lookups,
-            multiplicities,
+            push_counts,
+            pull_counts,
             arg_offsets,
             args,
         }
@@ -152,8 +436,8 @@ impl<F: Field> LookupValues<F> {
     /// vary across rows within a lookup slot (e.g. rows holding
     /// [`Lookup::empty`]); shorter argument lists are zero-padded to the
     /// slot's maximum width. Padding is transparent to the protocol: the
-    /// message fingerprint is a Horner evaluation, so trailing zero
-    /// coefficients do not change its value.
+    /// message fingerprint is a Horner evaluation and the counter comes
+    /// first, so trailing zero coefficients do not change its value.
     ///
     /// # Panics
     /// Panics if rows have differing numbers of lookups.
@@ -177,11 +461,13 @@ impl<F: Field> LookupValues<F> {
             arg_offsets.push(arg_offsets.last().unwrap() + width);
         }
         let args_width = *arg_offsets.last().unwrap();
-        let mut multiplicities = Vec::with_capacity(height * num_lookups);
+        let mut push_counts = Vec::with_capacity(height * num_lookups);
+        let mut pull_counts = Vec::with_capacity(height * num_lookups);
         let mut args = Vec::with_capacity(height * args_width);
         for row in rows {
             for (lookup, &width) in row.into_iter().zip(&slot_widths) {
-                multiplicities.push(lookup.multiplicity);
+                push_counts.push(lookup.push_count);
+                pull_counts.push(lookup.pull_count);
                 let padding = width - lookup.args.len();
                 args.extend(lookup.args);
                 args.extend(std::iter::repeat_n(F::ZERO, padding));
@@ -190,7 +476,8 @@ impl<F: Field> LookupValues<F> {
         Self {
             height,
             num_lookups,
-            multiplicities,
+            push_counts,
+            pull_counts,
             arg_offsets,
             args,
         }
@@ -207,93 +494,150 @@ impl<F: Field> LookupValues<F> {
         let start = row * self.arg_offsets[self.num_lookups];
         &self.args[start + self.arg_offsets[lookup]..start + self.arg_offsets[lookup + 1]]
     }
+}
 
-    /// Computes the stage 2 traces and the intermediate accumulators for each
-    /// circuit given a lookup challenge, a fingerprint challenge and the current
-    /// accumulator value (computed from the initial claims).
-    pub fn stage_2_traces<EF: ExtensionField<F>>(
-        circuits: &[Self],
-        lookup_challenge: EF,
-        fingerprint_challenge: &EF,
-        mut accumulator: EF,
-    ) -> (Vec<RowMajorMatrix<EF>>, Vec<EF>) {
-        // Compute the message for each lookup, in flat circuit-major order.
-        let _g = tracing::info_span!("stark/lookup_messages").entered();
-        let num_messages = circuits
-            .iter()
-            .map(|circuit| circuit.height * circuit.num_lookups)
-            .sum();
-        let mut messages: Vec<EF> = Vec::with_capacity(num_messages);
-        for circuit in circuits {
-            messages.extend(
-                (0..circuit.height * circuit.num_lookups)
-                    .into_par_iter()
-                    .map(|idx| {
-                        let (row, lookup) = (idx / circuit.num_lookups, idx % circuit.num_lookups);
-                        let args = circuit.args_at(row, lookup);
-                        lookup_challenge + fingerprint(fingerprint_challenge, args.iter().cloned())
-                    })
-                    .collect::<Vec<_>>(),
-            );
-        }
-        drop(_g);
+/// Per-circuit inputs for stage 2 trace generation.
+pub struct Stage2Inputs<'a, F: Field, EF> {
+    /// The circuit's concrete lookup values.
+    pub lookups: &'a LookupValues<F>,
+    /// The circuit's lowered lookups.
+    pub gpa: &'a GpaLookups<EF>,
+    /// The circuit's main trace; required when the lowering has definitions
+    /// (their values are functions of the stage 1 values).
+    pub main: Option<&'a RowMajorMatrix<F>>,
+    /// The circuit's preprocessed trace, if any.
+    pub preprocessed: Option<&'a RowMajorMatrix<F>>,
+}
 
-        // Compute the inverses of all messages in batch.
-        let messages_inverses = tracing::info_span!("stark/batch_inverse")
-            .in_scope(|| batch_multiplicative_inverse(&messages));
-        // Only the inverses are consumed below.
-        drop(messages);
+/// Computes the stage 2 traces and the intermediate accumulators for each
+/// circuit given a lookup challenge, a fingerprint challenge and the initial
+/// accumulator value (the pushed product of the claims).
+///
+/// Each circuit's trace has one column for the running accumulator followed
+/// by one column per extracted definition. The accumulator satisfies
+/// `z_next = z * push_product / pull_product` row by row, entering the next
+/// circuit where it left the previous one.
+pub fn stage_2_traces<F: Field, EF: ExtensionField<F>>(
+    circuits: &[Stage2Inputs<'_, F, EF>],
+    lookup_challenge: EF,
+    fingerprint_challenge: &EF,
+    mut accumulator: EF,
+) -> (Vec<RowMajorMatrix<EF>>, Vec<EF>) {
+    let mut traces = Vec::with_capacity(circuits.len());
+    let mut intermediate_accumulators = Vec::with_capacity(circuits.len());
+    for circuit in circuits {
+        let lookups = circuit.lookups;
+        let height = lookups.height;
+        let num_definitions = circuit.gpa.definitions.len();
 
-        // Compute and collect intermediate accumulators and traces.
-        let _g = tracing::info_span!("stark/lookup_traces").entered();
-        let mut intermediate_accumulators = Vec::with_capacity(circuits.len());
-        let mut traces = Vec::with_capacity(circuits.len());
-        let mut offset = 0;
-        for circuit in circuits {
-            // Get the slice containing the messages inverses for the current circuit.
-            let num_circuit_messages = circuit.height * circuit.num_lookups;
-            let circuit_messages_inverses =
-                &messages_inverses[offset..offset + num_circuit_messages];
-            offset += num_circuit_messages;
-
-            let vec = if circuit.num_lookups == 0 {
-                // No row lookup. Just repeat the accumulator for each row.
-                vec![accumulator; circuit.height]
-            } else {
-                // Flatten each row accumulator followed by the inverse of the message
-                // associated with each row lookup.
-                let mut vec = Vec::with_capacity(circuit.height * (1 + circuit.num_lookups));
-                for (row_multiplicities, row_messages_inverses) in circuit
-                    .multiplicities
-                    .chunks_exact(circuit.num_lookups)
-                    .zip(circuit_messages_inverses.chunks_exact(circuit.num_lookups))
-                {
-                    vec.push(accumulator);
-                    for (&multiplicity, &message_inverse) in
-                        row_multiplicities.iter().zip(row_messages_inverses)
-                    {
-                        accumulator += EF::from(multiplicity) * message_inverse;
-                        vec.push(message_inverse);
-                    }
-                }
-                vec
-            };
-            let width = 1 + circuit.num_lookups;
-            debug_assert_eq!(vec.len() % width, 0);
-            let trace = RowMajorMatrix::new(vec, width);
+        if lookups.num_lookups == 0 {
+            // No lookups: both products are 1 (and there is nothing to
+            // extract), so the accumulator just repeats.
+            debug_assert_eq!(num_definitions, 0);
+            traces.push(RowMajorMatrix::new(vec![accumulator; height], 1));
             intermediate_accumulators.push(accumulator);
-            traces.push(trace);
+            continue;
+        }
+
+        // Pull- and push-side message products of every row.
+        let _g = tracing::info_span!("stark/lookup_messages").entered();
+        let (pull_products, push_products): (Vec<EF>, Vec<EF>) = (0..height)
+            .into_par_iter()
+            .map(|row| {
+                let mut pull = EF::ONE;
+                let mut push = EF::ONE;
+                for lookup in 0..lookups.num_lookups {
+                    let index = row * lookups.num_lookups + lookup;
+                    let args = lookups.args_at(row, lookup);
+                    pull *= message(
+                        lookup_challenge,
+                        fingerprint_challenge,
+                        lookups.pull_counts[index],
+                        args.iter().cloned(),
+                    );
+                    push *= message(
+                        lookup_challenge,
+                        fingerprint_challenge,
+                        lookups.push_counts[index],
+                        args.iter().cloned(),
+                    );
+                }
+                (pull, push)
+            })
+            .unzip();
+        drop(_g);
+
+        // Only the pulled products need inverting, one element per row.
+        let pull_inverses = tracing::info_span!("stark/batch_inverse")
+            .in_scope(|| batch_multiplicative_inverse(&pull_products));
+        drop(pull_products);
+
+        // Values of the extracted definition columns, row-major.
+        let definition_values: Vec<Vec<EF>> = if num_definitions == 0 {
+            vec![]
+        } else {
+            let _g = tracing::info_span!("stark/lookup_definitions").entered();
+            let main = circuit
+                .main
+                .expect("main trace required to fill definition columns");
+            assert_eq!(main.height(), height, "main trace height mismatch");
+            let challenges = [lookup_challenge, *fingerprint_challenge];
+            (0..height)
+                .into_par_iter()
+                .map(|row| {
+                    let main_row = main.row_slice(row).unwrap();
+                    let preprocessed_row = circuit
+                        .preprocessed
+                        .map(|preprocessed| preprocessed.row_slice(row).unwrap());
+                    let mut values: Vec<EF> = Vec::with_capacity(num_definitions);
+                    for (variable, definition) in &circuit.gpa.definitions {
+                        debug_assert_eq!(variable.index, values.len() + 1);
+                        let value = definition.interpret_with(&|v: &SymbolicVariable<EF>| {
+                            match v.entry {
+                                Entry::Main { offset: 0 } => main_row[v.index].into(),
+                                Entry::Preprocessed { offset: 0 } => preprocessed_row
+                                    .as_ref()
+                                    .expect("circuit has no preprocessed trace")[v.index]
+                                    .into(),
+                                // Column 0 is the accumulator; definitions
+                                // only reference earlier definitions.
+                                Entry::Stage2 { offset: 0 } => values[v.index - 1],
+                                Entry::Stage2Public => challenges[v.index],
+                                _ => unimplemented!(
+                                    "unsupported variable entry in lookup expressions"
+                                ),
+                            }
+                        });
+                        values.push(value);
+                    }
+                    values
+                })
+                .collect()
+        };
+
+        // Assemble the trace: running accumulator followed by definitions.
+        let _g = tracing::info_span!("stark/lookup_traces").entered();
+        let width = 1 + num_definitions;
+        let mut values = Vec::with_capacity(height * width);
+        for row in 0..height {
+            values.push(accumulator);
+            if num_definitions != 0 {
+                values.extend_from_slice(&definition_values[row]);
+            }
+            accumulator *= push_products[row] * pull_inverses[row];
         }
         drop(_g);
-        (traces, intermediate_accumulators)
+        traces.push(RowMajorMatrix::new(values, width));
+        intermediate_accumulators.push(accumulator);
     }
+    (traces, intermediate_accumulators)
 }
 
 /// Incremental, allocation-free constructor for [`LookupValues`].
 ///
-/// Rows start zeroed — multiplicity zero and zero arguments in every slot,
+/// Rows start zeroed — both counters zero and zero arguments in every slot,
 /// i.e. [`Lookup::empty`] — and are filled in place through the parallel row
-/// writers of [`Self::par_rows_mut`]. Values are written directly into the
+/// writers of [`Self::rows_mut`]. Values are written directly into the
 /// final flat storage, so no per-lookup allocation ever happens.
 pub struct LookupValuesBuilder<F> {
     height: usize,
@@ -302,14 +646,16 @@ pub struct LookupValuesBuilder<F> {
     /// Row stride of `args`: the total argument width, with a minimum of 1
     /// so row chunking stays well-defined when every slot is argument-less.
     row_stride: usize,
-    multiplicities: Vec<F>,
+    push_counts: Vec<F>,
+    pull_counts: Vec<F>,
     args: Vec<F>,
 }
 
 impl<F: Field> LookupValuesBuilder<F> {
     /// `slot_arg_widths[j]` is the maximum number of arguments of lookup
     /// slot `j`. Rows writing fewer arguments leave zero padding, which does
-    /// not change the message fingerprint (a Horner evaluation).
+    /// not change the message fingerprint (a Horner evaluation with the
+    /// counter as the leading coefficient).
     pub fn new(height: usize, slot_arg_widths: &[usize]) -> Self {
         let num_lookups = slot_arg_widths.len();
         let mut arg_offsets = Vec::with_capacity(num_lookups + 1);
@@ -323,7 +669,8 @@ impl<F: Field> LookupValuesBuilder<F> {
             num_lookups,
             arg_offsets,
             row_stride,
-            multiplicities: F::zero_vec(height * num_lookups),
+            push_counts: F::zero_vec(height * num_lookups),
+            pull_counts: F::zero_vec(height * num_lookups),
             args: F::zero_vec(height * row_stride),
         }
     }
@@ -342,16 +689,19 @@ impl<F: Field> LookupValuesBuilder<F> {
             num_lookups,
             arg_offsets,
             row_stride,
-            multiplicities,
+            push_counts,
+            pull_counts,
             args,
             ..
         } = self;
         let arg_offsets = arg_offsets.as_slice();
-        multiplicities
+        push_counts
             .chunks_exact_mut(*num_lookups)
+            .zip(pull_counts.chunks_exact_mut(*num_lookups))
             .zip(args.chunks_exact_mut(*row_stride))
-            .map(|(multiplicities, args)| LookupRowMut {
-                multiplicities,
+            .map(|((push_counts, pull_counts), args)| LookupRowMut {
+                push_counts,
+                pull_counts,
                 args,
                 arg_offsets,
             })
@@ -367,7 +717,8 @@ impl<F: Field> LookupValuesBuilder<F> {
         LookupValues {
             height: self.height,
             num_lookups: self.num_lookups,
-            multiplicities: self.multiplicities,
+            push_counts: self.push_counts,
+            pull_counts: self.pull_counts,
             arg_offsets: self.arg_offsets,
             args: self.args,
         }
@@ -376,35 +727,46 @@ impl<F: Field> LookupValuesBuilder<F> {
 
 /// Mutable view of one row of a [`LookupValuesBuilder`].
 pub struct LookupRowMut<'a, F> {
-    multiplicities: &'a mut [F],
+    push_counts: &'a mut [F],
+    pull_counts: &'a mut [F],
     args: &'a mut [F],
     arg_offsets: &'a [usize],
 }
 
 impl<F: Field> LookupRowMut<'_, F> {
-    /// Writes lookup slot `slot` with "push" semantics (adds a claim).
-    /// Fewer arguments than the slot's width leave zero padding.
+    /// Writes lookup slot `slot` with "provide" semantics; see
+    /// [`Lookup::provide`]. Fewer arguments than the slot's width leave zero
+    /// padding.
     ///
     /// # Panics
     /// Panics if `args` exceeds the slot's width.
     #[inline]
-    pub fn push(&mut self, slot: usize, multiplicity: F, args: &[F]) {
+    pub fn provide(&mut self, slot: usize, multiplicity: F, args: &[F]) {
+        self.write(slot, F::ZERO, multiplicity, args);
+    }
+
+    /// Writes lookup slot `slot` with "require" semantics; see
+    /// [`Lookup::require`].
+    ///
+    /// # Panics
+    /// Panics if `args` exceeds the slot's width.
+    #[inline]
+    pub fn require(&mut self, slot: usize, count: F, multiplicity: F, args: &[F]) {
+        self.write(slot, count + multiplicity, count, args);
+    }
+
+    #[inline]
+    fn write(&mut self, slot: usize, push_count: F, pull_count: F, args: &[F]) {
         let start = self.arg_offsets[slot];
         let end = self.arg_offsets[slot + 1];
         assert!(
             args.len() <= end - start,
             "too many arguments for lookup slot {slot}"
         );
-        self.multiplicities[slot] = multiplicity;
+        self.push_counts[slot] = push_count;
+        self.pull_counts[slot] = pull_count;
         self.args[start..start + args.len()].copy_from_slice(args);
         self.args[start + args.len()..end].fill(F::ZERO);
-    }
-
-    /// Writes lookup slot `slot` with "pull" semantics (removes a claim):
-    /// same as [`Self::push`] with negated multiplicity.
-    #[inline]
-    pub fn pull(&mut self, slot: usize, multiplicity: F, args: &[F]) {
-        self.push(slot, -multiplicity, args);
     }
 }
 
@@ -419,85 +781,6 @@ where
 
     fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
         self.preprocessed.clone()
-    }
-}
-
-impl<A, F, AB> Air<AB> for LookupAir<A, F>
-where
-    A: Air<AB>,
-    F: Field,
-    AB: TwoStagedBuilder<F = F>,
-{
-    fn eval(&self, builder: &mut AB) {
-        if self.preprocessed.is_some() {
-            let preprocessed = builder.preprocessed().clone();
-            let preprocessed_row = preprocessed.current_slice();
-            self.eval_with_preprocessed_row(builder, Some(preprocessed_row))
-        } else {
-            self.eval_with_preprocessed_row(builder, None)
-        }
-    }
-}
-
-impl<A, F: Field> LookupAir<A, F> {
-    fn eval_with_preprocessed_row<AB>(&self, builder: &mut AB, preprocessed_row: Option<&[AB::Var]>)
-    where
-        A: Air<AB>,
-        AB: TwoStagedBuilder<F = F>,
-    {
-        // Call `eval` for regular stage 1 constraints.
-        self.inner_air.eval(builder);
-
-        // Extract challenges and accumulators from stage 2 public values.
-        let stage_2_public_values = builder.stage_2_public_values();
-        debug_assert_eq!(stage_2_public_values.len(), LOOKUP_PUBLIC_SIZE);
-        let lookup_challenge = stage_2_public_values[0].into();
-        let fingerprint_challenge = stage_2_public_values[1].into();
-        let acc = stage_2_public_values[2];
-        let next_acc = stage_2_public_values[3];
-
-        // Bind relevant variables to construct the stage 2 constraints.
-        let stage_2 = builder.stage_2();
-        let stage_2_row = stage_2.row_slice(0).unwrap();
-        let stage_2_next_row = stage_2.row_slice(1).unwrap();
-        let acc_col = stage_2_row[0];
-        let next_acc_col = stage_2_next_row[0];
-        let messages_inverses = &stage_2_row[1..];
-        let lookups = &self.lookups;
-        debug_assert_eq!(messages_inverses.len(), lookups.len());
-
-        // Compute the final accumulator for the current row with the inverses
-        // of the messages from the stage 2 trace while asserting that these
-        // inverses are indeed the inverses of the messages computed on the main
-        // trace.
-        let main = builder.main();
-        let row = main.current_slice();
-        let mut acc_expr = acc_col.into();
-        for (lookup, &message_inverse) in lookups.iter().zip(messages_inverses) {
-            let multiplicity: AB::ExprEF =
-                lookup.multiplicity.interpret(row, preprocessed_row).into();
-            let args = lookup
-                .args
-                .iter()
-                .map(|arg| arg.interpret(row, preprocessed_row));
-            let fingerprint = fingerprint(&fingerprint_challenge, args);
-            let message: AB::ExprEF = lookup_challenge.clone() + fingerprint;
-            let message_inverse = message_inverse.into();
-            builder.assert_one_ext(message * message_inverse.clone());
-            acc_expr += multiplicity * message_inverse;
-        }
-
-        // The initial accumulator value must be set correctly.
-        builder.when_first_row().assert_eq_ext(acc_col, acc);
-
-        // The accumulator computed on the main trace for the current row must
-        // equal the accumulator of the next row from the stage 2 trace.
-        builder
-            .when_transition()
-            .assert_eq_ext(acc_expr.clone(), next_acc_col);
-
-        // The final accumulator must match the expected value.
-        builder.when_last_row().assert_eq_ext(acc_expr, next_acc);
     }
 }
 
@@ -528,7 +811,6 @@ mod tests {
     }
     impl CS {
         fn lookups(&self) -> Vec<Lookup<SymbolicExpression<Val>>> {
-            // provide removes multiplicity
             let multiplicity = var(0);
             let input = var(1);
             let input_is_zero = var(3);
@@ -537,9 +819,14 @@ mod tests {
             let even_index = Val::ZERO.into();
             let odd_index = Val::ONE.into();
             let one: SymbolicExpression<_> = Val::ONE.into();
+            let zero = SymbolicExpression::ZERO;
+            // Every claim in this system is required exactly once (either by
+            // the initial claim or by the recursion of the next step), so
+            // provide multiplicities are boolean and require counters are
+            // all zero.
             match self {
                 Self::Even => vec![
-                    Lookup::pull(
+                    Lookup::provide(
                         multiplicity,
                         vec![
                             even_index,
@@ -547,13 +834,14 @@ mod tests {
                             input_not_zero.clone() * recursion_output.clone() + input_is_zero,
                         ],
                     ),
-                    Lookup::push(
+                    Lookup::require(
+                        zero,
                         input_not_zero,
                         vec![odd_index, input - one, recursion_output],
                     ),
                 ],
                 Self::Odd => vec![
-                    Lookup::pull(
+                    Lookup::provide(
                         multiplicity,
                         vec![
                             odd_index,
@@ -561,12 +849,13 @@ mod tests {
                             input_not_zero.clone() * recursion_output.clone(),
                         ],
                     ),
-                    Lookup::push(
+                    Lookup::require(
+                        zero,
                         input_not_zero,
                         vec![even_index, input - one, recursion_output],
                     ),
                 ],
-                Self::Dead => vec![Lookup::pull(
+                Self::Dead => vec![Lookup::provide(
                     multiplicity,
                     vec![Val::from_u32(2).into(), input],
                 )],
@@ -665,26 +954,27 @@ mod tests {
         let f = Val::from_u32;
         let rows = vec![
             vec![
-                Lookup::push(f(1), vec![f(2), f(3)]),
-                Lookup::pull(f(4), vec![f(5), f(6), f(7)]),
+                Lookup::provide(f(1), vec![f(2), f(3)]),
+                Lookup::require(f(4), f(1), vec![f(5), f(6), f(7)]),
             ],
-            vec![Lookup::empty(), Lookup::push(f(8), vec![f(9)])],
+            vec![Lookup::empty(), Lookup::provide(f(8), vec![f(9)])],
         ];
         let a = LookupValues::from_rows(rows);
         let mut builder = LookupValues::builder(2, &[2, 3]);
         for (i, row) in builder.rows_mut().iter_mut().enumerate() {
             if i == 0 {
-                row.push(0, f(1), &[f(2), f(3)]);
-                row.pull(1, f(4), &[f(5), f(6), f(7)]);
+                row.provide(0, f(1), &[f(2), f(3)]);
+                row.require(1, f(4), f(1), &[f(5), f(6), f(7)]);
             } else {
-                row.push(1, f(8), &[f(9)]);
+                row.provide(1, f(8), &[f(9)]);
             }
         }
         let b = builder.finish();
         assert_eq!(a.height, b.height);
         assert_eq!(a.num_lookups, b.num_lookups);
         assert_eq!(a.arg_offsets, b.arg_offsets);
-        assert_eq!(a.multiplicities, b.multiplicities);
+        assert_eq!(a.push_counts, b.push_counts);
+        assert_eq!(a.pull_counts, b.pull_counts);
         assert_eq!(a.args, b.args);
     }
 
@@ -745,14 +1035,14 @@ mod tests {
     }
 
     /// Deactivating a circuit the claim's execution NEEDS (here: emptying the
-    /// Odd table while Even still pushes into the odd channel) must leave the
-    /// lookup accumulator unbalanced and be rejected.
+    /// Odd table while Even still requires from the odd channel) must leave
+    /// the grand product unbalanced and be rejected.
     #[test]
     fn sparse_needed_circuit_rejected() {
         let (system, key) = system();
         let mut traces = witness_traces();
-        // Empty the Odd table: Even's pushes into the odd channel and the
-        // claim's pull can no longer be matched.
+        // Empty the Odd table: Even's requires from the odd channel and the
+        // claim's chain can no longer be matched.
         traces[1] = RowMajorMatrix::new(vec![], 6);
         let witness = SystemWitness::from_stage_1(traces, &system);
         let f = Val::from_u32;

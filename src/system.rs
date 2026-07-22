@@ -1,7 +1,7 @@
 use crate::{
     builder::symbolic::{SymbolicAirBuilder, get_max_constraint_degree, get_symbolic_constraints},
     config::{Com, PcsData, StarkGenericConfig, Val},
-    lookup::{LOOKUP_PUBLIC_SIZE, LookupAir, LookupValues},
+    lookup::{GpaAir, GpaLookups, LOOKUP_PUBLIC_SIZE, LookupAir, LookupValues},
 };
 use p3_air::{Air, BaseAir};
 use p3_challenger::CanObserve;
@@ -13,7 +13,7 @@ use p3_matrix::{Matrix, dense::RowMajorMatrix};
 /// shared preprocessed commitment and the protocol configuration.
 pub struct System<SC: StarkGenericConfig, A> {
     pub config: SC,
-    pub circuits: Vec<Circuit<A, Val<SC>>>,
+    pub circuits: Vec<Circuit<A, Val<SC>, SC::Challenge>>,
     /// Commitment to all preprocessed traces (if any circuit has one).
     pub preprocessed_commit: Option<Com<SC>>,
     /// Maps each circuit index to its position within the preprocessed commitment.
@@ -38,11 +38,14 @@ where
         airs: impl IntoIterator<Item = LookupAir<A, Val<SC>>>,
     ) -> (Self, ProverKey<SC>) {
         let pcs = config.pcs();
+        // The largest constraint degree the PCS can serve; the lookup
+        // lowering trims its expressions to this budget.
+        let max_degree = config.max_quotient_degree() + 1;
         let mut circuits = vec![];
         let mut preprocessed_traces = vec![];
         let mut preprocessed_indices = vec![];
         for (circuit_idx, air) in airs.into_iter().enumerate() {
-            let (circuit, maybe_preprocessed_trace) = Circuit::from_air::<SC::Challenge>(air);
+            let (circuit, maybe_preprocessed_trace) = Circuit::from_air(air, max_degree);
             // The prover obtains trace evaluations on the quotient domain
             // from the PCS, which can only serve domains up to
             // `max_quotient_degree` times the trace domain (the blowup
@@ -103,10 +106,13 @@ impl<SC: StarkGenericConfig, A> System<SC, A> {
     }
 }
 
-/// A single circuit within the system, wrapping an AIR together with
-/// precomputed metadata used by the prover and verifier.
-pub struct Circuit<A, F: Field> {
+/// A single circuit within the system, wrapping an AIR together with its
+/// lowered lookup argument and precomputed metadata used by the prover and
+/// verifier.
+pub struct Circuit<A, F: Field, EF: Field> {
     pub air: LookupAir<A, F>,
+    /// The circuit's lookups lowered for the grand-product argument.
+    pub gpa: GpaLookups<EF>,
     pub constraint_count: usize,
     pub max_constraint_degree: usize,
     pub preprocessed_height: usize,
@@ -115,7 +121,7 @@ pub struct Circuit<A, F: Field> {
     pub stage_2_width: usize,
 }
 
-impl<A, F: Field> Circuit<A, F> {
+impl<A, F: Field, EF: Field> Circuit<A, F, EF> {
     /// Degree of the quotient polynomial as a multiple of the trace degree.
     /// Division by the vanishing polynomial reduces the composition
     /// polynomial's degree by 1; the result is padded to a power of two so
@@ -174,21 +180,26 @@ impl<F: Field> SystemWitness<F> {
     }
 }
 
-impl<A, F: Field> Circuit<A, F> {
-    pub fn from_air<EF>(air: LookupAir<A, F>) -> (Self, Option<RowMajorMatrix<F>>)
+impl<A, F: Field, EF: ExtensionField<F>> Circuit<A, F, EF> {
+    /// Builds a circuit from its AIR, lowering the lookups to grand-product
+    /// form under the given constraint degree budget.
+    pub fn from_air(air: LookupAir<A, F>, max_degree: usize) -> (Self, Option<RowMajorMatrix<F>>)
     where
-        EF: ExtensionField<F>,
         A: BaseAir<F> + Air<SymbolicAirBuilder<F, EF>>,
     {
         // as of now, we assume no public values apart from the lookup values
         let io_size = 0;
         let stage_1_width = air.inner_air.width();
-        let stage_2_width = air.stage_2_width();
+        let gpa = GpaLookups::lower(&air.lookups, max_degree);
+        let stage_2_width = gpa.stage_2_width();
         let preprocessed_trace = air.preprocessed_trace();
         let preprocessed_height = preprocessed_trace.as_ref().map_or(0, |mat| mat.height());
         let preprocessed_width = preprocessed_trace.as_ref().map_or(0, |mat| mat.width());
         let symbolic_constraints = get_symbolic_constraints::<F, EF, _>(
-            &air,
+            &GpaAir {
+                air: &air,
+                gpa: &gpa,
+            },
             preprocessed_width,
             stage_1_width,
             stage_2_width,
@@ -199,6 +210,7 @@ impl<A, F: Field> Circuit<A, F> {
         let max_constraint_degree = get_max_constraint_degree(&symbolic_constraints);
         let circuit = Self {
             air,
+            gpa,
             max_constraint_degree,
             preprocessed_height,
             preprocessed_width,

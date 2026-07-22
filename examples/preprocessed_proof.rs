@@ -2,9 +2,10 @@
 //!
 //! Defines two circuits:
 //! - **RangeTable**: a read-only byte table (0..256) committed as a preprocessed
-//!   trace. Each row pulls a lookup weighted by its multiplicity column.
+//!   trace. Each row provides its byte with the multiplicity column counting
+//!   the total requires.
 //! - **Squares**: computes `x * x` and range-checks both bytes of the result
-//!   via lookup pushes into the RangeTable.
+//!   by requiring them from the RangeTable, with witnessed require counters.
 //!
 //! Run with:
 //! ```sh
@@ -27,7 +28,7 @@ type SymbExpr = SymbolicExpression<Val>;
 enum SquaresCS {
     /// Preprocessed column: bytes 0..256.  Main column: multiplicity.
     RangeTable,
-    /// Columns: [x, x², low_byte, high_byte, multiplicity].
+    /// Columns: [x, x², low_byte, high_byte, multiplicity, low_count, high_count].
     Squares,
 }
 
@@ -35,7 +36,7 @@ impl<F: Field> BaseAir<F> for SquaresCS {
     fn width(&self) -> usize {
         match self {
             Self::RangeTable => 1,
-            Self::Squares => 5,
+            Self::Squares => 7,
         }
     }
 
@@ -75,12 +76,14 @@ where
 impl SquaresCS {
     fn lookups(&self) -> Vec<Lookup<SymbExpr>> {
         match self {
-            // RangeTable pulls: multiplicity × (preprocessed byte value)
-            Self::RangeTable => vec![Lookup::pull(var(0), vec![preprocessed_var(0)])],
-            // Squares pushes each byte into the range table for validation
+            // RangeTable provides: multiplicity × (preprocessed byte value)
+            Self::RangeTable => vec![Lookup::provide(var(0), vec![preprocessed_var(0)])],
+            // Squares requires each byte from the range table for validation,
+            // with a witnessed counter per require and the row's multiplicity
+            // as activation guard
             Self::Squares => vec![
-                Lookup::push(var(4), vec![var(2)]), // low byte
-                Lookup::push(var(4), vec![var(3)]), // high byte
+                Lookup::require(var(5), var(4), vec![var(2)]), // low byte
+                Lookup::require(var(6), var(4), vec![var(3)]), // high byte
             ],
         }
     }
@@ -111,19 +114,34 @@ fn main() {
 
     // Range-table main trace: multiplicity per byte value (256 rows × 1 col)
     let mut range_mults = vec![Val::ZERO; 256];
-    // Squares trace: 16 rows × 5 cols
-    let mut sq_values = Vec::with_capacity(5 * n as usize);
+    // Per-byte require counters: each require pulls at the current count and
+    // pushes at count + 1; the table provides the total.
+    let mut range_counts = vec![0u32; 256];
+    // Squares trace: 16 rows × 7 cols
+    let mut sq_values = Vec::with_capacity(7 * n as usize);
     for x in 0..n {
         let sq = x * x;
         let low = sq & 0xFF;
         let high = (sq >> 8) & 0xFF;
-        sq_values.extend([f(x), f(sq), f(low), f(high), Val::ONE]);
+        let low_count = range_counts[low as usize];
+        range_counts[low as usize] += 1;
+        let high_count = range_counts[high as usize];
+        range_counts[high as usize] += 1;
+        sq_values.extend([
+            f(x),
+            f(sq),
+            f(low),
+            f(high),
+            Val::ONE,
+            f(low_count),
+            f(high_count),
+        ]);
         range_mults[low as usize] += Val::ONE;
         range_mults[high as usize] += Val::ONE;
     }
 
     let range_trace = RowMajorMatrix::new(range_mults, 1);
-    let squares_trace = RowMajorMatrix::new(sq_values, 5);
+    let squares_trace = RowMajorMatrix::new(sq_values, 7);
     let witness = SystemWitness::from_stage_1(vec![range_trace, squares_trace], &system);
 
     let no_claims: &[&[Val]] = &[];

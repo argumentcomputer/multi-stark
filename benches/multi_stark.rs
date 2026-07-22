@@ -40,7 +40,9 @@ impl<F: Field> BaseAir<F> for U32CS {
     fn width(&self) -> usize {
         match self {
             Self::ByteTable => 1,
-            Self::U32Add => 14,
+            // 4 bytes for x, 4 for y, 4 for z, 1 carry, 1 multiplicity,
+            // 12 byte-require counters
+            Self::U32Add => 26,
         }
     }
 
@@ -94,9 +96,12 @@ impl U32CS {
         let byte_index = SymbExpr::from_u8(0);
         let u32_index = SymbExpr::from_u8(1);
         match self {
-            Self::ByteTable => vec![Lookup::pull(var(0), vec![byte_index, preprocessed_var(0)])],
+            Self::ByteTable => vec![Lookup::provide(
+                var(0),
+                vec![byte_index, preprocessed_var(0)],
+            )],
             Self::U32Add => {
-                let mut lookups = vec![Lookup::pull(
+                let mut lookups = vec![Lookup::provide(
                     var(13),
                     vec![
                         u32_index,
@@ -114,9 +119,12 @@ impl U32CS {
                             + var(11) * SymbExpr::from_u32(256 * 256 * 256),
                     ],
                 )];
-                lookups.extend(
-                    (0..12).map(|i| Lookup::push(SymbExpr::ONE, vec![byte_index.clone(), var(i)])),
-                );
+                // Require the range check of each byte from the table, with
+                // a witnessed counter column and the row activity flag as
+                // the multiplicity guard (padding rows self-cancel).
+                lookups.extend((0..12).map(|i| {
+                    Lookup::require(var(14 + i), var(13), vec![byte_index.clone(), var(i)])
+                }));
                 lookups
             }
         }
@@ -132,11 +140,15 @@ fn build_witness(
     system: &System<GoldilocksBlake3Config, U32CS>,
 ) -> SystemWitness<Val> {
     let byte_width = 1;
-    let add_width = 14;
+    let add_width = 26;
     let add_height = num_adds.next_power_of_two();
 
     let mut byte_trace = RowMajorMatrix::new(vec![Val::ZERO; byte_width * 256], byte_width);
     let mut add_trace = RowMajorMatrix::new(vec![Val::ZERO; add_width * add_height], add_width);
+
+    // Global require counter per byte value; the byte table's multiplicity
+    // column provides the final total.
+    let mut byte_counts = [0u32; 256];
 
     // Fill with pseudo-random additions (deterministic for reproducibility).
     let mut a: u32 = 0xdead_beef;
@@ -170,7 +182,14 @@ fn build_witness(
         row[12] = Val::from_u8(u8::from(carry));
         row[13] = Val::ONE;
 
-        for &byte in x_bytes.iter().chain(y_bytes.iter()).chain(z_bytes.iter()) {
+        for (i, &byte) in x_bytes
+            .iter()
+            .chain(y_bytes.iter())
+            .chain(z_bytes.iter())
+            .enumerate()
+        {
+            row[14 + i] = Val::from_u32(byte_counts[byte as usize]);
+            byte_counts[byte as usize] += 1;
             byte_trace.row_mut(byte as usize)[0] += Val::ONE;
         }
     }

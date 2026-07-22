@@ -10,6 +10,7 @@ mod tests {
     use p3_matrix::Matrix;
     use p3_matrix::dense::RowMajorMatrix;
     use std::array;
+    use std::collections::HashMap;
     use std::ops::Range;
 
     struct CompressionInfo {
@@ -374,14 +375,17 @@ mod tests {
     // Main trace consists of multiplicities for 'xor' and 'range_check' operations
     const U8_XOR_PAIR_RANGE_CHECK_TRACE_WIDTH: usize = 2;
 
-    // multiplicity, a0, a1, a2, a3, b0, b1, b2, b3, a0^b0, a1^b1, a2^b2, a3^b3
-    const U32_XOR_TRACE_WIDTH: usize = 13;
+    // multiplicity, a0, a1, a2, a3, b0, b1, b2, b3, a0^b0, a1^b1, a2^b2, a3^b3,
+    // plus 4 counter columns for the byte-xor requires
+    const U32_XOR_TRACE_WIDTH: usize = 17;
 
-    // a0, a1, a2, a3, b0, b1, b2, b3, z0, z1, z2, z3, carry, multiplicity
-    const U32_ADD_TRACE_WIDTH: usize = 14;
+    // a0, a1, a2, a3, b0, b1, b2, b3, z0, z1, z2, z3, carry, multiplicity,
+    // plus 8 counter columns for the byte-pair range check requires
+    const U32_ADD_TRACE_WIDTH: usize = 22;
 
-    // multiplicity, a0, a1, a2, a3, rot0, rot1, rot2, rot3
-    const U32_RIGHT_ROTATE_8_TRACE_WIDTH: usize = 9;
+    // multiplicity, a0, a1, a2, a3, rot0, rot1, rot2, rot3,
+    // plus 2 counter columns for the byte-pair range check requires
+    const U32_RIGHT_ROTATE_8_TRACE_WIDTH: usize = 11;
     const U32_RIGHT_ROTATE_16_TRACE_WIDTH: usize = U32_RIGHT_ROTATE_8_TRACE_WIDTH;
 
     // multiplicity,
@@ -784,7 +788,7 @@ mod tests {
             let g_function_idx = Self::GFunction.position();
             let compression_idx = Self::Compression.position();
 
-            fn pull_state_in_state_out(
+            fn provide_state_in_state_out(
                 multiplicity: SymbExpr,
                 circuit_idx: usize,
                 state_in_range: Range<usize>,
@@ -818,14 +822,17 @@ mod tests {
                     })
                     .collect::<Vec<SymbExpr>>();
 
-                Lookup::pull(
+                Lookup::provide(
                     multiplicity,
                     [vec![SymbExpr::from_usize(circuit_idx)], state_in, state_out].concat(),
                 )
             }
 
-            fn push_round(
-                multiplicity: SymbExpr,
+            // Each round's provider row is created for exactly this require,
+            // so a constant zero counter telescopes; `guard` (the row's
+            // activity flag) cancels the require on padding rows.
+            fn require_round(
+                guard: SymbExpr,
                 circuit_idx: usize,
                 v_ind: Range<usize>,
                 var: fn(usize) -> SymbExpr,
@@ -834,8 +841,9 @@ mod tests {
 
                 let i = v_ind.collect::<Vec<usize>>();
 
-                Lookup::push(
-                    multiplicity,
+                Lookup::require(
+                    SymbExpr::ZERO,
+                    guard,
                     vec![
                         SymbExpr::from_usize(circuit_idx),
                         var(i[0])
@@ -882,59 +890,57 @@ mod tests {
                 )
             }
 
-            fn push_u32(
-                multiplicity: SymbExpr,
+            // See `require_round` for the zero-counter/guard convention.
+            fn require_u32(
+                guard: SymbExpr,
                 circuit_idx: usize,
                 v_ind: Range<usize>,
                 var: fn(usize) -> SymbExpr,
             ) -> Lookup<SymbExpr> {
-                lookup_u32_inner(Lookup::push, multiplicity, circuit_idx, v_ind, var)
+                Lookup::require(SymbExpr::ZERO, guard, u32_args(circuit_idx, v_ind, var))
             }
 
-            fn pull_u32(
+            fn provide_u32(
                 multiplicity: SymbExpr,
                 circuit_idx: usize,
                 v_ind: Range<usize>,
                 var: fn(usize) -> SymbExpr,
             ) -> Lookup<SymbExpr> {
-                lookup_u32_inner(Lookup::pull, multiplicity, circuit_idx, v_ind, var)
+                Lookup::provide(multiplicity, u32_args(circuit_idx, v_ind, var))
             }
 
-            fn lookup_u32_inner(
-                lookup_fn: fn(SymbExpr, Vec<SymbExpr>) -> Lookup<SymbExpr>,
-                multiplicity: SymbExpr,
+            fn u32_args(
                 circuit_idx: usize,
                 v_ind: Range<usize>,
                 var: fn(usize) -> SymbExpr,
-            ) -> Lookup<SymbExpr> {
+            ) -> Vec<SymbExpr> {
                 assert_eq!(v_ind.len(), 12);
 
                 let i = v_ind.collect::<Vec<usize>>();
 
-                lookup_fn(
-                    multiplicity,
-                    vec![
-                        SymbExpr::from_usize(circuit_idx),
-                        var(i[0])
-                            + var(i[1]) * SymbExpr::from_u32(256)
-                            + var(i[2]) * SymbExpr::from_u32(256 * 256)
-                            + var(i[3]) * SymbExpr::from_u32(256 * 256 * 256),
-                        var(i[4])
-                            + var(i[5]) * SymbExpr::from_u32(256)
-                            + var(i[6]) * SymbExpr::from_u32(256 * 256)
-                            + var(i[7]) * SymbExpr::from_u32(256 * 256 * 256),
-                        var(i[8])
-                            + var(i[9]) * SymbExpr::from_u32(256)
-                            + var(i[10]) * SymbExpr::from_u32(256 * 256)
-                            + var(i[11]) * SymbExpr::from_u32(256 * 256 * 256),
-                    ],
-                )
+                vec![
+                    SymbExpr::from_usize(circuit_idx),
+                    var(i[0])
+                        + var(i[1]) * SymbExpr::from_u32(256)
+                        + var(i[2]) * SymbExpr::from_u32(256 * 256)
+                        + var(i[3]) * SymbExpr::from_u32(256 * 256 * 256),
+                    var(i[4])
+                        + var(i[5]) * SymbExpr::from_u32(256)
+                        + var(i[6]) * SymbExpr::from_u32(256 * 256)
+                        + var(i[7]) * SymbExpr::from_u32(256 * 256 * 256),
+                    var(i[8])
+                        + var(i[9]) * SymbExpr::from_u32(256)
+                        + var(i[10]) * SymbExpr::from_u32(256 * 256)
+                        + var(i[11]) * SymbExpr::from_u32(256 * 256 * 256),
+                ]
             }
 
             match self {
                 Self::U8Xor | Self::U8PairRangeCheck => {
+                    // The multiplicity columns count the total requires of
+                    // each table row across the system.
                     vec![
-                        Lookup::pull(
+                        Lookup::provide(
                             var(0),
                             vec![
                                 SymbExpr::from_usize(u8_xor_idx),
@@ -943,7 +949,7 @@ mod tests {
                                 preprocessed_var(2),
                             ],
                         ),
-                        Lookup::pull(
+                        Lookup::provide(
                             var(1),
                             vec![
                                 SymbExpr::from_usize(u8_pair_range_check_idx),
@@ -954,14 +960,17 @@ mod tests {
                     ]
                 }
 
-                // (4 push lookups to u8_xor circuit)
+                // (4 require lookups to u8_xor circuit)
                 Self::U32Xor => {
-                    let mut lookups = vec![pull_u32(var(0), u32_xor_idx, 1..12 + 1, var)];
+                    let mut lookups = vec![provide_u32(var(0), u32_xor_idx, 1..12 + 1, var)];
 
-                    // push (A, B, A^B) tuples to U8Xor circuit for verification
+                    // require (A, B, A^B) tuples from the U8Xor table; the
+                    // table aggregates multiplicities, so each require needs
+                    // a witnessed counter column
                     lookups.extend((0..4).map(|i| {
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            var(13 + i),
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u8_xor_idx).clone(),
                                 var(i + 1),
@@ -973,15 +982,17 @@ mod tests {
                     lookups
                 }
 
-                // (8 push lookups to pair_range_check)
+                // (8 require lookups to pair_range_check)
                 Self::U32Add => {
-                    // Pull
-                    let mut lookups = vec![pull_u32(var(13), u32_add_idx, 0..11 + 1, var)];
+                    // Provide the addition claim
+                    let mut lookups = vec![provide_u32(var(13), u32_add_idx, 0..11 + 1, var)];
 
-                    // push (A, B) tuples to U8PairRangeCheck circuit for verification
+                    // require (A, B) tuples from the U8PairRangeCheck table,
+                    // with witnessed counter columns
                     lookups.extend((0..4).map(|i| {
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            var(14 + i),
+                            var(13),
                             vec![
                                 SymbExpr::from_usize(u8_pair_range_check_idx).clone(),
                                 var(i),
@@ -990,10 +1001,12 @@ mod tests {
                         )
                     }));
 
-                    // push (A + B, 0) tuples to U8PairRangeCheck circuit for verification. 0 is used just as a stub
+                    // require (A + B, 0) tuples from the U8PairRangeCheck
+                    // table. 0 is used just as a stub
                     lookups.extend((0..4).map(|i| {
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            var(18 + i),
+                            var(13),
                             vec![
                                 SymbExpr::from_usize(u8_pair_range_check_idx).clone(),
                                 var(i + 8),
@@ -1004,9 +1017,9 @@ mod tests {
                     lookups
                 }
 
-                // (2 push lookups to pair_range_check)
+                // (2 require lookups to pair_range_check)
                 Self::U32RightRotate8 => {
-                    let mut lookups = vec![Lookup::pull(
+                    let mut lookups = vec![Lookup::provide(
                         var(0),
                         vec![
                             SymbExpr::from_usize(u32_right_rotate_8_idx),
@@ -1022,10 +1035,12 @@ mod tests {
                         ],
                     )];
 
-                    // range check only input u32 word (since output is constructed exactly from the same bytes)
+                    // range check only input u32 word (since output is constructed exactly from the same bytes),
+                    // with witnessed counter columns for the table requires
                     lookups.extend((0..2).map(|i| {
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            var(9 + i),
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u8_pair_range_check_idx).clone(),
                                 var(i + 1),
@@ -1037,9 +1052,9 @@ mod tests {
                     lookups
                 }
 
-                // (2 push lookups to pair_range_check)
+                // (2 require lookups to pair_range_check)
                 Self::U32RightRotate16 => {
-                    let mut lookups = vec![Lookup::pull(
+                    let mut lookups = vec![Lookup::provide(
                         var(0),
                         vec![
                             SymbExpr::from_usize(u32_right_rotate_16_idx),
@@ -1055,10 +1070,12 @@ mod tests {
                         ],
                     )];
 
-                    // range check only input u32 word (since output is constructed exactly from the same 4 bytes)
+                    // range check only input u32 word (since output is constructed exactly from the same 4 bytes),
+                    // with witnessed counter columns for the table requires
                     lookups.extend((0..2).map(|i| {
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            var(9 + i),
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u8_pair_range_check_idx).clone(),
                                 var(i + 1),
@@ -1071,7 +1088,7 @@ mod tests {
                 }
 
                 Self::U32RightRotate12 => {
-                    vec![Lookup::pull(
+                    vec![Lookup::provide(
                         var(0),
                         vec![
                             SymbExpr::from_usize(u32_right_rotate_12_idx),
@@ -1088,7 +1105,7 @@ mod tests {
                 }
 
                 Self::U32RightRotate7 => {
-                    vec![Lookup::pull(
+                    vec![Lookup::provide(
                         var(0),
                         vec![
                             SymbExpr::from_usize(u32_right_rotate_7_idx),
@@ -1111,7 +1128,7 @@ mod tests {
                 Self::GFunction => {
                     vec![
                         // balancing the initial claim
-                        Lookup::pull(
+                        Lookup::provide(
                             var(0),
                             vec![
                                 SymbExpr::from_usize(g_function_idx),
@@ -1161,8 +1178,9 @@ mod tests {
                         // interacting with lower-level circuits that constrain operations used in G function
 
                         // a_in + b_in = a_0_tmp
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            SymbExpr::ZERO,
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u32_add_idx),
                                 var(1) // a_in
@@ -1180,8 +1198,9 @@ mod tests {
                             ],
                         ),
                         // a_0_tmp + mx_in = a_0
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            SymbExpr::ZERO,
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u32_add_idx),
                                 var(25) // a_0_tmp
@@ -1199,8 +1218,9 @@ mod tests {
                             ],
                         ),
                         // d_in ^ a_0 = d_0_tmp
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            SymbExpr::ZERO,
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u32_xor_idx),
                                 var(13) // d_in
@@ -1218,8 +1238,9 @@ mod tests {
                             ],
                         ),
                         // d_0_tmp >> 16 = d_0
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            SymbExpr::ZERO,
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u32_right_rotate_16_idx),
                                 var(33) // d_0_tmp
@@ -1233,8 +1254,9 @@ mod tests {
                             ],
                         ),
                         // c_in + d_0 = c_0
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            SymbExpr::ZERO,
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u32_add_idx),
                                 var(9) // c_in
@@ -1252,8 +1274,9 @@ mod tests {
                             ],
                         ),
                         // b_in ^ c_0 = b_0_tmp
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            SymbExpr::ZERO,
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u32_xor_idx),
                                 var(5) // b_in
@@ -1271,8 +1294,9 @@ mod tests {
                             ],
                         ),
                         // b_0_tmp >> 12 = b_0
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            SymbExpr::ZERO,
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u32_right_rotate_12_idx),
                                 var(45) // b_0_tmp
@@ -1286,8 +1310,9 @@ mod tests {
                             ],
                         ),
                         // a_0 + b_0 = a_1_tmp
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            SymbExpr::ZERO,
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u32_add_idx),
                                 var(29) // a_0
@@ -1305,8 +1330,9 @@ mod tests {
                             ],
                         ),
                         // a_1_tmp, my_in, a_1
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            SymbExpr::ZERO,
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u32_add_idx),
                                 var(53) // a_1_tmp
@@ -1324,8 +1350,9 @@ mod tests {
                             ],
                         ),
                         // d_0 ^ a_1 = d_1_tmp
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            SymbExpr::ZERO,
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u32_xor_idx),
                                 var(37) // d_0
@@ -1343,8 +1370,9 @@ mod tests {
                             ],
                         ),
                         // d_1_tmp >> 8 = d_1
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            SymbExpr::ZERO,
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u32_right_rotate_8_idx),
                                 var(61) // d_1_tmp
@@ -1358,8 +1386,9 @@ mod tests {
                             ],
                         ),
                         // c_0 + d_1 = c_1
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            SymbExpr::ZERO,
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u32_add_idx),
                                 var(41) // c_0
@@ -1377,8 +1406,9 @@ mod tests {
                             ],
                         ),
                         //b_0 ^ c_1 = b_1_tmp
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            SymbExpr::ZERO,
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u32_xor_idx),
                                 var(49) // b_0
@@ -1396,8 +1426,9 @@ mod tests {
                             ],
                         ),
                         // b_1_tmp >> 7 = b_1
-                        Lookup::push(
-                            SymbExpr::ONE,
+                        Lookup::require(
+                            SymbExpr::ZERO,
+                            var(0),
                             vec![
                                 SymbExpr::from_usize(u32_right_rotate_7_idx),
                                 var(73) // b_1_tmp
@@ -1419,89 +1450,89 @@ mod tests {
                 // state_out (32 * 4),
                 Self::Compression => {
                     vec![
-                        // pulling state_in / state_out (to balance initial claim)
-                        pull_state_in_state_out(
+                        // providing state_in / state_out (to balance initial claim)
+                        provide_state_in_state_out(
                             var(0),
                             compression_idx,
                             1..128 + 1,
                             2561..2624 + 1,
                             var,
                         ),
-                        // pushing data for 56 rounds of g_function
-                        push_round(SymbExpr::ONE, g_function_idx, 129..168 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 169..208 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 209..248 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 249..288 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 289..328 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 329..368 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 369..408 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 409..448 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 449..488 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 489..528 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 529..568 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 569..608 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 609..648 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 649..688 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 689..728 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 729..768 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 769..808 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 809..848 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 849..888 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 889..928 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 929..968 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 969..1008 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1009..1048 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1049..1088 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1089..1128 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1129..1168 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1169..1208 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1209..1248 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1249..1288 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1289..1328 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1329..1368 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1369..1408 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1409..1448 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1449..1488 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1489..1528 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1529..1568 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1569..1608 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1609..1648 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1649..1688 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1689..1728 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1729..1768 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1769..1808 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1809..1848 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1849..1888 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1889..1928 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1929..1968 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 1969..2008 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 2009..2048 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 2049..2088 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 2089..2128 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 2129..2168 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 2169..2208 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 2209..2248 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 2249..2288 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 2289..2328 + 1, var),
-                        push_round(SymbExpr::ONE, g_function_idx, 2329..2368 + 1, var),
-                        // pushing data for state[i] ^= state[i + 8] operation
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2369..2380 + 1, var),
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2381..2392 + 1, var),
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2393..2404 + 1, var),
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2405..2416 + 1, var),
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2417..2428 + 1, var),
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2429..2440 + 1, var),
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2441..2452 + 1, var),
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2453..2464 + 1, var),
-                        //  pushing data for  state[i + 8] ^= chaining_value[i] operation
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2465..2476 + 1, var),
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2477..2488 + 1, var),
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2489..2500 + 1, var),
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2501..2512 + 1, var),
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2513..2524 + 1, var),
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2525..2536 + 1, var),
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2537..2548 + 1, var),
-                        push_u32(SymbExpr::ONE, u32_xor_idx, 2549..2560 + 1, var),
+                        // requiring 56 rounds of g_function
+                        require_round(var(0), g_function_idx, 129..168 + 1, var),
+                        require_round(var(0), g_function_idx, 169..208 + 1, var),
+                        require_round(var(0), g_function_idx, 209..248 + 1, var),
+                        require_round(var(0), g_function_idx, 249..288 + 1, var),
+                        require_round(var(0), g_function_idx, 289..328 + 1, var),
+                        require_round(var(0), g_function_idx, 329..368 + 1, var),
+                        require_round(var(0), g_function_idx, 369..408 + 1, var),
+                        require_round(var(0), g_function_idx, 409..448 + 1, var),
+                        require_round(var(0), g_function_idx, 449..488 + 1, var),
+                        require_round(var(0), g_function_idx, 489..528 + 1, var),
+                        require_round(var(0), g_function_idx, 529..568 + 1, var),
+                        require_round(var(0), g_function_idx, 569..608 + 1, var),
+                        require_round(var(0), g_function_idx, 609..648 + 1, var),
+                        require_round(var(0), g_function_idx, 649..688 + 1, var),
+                        require_round(var(0), g_function_idx, 689..728 + 1, var),
+                        require_round(var(0), g_function_idx, 729..768 + 1, var),
+                        require_round(var(0), g_function_idx, 769..808 + 1, var),
+                        require_round(var(0), g_function_idx, 809..848 + 1, var),
+                        require_round(var(0), g_function_idx, 849..888 + 1, var),
+                        require_round(var(0), g_function_idx, 889..928 + 1, var),
+                        require_round(var(0), g_function_idx, 929..968 + 1, var),
+                        require_round(var(0), g_function_idx, 969..1008 + 1, var),
+                        require_round(var(0), g_function_idx, 1009..1048 + 1, var),
+                        require_round(var(0), g_function_idx, 1049..1088 + 1, var),
+                        require_round(var(0), g_function_idx, 1089..1128 + 1, var),
+                        require_round(var(0), g_function_idx, 1129..1168 + 1, var),
+                        require_round(var(0), g_function_idx, 1169..1208 + 1, var),
+                        require_round(var(0), g_function_idx, 1209..1248 + 1, var),
+                        require_round(var(0), g_function_idx, 1249..1288 + 1, var),
+                        require_round(var(0), g_function_idx, 1289..1328 + 1, var),
+                        require_round(var(0), g_function_idx, 1329..1368 + 1, var),
+                        require_round(var(0), g_function_idx, 1369..1408 + 1, var),
+                        require_round(var(0), g_function_idx, 1409..1448 + 1, var),
+                        require_round(var(0), g_function_idx, 1449..1488 + 1, var),
+                        require_round(var(0), g_function_idx, 1489..1528 + 1, var),
+                        require_round(var(0), g_function_idx, 1529..1568 + 1, var),
+                        require_round(var(0), g_function_idx, 1569..1608 + 1, var),
+                        require_round(var(0), g_function_idx, 1609..1648 + 1, var),
+                        require_round(var(0), g_function_idx, 1649..1688 + 1, var),
+                        require_round(var(0), g_function_idx, 1689..1728 + 1, var),
+                        require_round(var(0), g_function_idx, 1729..1768 + 1, var),
+                        require_round(var(0), g_function_idx, 1769..1808 + 1, var),
+                        require_round(var(0), g_function_idx, 1809..1848 + 1, var),
+                        require_round(var(0), g_function_idx, 1849..1888 + 1, var),
+                        require_round(var(0), g_function_idx, 1889..1928 + 1, var),
+                        require_round(var(0), g_function_idx, 1929..1968 + 1, var),
+                        require_round(var(0), g_function_idx, 1969..2008 + 1, var),
+                        require_round(var(0), g_function_idx, 2009..2048 + 1, var),
+                        require_round(var(0), g_function_idx, 2049..2088 + 1, var),
+                        require_round(var(0), g_function_idx, 2089..2128 + 1, var),
+                        require_round(var(0), g_function_idx, 2129..2168 + 1, var),
+                        require_round(var(0), g_function_idx, 2169..2208 + 1, var),
+                        require_round(var(0), g_function_idx, 2209..2248 + 1, var),
+                        require_round(var(0), g_function_idx, 2249..2288 + 1, var),
+                        require_round(var(0), g_function_idx, 2289..2328 + 1, var),
+                        require_round(var(0), g_function_idx, 2329..2368 + 1, var),
+                        // requiring data for state[i] ^= state[i + 8] operation
+                        require_u32(var(0), u32_xor_idx, 2369..2380 + 1, var),
+                        require_u32(var(0), u32_xor_idx, 2381..2392 + 1, var),
+                        require_u32(var(0), u32_xor_idx, 2393..2404 + 1, var),
+                        require_u32(var(0), u32_xor_idx, 2405..2416 + 1, var),
+                        require_u32(var(0), u32_xor_idx, 2417..2428 + 1, var),
+                        require_u32(var(0), u32_xor_idx, 2429..2440 + 1, var),
+                        require_u32(var(0), u32_xor_idx, 2441..2452 + 1, var),
+                        require_u32(var(0), u32_xor_idx, 2453..2464 + 1, var),
+                        //  requiring data for  state[i + 8] ^= chaining_value[i] operation
+                        require_u32(var(0), u32_xor_idx, 2465..2476 + 1, var),
+                        require_u32(var(0), u32_xor_idx, 2477..2488 + 1, var),
+                        require_u32(var(0), u32_xor_idx, 2489..2500 + 1, var),
+                        require_u32(var(0), u32_xor_idx, 2501..2512 + 1, var),
+                        require_u32(var(0), u32_xor_idx, 2513..2524 + 1, var),
+                        require_u32(var(0), u32_xor_idx, 2525..2536 + 1, var),
+                        require_u32(var(0), u32_xor_idx, 2537..2548 + 1, var),
+                        require_u32(var(0), u32_xor_idx, 2549..2560 + 1, var),
                     ]
                 }
             }
@@ -1650,22 +1681,34 @@ mod tests {
                 }
             }
 
-            // Build traces. If claim for a given circuit was not provided (and hence no data available), we just use zero trace
-            // and balance lookups providing zero values
+            // Per-key require counters for the two byte tables: each require
+            // of a key pulls at the current count and pushes at count + 1,
+            // and the table's multiplicity column provides the total. The
+            // claims are required by the verifier at counter zero (see
+            // `fold_claims`), so they seed the counters.
+            let byte_key = |a: Val, b: Val| {
+                (
+                    u8::try_from(a.as_canonical_u64()).unwrap(),
+                    u8::try_from(b.as_canonical_u64()).unwrap(),
+                )
+            };
+            let mut u8_xor_counts = HashMap::<(u8, u8), u64>::new();
+            for (a, b, _) in &byte_xor_values_from_claims {
+                *u8_xor_counts.entry(byte_key(*a, *b)).or_insert(0) += 1;
+            }
+            let mut u8_range_check_counts = HashMap::<(u8, u8), u64>::new();
+            for (a, b) in &byte_range_check_values_from_claims {
+                *u8_range_check_counts.entry(byte_key(*a, *b)).or_insert(0) += 1;
+            }
+
+            // Build traces. If claim for a given circuit was not provided (and hence no data
+            // available), we just use zero trace: its provides and its guarded requires all
+            // self-cancel (zero multiplicities), so no zero-value balancing is needed.
 
             let mut state_transition_trace_values =
                 Vec::<Val>::with_capacity(state_transition_values_from_claims.len());
             if state_transition_values_from_claims.is_empty() {
                 state_transition_trace_values = Val::zero_vec(COMPRESSION_TRACE_WIDTH);
-                for _ in 0..56 {
-                    g_function_values_from_claims
-                        .push((0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32));
-                }
-
-                for _ in 0..8 {
-                    u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
-                    u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
-                }
             } else {
                 for (state_in_io, state_out_io) in state_transition_values_from_claims {
                     let state_in_io_bytes = state_in_io
@@ -1788,20 +1831,8 @@ mod tests {
             let mut state_transition_trace =
                 RowMajorMatrix::new(state_transition_trace_values, COMPRESSION_TRACE_WIDTH);
             let height = state_transition_trace.height().next_power_of_two();
-            let zero_rows_added = height - state_transition_trace.height();
-            for _ in 0..zero_rows_added {
-                // we have 56 communications with G_Function circuit
-                for _ in 0..56 {
-                    g_function_values_from_claims
-                        .push((0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32));
-                }
-
-                // we have 8 * 2 communications with U32_XOR circuit
-                for _ in 0..8 {
-                    u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
-                    u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
-                }
-            }
+            // Padding rows have a zero multiplicity, which guards all of the
+            // circuit's requires, so no zero-value balancing is needed.
             state_transition_trace.pad_to_height(height, Val::ZERO);
 
             // build GFunction trace columns:
@@ -1812,25 +1843,6 @@ mod tests {
                 Vec::<Val>::with_capacity(g_function_values_from_claims.len());
             if g_function_values_from_claims.is_empty() {
                 g_function_trace_values = Val::zero_vec(G_FUNCTION_TRACE_WIDHT);
-
-                // 1 rot7
-                u32_rotate_right_7_values_from_claims.push((0u32, 0u32));
-                // 1 rot8
-                u32_rotate_right_8_values_from_claims.push((0u32, 0u32));
-                // 1 rot16
-                u32_rotate_right_16_values_from_claims.push((0u32, 0u32));
-                // 1 rot12
-                u32_rotate_right_12_values_from_claims.push((0u32, 0u32));
-
-                // 4 u32_xor
-                for _ in 0..4 {
-                    u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
-                }
-
-                // 6 u32_add
-                for _ in 0..6 {
-                    u32_add_values_from_claims.push((0u32, 0u32, 0u32));
-                }
             } else {
                 for (a_in, b_in, c_in, d_in, mx_in, my_in, a1, b1, c1, d1) in
                     g_function_values_from_claims
@@ -1898,21 +1910,6 @@ mod tests {
             let mut g_function_trace =
                 RowMajorMatrix::new(g_function_trace_values, G_FUNCTION_TRACE_WIDHT);
             let height = g_function_trace.height().next_power_of_two();
-            let zero_rows_added = height - g_function_trace.height();
-            for _ in 0..zero_rows_added {
-                u32_rotate_right_7_values_from_claims.push((0u32, 0u32));
-                u32_rotate_right_8_values_from_claims.push((0u32, 0u32));
-                u32_rotate_right_16_values_from_claims.push((0u32, 0u32));
-                u32_rotate_right_12_values_from_claims.push((0u32, 0u32));
-
-                for _ in 0..4 {
-                    u32_xor_values_from_claims.push((0u32, 0u32, 0u32));
-                }
-
-                for _ in 0..6 {
-                    u32_add_values_from_claims.push((0u32, 0u32, 0u32));
-                }
-            }
             g_function_trace.pad_to_height(height, Val::ZERO);
 
             // build U32Xor trace (columns: multiplicity, A0, A1, A2, A3, B0, B1, B2, B3, A0^B0, A1^B1, A2^B2, A3^B3)
@@ -1920,12 +1917,6 @@ mod tests {
                 Vec::<Val>::with_capacity(u32_xor_values_from_claims.len());
             if u32_xor_values_from_claims.is_empty() {
                 u32_xor_trace_values = Val::zero_vec(U32_XOR_TRACE_WIDTH);
-
-                // we also need to balance the U8Xor circuit lookups using zeroes
-
-                for _ in 0..4 {
-                    byte_xor_values_from_claims.push((Val::ZERO, Val::ZERO, Val::ZERO));
-                }
             } else {
                 for (left, right, xor) in u32_xor_values_from_claims {
                     debug_assert_eq!(left ^ right, xor);
@@ -1941,9 +1932,15 @@ mod tests {
                         .extend_from_slice(right_bytes.map(Val::from_u8).as_slice());
                     u32_xor_trace_values.extend_from_slice(xor_bytes.map(Val::from_u8).as_slice());
 
-                    /* we send bytes to U8Xor circuit, relying on lookup constraining */
+                    /* we require bytes from the U8Xor table, relying on lookup constraining */
 
                     for i in 0..4 {
+                        let count = u8_xor_counts
+                            .entry((left_bytes[i], right_bytes[i]))
+                            .or_insert(0);
+                        u32_xor_trace_values.push(Val::from_u64(*count));
+                        *count += 1;
+
                         byte_xor_values_from_claims.push((
                             Val::from_u8(left_bytes[i]),
                             Val::from_u8(right_bytes[i]),
@@ -1954,25 +1951,12 @@ mod tests {
             }
             let mut u32_xor_trace = RowMajorMatrix::new(u32_xor_trace_values, U32_XOR_TRACE_WIDTH);
             let height = u32_xor_trace.height().next_power_of_two();
-            let zero_rows = height - u32_xor_trace.height();
-            for _ in 0..zero_rows {
-                // we also need to balance the U8Xor circuit lookups using zeroes for every padded row
-                for _ in 0..4 {
-                    byte_xor_values_from_claims.push((Val::ZERO, Val::ZERO, Val::ZERO));
-                }
-            }
             u32_xor_trace.pad_to_height(height, Val::ZERO);
 
             // build U32Add trace (columns: A0, A1, A2, A3, B0, B1, B2, B3, C0, C1, C2, C3, carry, multiplicity)
             let mut u32_add_trace_values = vec![];
             if u32_add_values_from_claims.is_empty() {
                 u32_add_trace_values = Val::zero_vec(U32_ADD_TRACE_WIDTH);
-
-                // we also need to balance the lookups using zeroes
-
-                for _ in 0..8 {
-                    byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-                }
             } else {
                 for (left, right, sum) in u32_add_values_from_claims {
                     let (z, carry) = left.overflowing_add(right);
@@ -1991,37 +1975,38 @@ mod tests {
                     u32_add_trace_values.push(Val::from_bool(carry));
                     u32_add_trace_values.push(Val::ONE); // multiplicity
 
-                    /* we send decomposed bytes to U8Xor circuit, relying on lookup constraining */
+                    /* we require decomposed bytes from the U8PairRangeCheck table:
+                    (left, right) pairs first, then (sum, 0) pairs, with
+                    witnessed counters matching the lookup order */
 
                     for i in 0..4 {
+                        let count = u8_range_check_counts
+                            .entry((left_bytes[i], right_bytes[i]))
+                            .or_insert(0);
+                        u32_add_trace_values.push(Val::from_u64(*count));
+                        *count += 1;
+
                         byte_range_check_values_from_claims
                             .push((Val::from_u8(left_bytes[i]), Val::from_u8(right_bytes[i])));
+                    }
+                    for sum_byte in sum_bytes {
+                        let count = u8_range_check_counts.entry((sum_byte, 0)).or_insert(0);
+                        u32_add_trace_values.push(Val::from_u64(*count));
+                        *count += 1;
+
                         byte_range_check_values_from_claims
-                            .push((Val::from_u8(sum_bytes[i]), Val::ZERO));
+                            .push((Val::from_u8(sum_byte), Val::ZERO));
                     }
                 }
             }
             let mut u32_add_trace = RowMajorMatrix::new(u32_add_trace_values, U32_ADD_TRACE_WIDTH);
             let height = u32_add_trace.height().next_power_of_two();
-            let zero_rows = height - u32_add_trace.height();
-            for _ in 0..zero_rows {
-                // we also need to balance the lookups using zeroes for every padded row
-
-                for _ in 0..8 {
-                    byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-                }
-            }
             u32_add_trace.pad_to_height(height, Val::ZERO);
 
             // build U32RotateRight8 trace (columns: multiplicity, a0, a1, a2, a3, rot0, rot1, rot2, rot3)
             let mut u32_rotate_right_8_trace_values = vec![];
             if u32_rotate_right_8_values_from_claims.is_empty() {
                 u32_rotate_right_8_trace_values = Val::zero_vec(U32_RIGHT_ROTATE_8_TRACE_WIDTH);
-
-                // we also need to balance U8PairRangeCheck circuit lookups using zeroes
-
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
             } else {
                 for (val, rot) in u32_rotate_right_8_values_from_claims {
                     u32_rotate_right_8_trace_values.push(Val::ONE); // multiplicity
@@ -2037,12 +2022,16 @@ mod tests {
                     u32_rotate_right_8_trace_values
                         .extend_from_slice(rot_bytes.map(Val::from_u8).as_slice());
 
-                    /* we send decomposed bytes to U8PairRangeCheck circuit, relying on lookup constraining */
+                    /* we require decomposed bytes from the U8PairRangeCheck table, with witnessed counters */
 
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(val_bytes[0]), Val::from_u8(val_bytes[2])));
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(val_bytes[1]), Val::from_u8(val_bytes[3])));
+                    for (a, b) in [(val_bytes[0], val_bytes[2]), (val_bytes[1], val_bytes[3])] {
+                        let count = u8_range_check_counts.entry((a, b)).or_insert(0);
+                        u32_rotate_right_8_trace_values.push(Val::from_u64(*count));
+                        *count += 1;
+
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(a), Val::from_u8(b)));
+                    }
                 }
             }
             let mut u32_rotate_right_8_trace = RowMajorMatrix::new(
@@ -2050,23 +2039,12 @@ mod tests {
                 U32_RIGHT_ROTATE_8_TRACE_WIDTH,
             );
             let height = u32_rotate_right_8_trace.height().next_power_of_two();
-            let zero_rows = height - u32_rotate_right_8_trace.height();
-            for _ in 0..zero_rows {
-                // we also need to balance the lookups using zeroes for every padded row
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-            }
             u32_rotate_right_8_trace.pad_to_height(height, Val::ZERO);
 
             // build U32RotateRight16 trace (columns: multiplicity, a0, a1, a2, a3, rot0, rot1, rot2, rot3)
             let mut u32_rotate_right_16_trace_values = vec![];
             if u32_rotate_right_16_values_from_claims.is_empty() {
                 u32_rotate_right_16_trace_values = Val::zero_vec(U32_RIGHT_ROTATE_16_TRACE_WIDTH);
-
-                // we also need to balance the lookups using zeroes
-
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
             } else {
                 for (val, rot) in u32_rotate_right_16_values_from_claims {
                     u32_rotate_right_16_trace_values.push(Val::ONE); // multiplicity
@@ -2082,12 +2060,16 @@ mod tests {
                     u32_rotate_right_16_trace_values
                         .extend_from_slice(rot_bytes.map(Val::from_u8).as_slice());
 
-                    /* we send decomposed bytes to U8PairRangeCheck circuit, relying on lookup constraining */
+                    /* we require decomposed bytes from the U8PairRangeCheck table, with witnessed counters */
 
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(a_bytes[0]), Val::from_u8(a_bytes[2])));
-                    byte_range_check_values_from_claims
-                        .push((Val::from_u8(a_bytes[1]), Val::from_u8(a_bytes[3])));
+                    for (a, b) in [(a_bytes[0], a_bytes[2]), (a_bytes[1], a_bytes[3])] {
+                        let count = u8_range_check_counts.entry((a, b)).or_insert(0);
+                        u32_rotate_right_16_trace_values.push(Val::from_u64(*count));
+                        *count += 1;
+
+                        byte_range_check_values_from_claims
+                            .push((Val::from_u8(a), Val::from_u8(b)));
+                    }
                 }
             }
             let mut u32_rotate_right_16_trace = RowMajorMatrix::new(
@@ -2095,12 +2077,6 @@ mod tests {
                 U32_RIGHT_ROTATE_16_TRACE_WIDTH,
             );
             let height = u32_rotate_right_16_trace.height().next_power_of_two();
-            let zero_rows = height - u32_rotate_right_16_trace.height();
-            for _ in 0..zero_rows {
-                // we also need to balance the lookups using zeroes for every padded row
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-                byte_range_check_values_from_claims.push((Val::ZERO, Val::ZERO));
-            }
             u32_rotate_right_16_trace.pad_to_height(height, Val::ZERO);
 
             fn rot_7_12_trace_values(

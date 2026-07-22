@@ -121,7 +121,7 @@ impl StarkGenericConfig for BabyBearPoseidon2Config {
 }
 
 /// A minimal AIR: enforces `a * b == c` per row, with a self-canceling
-/// push/pull lookup pair to exercise the stage 2 machinery.
+/// provide/require lookup pair to exercise the stage 2 machinery.
 struct MulAir;
 
 impl<F> BaseAir<F> for MulAir {
@@ -145,8 +145,8 @@ where
 fn lookups() -> Vec<Lookup<SymbolicExpression<Val>>> {
     let one: SymbolicExpression<Val> = Val::ONE.into();
     vec![
-        Lookup::push(one.clone(), vec![var(0), var(2)]),
-        Lookup::pull(one, vec![var(0), var(2)]),
+        Lookup::provide(one.clone(), vec![var(0), var(2)]),
+        Lookup::require(SymbolicExpression::ZERO, one, vec![var(0), var(2)]),
     ]
 }
 

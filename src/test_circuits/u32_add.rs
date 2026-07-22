@@ -33,8 +33,10 @@ mod tests {
         fn width(&self) -> usize {
             match self {
                 Self::ByteTable => 1,
-                // 4 bytes for x, 4 bytes for y, 4 bytes for z, 1 byte for the carry, 1 column for the multiplicity
-                Self::U32Add => 14,
+                // 4 bytes for x, 4 bytes for y, 4 bytes for z, 1 byte for the
+                // carry, 1 column for the multiplicity, 12 columns for the
+                // byte-require counters
+                Self::U32Add => 26,
             }
         }
 
@@ -92,11 +94,16 @@ mod tests {
             let u32_index = SymbExpr::from_u8(1);
             match self {
                 Self::ByteTable => {
-                    vec![Lookup::pull(var(0), vec![byte_index, preprocessed_var(0)])]
+                    // The multiplicity column counts how many times each byte
+                    // is required across the system.
+                    vec![Lookup::provide(
+                        var(0),
+                        vec![byte_index, preprocessed_var(0)],
+                    )]
                 }
                 Self::U32Add => {
-                    // Pull
-                    let mut lookups = vec![Lookup::pull(
+                    // Provide the addition claim
+                    let mut lookups = vec![Lookup::provide(
                         var(13),
                         vec![
                             u32_index,
@@ -114,11 +121,12 @@ mod tests {
                                 + var(11) * SymbExpr::from_u32(256 * 256 * 256),
                         ],
                     )];
-                    // Push
-                    lookups
-                        .extend((0..12).map(|i| {
-                            Lookup::push(SymbExpr::ONE, vec![byte_index.clone(), var(i)])
-                        }));
+                    // Require the range check of each byte, with a witnessed
+                    // counter column and the row activity flag as the
+                    // multiplicity guard (padding rows self-cancel).
+                    lookups.extend((0..12).map(|i| {
+                        Lookup::require(var(14 + i), var(13), vec![byte_index.clone(), var(i)])
+                    }));
                     lookups
                 }
             }
@@ -143,7 +151,7 @@ mod tests {
     impl AddCalls {
         fn witness(&self, system: &System<GoldilocksBlake3Config, U32CS>) -> SystemWitness<Val> {
             let byte_width = 1;
-            let add_width = 14;
+            let add_width = 26;
             let mut byte_trace = RowMajorMatrix::new(vec![Val::ZERO; byte_width * 256], byte_width);
             let add_height = add_width * self.calls.len().next_power_of_two();
             let mut add_trace = RowMajorMatrix::new(vec![Val::ZERO; add_height], add_width);
@@ -157,6 +165,10 @@ mod tests {
             byte_trace: &mut RowMajorMatrix<Val>,
             add_trace: &mut RowMajorMatrix<Val>,
         ) {
+            // Global require counter per byte value: each require pulls at
+            // the current count and pushes at count + 1, and the byte
+            // table's multiplicity column provides the final total.
+            let mut byte_counts = [0u32; 256];
             for (row_index, (x, y)) in self.calls.iter().enumerate() {
                 let x_bytes = x.to_le_bytes();
                 let y_bytes = y.to_le_bytes();
@@ -177,13 +189,14 @@ mod tests {
                     .for_each(|(col, val)| *col = Val::from_u8(*val));
                 add_row[12] = Val::from_u8(u8::from(carry));
                 add_row[13] = Val::ONE;
-                for byte in x_bytes.iter() {
-                    byte_trace.row_mut(*byte as usize)[0] += Val::ONE;
-                }
-                for byte in y_bytes.iter() {
-                    byte_trace.row_mut(*byte as usize)[0] += Val::ONE;
-                }
-                for byte in z_bytes.iter() {
+                for (i, byte) in x_bytes
+                    .iter()
+                    .chain(y_bytes.iter())
+                    .chain(z_bytes.iter())
+                    .enumerate()
+                {
+                    add_row[14 + i] = Val::from_u32(byte_counts[*byte as usize]);
+                    byte_counts[*byte as usize] += 1;
                     byte_trace.row_mut(*byte as usize)[0] += Val::ONE;
                 }
             }

@@ -2,8 +2,8 @@
 //!
 //! Defines two AIR circuits (Even and Odd) that compute whether an input
 //! number is even or odd using a recursive lookup argument:
-//!   - Even(n) pulls a lookup claim and, if n > 0, pushes to Odd(n-1).
-//!   - Odd(n) pulls a lookup claim and, if n > 0, pushes to Even(n-1).
+//!   - Even(n) provides a lookup claim and, if n > 0, requires Odd(n-1).
+//!   - Odd(n) provides a lookup claim and, if n > 0, requires Even(n-1).
 //!
 //! The claim encodes the initial query: is_even(4) == 1.
 //!
@@ -39,9 +39,13 @@ impl ParityAir {
         let even_index = Val::ZERO.into();
         let odd_index = Val::ONE.into();
         let one: SymbolicExpression<_> = Val::ONE.into();
+        let zero = SymbolicExpression::ZERO;
+        // Every claim is required exactly once (by the initial claim or by
+        // the next recursion step), so provide multiplicities are boolean
+        // and require counters are all zero.
         match self {
             Self::Even => vec![
-                Lookup::pull(
+                Lookup::provide(
                     multiplicity,
                     vec![
                         even_index,
@@ -49,13 +53,14 @@ impl ParityAir {
                         input_not_zero.clone() * recursion_output.clone() + input_is_zero,
                     ],
                 ),
-                Lookup::push(
+                Lookup::require(
+                    zero,
                     input_not_zero,
                     vec![odd_index, input - one, recursion_output],
                 ),
             ],
             Self::Odd => vec![
-                Lookup::pull(
+                Lookup::provide(
                     multiplicity,
                     vec![
                         odd_index,
@@ -63,7 +68,8 @@ impl ParityAir {
                         input_not_zero.clone() * recursion_output.clone(),
                     ],
                 ),
-                Lookup::push(
+                Lookup::require(
+                    zero,
                     input_not_zero,
                     vec![even_index, input - one, recursion_output],
                 ),

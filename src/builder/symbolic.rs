@@ -128,26 +128,75 @@ impl<F: Field> SymbolicExpression<F> {
         row: &[Var],
         preprocessed: Option<&[Var]>,
     ) -> Expr {
-        match self {
-            Self::Variable(var) => match &var.entry {
-                Entry::Main { offset: 0 } => row[var.index].clone().into(),
-                Entry::Preprocessed { offset: 0 } => {
-                    preprocessed.unwrap()[var.index].clone().into()
-                }
-                _ => unimplemented!(),
-            },
-            Self::Constant(c) => (*c).into(),
-            Self::Add { x, y, .. } => {
-                x.interpret(row, preprocessed) + y.interpret(row, preprocessed)
-            }
-            Self::Sub { x, y, .. } => {
-                x.interpret(row, preprocessed) - y.interpret(row, preprocessed)
-            }
-            Self::Neg { x, .. } => -x.interpret(row, preprocessed),
-            Self::Mul { x, y, .. } => {
-                x.interpret(row, preprocessed) * y.interpret(row, preprocessed)
-            }
+        self.interpret_with(&|var| match &var.entry {
+            Entry::Main { offset: 0 } => row[var.index].clone().into(),
+            Entry::Preprocessed { offset: 0 } => preprocessed.unwrap()[var.index].clone().into(),
             _ => unimplemented!(),
+        })
+    }
+
+    /// Evaluates the expression with a caller-supplied variable resolver,
+    /// which decides what each [`SymbolicVariable`] stands for.
+    ///
+    /// # Panics
+    /// Panics on the row selector expressions (`IsFirstRow`, `IsLastRow`,
+    /// `IsTransition`), which have no value outside a constraint context.
+    pub fn interpret_with<Expr: Algebra<F>>(
+        &self,
+        resolve: &impl Fn(&SymbolicVariable<F>) -> Expr,
+    ) -> Expr {
+        match self {
+            Self::Variable(var) => resolve(var),
+            Self::Constant(c) => (*c).into(),
+            Self::Add { x, y, .. } => x.interpret_with(resolve) + y.interpret_with(resolve),
+            Self::Sub { x, y, .. } => x.interpret_with(resolve) - y.interpret_with(resolve),
+            Self::Neg { x, .. } => -x.interpret_with(resolve),
+            Self::Mul { x, y, .. } => x.interpret_with(resolve) * y.interpret_with(resolve),
+            _ => unimplemented!("row selectors cannot be interpreted"),
+        }
+    }
+
+    /// Re-tags the expression from `F` to an extension field `EF`. The
+    /// structure (variables, degrees) is unchanged; only embedded constants
+    /// are lifted.
+    pub fn lift<EF: ExtensionField<F>>(&self) -> SymbolicExpression<EF> {
+        match self {
+            Self::Variable(var) => SymbolicVariable::new(var.entry, var.index).into(),
+            Self::IsFirstRow => SymbolicExpression::IsFirstRow,
+            Self::IsLastRow => SymbolicExpression::IsLastRow,
+            Self::IsTransition => SymbolicExpression::IsTransition,
+            Self::Constant(c) => SymbolicExpression::Constant((*c).into()),
+            Self::Add {
+                x,
+                y,
+                degree_multiple,
+            } => SymbolicExpression::Add {
+                x: Box::new(x.lift()),
+                y: Box::new(y.lift()),
+                degree_multiple: *degree_multiple,
+            },
+            Self::Sub {
+                x,
+                y,
+                degree_multiple,
+            } => SymbolicExpression::Sub {
+                x: Box::new(x.lift()),
+                y: Box::new(y.lift()),
+                degree_multiple: *degree_multiple,
+            },
+            Self::Neg { x, degree_multiple } => SymbolicExpression::Neg {
+                x: Box::new(x.lift()),
+                degree_multiple: *degree_multiple,
+            },
+            Self::Mul {
+                x,
+                y,
+                degree_multiple,
+            } => SymbolicExpression::Mul {
+                x: Box::new(x.lift()),
+                y: Box::new(y.lift()),
+                degree_multiple: *degree_multiple,
+            },
         }
     }
 

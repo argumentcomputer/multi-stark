@@ -21,14 +21,17 @@
 //!
 //! 2. **Lookup challenges**: The challenger samples two independent challenges:
 //!    `lookup_argument_challenge` (β) and `fingerprint_challenge` (γ). An initial
-//!    accumulator is computed from the claims:
-//!    `acc = Σ (β + fingerprint(γ, claim_i))⁻¹`.
+//!    accumulator is computed from the claims, which behave as one *require* of
+//!    each claim at counter zero: the chain starts at the pushed product
+//!    `Π (β + fingerprint(γ, [1, claim_i]))` and must end at the pulled product
+//!    `Π (β + fingerprint(γ, [0, claim_i]))`.
 //!
 //! 3. **Stage 2 — Lookup traces**: For each circuit, the lookup traces are computed
-//!    (running accumulator and message inverses per row) and committed via PCS. Each
-//!    circuit produces an intermediate accumulator value recording where its running
-//!    sum ended up; these are observed into the challenger, and the verifier will
-//!    check that the last one is zero.
+//!    (running grand-product accumulator and extracted definition columns per row)
+//!    and committed via PCS. Each circuit produces an intermediate accumulator value
+//!    recording where its running product ended up; these are observed into the
+//!    challenger, and the verifier will check that the last one equals the claims'
+//!    pulled product.
 //!
 //! 4. **Quotient polynomial**: A constraint challenge (α) is sampled and used to fold
 //!    all constraints via powers of α. The folded constraint polynomial is divided by
@@ -170,7 +173,7 @@ use crate::{
         Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsProof, StarkGenericConfig,
         Val,
     },
-    lookup::{LookupValues, fingerprint},
+    lookup::{GpaAir, Stage2Inputs, fold_claims, stage_2_traces},
     system::{ProverKey, System, SystemWitness},
 };
 use bincode::{
@@ -181,7 +184,7 @@ use bincode::{
 use p3_air::{Air, BaseAir, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{LagrangeSelectors, OpenedValuesForRound, Pcs, PolynomialSpace};
-use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
+use p3_field::{BasedVectorSpace, PackedValue, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
@@ -321,16 +324,23 @@ where
         // n_i·B rows, then Merkle tree. FFT work: Σ w_i · n_i · B · log₂(n_i·B).
         let _g = tracing::info_span!("stark/stage1_commit").entered();
         let mut log_degrees = vec![];
+        // Traces of circuits whose lookup lowering has definition columns
+        // must survive until stage 2: the definition values are functions of
+        // the main trace and the lookup challenges, which are only sampled
+        // after this commitment. Indexed by active position.
+        let mut retained_traces: Vec<Option<RowMajorMatrix<Val<SC>>>> = vec![];
         let evaluations = witness
             .traces
             .into_iter()
-            .zip(active.clone())
-            .filter_map(|(trace, is_active)| is_active.then_some(trace))
-            .map(|trace| {
+            .enumerate()
+            .filter_map(|(ci, trace)| active[ci].then_some((ci, trace)))
+            .map(|(ci, trace)| {
                 let degree = trace.height();
                 let log_degree = log2_strict_usize(degree);
                 let trace_domain = pcs.natural_domain_for_degree(degree);
                 log_degrees.push(log_degree);
+                let needs_trace = !self.circuits[ci].gpa.definitions.is_empty();
+                retained_traces.push(needs_trace.then(|| trace.clone()));
                 (trace_domain, trace)
             });
         let (stage_1_trace_commit, stage_1_trace_data) = pcs.commit(evaluations);
@@ -364,16 +374,16 @@ where
         let fingerprint_challenge: SC::Challenge = challenger.sample_algebra_element();
         challenger.observe_algebra_element(fingerprint_challenge);
 
-        // construct the accumulator from the claims
-        let mut acc = SC::Challenge::ZERO;
-        for claim in claims {
-            let message = lookup_argument_challenge
-                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
-            acc += message.inverse();
-        }
+        // Seed the accumulator chain from the claims: the claim set behaves
+        // as one require of each claim at counter zero, so its pushed
+        // product starts the chain (and its pulled product is the expected
+        // final value, checked by the verifier).
+        let (mut acc, _expected_final) =
+            fold_claims(claims, lookup_argument_challenge, &fingerprint_challenge);
 
-        // Cost: "Lookup trace construction" — fingerprint (Horner), batch
-        // inversion, and accumulator update. Total: Σ n_i·L_i extension field ops.
+        // Cost: "Lookup trace construction" — fingerprint (Horner), message
+        // products, batch inversion of one pulled product per row, and
+        // definition column evaluation.
         let _g = tracing::info_span!("stark/lookup_construction").entered();
         // Only active circuits enter the accumulator chain; the chain (and
         // `intermediate_accumulators`) is indexed by active position.
@@ -383,15 +393,31 @@ where
             .zip(&active)
             .filter_map(|(l, &is_active)| is_active.then_some(l))
             .collect();
-        let (stage_2_traces, intermediate_accumulators) = LookupValues::stage_2_traces(
-            &active_lookups,
+        let stage_2_inputs: Vec<Stage2Inputs<_, _>> = active_indices
+            .iter()
+            .enumerate()
+            .map(|(pos, &ci)| {
+                let circuit = &self.circuits[ci];
+                Stage2Inputs {
+                    lookups: &active_lookups[pos],
+                    gpa: &circuit.gpa,
+                    main: retained_traces[pos].as_ref(),
+                    preprocessed: circuit.air.preprocessed.as_ref(),
+                }
+            })
+            .collect();
+        let (stage_2_traces, intermediate_accumulators) = stage_2_traces(
+            &stage_2_inputs,
             lookup_argument_challenge,
             &fingerprint_challenge,
             acc,
         );
-        // The lookup witness can be as large as the traces themselves; free it
-        // now instead of holding it through the commit/quotient/FRI stages.
+        // The lookup witness (and the retained traces) can be as large as
+        // the traces themselves; free them now instead of holding them
+        // through the commit/quotient/FRI stages.
+        drop(stage_2_inputs);
         drop(active_lookups);
+        drop(retained_traces);
         drop(_g);
 
         // Cost: "Stage 2 commit" — LDE + Merkle for flattened extension traces.
@@ -430,7 +456,10 @@ where
             .enumerate()
             .flat_map(|(pos, ((&ci, log_degree), next_acc))| {
                 let circuit = &self.circuits[ci];
-                let air = &circuit.air;
+                let air = GpaAir {
+                    air: &circuit.air,
+                    gpa: &circuit.gpa,
+                };
                 let quotient_degree = circuit.quotient_degree();
                 let log_quotient_degree = log2_strict_usize(quotient_degree);
                 let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
@@ -460,7 +489,7 @@ where
                     *next_acc,
                 ];
                 let quotient_values = quotient_values::<SC, _>(
-                    air,
+                    &air,
                     &public_values,
                     &stage_2_public_values,
                     trace_domain,

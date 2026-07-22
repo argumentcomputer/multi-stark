@@ -7,8 +7,11 @@
 //!    and that the proof's array dimensions (opened values, accumulators, quotient
 //!    chunks) match the ACTIVE circuit count and the canonical column widths.
 //!
-//! 2. **Accumulator balance**: Assert that the last intermediate accumulator is zero,
-//!    ensuring that all lookup pushes and pulls cancel out across circuits.
+//! 2. **Accumulator balance**: Assert that the last intermediate accumulator equals
+//!    the claims' pulled message product, ensuring that all lookup pushes and pulls
+//!    cancel out across circuits (the chain starts at the claims' pushed product).
+//!    This runs after the lookup challenges are replayed, since both products
+//!    depend on them.
 //!
 //! 3. **Fiat-Shamir replay**: Reconstruct the challenger state identically to the
 //!    prover: starting from the parameter-seeded challenger, observe the system
@@ -89,16 +92,17 @@
 //!
 //! ## Lookup argument
 //!
-//! The accumulator-based lookup argument uses two random challenges (β, γ) to
-//! compress lookup messages into field elements. For each lookup interaction, the
-//! message `m = β + fingerprint(γ, args)` is a random affine function of the
-//! challenges. If the multiset of "pushed" values differs from the multiset of
-//! "pulled" values, the running accumulator `Σ multiplicity_i / m_i` is a nonzero
-//! rational function of the challenges. By Schwartz-Zippel (applied to the
-//! numerator after clearing denominators), the accumulator evaluates to zero with
-//! probability at most **N / |F_ext|**. Crucially, the challenges are sampled
-//! *after* the prover has committed to the stage-1 traces and the claims have been
-//! observed, so the prover cannot adapt them.
+//! The grand-product lookup argument uses two random challenges (β, γ) to
+//! compress lookup messages into field elements. Each side of an interaction
+//! contributes the message `m = β + fingerprint(γ, [count, args...])`, a random
+//! polynomial in the challenges. If the multiset of "pushed" messages differs
+//! from the multiset of "pulled" messages, the completed running product
+//! `Π pushed_i / Π pulled_i` is a nonzero rational function of the challenges.
+//! By Schwartz-Zippel (applied to the numerator after clearing denominators),
+//! it matches the expected value with probability at most **N / |F_ext|**.
+//! Crucially, the challenges are sampled *after* the prover has committed to
+//! the stage-1 traces and the claims have been observed, so the prover cannot
+//! adapt them.
 //!
 //! ## Fiat-Shamir (random oracle model)
 //!
@@ -156,7 +160,7 @@ use crate::{
     builder::folder::VerifierConstraintFolder,
     config::{PcsError, StarkGenericConfig, Val},
     ensure, ensure_eq,
-    lookup::fingerprint,
+    lookup::{GpaAir, fold_claims},
     prover::Proof,
     system::System,
 };
@@ -231,17 +235,6 @@ where
             .filter_map(|(i, &a)| a.then_some(i))
             .collect();
 
-        // Soundness: lookup argument. The accumulator was computed by the prover
-        // under challenges (β, γ) that were sampled after the traces and claims were
-        // committed. If the pushed and pulled multisets differ, the accumulator is a
-        // nonzero rational function of (β, γ) and evaluates to zero with probability
-        // ≤ N / |F_ext| (Schwartz-Zippel on the numerator polynomial).
-        ensure_eq!(
-            intermediate_accumulators.last(),
-            Some(&SC::Challenge::ZERO),
-            VerificationError::UnbalancedChannel
-        );
-
         // Soundness: Fiat-Shamir. All challenges below are derived deterministically
         // from the transcript via the configuration's challenger, whose hash is
         // modeled as a random oracle. The verifier replays exactly the same
@@ -302,13 +295,25 @@ where
             challenger.observe_algebra_element(*acc);
         }
 
-        // construct the accumulator from the claims
-        let mut acc = SC::Challenge::ZERO;
-        for claim in claims {
-            let message = lookup_argument_challenge
-                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
-            acc += message.inverse();
-        }
+        // Fold the claims into the two ends of the accumulator chain: the
+        // claim set behaves as one require of each claim at counter zero, so
+        // the chain starts at the claims' pushed product and must end at
+        // their pulled product.
+        let (mut acc, expected_final) =
+            fold_claims(claims, lookup_argument_challenge, &fingerprint_challenge);
+
+        // Soundness: lookup argument. The accumulators were computed by the
+        // prover under challenges (β, γ) that were sampled after the traces
+        // and claims were committed. If the pushed and pulled message
+        // multisets differ, the completed grand product is a nonzero
+        // rational function of (β, γ) and matches the expected value with
+        // probability ≤ N / |F_ext| (Schwartz-Zippel on the numerator after
+        // clearing denominators).
+        ensure_eq!(
+            intermediate_accumulators.last(),
+            Some(&expected_final),
+            VerificationError::UnbalancedChannel
+        );
 
         // Soundness: constraint folding. All k constraints are combined via powers
         // of α. The folded sum has degree k-1 in α, so by Schwartz-Zippel a violated
@@ -487,7 +492,11 @@ where
                 alpha: constraint_challenge,
                 accumulator: SC::Challenge::ZERO,
             };
-            circuit.air.eval(&mut folder);
+            GpaAir {
+                air: &circuit.air,
+                gpa: &circuit.gpa,
+            }
+            .eval(&mut folder);
             let composition_polynomial = folder.accumulator;
             // compute the quotient evaluation
             let quotient_domain = trace_domain.create_disjoint_domain(degree * quotient_degree);
@@ -882,9 +891,10 @@ mod tests {
     #[test]
     fn test_tampered_accumulator_rejected() {
         let (system, mut proof) = small_system_and_proof();
-        // Set the last intermediate accumulator to non-zero.
+        // Move the last intermediate accumulator off the expected final
+        // value (the grand product balances at the claims' pulled product).
         let last = proof.intermediate_accumulators.len() - 1;
-        proof.intermediate_accumulators[last] = ExtVal::ONE;
+        proof.intermediate_accumulators[last] += ExtVal::ONE;
         let no_claims: &[&[Val]] = &[];
         let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(result.is_err());
