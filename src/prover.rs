@@ -389,6 +389,9 @@ where
             &fingerprint_challenge,
             acc,
         );
+        // The lookup witness can be as large as the traces themselves; free it
+        // now instead of holding it through the commit/quotient/FRI stages.
+        drop(active_lookups);
         drop(_g);
 
         // Cost: "Stage 2 commit" — LDE + Merkle for flattened extension traces.

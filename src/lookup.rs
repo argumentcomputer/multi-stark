@@ -129,11 +129,14 @@ impl<F: Field> Lookup<F> {
             .par_iter()
             .map(|lookup| lookup.compute_message(lookup_challenge, fingerprint_challenge))
             .collect();
+        drop(flat);
         drop(_g);
 
         // Compute the inverses of all messages in batch.
         let messages_inverses = tracing::info_span!("stark/batch_inverse")
             .in_scope(|| batch_multiplicative_inverse(&messages));
+        // Only the inverses are consumed below.
+        drop(messages);
 
         // Compute and collect intermediate accumulators and traces.
         let _g = tracing::info_span!("stark/lookup_traces").entered();
