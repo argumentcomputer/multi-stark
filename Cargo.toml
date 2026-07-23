@@ -8,6 +8,9 @@ rust-version = "1.91"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+# Standalone package: don't get absorbed by an enclosing workspace checkout.
+[workspace]
+
 [dependencies]
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
