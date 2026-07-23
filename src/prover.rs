@@ -112,8 +112,10 @@
 //! obtained by subsetting the LDE (essentially free); otherwise an additional
 //! iFFT + FFT is required.
 //!
-//! The quotient polynomial is split into q_i sub-polynomials (each of degree
-//! n_i) and committed.
+//! The quotient polynomial is split into q_i coefficient slices (each of
+//! degree n_i) and committed as a single q_i·D-column matrix per circuit on
+//! the trace domain, so the opening phase pays its per-matrix costs once per
+//! circuit rather than once per slice.
 //!
 //! ```text
 //! Constraint eval:  Σ_i  n_i · q_i · eval_cost(k_i)         field operations
@@ -181,7 +183,8 @@ use bincode::{
 use p3_air::{Air, BaseAir, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{LagrangeSelectors, OpenedValuesForRound, Pcs, PolynomialSpace};
-use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing};
+use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
+use p3_field::{BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing, TwoAdicField};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
@@ -246,6 +249,9 @@ impl<SC: StarkGenericConfig> Proof<SC> {
 impl<SC, A> System<SC, A>
 where
     SC: StarkGenericConfig,
+    // Two-adicity is needed to re-base the quotient's coefficient slices
+    // onto the trace domain; every FRI-based config is two-adic anyway.
+    Val<SC>: TwoAdicField + Ord,
     A: BaseAir<Val<SC>> + for<'a> Air<ProverConstraintFolder<'a, Val<SC>, SC::Challenge>>,
 {
     /// Generates a STARK proof for the system with a single claim.
@@ -422,13 +428,13 @@ where
         let _g = tracing::info_span!("stark/quotient").entered();
         debug_assert_eq!(intermediate_accumulators.len(), active_indices.len());
         debug_assert_eq!(log_degrees.len(), active_indices.len());
-        let mut quotient_degrees = vec![];
+        let dft = Radix2DitParallel::<Val<SC>>::default();
         let quotient_evaluations = active_indices
             .iter()
             .zip(log_degrees.iter())
             .zip(intermediate_accumulators.iter())
             .enumerate()
-            .flat_map(|(pos, ((&ci, log_degree), next_acc))| {
+            .map(|(pos, ((&ci, log_degree), next_acc))| {
                 let circuit = &self.circuits[ci];
                 let air = &circuit.air;
                 let quotient_degree = circuit.quotient_degree();
@@ -473,17 +479,36 @@ where
                 );
                 let quotient_flat =
                     RowMajorMatrix::new_col(quotient_values).flatten_to_base::<Val<SC>>();
-                // note that, in general, the quotients have a degree that is greater than the trace polynomials,
-                // so for FRI to work so we must split into smaller polynomials
-                let quotient_sub_evaluations =
-                    quotient_domain.split_evals(quotient_degree, quotient_flat);
-                let quotient_sub_domains = quotient_domain.split_domains(quotient_degree);
-                // need to save the quotient degree for later
-                quotient_degrees.push(quotient_degree);
+                // The quotient has degree greater than the trace polynomials,
+                // so for FRI to work it must be split into `quotient_degree`
+                // sub-polynomials of trace degree. Slice its COEFFICIENTS:
+                // `Q(X) = Σᵢ X^{i·n}·cᵢ(X)` with each `cᵢ` of degree < n, and
+                // commit all slices as ONE `q·D`-column matrix on the trace
+                // domain — instead of one matrix per slice on the split
+                // cosets — so the opening phase pays its per-matrix costs
+                // once per circuit rather than once per slice.
+                let coefficients =
+                    dft.coset_idft_batch(quotient_flat, quotient_domain.first_point());
+                let ext_degree = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
+                let n = 1 << log_degree;
+                let width = quotient_degree * ext_degree;
+                let mut sliced = Vec::with_capacity(n * width);
+                for row in 0..n {
+                    for chunk in 0..quotient_degree {
+                        sliced.extend_from_slice(
+                            &coefficients.values[(chunk * n + row) * ext_degree
+                                ..(chunk * n + row + 1) * ext_degree],
+                        );
+                    }
+                }
+                let quotient_chunks_evals = dft
+                    .coset_dft_batch(
+                        RowMajorMatrix::new(sliced, width),
+                        trace_domain.first_point(),
+                    )
+                    .to_row_major_matrix();
                 acc = *next_acc;
-                quotient_sub_domains
-                    .into_iter()
-                    .zip(quotient_sub_evaluations)
+                (trace_domain, quotient_chunks_evals)
             });
         let (quotient_commit, quotient_data) = pcs.commit(quotient_evaluations);
         challenger.observe(quotient_commit.clone());
@@ -504,16 +529,15 @@ where
         let mut round1_openings = vec![];
         let mut round2_openings = vec![];
         let mut round3_openings = vec![];
-        for pos in 0..active_indices.len() {
-            let log_degree = log_degrees[pos];
-            let quotient_degree = quotient_degrees[pos];
+        for &log_degree in log_degrees.iter() {
             let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
             let zeta_next = trace_domain
                 .next_point(zeta)
                 .expect("domain has no next point");
             round1_openings.push(vec![zeta, zeta_next]);
             round2_openings.push(vec![zeta, zeta_next]);
-            round3_openings.extend(vec![vec![zeta]; quotient_degree]);
+            // One wide matrix per circuit holds all its quotient slices.
+            round3_openings.push(vec![zeta]);
         }
         // The preprocessed commitment is built once over ALL preprocessed
         // traces at system construction, so its round must carry one entry
