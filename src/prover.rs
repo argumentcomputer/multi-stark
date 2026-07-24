@@ -473,7 +473,10 @@ where
                 // program the evaluation loop executes. The hash-consing pass
                 // collapses duplicated sub-expressions, so this once-per-proof
                 // cost buys a much cheaper per-row evaluation below.
-                let _g = tracing::info_span!("quotient/compile").entered();
+                //
+                // Sub-span names keep the `stark/` prefix: texray subscribers
+                // commonly filter spans to the `aiur/`/`stark/` namespaces.
+                let _g = tracing::info_span!("stark/quotient/compile").entered();
                 let symbolic_constraints = get_symbolic_constraints::<Val<SC>, SC::Challenge, _>(
                     air,
                     circuit.preprocessed_width,
@@ -490,7 +493,7 @@ where
                     circuit.stage_2_width,
                 );
                 drop(_g);
-                let _g = tracing::info_span!("quotient/values").entered();
+                let _g = tracing::info_span!("stark/quotient/values").entered();
                 let quotient_values = quotient_values::<SC>(
                     &compiled,
                     &public_values,
@@ -504,7 +507,7 @@ where
                     circuit.constraint_count,
                 );
                 drop(_g);
-                let _g = tracing::info_span!("quotient/split").entered();
+                let _g = tracing::info_span!("stark/quotient/split").entered();
                 let quotient_flat =
                     RowMajorMatrix::new_col(quotient_values).flatten_to_base::<Val<SC>>();
                 // The quotient has degree greater than the trace polynomials,
