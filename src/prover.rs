@@ -429,18 +429,59 @@ where
         // Cost: "Quotient computation and commit" — constraint evaluation on the
         // quotient domain (Σ n_i·q_i·eval_cost(k_i)) plus LDE + Merkle of the
         // quotient sub-polynomials (Σ q_i·D·n_i·B·log₂(n_i·B)).
+        //
+        // The phase runs as three aggregate passes over the active circuits —
+        // compile, evaluate, split — so the timeline shows one span per stage
+        // (totals across all circuits) instead of one span per circuit. Span
+        // names keep the `stark/` prefix: texray subscribers commonly filter
+        // spans to the `aiur/`/`stark/` namespaces. The trade-off of eager
+        // passes is holding every circuit's intermediate matrix at once, a
+        // footprint of 1/B of the quotient LDEs the commit builds anyway.
         let _g = tracing::info_span!("stark/quotient").entered();
         debug_assert_eq!(intermediate_accumulators.len(), active_indices.len());
         debug_assert_eq!(log_degrees.len(), active_indices.len());
         let dft = Radix2DitParallel::<Val<SC>>::default();
-        let quotient_evaluations = active_indices
+
+        // Pass 1: lower each circuit's symbolic constraints into the linear
+        // program the evaluation loop executes. The hash-consing pass
+        // collapses duplicated sub-expressions, so this once-per-proof cost
+        // buys a much cheaper per-row evaluation below.
+        let _g_stage = tracing::info_span!("stark/quotient/compile").entered();
+        let public_values: [Val<SC>; 0] = [];
+        let compiled_constraints: Vec<_> = active_indices
+            .iter()
+            .map(|&ci| {
+                let circuit = &self.circuits[ci];
+                let symbolic_constraints = get_symbolic_constraints::<Val<SC>, SC::Challenge, _>(
+                    &circuit.air,
+                    circuit.preprocessed_width,
+                    circuit.stage_1_width,
+                    circuit.stage_2_width,
+                    public_values.len(),
+                    LOOKUP_PUBLIC_SIZE,
+                );
+                debug_assert_eq!(symbolic_constraints.len(), circuit.constraint_count);
+                CompiledConstraints::<Val<SC>, SC::Challenge>::compile(
+                    &symbolic_constraints,
+                    circuit.preprocessed_width,
+                    circuit.stage_1_width,
+                    circuit.stage_2_width,
+                )
+            })
+            .collect();
+        drop(_g_stage);
+
+        // Pass 2: evaluate all constraints of every circuit on its quotient
+        // domain and divide by the vanishing polynomial (`quotient_values`).
+        let _g_stage = tracing::info_span!("stark/quotient/values").entered();
+        let quotient_flats: Vec<_> = active_indices
             .iter()
             .zip(log_degrees.iter())
             .zip(intermediate_accumulators.iter())
+            .zip(compiled_constraints.iter())
             .enumerate()
-            .map(|(pos, ((&ci, log_degree), next_acc))| {
+            .map(|(pos, (((&ci, log_degree), next_acc), compiled))| {
                 let circuit = &self.circuits[ci];
-                let air = &circuit.air;
                 let quotient_degree = circuit.quotient_degree();
                 let log_quotient_degree = log2_strict_usize(quotient_degree);
                 let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
@@ -461,41 +502,24 @@ where
                     pcs.get_evaluations_on_domain(&stage_1_trace_data, pos, quotient_domain);
                 let stage_2_trace_on_quotient_domain =
                     pcs.get_evaluations_on_domain(&stage_2_trace_data, pos, quotient_domain);
-                // compute the quotient values which are elements of the extension field and flatten it to the base field
-                let public_values: [Val<SC>; 0] = [];
+                // The accumulator entering this circuit's chain step: the
+                // claims accumulator for the first active circuit, the
+                // previous circuit's intermediate accumulator afterwards.
+                let acc_in = if pos == 0 {
+                    acc
+                } else {
+                    intermediate_accumulators[pos - 1]
+                };
                 let stage_2_public_values = [
                     lookup_argument_challenge,
                     fingerprint_challenge,
-                    acc,
+                    acc_in,
                     *next_acc,
                 ];
-                // Lower the circuit's symbolic constraints into the linear
-                // program the evaluation loop executes. The hash-consing pass
-                // collapses duplicated sub-expressions, so this once-per-proof
-                // cost buys a much cheaper per-row evaluation below.
-                //
-                // Sub-span names keep the `stark/` prefix: texray subscribers
-                // commonly filter spans to the `aiur/`/`stark/` namespaces.
-                let _g = tracing::info_span!("stark/quotient/compile").entered();
-                let symbolic_constraints = get_symbolic_constraints::<Val<SC>, SC::Challenge, _>(
-                    air,
-                    circuit.preprocessed_width,
-                    circuit.stage_1_width,
-                    circuit.stage_2_width,
-                    public_values.len(),
-                    LOOKUP_PUBLIC_SIZE,
-                );
-                debug_assert_eq!(symbolic_constraints.len(), circuit.constraint_count);
-                let compiled = CompiledConstraints::<Val<SC>, SC::Challenge>::compile(
-                    &symbolic_constraints,
-                    circuit.preprocessed_width,
-                    circuit.stage_1_width,
-                    circuit.stage_2_width,
-                );
-                drop(_g);
-                let _g = tracing::info_span!("stark/quotient/values").entered();
+                // compute the quotient values which are elements of the
+                // extension field and flatten them to the base field
                 let quotient_values = quotient_values::<SC>(
-                    &compiled,
+                    compiled,
                     &public_values,
                     &stage_2_public_values,
                     trace_domain,
@@ -506,43 +530,61 @@ where
                     constraint_challenge,
                     circuit.constraint_count,
                 );
-                drop(_g);
-                let _g = tracing::info_span!("stark/quotient/split").entered();
                 let quotient_flat =
                     RowMajorMatrix::new_col(quotient_values).flatten_to_base::<Val<SC>>();
-                // The quotient has degree greater than the trace polynomials,
-                // so for FRI to work it must be split into `quotient_degree`
-                // sub-polynomials of trace degree. Slice its COEFFICIENTS:
-                // `Q(X) = Σᵢ X^{i·n}·cᵢ(X)` with each `cᵢ` of degree < n, and
-                // commit all slices as ONE `q·D`-column matrix on the trace
-                // domain — instead of one matrix per slice on the split
-                // cosets — so the opening phase pays its per-matrix costs
-                // once per circuit rather than once per slice.
-                let coefficients =
-                    dft.coset_idft_batch(quotient_flat, quotient_domain.first_point());
-                let ext_degree = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
-                let n = 1 << log_degree;
-                let width = quotient_degree * ext_degree;
-                let mut sliced = Vec::with_capacity(n * width);
-                for row in 0..n {
-                    for chunk in 0..quotient_degree {
-                        sliced.extend_from_slice(
-                            &coefficients.values[(chunk * n + row) * ext_degree
-                                ..(chunk * n + row + 1) * ext_degree],
-                        );
+                (
+                    trace_domain,
+                    quotient_domain,
+                    quotient_degree,
+                    1usize << log_degree,
+                    quotient_flat,
+                )
+            })
+            .collect();
+        drop(_g_stage);
+        drop(compiled_constraints);
+
+        // Pass 3: re-base each quotient onto the trace domain. The quotient
+        // has degree greater than the trace polynomials, so for FRI to work
+        // it must be split into `quotient_degree` sub-polynomials of trace
+        // degree. Slice its COEFFICIENTS: `Q(X) = Σᵢ X^{i·n}·cᵢ(X)` with each
+        // `cᵢ` of degree < n, and commit all slices as ONE `q·D`-column
+        // matrix on the trace domain — instead of one matrix per slice on
+        // the split cosets — so the opening phase pays its per-matrix costs
+        // once per circuit rather than once per slice.
+        let _g_stage = tracing::info_span!("stark/quotient/split").entered();
+        let ext_degree = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
+        let quotient_evaluations: Vec<_> = quotient_flats
+            .into_iter()
+            .map(
+                |(trace_domain, quotient_domain, quotient_degree, n, quotient_flat)| {
+                    let coefficients =
+                        dft.coset_idft_batch(quotient_flat, quotient_domain.first_point());
+                    let width = quotient_degree * ext_degree;
+                    let mut sliced = Vec::with_capacity(n * width);
+                    for row in 0..n {
+                        for chunk in 0..quotient_degree {
+                            sliced.extend_from_slice(
+                                &coefficients.values[(chunk * n + row) * ext_degree
+                                    ..(chunk * n + row + 1) * ext_degree],
+                            );
+                        }
                     }
-                }
-                let quotient_chunks_evals = dft
-                    .coset_dft_batch(
-                        RowMajorMatrix::new(sliced, width),
-                        trace_domain.first_point(),
-                    )
-                    .to_row_major_matrix();
-                drop(_g);
-                acc = *next_acc;
-                (trace_domain, quotient_chunks_evals)
-            });
+                    let quotient_chunks_evals = dft
+                        .coset_dft_batch(
+                            RowMajorMatrix::new(sliced, width),
+                            trace_domain.first_point(),
+                        )
+                        .to_row_major_matrix();
+                    (trace_domain, quotient_chunks_evals)
+                },
+            )
+            .collect();
+        drop(_g_stage);
+
+        let _g_stage = tracing::info_span!("stark/quotient/commit").entered();
         let (quotient_commit, quotient_data) = pcs.commit(quotient_evaluations);
+        drop(_g_stage);
         challenger.observe(quotient_commit.clone());
         drop(_g);
 
