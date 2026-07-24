@@ -425,11 +425,16 @@ where
         // Cost: "Quotient computation and commit" — constraint evaluation on the
         // quotient domain (Σ n_i·q_i·eval_cost(k_i)) plus LDE + Merkle of the
         // quotient sub-polynomials (Σ q_i·D·n_i·B·log₂(n_i·B)).
-        let _g = tracing::info_span!("stark/quotient").entered();
+        //
+        // The phase runs as three eager passes over the active circuits —
+        // constraint evaluation, coefficient split, commit — so each pass gets
+        // ONE aggregate tracing span instead of interleaved per-circuit spans.
+        let _quotient_g = tracing::info_span!("stark/quotient").entered();
         debug_assert_eq!(intermediate_accumulators.len(), active_indices.len());
         debug_assert_eq!(log_degrees.len(), active_indices.len());
         let dft = Radix2DitParallel::<Val<SC>>::default();
-        let quotient_evaluations = active_indices
+        let _g = tracing::info_span!("stark/quotient/values").entered();
+        let quotient_flats: Vec<RowMajorMatrix<Val<SC>>> = active_indices
             .iter()
             .zip(log_degrees.iter())
             .zip(intermediate_accumulators.iter())
@@ -477,16 +482,31 @@ where
                     constraint_challenge,
                     circuit.constraint_count,
                 );
-                let quotient_flat =
-                    RowMajorMatrix::new_col(quotient_values).flatten_to_base::<Val<SC>>();
-                // The quotient has degree greater than the trace polynomials,
-                // so for FRI to work it must be split into `quotient_degree`
-                // sub-polynomials of trace degree. Slice its COEFFICIENTS:
-                // `Q(X) = Σᵢ X^{i·n}·cᵢ(X)` with each `cᵢ` of degree < n, and
-                // commit all slices as ONE `q·D`-column matrix on the trace
-                // domain — instead of one matrix per slice on the split
-                // cosets — so the opening phase pays its per-matrix costs
-                // once per circuit rather than once per slice.
+                acc = *next_acc;
+                RowMajorMatrix::new_col(quotient_values).flatten_to_base::<Val<SC>>()
+            })
+            .collect();
+        drop(_g);
+
+        // The quotient has degree greater than the trace polynomials,
+        // so for FRI to work it must be split into `quotient_degree`
+        // sub-polynomials of trace degree. Slice its COEFFICIENTS:
+        // `Q(X) = Σᵢ X^{i·n}·cᵢ(X)` with each `cᵢ` of degree < n, and
+        // commit all slices as ONE `q·D`-column matrix on the trace
+        // domain — instead of one matrix per slice on the split
+        // cosets — so the opening phase pays its per-matrix costs
+        // once per circuit rather than once per slice.
+        let _g = tracing::info_span!("stark/quotient/split").entered();
+        let quotient_evaluations: Vec<_> = quotient_flats
+            .into_iter()
+            .zip(active_indices.iter().zip(log_degrees.iter()))
+            .map(|(quotient_flat, (&ci, log_degree))| {
+                let circuit = &self.circuits[ci];
+                let quotient_degree = circuit.quotient_degree();
+                let log_quotient_degree = log2_strict_usize(quotient_degree);
+                let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
+                let quotient_domain =
+                    trace_domain.create_disjoint_domain(1 << (log_degree + log_quotient_degree));
                 let coefficients =
                     dft.coset_idft_batch(quotient_flat, quotient_domain.first_point());
                 let ext_degree = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
@@ -507,12 +527,16 @@ where
                         trace_domain.first_point(),
                     )
                     .to_row_major_matrix();
-                acc = *next_acc;
                 (trace_domain, quotient_chunks_evals)
-            });
-        let (quotient_commit, quotient_data) = pcs.commit(quotient_evaluations);
-        challenger.observe(quotient_commit.clone());
+            })
+            .collect();
         drop(_g);
+
+        let _g = tracing::info_span!("stark/quotient/commit").entered();
+        let (quotient_commit, quotient_data) = pcs.commit(quotient_evaluations);
+        drop(_g);
+        challenger.observe(quotient_commit.clone());
+        drop(_quotient_g);
 
         // save the commitments
         let commitments = Commitments {
