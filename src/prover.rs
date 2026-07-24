@@ -167,12 +167,13 @@
 use std::ops::Deref;
 
 use crate::{
-    builder::folder::ProverConstraintFolder,
+    builder::compiled::{CompiledConstraints, PreparedConstraints, RowChunk, Scratch},
+    builder::symbolic::{SymbolicAirBuilder, get_symbolic_constraints},
     config::{
         Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsProof, StarkGenericConfig,
         Val,
     },
-    lookup::{LookupValues, fingerprint},
+    lookup::{LOOKUP_PUBLIC_SIZE, LookupValues, fingerprint},
     system::{ProverKey, System, SystemWitness},
 };
 use bincode::{
@@ -180,7 +181,7 @@ use bincode::{
     error::{DecodeError, EncodeError},
     serde::{decode_from_slice, encode_to_vec},
 };
-use p3_air::{Air, BaseAir, RowWindow};
+use p3_air::{Air, BaseAir};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{LagrangeSelectors, OpenedValuesForRound, Pcs, PolynomialSpace};
 use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
@@ -252,7 +253,10 @@ where
     // Two-adicity is needed to re-base the quotient's coefficient slices
     // onto the trace domain; every FRI-based config is two-adic anyway.
     Val<SC>: TwoAdicField + Ord,
-    A: BaseAir<Val<SC>> + for<'a> Air<ProverConstraintFolder<'a, Val<SC>, SC::Challenge>>,
+    // The prover evaluates constraints through their compiled form, obtained
+    // by running the AIR once over the symbolic builder (same bound as
+    // system setup) — not through a folder over the AIR itself.
+    A: BaseAir<Val<SC>> + Air<SymbolicAirBuilder<Val<SC>, SC::Challenge>>,
 {
     /// Generates a STARK proof for the system with a single claim.
     ///
@@ -465,8 +469,30 @@ where
                     acc,
                     *next_acc,
                 ];
-                let quotient_values = quotient_values::<SC, _>(
+                // Lower the circuit's symbolic constraints into the linear
+                // program the evaluation loop executes. The hash-consing pass
+                // collapses duplicated sub-expressions, so this once-per-proof
+                // cost buys a much cheaper per-row evaluation below.
+                let _g = tracing::info_span!("quotient/compile").entered();
+                let symbolic_constraints = get_symbolic_constraints::<Val<SC>, SC::Challenge, _>(
                     air,
+                    circuit.preprocessed_width,
+                    circuit.stage_1_width,
+                    circuit.stage_2_width,
+                    public_values.len(),
+                    LOOKUP_PUBLIC_SIZE,
+                );
+                debug_assert_eq!(symbolic_constraints.len(), circuit.constraint_count);
+                let compiled = CompiledConstraints::<Val<SC>, SC::Challenge>::compile(
+                    &symbolic_constraints,
+                    circuit.preprocessed_width,
+                    circuit.stage_1_width,
+                    circuit.stage_2_width,
+                );
+                drop(_g);
+                let _g = tracing::info_span!("quotient/values").entered();
+                let quotient_values = quotient_values::<SC>(
+                    &compiled,
                     &public_values,
                     &stage_2_public_values,
                     trace_domain,
@@ -477,6 +503,8 @@ where
                     constraint_challenge,
                     circuit.constraint_count,
                 );
+                drop(_g);
+                let _g = tracing::info_span!("quotient/split").entered();
                 let quotient_flat =
                     RowMajorMatrix::new_col(quotient_values).flatten_to_base::<Val<SC>>();
                 // The quotient has degree greater than the trace polynomials,
@@ -507,6 +535,7 @@ where
                         trace_domain.first_point(),
                     )
                     .to_row_major_matrix();
+                drop(_g);
                 acc = *next_acc;
                 (trace_domain, quotient_chunks_evals)
             });
@@ -592,8 +621,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn quotient_values<SC, A>(
-    air: &A,
+fn quotient_values<SC>(
+    compiled: &CompiledConstraints<Val<SC>, SC::Challenge>,
     public_values: &[Val<SC>],
     stage_2_public_values: &[SC::Challenge],
     trace_domain: Domain<SC>,
@@ -606,14 +635,8 @@ fn quotient_values<SC, A>(
 ) -> Vec<SC::Challenge>
 where
     SC: StarkGenericConfig,
-    A: for<'a> Air<ProverConstraintFolder<'a, Val<SC>, SC::Challenge>>,
 {
     let quotient_size = quotient_domain.size();
-    let stage_1_width = stage_1_on_quotient_domain.width();
-    let stage_2_width = stage_2_on_quotient_domain.width();
-    let preprocessed_width = preprocessed_on_quotient_domain
-        .as_ref()
-        .map_or(0, |mat| mat.width());
     let mut sels = trace_domain.selectors_on_coset(quotient_domain);
 
     let qdb = log2_strict_usize(quotient_domain.size()) - log2_strict_usize(trace_domain.size());
@@ -629,89 +652,73 @@ where
     let mut alpha_powers = alpha.powers().collect_n(constraint_count);
     alpha_powers.reverse();
 
-    let decomposed_alpha_powers: Vec<_> = (0
-        ..<SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION)
-        .map(|i| {
-            alpha_powers
-                .iter()
-                .map(|x| x.as_basis_coefficients_slice()[i])
-                .collect()
-        })
-        .collect();
+    let prepared = compiled.prepare(public_values, stage_2_public_values, &alpha_powers);
+
     #[cfg(feature = "parallel")]
     {
         (0..quotient_size)
             .into_par_iter()
             .step_by(PackedVal::<SC>::WIDTH)
-            .flat_map_iter(|i_start| {
-                quotient_values_inner::<SC, A>(
-                    air,
-                    public_values,
-                    stage_2_public_values,
-                    &sels,
-                    quotient_size,
-                    preprocessed_on_quotient_domain,
-                    stage_1_on_quotient_domain,
-                    stage_2_on_quotient_domain,
-                    stage_1_width,
-                    stage_2_width,
-                    preprocessed_width,
-                    &alpha_powers,
-                    &decomposed_alpha_powers,
-                    next_step,
-                    i_start,
-                )
-            })
+            .map_init(
+                || compiled.scratch(),
+                |scratch, i_start| {
+                    quotient_values_inner::<SC>(
+                        compiled,
+                        &prepared,
+                        &sels,
+                        quotient_size,
+                        preprocessed_on_quotient_domain,
+                        stage_1_on_quotient_domain,
+                        stage_2_on_quotient_domain,
+                        next_step,
+                        i_start,
+                        scratch,
+                    )
+                },
+            )
+            .flatten_iter()
             .collect()
     }
     #[cfg(not(feature = "parallel"))]
     {
-        (0..quotient_size)
-            .step_by(PackedVal::<SC>::WIDTH)
-            .flat_map_iter(|i_start| {
-                quotient_values_inner::<SC, A>(
-                    air,
-                    public_values,
-                    stage_2_public_values,
-                    &sels,
-                    quotient_size,
-                    preprocessed_on_quotient_domain,
-                    stage_1_on_quotient_domain,
-                    stage_2_on_quotient_domain,
-                    stage_1_width,
-                    stage_2_width,
-                    preprocessed_width,
-                    &alpha_powers,
-                    &decomposed_alpha_powers,
-                    next_step,
-                    i_start,
-                )
-            })
-            .collect()
+        let mut scratch = compiled.scratch();
+        let mut values = Vec::with_capacity(quotient_size);
+        for i_start in (0..quotient_size).step_by(PackedVal::<SC>::WIDTH) {
+            values.extend(quotient_values_inner::<SC>(
+                compiled,
+                &prepared,
+                &sels,
+                quotient_size,
+                preprocessed_on_quotient_domain,
+                stage_1_on_quotient_domain,
+                stage_2_on_quotient_domain,
+                next_step,
+                i_start,
+                &mut scratch,
+            ));
+        }
+        values
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn quotient_values_inner<SC, A>(
-    air: &A,
-    stage_1_public_values: &[Val<SC>],
-    stage_2_public_values: &[SC::Challenge],
+fn quotient_values_inner<SC>(
+    compiled: &CompiledConstraints<Val<SC>, SC::Challenge>,
+    prepared: &PreparedConstraints<Val<SC>, SC::Challenge>,
     sels: &LagrangeSelectors<Vec<Val<SC>>>,
     quotient_size: usize,
     preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_, SC>>,
     stage_1_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
     stage_2_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
-    stage_1_width: usize,
-    stage_2_width: usize,
-    preprocessed_width: usize,
-    alpha_powers: &[SC::Challenge],
-    decomposed_alpha_powers: &[Vec<Val<SC>>],
     next_step: usize,
     i_start: usize,
-) -> impl Iterator<Item = SC::Challenge>
+    scratch: &mut Scratch<Val<SC>, SC::Challenge>,
+    // The returned iterator owns its data (`use<SC>`): it must not capture
+    // the input borrows, so each worker's scratch can be reused while
+    // previously returned iterators are still being drained.
+) -> impl Iterator<Item = SC::Challenge> + use<SC>
 where
     SC: StarkGenericConfig,
-    A: for<'a> Air<ProverConstraintFolder<'a, Val<SC>, SC::Challenge>>,
 {
     let i_range = i_start..i_start + PackedVal::<SC>::WIDTH;
 
@@ -720,54 +727,37 @@ where
     let is_transition = *PackedVal::<SC>::from_slice(&sels.is_transition[i_range.clone()]);
     let inv_vanishing = *PackedVal::<SC>::from_slice(&sels.inv_vanishing[i_range]);
 
-    let preprocessed = preprocessed_on_quotient_domain
-        .as_ref()
-        .map(|on_quotient_domain| {
-            RowMajorMatrix::new(
-                on_quotient_domain.vertically_packed_row_pair(i_start, next_step),
-                preprocessed_width,
-            )
-        });
-    let stage_1 = RowMajorMatrix::new(
-        stage_1_on_quotient_domain.vertically_packed_row_pair::<PackedVal<SC>>(i_start, next_step),
-        stage_1_width,
-    );
-    let extension_d = <PackedChallenge<SC> as BasedVectorSpace<PackedVal<SC>>>::DIMENSION;
-    let stage_2 = RowMajorMatrix::new(
-        pack::<SC>(
-            stage_2_on_quotient_domain.width(),
-            stage_2_on_quotient_domain.wrapping_row_slices(i_start, PackedVal::<SC>::WIDTH),
-        )
-        .chain(pack::<SC>(
-            stage_2_on_quotient_domain.width(),
-            stage_2_on_quotient_domain
-                .wrapping_row_slices(i_start + next_step, PackedVal::<SC>::WIDTH),
-        ))
-        .collect::<Vec<_>>(),
-        stage_2_width / extension_d,
-    );
+    // Local row followed by next row, matching the compiled program's flat
+    // `offset * width + column` operand indexing.
+    let preprocessed: Option<Vec<PackedVal<SC>>> =
+        preprocessed_on_quotient_domain
+            .as_ref()
+            .map(|on_quotient_domain| {
+                on_quotient_domain.vertically_packed_row_pair(i_start, next_step)
+            });
+    let stage_1: Vec<PackedVal<SC>> =
+        stage_1_on_quotient_domain.vertically_packed_row_pair(i_start, next_step);
+    let stage_2: Vec<PackedChallenge<SC>> = pack::<SC>(
+        stage_2_on_quotient_domain.width(),
+        stage_2_on_quotient_domain.wrapping_row_slices(i_start, PackedVal::<SC>::WIDTH),
+    )
+    .chain(pack::<SC>(
+        stage_2_on_quotient_domain.width(),
+        stage_2_on_quotient_domain.wrapping_row_slices(i_start + next_step, PackedVal::<SC>::WIDTH),
+    ))
+    .collect();
 
-    let accumulator = PackedChallenge::<SC>::ZERO;
-    let mut folder = ProverConstraintFolder {
-        preprocessed: match preprocessed.as_ref() {
-            Some(mat) => RowWindow::from_view(&mat.as_view()),
-            None => RowWindow::from_two_rows(&[], &[]),
-        },
-        stage_1: stage_1.as_view(),
-        stage_2: stage_2.as_view(),
-        stage_1_public_values,
-        stage_2_public_values,
+    let chunk = RowChunk {
+        stage_1: &stage_1,
+        preprocessed: preprocessed.as_deref().unwrap_or(&[]),
+        stage_2: &stage_2,
         is_first_row,
         is_last_row,
         is_transition,
-        alpha_powers,
-        decomposed_alpha_powers,
-        accumulator,
-        constraint_index: 0,
     };
-    air.eval(&mut folder);
+    let accumulator = compiled.eval(prepared, &chunk, scratch);
 
-    let quotient = folder.accumulator * inv_vanishing;
+    let quotient = accumulator * inv_vanishing;
 
     (0..quotient_size.min(PackedVal::<SC>::WIDTH)).map(move |idx_in_packing| {
         SC::Challenge::from_basis_coefficients_fn(|coeff_idx| {

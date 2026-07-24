@@ -2,6 +2,7 @@ use p3_air::ExtensionBuilder;
 use p3_matrix::Matrix;
 
 pub mod check;
+pub mod compiled;
 pub mod folder;
 pub mod symbolic;
 
