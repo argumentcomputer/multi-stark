@@ -324,19 +324,9 @@ where
         let mut stage_1_trace_evaluations = vec![];
         let mut stage_2_trace_evaluations = vec![];
         let mut quotient_chunks_evaluations = vec![];
-        let mut last_quotient_i = 0;
         for pos in 0..active_indices.len() {
             let log_degree = log_degrees[pos];
-            let quotient_degree = quotient_degrees[pos];
-            let log_quotient_degree = log2_strict_usize(quotient_degree);
             let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
-            let quotient_domain =
-                trace_domain.create_disjoint_domain((1 << log_degree) << log_quotient_degree);
-            let quotient_chunks_domains = quotient_domain.split_domains(quotient_degree);
-            let unshifted_quotient_chunks_domains = quotient_chunks_domains
-                .iter()
-                .map(|domain| pcs.natural_domain_for_degree(domain.size()))
-                .collect::<Vec<_>>();
             let zeta_next = trace_domain
                 .next_point(zeta)
                 .ok_or(VerificationError::InvalidProofShape)?;
@@ -354,15 +344,12 @@ where
                     (zeta_next, stage_2_opened_values[pos][1].clone()),
                 ],
             ));
-            let iter = unshifted_quotient_chunks_domains
-                .into_iter()
-                .zip(
-                    quotient_opened_values[last_quotient_i..last_quotient_i + quotient_degree]
-                        .iter(),
-                )
-                .map(|(domain, opened_values)| (domain, vec![(zeta, opened_values[0].clone())]));
-            quotient_chunks_evaluations.extend(iter);
-            last_quotient_i += quotient_degree;
+            // All of a circuit's quotient coefficient slices live in one
+            // matrix on the trace domain, opened once at ζ.
+            quotient_chunks_evaluations.push((
+                trace_domain,
+                vec![(zeta, quotient_opened_values[pos][0].clone())],
+            ));
         }
         // The preprocessed commitment covers ALL preprocessed matrices, in
         // canonical slot order; inactive circuits' matrices are opened at no
@@ -424,7 +411,6 @@ where
         // use the opened values to compute the composition polynomial for each circuit
         // and check that the evaluation of the composition polynomial equals the
         // product of the zerofier with the quotient
-        let mut last_quotient_i = 0;
         for (pos, &ci) in active_indices.iter().enumerate() {
             let circuit = &self.circuits[ci];
             let degree = 1 << log_degrees[pos];
@@ -434,11 +420,7 @@ where
             let stage_1_next_row = &stage_1_opened_values[pos][1];
             let stage_2_row = &stage_2_opened_values[pos][0];
             let stage_2_next_row = &stage_2_opened_values[pos][1];
-            let quotient_chunks = quotient_opened_values
-                [last_quotient_i..last_quotient_i + quotient_degree]
-                .iter()
-                .map(|values| &values[0]);
-            last_quotient_i += quotient_degree;
+            let quotient_row = &quotient_opened_values[pos][0];
 
             // compute the composition polynomial evaluation
             let trace_domain = pcs.natural_domain_for_degree(degree);
@@ -489,30 +471,16 @@ where
             };
             circuit.air.eval(&mut folder);
             let composition_polynomial = folder.accumulator;
-            // compute the quotient evaluation
-            let quotient_domain = trace_domain.create_disjoint_domain(degree * quotient_degree);
-            let quotient_chunks_domains = quotient_domain.split_domains(quotient_degree);
-            let zps = quotient_chunks_domains
-                .iter()
-                .enumerate()
-                .map(|(i, domain)| {
-                    quotient_chunks_domains
-                        .iter()
-                        .enumerate()
-                        .filter(|(j, _)| *j != i)
-                        .map(|(_, other_domain)| {
-                            other_domain.vanishing_poly_at_point(zeta)
-                                * other_domain
-                                    .vanishing_poly_at_point(domain.first_point())
-                                    .inverse()
-                        })
-                        .product::<SC::Challenge>()
-                })
-                .collect::<Vec<_>>();
-            let quotient = quotient_chunks
-                .enumerate()
-                .map(|(ch_i, ch)| zps[ch_i] * from_ext_basis::<Val<SC>, SC::Challenge>(ch))
+            // Recombine the quotient from its coefficient slices:
+            // `Q(ζ) = Σᵢ ζ^{i·n}·cᵢ(ζ)`, with each slice's value read from
+            // the wide quotient matrix opened at ζ.
+            let zeta_pow_n = zeta.exp_power_of_2(log2_strict_usize(degree));
+            let quotient = quotient_row
+                .chunks_exact(extension_d)
+                .zip(zeta_pow_n.powers())
+                .map(|(chunk, zeta_pow)| zeta_pow * from_ext_basis::<Val<SC>, SC::Challenge>(chunk))
                 .sum::<SC::Challenge>();
+            debug_assert_eq!(quotient_row.len(), quotient_degree * extension_d);
 
             // Soundness: OOD check. If any constraint is violated on the trace
             // domain, the composition polynomial is not divisible by the vanishing
@@ -676,24 +644,24 @@ where
             );
             quotient_degrees.push(quotient_degree);
         }
-        let quotient_size: usize = quotient_degrees.iter().sum();
+        // One wide quotient matrix per active circuit, holding all its
+        // coefficient slices, opened at the single point ζ.
         ensure_eq!(
             quotient_opened_values.len(),
-            quotient_size,
+            num_active,
             VerificationError::InvalidProofShape
         );
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..quotient_size {
+        for (pos, quotient_degree) in quotient_degrees.iter().enumerate() {
             // zeta
             let num_openings = 1;
             ensure_eq!(
-                quotient_opened_values[i].len(),
+                quotient_opened_values[pos].len(),
                 num_openings,
                 VerificationError::InvalidProofShape
             );
             ensure_eq!(
-                quotient_opened_values[i][0].len(),
-                <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION,
+                quotient_opened_values[pos][0].len(),
+                quotient_degree * <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION,
                 VerificationError::InvalidProofShape
             );
         }
