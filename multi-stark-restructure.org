@@ -1,0 +1,584 @@
+#+title: Multi-STARK constraint restructure
+#+author: Gabriel Barreto, Claude
+#+startup: overview
+
+Design document for replacing the Plonky3-inherited builder traits with a
+first-class expression IR. Circuits become /data/; the prover, verifier
+and debug checker become /interpreters/ of that data.
+
+Status: DRAFT — under discussion, nothing implemented yet.
+
+* Motivation
+
+The current constraint machinery is inherited from uni-stark and pays for
+that inheritance in several ways:
+
+- One circuit, four evaluations, four builders :: every AIR must be
+  evaluated against =SymbolicAirBuilder= (setup: constraint count, degree),
+  =ProverConstraintFolder= (quotient computation, packed values),
+  =VerifierConstraintFolder= (OOD check) and =DebugConstraintBuilder=
+  (trace checking). Each is a separate impl of =AirBuilder= +
+  =ExtensionBuilder= + =TwoStagedBuilder=, and the semantics of a
+  constraint is smeared across all four.
+- Viral generics :: =System<SC, A>= carries the AIR type parameter;
+  the prover needs =A: for<'a> Air<ProverConstraintFolder<'a, ..>>=, the
+  verifier its own bound, etc. Mixing heterogeneous circuits in one system
+  forces artificial enums (see =CS= in the lookup tests).
+- Constraints are code, not data :: they cannot be serialized, hashed,
+  inspected, or constructed across the FFI boundary (Lean must go through
+  Rust codegen to define circuits).
+- Interpretation is expensive :: =SymbolicExpression= is a boxed tree;
+  pointer-chasing evaluation, allocation-heavy construction, recursive
+  walks per row.
+- Recomputation :: the same subexpressions reappear across many
+  constraints (heavily so in Aiur's generated circuits: selector products,
+  lookup argument fingerprints, the shared accumulator expression that
+  =LookupAir::eval= clones into both the transition and last-row
+  constraints). Tree representation recomputes them per constraint,
+  per row.
+- Hidden constraint synthesis :: =LookupAir::eval= generates the stage-2
+  constraints imperatively inside the builder callback, so the actual
+  constraint set of a circuit exists nowhere as an object.
+
+* Goals
+
+- A circuit is defined by data:
+  1. a vector of base-field expressions that must evaluate to 0 on every
+     trace row (window = current and next row only);
+  2. a vector of extension-field expressions (same vanishing semantics)
+     whose primitives — variables and constants — are arrays of fixed
+     size D, the extension degree;
+  3. a vector of lookups, each a multiplicity plus a vector of arguments,
+     all of them expressions.
+- Two-layer architecture: an ergonomic *frontend* expression type used
+  only at construction time, and a *compiled* flat format produced when
+  the system is built — the only thing the prover/verifier/checker ever
+  touch, and the serialization target.
+- The compiled format is *base-field only*: extension constraints are
+  coordinate-expanded into D base constraints at compile time. One node
+  sort, one evaluation buffer, one folding path.
+- Compiled expressions are hash-consed: structurally equal expressions
+  get equal indices, so shared work is computed once per row, and index
+  equality doubles as structural equality.
+- One evaluation semantics, several evaluation /contexts/ (prover /
+  verifier / debug / lookup-witness) that only decide the value type and
+  where leaves get their values.
+- Kill the builder traits: =AirBuilder=, =ExtensionBuilder=,
+  =TwoStagedBuilder=, the three folders and the symbolic builder all go.
+- =System<SC, A>= → =System<SC>=; circuits are values, heterogeneous by
+  construction.
+- Keep the protocol (transcript, commitments, lookup argument, quotient,
+  FRI) byte-for-byte identical, with one deliberate exception: the
+  transcript additionally binds a hash of the constraint system (see
+  "Transcript binding").
+
+Non-goals (for this restructure):
+
+- No change to the logUp argument itself, stage-2 trace layout, or proof
+  format.
+- No new window sizes: only =row= and =next_row= are addressable
+  (offset 0 or 1), as today.
+- No algebraic-optimization framework beyond hash-consing, constant
+  folding and the expansion rules — though the compiled form unlocks
+  passes later.
+
+* Architecture
+
+#+begin_example
+  frontend Expr trees            compiled Circuit                 evaluation
+  (per-circuit, ergonomic)       (flat, base-only, interned,      contexts
+                                  serializable)
+┌──────────────────────┐  Sys- ┌───────────────────────────────┐ ┌──────────────┐
+│ CircuitSpec          │  tem  │ nodes: Vec<Node>  (unique,    │ │ prover:      │
+│  · constraints       │ ────▶ │       topo-ordered, deduped)  │ │  packed vals │
+│  · ext_constraints   │  new  │ zeros: root ids               │▶│ verifier: EF │
+│  · lookups           │       │       (ext expanded ×D)       │ │ checker: F   │
+│  · widths, preproc.  │       │ lookups: ids                  │ │ lookup wit.  │
+└──────────────────────┘       │ degrees, counts, segments     │ └──────────────┘
+                               └───────────────────────────────┘
+#+end_example
+
+** Frontend: expression trees
+
+The frontend exists only while a circuit is being described; its cost is
+irrelevant, so it optimizes for ergonomics — an owned tree with operator
+overloading, much like today's =SymbolicExpression= minus the degree
+bookkeeping (degrees are computed at compile time, memoized per interned
+node):
+
+#+begin_src rust
+pub enum Expr<F> {
+    Const(F),
+    Var(ColRef),            // { source, offset (Current|Next), index }
+    Public(u32),
+    IsFirstRow, IsLastRow, IsTransition,
+    Add(Box<Self>, Box<Self>), Sub(Box<Self>, Box<Self>),
+    Mul(Box<Self>, Box<Self>), Neg(Box<Self>),
+}
+
+pub enum ExtExpr<F> {
+    /// The D-tuple primitive: an array of D base-field coordinates.
+    Coords(Vec<Expr<F>>),   // length D, checked at compile time
+    /// Implicit embedding of a base expression (`From<Expr<F>>`), so
+    /// mixed arithmetic like `m * inv` needs no explicit lift.
+    Base(Box<Expr<F>>),
+    Add(Box<Self>, Box<Self>), Sub(Box<Self>, Box<Self>),
+    Mul(Box<Self>, Box<Self>), Neg(Box<Self>),
+}
+
+pub struct Lookup<E> {
+    pub multiplicity: E,
+    pub args: Vec<E>,
+}
+
+pub struct CircuitSpec<F: Field> {
+    pub main_width: usize,
+    pub preprocessed: Option<RowMajorMatrix<F>>,
+    /// Base-field constraints: each must evaluate to 0 on every row.
+    pub constraints: Vec<Expr<F>>,
+    /// Extension-field constraints, same vanishing semantics.
+    pub ext_constraints: Vec<ExtExpr<F>>,
+    /// Lookup specifications; used for BOTH witness generation and
+    /// stage-2 constraint synthesis.
+    pub lookups: Vec<Lookup<Expr<F>>>,
+}
+#+end_src
+
+Constructors and =Add=/=Sub=/=Mul=/=Neg= operator impls give natural
+authoring syntax (=input.clone() * inv - F::ONE=), with constant folding
+in the operators as today. Mixed impls (=Mul<ExtExpr> for Expr=, etc.)
+route through =ExtExpr::Base=, so base values combine with extension
+values without any visible lift. Conveniences: =ExtExpr::constant(EF)=,
+=stage2(j)= (the D flattened columns of stage-2 slot j),
+=horner(γ, args)=.
+
+Deep frontend trees dropped recursively can overflow the stack (a latent
+issue =SymbolicExpression= shares); compilation is iterative, and a
+manual iterative =Drop= impl is cheap insurance.
+
+** Compiled format: one flat, interned, base-only vector
+
+=System::new= compiles each =CircuitSpec= into the format everything
+else consumes:
+
+#+begin_src rust
+pub struct NodeId(u32);
+
+pub enum Node<F> {
+    Const(F),
+    Var(ColRef),
+    Public(u32),
+    IsFirstRow, IsLastRow, IsTransition,
+    Add(NodeId, NodeId), Sub(NodeId, NodeId),
+    Mul(NodeId, NodeId), Neg(NodeId),
+}
+
+pub struct Circuit<F> {
+    /// The unique expression vector; all constraints and lookups of
+    /// this circuit share it.
+    nodes: Vec<Node<F>>,
+    /// Constraint roots, in canonical order: compiled `constraints`,
+    /// then each `ext_constraints` entry expanded to its D coordinate
+    /// roots, then the synthesized lookup constraints (×D each).
+    zeros: Vec<NodeId>,
+    lookups: Vec<Lookup<NodeId>>,
+    // -- metadata (computed once, per node / per circuit) --
+    degrees: Vec<u8>,
+    constraint_count: usize, max_constraint_degree: usize,
+    main_width: usize, preprocessed_width: usize, stage_2_width: usize,
+    /// nodes[..lookup_prefix_len] is exactly the set of nodes reachable
+    /// from the lookup expressions (see "Partial evaluation").
+    lookup_prefix_len: u32,
+}
+#+end_src
+
+Properties, all established during compilation:
+
+- Children by index, no boxes :: nodes reference children through
+  =u32= ids into the same vector; evaluation is array indexing, not
+  pointer chasing. The format is trivially serializable (this compiled
+  form — not the frontend — is the serialization target, for storage
+  and for the Lean FFI).
+- Topological order :: interning is bottom-up, so a node's children
+  always have smaller indices (children-before-parents; leaves are not
+  necessarily all at the front). Index order is a valid evaluation
+  order; no scheduling pass needed.
+- Hash-consing :: a =HashMap<Node, NodeId>= during compilation maps
+  each structurally distinct node to exactly one index. Children are
+  already canonical ids when a parent is interned, so interning is O(1)
+  per node and sharing is automatic and complete: *index equality ⇔
+  structural equality*. Commutative normalization: =Add= and =Mul=
+  operand ids are sorted before interning, so =a + b= and =b + a=
+  collapse to one node. An expression appearing in ten constraints
+  occupies one slot and is evaluated once per row. The intern map is
+  dropped after compilation.
+- Cross-root sharing for free :: the synthesized stage-2 constraints
+  intern into the same vector as the user constraints and lookups, so
+  fingerprint arguments, multiplicities and the accumulator expression
+  are shared with — not duplicated from — the lookup specs they came
+  from. Likewise the D coordinate roots of one extension constraint
+  share their cross-coordinate products.
+
+** Coordinate expansion of extension constraints
+
+Extension constraints do not survive compilation: each =ExtExpr= is
+expanded into its D base-field coordinate expressions, which are
+interned like any other. An EF equation =E = 0= holds iff its D
+coordinates are 0, so the D roots are appended to =zeros= in coordinate
+order. The compiled format therefore has a single sort, a single
+buffer, and a single folding path; there is no extension arithmetic in
+constraint evaluation at all.
+
+Expansion works on coordinate vectors =[e_0, …, e_{D-1}]= of frontend
+base expressions:
+
+| ext expression   | coordinates                                          |
+|------------------+------------------------------------------------------|
+| =Coords([e_j])=  | =[e_0, …, e_{D-1}]= — literally its array            |
+| =Base(e)=        | =[e, 0, …, 0]=                                       |
+| =Add= / =Sub= / =Neg= | coordinate-wise                                 |
+| =Mul=            | binomial multiplication (=X^D = W=), see below       |
+
+Multiplication needs the extension's structure: compilation requires
+the binomial parameter W (p3's =BinomiallyExtendable=; every extension
+used with this crate is binomial). For D=2 the emitted form is
+Karatsuba — =[a_0 b_0 + W·a_1 b_1, (a_0+a_1)(b_0+b_1) − a_0 b_0 − a_1 b_1]=
+— matching the 3-mult cost of p3's native extension multiplication;
+schoolbook expansion for general D. The shared products are single
+interned nodes used by all D coordinate roots.
+
+Constant folding during interning makes the zero coordinates of
+=Base(e)= embeddings vanish: a scalar–extension product
+=Base(m) · inv= expands to exactly D multiplications
+=[m·inv_0, …, m·inv_{D-1}]= — the scalar structure is preserved by
+construction, with no strength-reduction pass.
+
+Consequences of expansion:
+
+- constraint counts: one frontend ext constraint contributes D entries
+  to =zeros= (and consumes D α powers); =constraint_count= reflects the
+  expanded count consistently on both sides;
+- degrees are preserved coordinate-wise;
+- the verifier evaluates the expanded base nodes in EF at ζ (more EF
+  multiplications than native extension evaluation would use —
+  negligible at a single point);
+- expansion correctness is property-tested against concrete EF
+  arithmetic: evaluate the frontend =ExtExpr= directly in EF on random
+  values vs. assemble the D expanded coordinates.
+
+** Evaluation: dense sweep, index-addressed buffer
+
+The evaluation buffer has *one slot per node* (sized by the node
+vector; constraint roots are just indices into it). The vector is
+topologically ordered and every node is a subexpression of some root,
+so evaluation is a single forward sweep:
+
+#+begin_src text
+for i in 0..nodes.len() { buf[i] = eval(nodes[i], buf, ctx) }
+read constraint values off buf at the root ids
+#+end_src
+
+Each node is computed exactly once per row-window. Buffers are
+allocated once and reused across all rows of a circuit (one per rayon
+worker on the quotient domain).
+
+*** Partial evaluation (lookup witness)
+
+=LookupValues::compute= runs after stage 1 only, evaluating just the
+lookup multiplicities/args over F. Compilation interns the lookup
+expressions *first*, so they occupy the prefix
+=[0..lookup_prefix_len)= by construction (see the compilation order
+under "Stage-2 constraint synthesis"). Lookup-witness evaluation
+sweeps the prefix; constraint evaluation sweeps the whole vector.
+
+*** Evaluation contexts
+
+One evaluator, generic over a context that fixes the value type and
+supplies leaf values:
+
+#+begin_src rust
+pub trait EvalContext<F: Field> {
+    /// F (debug, lookup witness), PackedVal<F> (prover), EF (verifier).
+    type Val: Algebra<F> + Copy;
+
+    fn var(&self, col: ColRef) -> Self::Val;
+    fn public(&self, idx: u32) -> Self::Val;
+    fn is_first_row(&self) -> Self::Val;
+    fn is_last_row(&self) -> Self::Val;
+    fn is_transition(&self) -> Self::Val;
+}
+#+end_src
+
+- Prover (quotient domain) :: =Val = PackedVal<F>=. Leaf values come
+  from the LDE matrices exactly as =quotient_values_inner= gathers them
+  today.
+- Verifier (at ζ) :: =Val = EF=. =var= reads opened values; selectors
+  are the Lagrange evaluations at ζ.
+- Debug checker :: =Val = F= over actual trace rows; replaces
+  =check_constraints= / =DebugConstraintBuilder=. Reports the failing
+  constraint id and row.
+- Lookup witness :: prefix sweep with =Val = F=; replaces
+  =SymbolicExpression::interpret=.
+
+*** Composition polynomial (prover pipeline)
+
+Per circuit, walking the quotient domain in packets of
+=PackedVal::WIDTH= points:
+
+1. gather leaf values from the LDE matrices (packed base values;
+   selectors and =inv_vanishing= precomputed once per circuit by
+   =selectors_on_coset=, the latter batch-inverted — nonzero since the
+   quotient domain is a disjoint coset);
+2. sweep: fill =buf: Vec<PackedVal>=;
+3. fold with the constraint challenge α, one power sequence over the
+   canonical root order (=α^{k−1−i}= for constraint =i= of =k=), via
+   the decomposed-α path (D base-field =batched_linear_combination=s,
+   one per basis coordinate);
+4. =quotient = folded_acc · inv_vanishing=.
+
+Unpacking to EF values, iDFT, coefficient slicing into =q= chunks and
+the single wide commit per circuit are unchanged from today; only the
+=air.eval(&mut folder)= step is replaced by sweep-then-fold.
+
+** The array-primitive rule (=Coords=)
+
+The extension *leaf* is an array of D base expressions — the value
+=Σ_j coord_j · b_j= (b_j = j-th basis element of EF over F). It covers
+the genuine D-tuples, values that only exist as D base coordinates:
+
+| what                        | coords array                                      |
+|-----------------------------+---------------------------------------------------|
+| ext constant =c=            | =[Const(c_0), …, Const(c_{D-1})]=                 |
+| stage-2 ext column =j=      | =[Var(Stage2, o, jD), …, Var(Stage2, o, jD+D-1)]= |
+| lookup public =k= (β, γ, …) | =[Public(kD), …, Public(kD+D-1)]=                 |
+
+Under coordinate expansion the rule is literal: the j-th coordinate of
+a =Coords= leaf *is* its j-th array element, so the basis combination
+never needs to be computed at runtime. =Source::Stage2= refers to the
+stage-2 trace in its *flattened base column* layout (width
+=(1 + num_lookups) · D=) — precisely how it is committed, opened, and
+served on the quotient domain today.
+
+** Public inputs
+
+One flat vector of *base-field coordinates* per circuit replaces the two
+current public-value spaces:
+
+- indices =0 .. 4·D=: the lookup publics as coordinates — β, γ, current
+  accumulator, next accumulator (each an EF value stored as its D basis
+  coefficients);
+- indices beyond that: reserved for future base-field io publics
+  (=io_size= is 0 everywhere today).
+
+The prover holds the EF values and exposes
+=as_basis_coefficients_slice()=; the verifier embeds the coordinates
+into EF; the debug checker uses them directly. Publics have degree 0.
+
+** Stage-2 constraint synthesis
+
+Replaces =LookupAir::eval_with_preprocessed_row=. Synthesis is a plain
+frontend-to-frontend function,
+=synthesize_lookup_constraints(&spec.lookups) -> Vec<ExtExpr>=, called
+by =System::new=; its output is indistinguishable from user-authored
+=ext_constraints= and goes through the same expansion and interning.
+It owns two conventions:
+
+- stage-2 column layout: accumulator in slot 0, then one inverse
+  column per lookup, in lookup order (=stage_2_width = 1 + L=
+  extension columns, =(1+L)·D= flattened);
+- publics layout: indices =0..4D= are the coordinates of β, γ, acc,
+  next_acc.
+
+Per-circuit compilation order in =System::new=:
+
+1. intern the lookup multiplicities and args
+   (→ =Vec<Lookup<NodeId>>=, =lookup_prefix_len = nodes.len()=);
+2. intern the user's base constraints;
+3. expand + intern the user's ext constraints;
+4. expand + intern the synthesized lookup constraints — their
+   fingerprint args and multiplicities re-resolve to the prefix nodes
+   from step 1, so the prefix segmentation holds by construction and
+   nothing is duplicated;
+5. degrees, counts, validation; then the preprocessed commitment and
+   constraint-system hash as before.
+
+The prover/verifier core never knows that lookups generate
+constraints; it only sees roots. With
+=β, γ, acc, next_acc= the four lookup publics (as =Coords= over
+=Public= nodes), =acc_col= / =next_acc_col= the stage-2 accumulator
+column at offsets 0/1, and =inv_j= the stage-2 column of lookup =j=,
+the synthesized constraints are:
+
+- for each lookup =j= with multiplicity =m_j= and args =a_{j,0..}=:
+  - =msg_j = β + Horner(γ; a_{j,0}, …)= (fingerprint)
+  - constraint: =msg_j · inv_j − 1 = 0=
+- =acc_expr = acc_col + Σ_j m_j · inv_j= — each term expands to D
+  scalar multiplications; built once, and the interner makes its two
+  uses below point at the same nodes
+- =IsFirstRow · (acc_col − acc) = 0=
+- =IsTransition · (acc_expr − next_acc_col) = 0=
+- =IsLastRow · (acc_expr − next_acc) = 0=
+
+Synthesis order is canonical: per-lookup inverse constraints in lookup
+order, then the three accumulator constraints, appended after the
+user's =ext_constraints=.
+
+** Constraint ordering and α-folding
+
+Canonical root order per circuit: compiled =constraints= in vector
+order, then =ext_constraints= in vector order (each contributing its D
+coordinate roots in coordinate order), then the synthesized lookup
+constraints (×D each). The folded accumulator keeps today's binding:
+root =i= of =k= is weighted by =α^{k−1−i}= (prover pre-reverses powers;
+verifier Horner-folds), uniformly through the decomposed-α batched
+path. Since prover and verifier interpret the *same data*, order
+agreement is structural rather than by convention.
+
+** Transcript binding
+
+=observe_shape= additionally observes a hash of the canonical
+serialization of the compiled constraint system (all circuits: node
+vectors, roots, lookups, widths), computed once at =System::new=.
+Today only summary numbers (counts, widths, degrees) enter the
+transcript, so two systems with identical shape but different
+constraints derive identical challenges; binding the content closes
+that gap — relevant when circuit descriptions come from multiple
+implementations (Lean vs Rust) or when proofs are interpreted relative
+to a claimed circuit identity. This is the one deliberate transcript
+change of the restructure; old proofs stop verifying.
+
+** Validation
+
+Checked once at compilation (hard error, not panic-in-prover):
+
+- every =Coords= array has length exactly D (D taken from
+  =SC::Challenge='s =DIMENSION= at runtime; the base field must expose
+  the binomial parameter W for expansion);
+- =ColRef.index= within the declared width of its source;
+- base constraints and lookup expressions must not reference
+  =Source::Stage2= (stage-2 columns are extension coordinates; touching
+  them from a base expression is almost certainly a bug — and lookups
+  are evaluated before stage 2 exists);
+- =Public= indices within the declared public size (=4·D= for now);
+- a fully base-field =ExtExpr= constraint (e.g. a bare =ExtExpr::Base=)
+  is rejected with "state it as a base constraint" — its expansion
+  would be one real constraint plus D−1 trivial zeros;
+- degree ≤ what the PCS supports (same check as today, moved here).
+
+* What gets deleted
+
+- =src/builder/mod.rs= (=TwoStagedBuilder=)
+- =src/builder/symbolic.rs= (=SymbolicAirBuilder=, =SymbolicExpression=,
+  =SymbolicVariable=, =Entry=, =get_symbolic_constraints=, …) — the
+  frontend =Expr= replaces the tree, the compiled =Circuit= replaces the
+  symbolic pass
+- =src/builder/folder.rs= (both folders)
+- =src/builder/check.rs= (rewritten as an evaluator context)
+- =LookupAir= and its =Air= / =BaseAir= impls (=lookup.rs= keeps
+  =Lookup=, =LookupValues=, the stage-2 trace builder, fingerprints)
+- the =A= type parameter and all =Air<…Folder>= bounds in =System=,
+  prover, verifier
+- the =p3_air= dependency from this crate's public API (=Air=,
+  =BaseAir=, =AirBuilder=, =RowWindow= usages)
+
+* Unlocked (not in scope, but motivating)
+
+- Lean constructs Aiur circuits across the FFI as serialized compiled
+  data — a single base-field node type, no Rust codegen step.
+- Further compile passes over the flat vector (algebraic
+  simplification, dead-node sweeps) as needed.
+- Index-as-identity enables cheap equality anywhere circuits are
+  compared, diffed, or cached downstream.
+
+* Migration plan
+
+1. New modules: =src/expr.rs= (frontend trees, operators),
+   =src/circuit.rs= (compiled format, interning compiler, coordinate
+   expansion, degrees, segments, validation), =src/eval.rs= (context
+   trait, dense-sweep evaluator) — with unit tests: interning (index
+   equality ⇔ structural equality, sharing across constraints), degree
+   accounting, expansion vs. concrete EF arithmetic on random values,
+   prefix segmentation, evaluation vs hand-computed values.
+2. Stage-2 synthesis, with a test asserting it reproduces the old
+   =LookupAir= constraint set (while both representations coexist).
+3. Port prover (=quotient_values= → evaluator with prover context),
+   verifier, checker; drop =A= generics.
+4. Rewrite =test_circuits=, lookup tests, examples, benches with the
+   frontend API.
+5. Delete =src/builder/=; drop =p3_air= from the API.
+6. Downstream: migrate Aiur's =constraints.rs= in the ix repo (separate
+   effort, coordinated bump); expected win there from interning, given
+   how much expression reuse Aiur's generated constraints have.
+
+* Resolved
+
+** DONE Mixing base and extension leaves in one expression
+The mixing is unavoidable in substance (multiplicities and fingerprint
+args are base values inside extension constraints); the question was
+where the seam lives. Resolution: the frontend bridges with
+=ExtExpr::Base= + =From= + mixed operator impls, so authors write
+=m * inv= with no visible lift; the seam is then eliminated entirely by
+coordinate expansion (below) — the compiled format has one sort, and
+scalar structure is preserved because =Base(e)= expands to
+=[e, 0, …, 0]= whose zero coordinates fold away.
+
+** DONE Extension constraints compile to D base constraints
+Rather than keeping extension nodes in the compiled format (evaluated
+in extension arithmetic, one α power each), each extension constraint
+is coordinate-expanded at compile time. Trade, considered and accepted:
+- requires the binomial structure (W) of the extension — narrows
+  genericity from any =ExtensionField= to binomial extensions, which is
+  all this crate uses;
+- expansion must emit Karatsuba for D=2 to match native ext-mult cost;
+- D α powers per ext constraint and ~D× more verifier EF mults at ζ —
+  both negligible.
+In exchange: single node sort, single buffer, uniform decomposed-α
+folding, no =Operand= tags or =from_coords= at runtime, DAG-shared
+cross-coordinate products, and a strictly simpler serialization/FFI
+surface.
+
+** DONE Evaluation strategy
+Dense forward sweep over the topologically-ordered node vector, one
+buffer slot per node, reused across rows; prefix segmentation for the
+lookup-witness pass. (Subsumes the lazy =Vec<Option<V>>= memo-table
+variant.)
+
+** DONE Extension degree D: runtime value
+Coordinate expansion erases D from the compiled format — the evaluator
+never sees it, so a runtime D has zero post-compilation cost. D appears
+at runtime only inside the compilation pass (=Coords= lengths,
+expansion loops, publics indexing) and, as today, through the concrete
+monomorphized extension types in α-folding and stage-2 trace
+construction. Const-generic =[T; D]= would buy nothing and needs
+=generic_const_exprs= (or a threaded =const D= parameter) because
+=DIMENSION= is an associated const.
+
+** DONE User-authored ext constraints are allowed
+=ext_constraints= is a real user-facing field, not just synthesis
+output: the synthesized lookup constraints are themselves written with
+the same frontend (there is no builder anymore), so the capability
+exists regardless; exposing it enables custom extension-field
+arguments. Note: custom arguments needing their own stage-2 columns
+would require a stage-2 width-extension mechanism (future work); the
+current layout is exactly =1 + L= columns, owned by the synthesis.
+
+** DONE Selectors are expression leaves
+=IsFirstRow= / =IsLastRow= / =IsTransition= are leaves, not
+per-constraint domain tags — more general constraints (mixed or nested
+gating, selectors inside shared subexpressions), degree-exact, and
+matches what the synthesis emits.
+
+** DONE Constraint-system hash is bound into the transcript
+See "Transcript binding". The one deliberate transcript change of the
+restructure.
+
+** DONE Commutative normalization, in v1
+=Add= and =Mul= operand ids are sorted before interning, so
+=a + b= ≡ =b + a= collapse to one node. Free soundness-wise; the minor
+authored-vs-compiled mismatch is an acceptable debugging cost.
+
+* Open questions
+
+** TODO Naming bikeshed
+=CircuitSpec= / =Circuit=? =zeros= vs =constraints=? =Coords= vs
+=Basis= vs =ExtFromBase=?
