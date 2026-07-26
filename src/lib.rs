@@ -1,5 +1,6 @@
 pub mod builder;
 pub mod config;
+pub mod constraint;
 pub mod lookup;
 pub mod prover;
 pub mod system;
