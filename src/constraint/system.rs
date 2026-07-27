@@ -7,13 +7,15 @@
 //! appends the synthesized lookup constraints, and compiles.
 
 use p3_challenger::CanObserve;
-use p3_commit::Pcs;
+use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 use crate::config::{Com, PcsData, StarkGenericConfig, Val};
+use crate::lookup::LookupValues;
 
 use super::circuit::{Circuit as CompiledCircuit, ExtensionParams, compile};
+use super::eval::VarValues;
 use super::expr::{CircuitSpec, Expr, ExtExpr};
 use super::lookup::{Lookup, num_publics, stage2_width, synthesize_lookups};
 
@@ -185,6 +187,108 @@ impl<SC: StarkGenericConfig> System<SC> {
             observe(circuit.stage_2_width);
         }
     }
+}
+
+/// Witness data for the system: stage-1 traces and the concrete lookup
+/// values derived from them.
+#[derive(Clone)]
+pub struct SystemWitness<F: Field> {
+    pub traces: Vec<RowMajorMatrix<F>>,
+    pub lookups: Vec<LookupValues<F>>,
+}
+
+impl<F: Field> SystemWitness<F> {
+    /// Builds the witness from the stage-1 traces, computing each circuit's
+    /// lookup values by sweeping the compiled lookup prefix over its rows.
+    ///
+    /// # Panics
+    /// Panics if the number of traces differs from the number of circuits,
+    /// or if a circuit with a preprocessed trace receives a main trace of a
+    /// different height.
+    pub fn from_stage_1<SC>(traces: Vec<RowMajorMatrix<F>>, system: &System<SC>) -> Self
+    where
+        SC: StarkGenericConfig,
+        SC::Pcs: Pcs<SC::Challenge, SC::Challenger, Domain: PolynomialSpace<Val = F>>,
+    {
+        assert_eq!(
+            traces.len(),
+            system.circuits.len(),
+            "expected one trace per circuit"
+        );
+        let lookups = traces
+            .iter()
+            .zip(&system.circuits)
+            .enumerate()
+            .map(|(i, (trace, circuit))| {
+                if let Some(preprocessed) = &circuit.preprocessed {
+                    assert_eq!(
+                        trace.height(),
+                        preprocessed.height(),
+                        "circuit {i}: main trace height must equal preprocessed trace height"
+                    );
+                }
+                compute_lookup_values(circuit, trace)
+            })
+            .collect();
+        Self { traces, lookups }
+    }
+}
+
+/// Computes a circuit's concrete lookup values by sweeping the compiled
+/// lookup prefix over each row (with wrap-around for the next-row window).
+fn compute_lookup_values<F: Field>(
+    circuit: &Circuit<F>,
+    trace: &RowMajorMatrix<F>,
+) -> LookupValues<F> {
+    let height = trace.height();
+    let slot_widths: Vec<usize> = circuit
+        .compiled
+        .lookups
+        .iter()
+        .map(|lookup| lookup.args.len())
+        .collect();
+    // No rows, or no lookups: nothing to sweep, but preserve num_lookups.
+    if height == 0 || slot_widths.is_empty() {
+        return LookupValues::builder(height, &slot_widths).finish();
+    }
+
+    let preprocessed = circuit.preprocessed.as_ref();
+    let empty: [F; 0] = [];
+    let mut builder = LookupValues::builder(height, &slot_widths);
+    let mut buf = Vec::new();
+    let mut args = Vec::new();
+    let mut writers = builder.rows_mut();
+    for (r, writer) in writers.iter_mut().enumerate() {
+        let r_next = (r + 1) % height;
+        let main_cur = trace.row_slice(r).unwrap();
+        let main_next = trace.row_slice(r_next).unwrap();
+        let preprocessed_rows =
+            preprocessed.map(|pp| (pp.row_slice(r).unwrap(), pp.row_slice(r_next).unwrap()));
+        let (pp_cur, pp_next): (&[F], &[F]) = match &preprocessed_rows {
+            Some((cur, next)) => (cur, next),
+            None => (&empty, &empty),
+        };
+        let view = VarValues {
+            preprocessed: [pp_cur, pp_next],
+            main: [&main_cur, &main_next],
+            stage2: [&empty, &empty],
+            publics: &empty,
+            is_first_row: if r == 0 { F::ONE } else { F::ZERO },
+            is_last_row: if r == height - 1 { F::ONE } else { F::ZERO },
+            is_transition: if r == height - 1 { F::ZERO } else { F::ONE },
+        };
+        circuit.compiled.sweep_lookup_prefix(&view, &mut buf);
+        for (slot, lookup) in circuit.compiled.lookups.iter().enumerate() {
+            let multiplicity = buf[lookup.multiplicity.index()];
+            args.clear();
+            args.extend(lookup.args.iter().map(|a| buf[a.index()]));
+            // The multiplicity expression already carries its sign, so store
+            // it as-is (push semantics).
+            writer.push(slot, multiplicity, &args);
+        }
+    }
+    drop(writers);
+    builder.finish()
 }
 
 /// Extracts the binomial extension parameters of the challenge field

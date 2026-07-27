@@ -5,30 +5,35 @@
 //! trees also get a direct recursive evaluator, used as the reference in
 //! tests (with genuine extension-field arithmetic for `ExtExpr`).
 
-use p3_field::Field;
+use p3_field::{Algebra, Field};
 
 use super::circuit::{Circuit, ExtensionParams, Node, NodeId};
 use super::expr::{ColRef, Expr, ExtExpr, RowOffset, Source};
 use super::lookup::Lookup;
 
-/// Concrete values for every leaf: the two-row window of each trace
-/// matrix, the public inputs and the selector values.
+/// Concrete leaf values for a sweep, in the working type `W`: the two-row
+/// window of each trace matrix, the public inputs and the selector values.
+///
+/// `W` is the type the sweep computes in — `F` for the debug/witness paths,
+/// `PackedVal` on the quotient domain (prover), `EF` at ζ (verifier). The
+/// compiled node constants (base field `F`) embed into `W` via `Algebra<F>`.
 #[derive(Clone, Debug)]
-pub struct VarValues<'a, F> {
+pub struct VarValues<'a, W> {
     /// `[current_row, next_row]` of the preprocessed trace.
-    pub preprocessed: [&'a [F]; 2],
+    pub preprocessed: [&'a [W]; 2],
     /// `[current_row, next_row]` of the main trace.
-    pub main: [&'a [F]; 2],
+    pub main: [&'a [W]; 2],
     /// `[current_row, next_row]` of the stage-2 trace (flattened base columns).
-    pub stage2: [&'a [F]; 2],
-    pub publics: &'a [F],
-    pub is_first_row: F,
-    pub is_last_row: F,
-    pub is_transition: F,
+    pub stage2: [&'a [W]; 2],
+    /// Public inputs, as base-field coordinates embedded into `W`.
+    pub publics: &'a [W],
+    pub is_first_row: W,
+    pub is_last_row: W,
+    pub is_transition: W,
 }
 
-impl<F: Field> VarValues<'_, F> {
-    fn var(&self, col: &ColRef) -> F {
+impl<W: Copy> VarValues<'_, W> {
+    fn var(&self, col: &ColRef) -> W {
         let rows = match col.source {
             Source::Preprocessed => &self.preprocessed,
             Source::Main => &self.main,
@@ -43,24 +48,33 @@ impl<F: Field> VarValues<'_, F> {
 }
 
 impl<F: Field> Circuit<F> {
-    /// Dense forward sweep over the whole node vector; fills `buf` with
-    /// one value per node.
-    pub fn sweep(&self, values: &VarValues<'_, F>, buf: &mut Vec<F>) {
+    /// Dense forward sweep over the whole node vector, in working type `W`;
+    /// fills `buf` with one value per node.
+    pub fn sweep<W: Algebra<F> + Copy>(&self, values: &VarValues<'_, W>, buf: &mut Vec<W>) {
         self.sweep_range(values, buf, self.nodes.len());
     }
 
     /// Sweeps only the lookup prefix (partial evaluation for the lookup
     /// witness).
-    pub fn sweep_lookup_prefix(&self, values: &VarValues<'_, F>, buf: &mut Vec<F>) {
+    pub fn sweep_lookup_prefix<W: Algebra<F> + Copy>(
+        &self,
+        values: &VarValues<'_, W>,
+        buf: &mut Vec<W>,
+    ) {
         self.sweep_range(values, buf, self.lookup_prefix_len);
     }
 
-    fn sweep_range(&self, values: &VarValues<'_, F>, buf: &mut Vec<F>, len: usize) {
+    fn sweep_range<W: Algebra<F> + Copy>(
+        &self,
+        values: &VarValues<'_, W>,
+        buf: &mut Vec<W>,
+        len: usize,
+    ) {
         buf.clear();
         buf.reserve(len);
         for node in &self.nodes[..len] {
             let value = match node {
-                Node::Const(c) => *c,
+                Node::Const(c) => (*c).into(),
                 Node::Var(col) => values.var(col),
                 Node::Public(i) => values.publics[*i as usize],
                 Node::IsFirstRow => values.is_first_row,
@@ -76,12 +90,12 @@ impl<F: Field> Circuit<F> {
     }
 
     /// The constraint values, read off a full sweep buffer.
-    pub fn constraint_values(&self, buf: &[F]) -> Vec<F> {
+    pub fn constraint_values<W: Copy>(&self, buf: &[W]) -> Vec<W> {
         self.zeros.iter().map(|z| buf[z.index()]).collect()
     }
 
     /// The concrete lookup values, read off a (prefix or full) sweep buffer.
-    pub fn lookup_values(&self, buf: &[F]) -> Vec<Lookup<F>> {
+    pub fn lookup_values<W: Copy>(&self, buf: &[W]) -> Vec<Lookup<W>> {
         self.lookups
             .iter()
             .map(|lookup| Lookup {
@@ -92,7 +106,7 @@ impl<F: Field> Circuit<F> {
     }
 
     /// Convenience: sweep and return the constraint values.
-    pub fn evaluate_constraints(&self, values: &VarValues<'_, F>) -> Vec<F> {
+    pub fn evaluate_constraints<W: Algebra<F> + Copy>(&self, values: &VarValues<'_, W>) -> Vec<W> {
         let mut buf = Vec::new();
         self.sweep(values, &mut buf);
         self.constraint_values(&buf)
