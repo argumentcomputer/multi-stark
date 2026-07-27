@@ -9,6 +9,7 @@
 pub mod circuit;
 pub mod eval;
 pub mod expr;
+pub mod synth;
 
 #[cfg(test)]
 mod tests;

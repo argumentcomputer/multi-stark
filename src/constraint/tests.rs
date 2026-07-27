@@ -3,6 +3,7 @@ use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
 use super::circuit::{Circuit, CompileError, ExtensionParams, Node, compile};
 use super::eval::{VarValues, check_topological_order, eval_expr, eval_ext_expr};
 use super::expr::{CircuitSpec, Expr, ExtExpr, Lookup, RowOffset, Source};
+use super::synth::{num_publics, stage2_width, synthesize_lookups};
 use crate::types::Val;
 
 type G = Val;
@@ -530,4 +531,137 @@ fn trivial_zero_constraints_dropped_and_duplicates_deduped() {
     };
     let circuit = compile(&spec, &params(true)).unwrap();
     assert_eq!(circuit.zeros.len(), 1);
+}
+
+// -- lookup synthesis ---------------------------------------------------
+
+fn ext_add(a: [G; 2], b: [G; 2]) -> [G; 2] {
+    [a[0] + b[0], a[1] + b[1]]
+}
+
+fn ext_sub(a: [G; 2], b: [G; 2]) -> [G; 2] {
+    [a[0] - b[0], a[1] - b[1]]
+}
+
+fn ext_scalar(s: G, a: [G; 2]) -> [G; 2] {
+    [s * a[0], s * a[1]]
+}
+
+/// Independent reference for the logUp stage-2 constraints, matching the
+/// formulas in `LookupAir::eval`, in coordinate form (W = 7). Order:
+/// per-lookup `message·inv − 1`, then first-row, transition, last-row.
+#[allow(clippy::too_many_arguments)]
+fn logup_reference(
+    mults: &[G],
+    args: &[Vec<G>],
+    beta: [G; 2],
+    gamma: [G; 2],
+    acc: [G; 2],
+    next_acc: [G; 2],
+    acc_col: [G; 2],
+    next_acc_col: [G; 2],
+    invs: &[[G; 2]],
+    is_first: G,
+    is_transition: G,
+    is_last: G,
+) -> Vec<[G; 2]> {
+    let w = gl(7);
+    let mut out = Vec::new();
+    let mut acc_expr = acc_col;
+    for j in 0..mults.len() {
+        // fingerprint = Σ_i args[j][i] · γ^i
+        let mut fingerprint = [G::ZERO, G::ZERO];
+        let mut gamma_pow = [G::ONE, G::ZERO];
+        for &arg in &args[j] {
+            fingerprint = ext_add(fingerprint, ext_scalar(arg, gamma_pow));
+            gamma_pow = ext_mul(gamma_pow, gamma, w);
+        }
+        let message = ext_add(beta, fingerprint);
+        out.push(ext_sub(ext_mul(message, invs[j], w), [G::ONE, G::ZERO]));
+        acc_expr = ext_add(acc_expr, ext_scalar(mults[j], invs[j]));
+    }
+    out.push(ext_scalar(is_first, ext_sub(acc_col, acc)));
+    out.push(ext_scalar(is_transition, ext_sub(acc_expr, next_acc_col)));
+    out.push(ext_scalar(is_last, ext_sub(acc_expr, next_acc)));
+    out
+}
+
+#[test]
+fn synthesize_lookups_matches_reference() {
+    let d = 2;
+    // lookup 0: multiplicity main0, args [main1, main2]
+    // lookup 1: multiplicity main3, args [main4]
+    let lookups = vec![
+        Lookup {
+            multiplicity: Expr::main(0),
+            args: vec![Expr::main(1), Expr::main(2)],
+        },
+        Lookup {
+            multiplicity: Expr::main(3),
+            args: vec![Expr::main(4)],
+        },
+    ];
+    let l = lookups.len();
+    let synth = synthesize_lookups(&lookups, d);
+    // one message/inverse constraint per lookup, plus first/transition/last.
+    assert_eq!(synth.len(), l + 3);
+
+    let main_width = 5;
+    let s2w = stage2_width(l, d); // (1 + 2) * 2 = 6
+    let npub = num_publics(d); //     4 * 2 = 8
+    let p = params(true);
+
+    let mut rng = Rng::new(0xA11CE);
+    for _ in 0..5 {
+        let main_cur: Vec<G> = (0..main_width).map(|_| rng.g()).collect();
+        let main_next: Vec<G> = (0..main_width).map(|_| rng.g()).collect();
+        let s2_cur: Vec<G> = (0..s2w).map(|_| rng.g()).collect();
+        let s2_next: Vec<G> = (0..s2w).map(|_| rng.g()).collect();
+        let publics: Vec<G> = (0..npub).map(|_| rng.g()).collect();
+        let (is_first, is_last, is_transition) = (rng.g(), rng.g(), rng.g());
+
+        // Extension coordinate of slot `slot`, at degree d = 2.
+        let coord = |v: &[G], slot: usize| [v[slot * 2], v[slot * 2 + 1]];
+        let reference = logup_reference(
+            &[main_cur[0], main_cur[3]],
+            &[vec![main_cur[1], main_cur[2]], vec![main_cur[4]]],
+            coord(&publics, 0),                      // β
+            coord(&publics, 1),                      // γ
+            coord(&publics, 2),                      // acc
+            coord(&publics, 3),                      // next_acc
+            coord(&s2_cur, 0),                       // acc_col (slot 0, current row)
+            coord(&s2_next, 0),                      // next_acc_col (slot 0, next row)
+            &[coord(&s2_cur, 1), coord(&s2_cur, 2)], // inverses
+            is_first,
+            is_transition,
+            is_last,
+        );
+
+        // Compile and evaluate each synthesized constraint in isolation so
+        // its two coordinate roots are the whole `zeros`; compare as a
+        // multiset since compilation sorts the roots.
+        for (i, constraint) in synth.iter().enumerate() {
+            let spec = CircuitSpec {
+                main_width,
+                stage2_width: s2w,
+                num_publics: npub,
+                ext_constraints: vec![constraint.clone()],
+                ..Default::default()
+            };
+            let circuit = compile(&spec, &p).unwrap();
+            let empty: Vec<G> = vec![];
+            let view = VarValues {
+                preprocessed: [&empty, &empty],
+                main: [&main_cur, &main_next],
+                stage2: [&s2_cur, &s2_next],
+                publics: &publics,
+                is_first_row: is_first,
+                is_last_row: is_last,
+                is_transition,
+            };
+            let compiled = sorted_by_canonical(circuit.evaluate_constraints(&view));
+            let expected = sorted_by_canonical(reference[i].to_vec());
+            assert_eq!(compiled, expected, "constraint {i}");
+        }
+    }
 }
