@@ -97,10 +97,24 @@ pub enum CompileError {
     PurelyBaseExtConstraint {
         constraint: usize,
     },
+    /// A constraint (or extension-constraint coordinate) that compiles to
+    /// a nonzero constant: it can never vanish, so the system would be
+    /// unprovable. `coordinate` is `None` for a base constraint, `Some(k)`
+    /// for coordinate `k` of extension constraint `constraint`.
+    UnsatisfiableConstant {
+        constraint: usize,
+        coordinate: Option<usize>,
+    },
 }
 
 /// Compiles a circuit spec. Interning order: lookups first (they form the
 /// prefix), then base constraints, then expanded extension constraints.
+///
+/// Constraint roots are canonicalized: a root that compiles to a constant
+/// is dropped if zero (vacuous) or rejected if nonzero (unsatisfiable),
+/// and the survivors are sorted by node id and deduplicated. The compiled
+/// constraint set is therefore independent of the order and multiplicity
+/// in which constraints were authored.
 pub fn compile<F: Field>(
     spec: &CircuitSpec<F>,
     params: &ExtensionParams<F>,
@@ -120,15 +134,24 @@ pub fn compile<F: Field>(
     let lookup_prefix_len = interner.nodes.len();
 
     let mut zeros = Vec::new();
-    for constraint in &spec.constraints {
-        zeros.push(interner.compile_expr(constraint, spec, false)?);
+    for (i, constraint) in spec.constraints.iter().enumerate() {
+        let root = interner.compile_expr(constraint, spec, false)?;
+        record_zero(&interner, &mut zeros, root, i, None)?;
     }
     for (i, constraint) in spec.ext_constraints.iter().enumerate() {
         if constraint.is_purely_base() {
             return Err(CompileError::PurelyBaseExtConstraint { constraint: i });
         }
-        zeros.extend(interner.expand_ext(constraint, spec, params, i)?);
+        let coords = interner.expand_ext(constraint, spec, params, i)?;
+        for (coord, root) in coords.into_iter().enumerate() {
+            record_zero(&interner, &mut zeros, root, i, Some(coord))?;
+        }
     }
+    // Canonicalize: sort by node id and drop duplicate roots. Index
+    // equality is structural equality, so this deduplicates constraints
+    // that became equal under interning (e.g. `a + b` and `b + a`).
+    zeros.sort_unstable();
+    zeros.dedup();
 
     let max_constraint_degree = zeros
         .iter()
@@ -143,6 +166,29 @@ pub fn compile<F: Field>(
         lookup_prefix_len,
         max_constraint_degree,
     })
+}
+
+/// Records a constraint root, handling the constant cases: a nonzero
+/// constant is rejected (unsatisfiable), a zero constant is dropped
+/// (vacuous), anything else is appended.
+fn record_zero<F: Field>(
+    interner: &Interner<F>,
+    zeros: &mut Vec<NodeId>,
+    root: NodeId,
+    constraint: usize,
+    coordinate: Option<usize>,
+) -> Result<(), CompileError> {
+    match interner.as_const(root) {
+        Some(c) if c == F::ZERO => {}
+        Some(_) => {
+            return Err(CompileError::UnsatisfiableConstant {
+                constraint,
+                coordinate,
+            });
+        }
+        None => zeros.push(root),
+    }
+    Ok(())
 }
 
 /// Bottom-up interner. Children are canonical ids before a parent is

@@ -1,4 +1,4 @@
-use p3_field::{Field, PrimeCharacteristicRing};
+use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
 
 use super::circuit::{Circuit, CompileError, ExtensionParams, Node, compile};
 use super::eval::{VarValues, check_topological_order, eval_expr, eval_ext_expr};
@@ -91,6 +91,13 @@ fn count_nodes<F: Field>(circuit: &Circuit<F>, pred: impl Fn(&Node<F>) -> bool) 
     circuit.nodes.iter().filter(|n| pred(n)).count()
 }
 
+/// Sorts field values canonically, for order-independent multiset compares
+/// (compilation sorts constraint roots by node id).
+fn sorted_by_canonical(mut values: Vec<G>) -> Vec<G> {
+    values.sort_by_key(|v| v.as_canonical_u64());
+    values
+}
+
 // -- extension-field reference arithmetic (quadratic, X² = W) --
 
 fn ext_mul(a: [G; 2], b: [G; 2], w: G) -> [G; 2] {
@@ -116,7 +123,8 @@ fn interning_shares_across_constraints() {
         ..Default::default()
     };
     let circuit = compile(&spec, &params(true)).unwrap();
-    assert_eq!(circuit.zeros[0], circuit.zeros[1]);
+    // Both constraints intern to the same root, so dedup leaves one.
+    assert_eq!(circuit.zeros.len(), 1);
     // var a, var b, mul, var c, add — nothing else.
     assert_eq!(circuit.nodes.len(), 5);
 }
@@ -124,7 +132,9 @@ fn interning_shares_across_constraints() {
 #[test]
 fn constant_folding_in_interner() {
     // Raw tree constructors bypass the frontend operators' own folding,
-    // so this exercises the interner's folding rules.
+    // so this exercises the interner's folding rules. Three constraints
+    // fold to `x` (deduped to one root) and two fold to the zero constant
+    // (dropped as vacuous).
     let x = || Box::new(Expr::<G>::main(0));
     let zero = || Box::new(Expr::Const(G::ZERO));
     let one = || Box::new(Expr::Const(G::ONE));
@@ -133,29 +143,30 @@ fn constant_folding_in_interner() {
         constraints: vec![
             Expr::Add(x(), zero()),              // x + 0 = x
             Expr::Mul(x(), one()),               // x * 1 = x
-            Expr::Mul(x(), zero()),              // x * 0 = 0
-            Expr::Sub(x(), x()),                 // x - x = 0
+            Expr::Mul(x(), zero()),              // x * 0 = 0  (dropped)
+            Expr::Sub(x(), x()),                 // x - x = 0  (dropped)
             Expr::Neg(Box::new(Expr::Neg(x()))), // -(-x) = x
-            Expr::Add(Box::new(Expr::Const(gl(2))), Box::new(Expr::Const(gl(3)))),
         ],
         ..Default::default()
     };
     let circuit = compile(&spec, &params(true)).unwrap();
-    let var = circuit.zeros[0];
+    // The zero-folded constraints are dropped; the three `x` roots dedup.
+    assert_eq!(circuit.zeros.len(), 1);
     assert_eq!(
-        circuit.nodes[var.index()],
+        circuit.nodes[circuit.zeros[0].index()],
         Node::Var(super::expr::ColRef {
             source: Source::Main,
             offset: RowOffset::Current,
             index: 0,
         })
     );
-    assert_eq!(circuit.zeros[1], var);
-    assert_eq!(circuit.zeros[4], var);
-    let zero_node = circuit.zeros[2];
-    assert_eq!(circuit.nodes[zero_node.index()], Node::Const(G::ZERO));
-    assert_eq!(circuit.zeros[3], zero_node);
-    assert_eq!(circuit.nodes[circuit.zeros[5].index()], Node::Const(gl(5)));
+    // Folding did produce a zero constant node in the pool.
+    assert!(
+        circuit
+            .nodes
+            .iter()
+            .any(|n| matches!(n, Node::Const(c) if *c == G::ZERO))
+    );
 }
 
 #[test]
@@ -202,16 +213,19 @@ fn degree_accounting() {
             Expr::IsFirstRow * (x.clone() * y.clone() - z.clone()), // 1 + 2 = 3
             Expr::IsTransition * (x.clone() * y),                   // 0 + 2 = 2
             Expr::public(0) * x,                                    // 0 + 1 = 1
-            Expr::constant(gl(42)),                                 // 0
+            Expr::public(0),                                        // 0 (not a constant)
         ],
         ..Default::default()
     };
     let circuit = compile(&spec, &params(true)).unwrap();
-    let degree = |i: usize| circuit.degrees[circuit.zeros[i].index()];
-    assert_eq!(degree(0), 3);
-    assert_eq!(degree(1), 2);
-    assert_eq!(degree(2), 1);
-    assert_eq!(degree(3), 0);
+    // Roots are sorted, so check the degree multiset rather than positions.
+    let mut degrees: Vec<u32> = circuit
+        .zeros
+        .iter()
+        .map(|z| circuit.degrees[z.index()])
+        .collect();
+    degrees.sort_unstable();
+    assert_eq!(degrees, vec![0, 1, 2, 3]);
     assert_eq!(circuit.max_constraint_degree, 3);
 }
 
@@ -239,8 +253,12 @@ fn sweep_matches_reference_eval() {
     for _ in 0..5 {
         let values = OwnedValues::random(&spec, &mut rng);
         let view = values.view();
-        let compiled = circuit.evaluate_constraints(&view);
-        let reference: Vec<G> = constraints.iter().map(|c| eval_expr(c, &view)).collect();
+        // The four constraints are distinct and non-constant, so the
+        // compiled roots are the same four values; compare as multisets
+        // since compilation sorts the roots.
+        let compiled = sorted_by_canonical(circuit.evaluate_constraints(&view));
+        let reference =
+            sorted_by_canonical(constraints.iter().map(|c| eval_expr(c, &view)).collect());
         assert_eq!(compiled, reference);
     }
 }
@@ -270,25 +288,25 @@ fn ext_test_constraints() -> (CircuitSpec<G>, Vec<ExtExpr<G>>) {
 
 #[test]
 fn expansion_matches_extension_field_reference() {
-    // Compiled coordinates (Karatsuba and schoolbook) must both agree
-    // with a direct recursive evaluation in genuine EF arithmetic.
+    // Compiled coordinates (Karatsuba and schoolbook) must both agree with
+    // a direct recursive evaluation in genuine EF arithmetic. Compile each
+    // extension constraint in isolation so its two coordinate roots are the
+    // whole `zeros`; compare as a multiset since compilation sorts them.
     let (spec, ext_constraints) = ext_test_constraints();
     for karatsuba in [true, false] {
         let p = params(karatsuba);
-        let circuit = compile(&spec, &p).unwrap();
-        assert_eq!(circuit.zeros.len(), 2 * ext_constraints.len());
         let mut rng = Rng::new(0xDEADBEEF);
-        for _ in 0..5 {
-            let values = OwnedValues::random(&spec, &mut rng);
-            let view = values.view();
-            let compiled = circuit.evaluate_constraints(&view);
-            for (i, constraint) in ext_constraints.iter().enumerate() {
-                let reference = eval_ext_expr(constraint, &view, &p);
-                assert_eq!(
-                    &compiled[2 * i..2 * i + 2],
-                    reference.as_slice(),
-                    "constraint {i}, karatsuba={karatsuba}"
-                );
+        for (i, constraint) in ext_constraints.iter().enumerate() {
+            let mut spec_i = spec.clone();
+            spec_i.ext_constraints = vec![constraint.clone()];
+            let circuit = compile(&spec_i, &p).unwrap();
+            assert_eq!(circuit.zeros.len(), 2);
+            for _ in 0..5 {
+                let values = OwnedValues::random(&spec_i, &mut rng);
+                let view = values.view();
+                let compiled = sorted_by_canonical(circuit.evaluate_constraints(&view));
+                let reference = sorted_by_canonical(eval_ext_expr(constraint, &view, &p));
+                assert_eq!(compiled, reference, "constraint {i}, karatsuba={karatsuba}");
             }
         }
     }
@@ -461,10 +479,55 @@ fn validation_errors() {
     // An ext constraint built solely from base embeddings is rejected.
     let spec = CircuitSpec {
         ext_constraints: vec![ExtExpr::from(Expr::main(0)) * Expr::main(1)],
-        ..base
+        ..base.clone()
     };
     assert_eq!(
         compile(&spec, &p),
         Err(CompileError::PurelyBaseExtConstraint { constraint: 0 })
     );
+
+    // A base constraint that compiles to a nonzero constant is unsatisfiable.
+    let spec = CircuitSpec {
+        constraints: vec![Expr::constant(gl(7))],
+        ..base.clone()
+    };
+    assert_eq!(
+        compile(&spec, &p),
+        Err(CompileError::UnsatisfiableConstant {
+            constraint: 0,
+            coordinate: None,
+        })
+    );
+
+    // Same for a nonzero-constant coordinate of an extension constraint
+    // (coordinate 0 here; the constraint is not purely base, so it passes
+    // that check first).
+    let spec = CircuitSpec {
+        ext_constraints: vec![ExtExpr::constant(vec![gl(5), G::ZERO])],
+        ..base
+    };
+    assert_eq!(
+        compile(&spec, &p),
+        Err(CompileError::UnsatisfiableConstant {
+            constraint: 0,
+            coordinate: Some(0),
+        })
+    );
+}
+
+#[test]
+fn trivial_zero_constraints_dropped_and_duplicates_deduped() {
+    let (a, b) = (Expr::main(0), Expr::main(1));
+    let spec = CircuitSpec {
+        main_width: 2,
+        constraints: vec![
+            Expr::constant(G::ZERO), // literal 0 = 0, dropped
+            a.clone() - a.clone(),   // folds to 0, dropped
+            a.clone() + b.clone(),   // kept
+            b + a,                   // same node as above, deduped
+        ],
+        ..Default::default()
+    };
+    let circuit = compile(&spec, &params(true)).unwrap();
+    assert_eq!(circuit.zeros.len(), 1);
 }

@@ -423,16 +423,30 @@ Synthesis order is canonical: per-lookup inverse constraints in lookup
 order, then the three accumulator constraints, appended after the
 user's =ext_constraints=.
 
-** Constraint ordering and α-folding
+** Constraint canonicalization, ordering and α-folding
 
-Canonical root order per circuit: compiled =constraints= in vector
-order, then =ext_constraints= in vector order (each contributing its D
-coordinate roots in coordinate order), then the synthesized lookup
-constraints (×D each). The folded accumulator keeps today's binding:
-root =i= of =k= is weighted by =α^{k−1−i}= (prover pre-reverses powers;
-verifier Horner-folds), uniformly through the decomposed-α batched
-path. Since prover and verifier interpret the *same data*, order
-agreement is structural rather than by convention.
+All constraint roots — compiled =constraints=, the coordinate roots of
+=ext_constraints=, and the synthesized lookup constraints — are pooled,
+then canonicalized:
+
+- a root that compiles to a *constant* is dropped if zero (vacuous:
+  =0 = 0=, =x − x=, =x · 0=) and rejected if nonzero
+  (=UnsatisfiableConstant=: the constraint can never vanish, so the
+  system would be unprovable);
+- the survivors are *sorted by node id and deduplicated*. Index equality
+  is structural equality, so this collapses constraints that became
+  equal under interning (=a + b= and =b + a=, or the same equation
+  authored twice).
+
+The result is a set of roots in ascending node-id order, independent of
+the order and multiplicity in which constraints were authored — so two
+specs differing only in constraint order or duplication compile to the
+same circuit (and the same constraint-system hash). The folded
+accumulator keeps today's binding: root =i= of =k= is weighted by
+=α^{k−1−i}= (prover pre-reverses powers; verifier Horner-folds),
+uniformly through the decomposed-α batched path. Since prover and
+verifier interpret the *same* canonical data, order agreement is
+structural rather than by convention.
 
 ** Transcript binding
 
@@ -463,6 +477,9 @@ Checked once at compilation (hard error, not panic-in-prover):
 - a fully base-field =ExtExpr= constraint (e.g. a bare =ExtExpr::Base=)
   is rejected with "state it as a base constraint" — its expansion
   would be one real constraint plus D−1 trivial zeros;
+- a constraint (or ext-constraint coordinate) that compiles to a nonzero
+  constant is rejected (=UnsatisfiableConstant=); a zero constant is
+  dropped, not an error (see "Constraint canonicalization");
 - degree ≤ what the PCS supports (same check as today, moved here).
 
 * What gets deleted
