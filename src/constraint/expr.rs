@@ -8,6 +8,8 @@ use std::ops::{Add, Mul, Neg, Sub};
 
 use p3_field::Field;
 
+use super::lookup::Lookup;
+
 /// Which committed matrix a column variable refers to.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Source {
@@ -61,14 +63,6 @@ pub enum ExtExpr<F> {
     Sub(Box<Self>, Box<Self>),
     Mul(Box<Self>, Box<Self>),
     Neg(Box<Self>),
-}
-
-/// A lookup: a multiplicity and a vector of arguments. `E` is a frontend
-/// expression in a [`CircuitSpec`] and a node id once compiled.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Lookup<E> {
-    pub multiplicity: E,
-    pub args: Vec<E>,
 }
 
 /// What the user hands to the system, per circuit.

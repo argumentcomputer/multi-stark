@@ -1,6 +1,10 @@
-//! Synthesis of the logUp stage-2 constraints from a circuit's lookups.
+//! Lookups and synthesis of the logUp stage-2 constraints.
 //!
-//! Replaces the imperative constraint generation in `LookupAir::eval` with a
+//! Defines the [`Lookup`] type (a multiplicity and its arguments) and the
+//! synthesis of the running-accumulator argument's constraints from a
+//! circuit's lookups.
+//!
+//! Synthesis replaces the imperative constraint generation in `LookupAir::eval` with a
 //! frontend-to-frontend function: given the lookups, it produces the
 //! extension-field constraints for the running-accumulator argument, as
 //! ordinary [`ExtExpr`] data. `System::new` appends these to the spec's
@@ -18,7 +22,15 @@
 
 use p3_field::Field;
 
-use super::expr::{Expr, ExtExpr, Lookup, RowOffset};
+use super::expr::{Expr, ExtExpr, RowOffset};
+
+/// A lookup: a multiplicity and a vector of arguments. `E` is a frontend
+/// expression in a [`super::expr::CircuitSpec`] and a node id once compiled.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Lookup<E> {
+    pub multiplicity: E,
+    pub args: Vec<E>,
+}
 
 /// Number of extension-valued public inputs the lookup argument uses:
 /// β, γ, current accumulator, next accumulator.

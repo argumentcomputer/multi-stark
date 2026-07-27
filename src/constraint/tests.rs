@@ -2,8 +2,8 @@ use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
 
 use super::circuit::{Circuit, CompileError, ExtensionParams, Node, compile};
 use super::eval::{VarValues, check_topological_order, eval_expr, eval_ext_expr};
-use super::expr::{CircuitSpec, Expr, ExtExpr, Lookup, RowOffset, Source};
-use super::synth::{num_publics, stage2_width, synthesize_lookups};
+use super::expr::{CircuitSpec, Expr, ExtExpr, RowOffset, Source};
+use super::lookup::{Lookup, num_publics, stage2_width, synthesize_lookups};
 use crate::types::Val;
 
 type G = Val;

@@ -8,7 +8,8 @@
 use p3_field::Field;
 
 use super::circuit::{Circuit, ExtensionParams, Node, NodeId};
-use super::expr::{ColRef, Expr, ExtExpr, Lookup, RowOffset, Source};
+use super::expr::{ColRef, Expr, ExtExpr, RowOffset, Source};
+use super::lookup::Lookup;
 
 /// Concrete values for every leaf: the two-row window of each trace
 /// matrix, the public inputs and the selector values.
