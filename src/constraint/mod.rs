@@ -10,7 +10,9 @@ pub mod circuit;
 pub mod eval;
 pub mod expr;
 pub mod lookup;
+pub mod prover;
 pub mod system;
+pub mod verifier;
 
 #[cfg(test)]
 mod tests;
