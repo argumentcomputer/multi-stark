@@ -154,6 +154,23 @@ pub fn compile<F: Field>(
     zeros.sort_unstable();
     zeros.dedup();
 
+    // Bottom-up interning guarantees children precede parents. The dense
+    // evaluator's unchecked sweep (`eval::Circuit::sweep_range`) relies on
+    // this, so pin it here.
+    debug_assert!(
+        interner
+            .nodes
+            .iter()
+            .enumerate()
+            .all(|(i, node)| match *node {
+                Node::Add(a, b) | Node::Sub(a, b) | Node::Mul(a, b) =>
+                    a.index() < i && b.index() < i,
+                Node::Neg(a) => a.index() < i,
+                _ => true,
+            }),
+        "compiled nodes must be topologically ordered"
+    );
+
     let max_constraint_degree = zeros
         .iter()
         .map(|z| interner.degrees[z.index()])

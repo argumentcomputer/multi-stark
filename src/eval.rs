@@ -72,21 +72,37 @@ impl<F: Field> Circuit<F> {
     ) {
         buf.clear();
         buf.reserve(len);
-        for node in &self.nodes[..len] {
+        // Raw pointer into the reserved storage; captured by the `child`
+        // reader (a `*mut` is `Copy`, so it borrows nothing) and used for the
+        // writes, sidestepping the borrow checker in the hot loop.
+        let ptr = buf.spare_capacity_mut().as_mut_ptr();
+        // SAFETY throughout: the node vector is topologically ordered — every
+        // child's index is strictly less than its parent's — so when node `i`
+        // is processed, every index it reads (`< i`) has already been written
+        // and initialized; the storage has room for `len` values (reserved,
+        // no realloc); and `W: Copy` means the reads take copies with no drop
+        // obligations. This is the constraint-evaluation hot loop (quotient
+        // domain, per packet), so eliding per-node bounds/capacity checks and
+        // the shared-subexpression recomputation matters.
+        let child = |id: NodeId| unsafe { (*ptr.add(id.index())).assume_init_read() };
+        for i in 0..len {
+            let node = unsafe { self.nodes.get_unchecked(i) };
             let value = match node {
                 Node::Const(c) => (*c).into(),
                 Node::Var(col) => values.var(col),
-                Node::Public(i) => values.publics[*i as usize],
+                Node::Public(idx) => values.publics[*idx as usize],
                 Node::IsFirstRow => values.is_first_row,
                 Node::IsLastRow => values.is_last_row,
                 Node::IsTransition => values.is_transition,
-                Node::Add(a, b) => buf[a.index()] + buf[b.index()],
-                Node::Sub(a, b) => buf[a.index()] - buf[b.index()],
-                Node::Mul(a, b) => buf[a.index()] * buf[b.index()],
-                Node::Neg(a) => -buf[a.index()],
+                Node::Add(a, b) => child(*a) + child(*b),
+                Node::Sub(a, b) => child(*a) - child(*b),
+                Node::Mul(a, b) => child(*a) * child(*b),
+                Node::Neg(a) => -child(*a),
             };
-            buf.push(value);
+            unsafe { (*ptr.add(i)).write(value) };
         }
+        // SAFETY: the loop initialized exactly `len` values.
+        unsafe { buf.set_len(len) };
     }
 
     /// The constraint values, read off a full sweep buffer.
