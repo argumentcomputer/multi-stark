@@ -1,14 +1,14 @@
 //! Frontend expression trees.
 //!
 //! These exist only while a circuit is being described; compilation (see
-//! [`super::circuit`]) flattens them into the interned format everything
+//! [`crate::circuit`]) flattens them into the interned format everything
 //! else consumes. Operators fold constants as they go.
 
 use std::ops::{Add, Mul, Neg, Sub};
 
 use p3_field::Field;
 
-use super::lookup::Lookup;
+use crate::lookup::Lookup;
 
 /// Which committed matrix a column variable refers to.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]

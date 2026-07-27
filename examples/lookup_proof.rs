@@ -1,7 +1,7 @@
 //! Multi-circuit example with lookup arguments.
 //!
-//! Defines two AIR circuits (Even and Odd) that compute whether an input
-//! number is even or odd using a recursive lookup argument:
+//! Defines two circuits (Even and Odd) that compute whether an input number
+//! is even or odd using a recursive lookup argument:
 //!   - Even(n) pulls a lookup claim and, if n > 0, pushes to Odd(n-1).
 //!   - Odd(n) pulls a lookup claim and, if n > 0, pushes to Even(n-1).
 //!
@@ -12,94 +12,70 @@
 //! cargo run --example lookup_proof --release
 //! ```
 
-use multi_stark::builder::symbolic::{SymbolicExpression, var};
-use multi_stark::lookup::{Lookup, LookupAir};
-use multi_stark::system::{System, SystemWitness};
+use multi_stark::expr::Expr;
+use multi_stark::lookup::Lookup;
+use multi_stark::system::{CircuitInputs, System, SystemWitness};
 use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
 use multi_stark::{
-    p3_air::{Air, AirBuilder, BaseAir, WindowAccess},
     p3_field::{Field, PrimeCharacteristicRing},
     p3_matrix::dense::RowMajorMatrix,
 };
 
-/// Circuit for the Even/Odd parity check.
-/// Width: 6 columns [multiplicity, input, input_inverse, input_is_zero, input_not_zero, recursion_output]
-enum ParityAir {
-    Even,
-    Odd,
+/// Width: 6 columns
+/// [multiplicity, input, input_inverse, input_is_zero, input_not_zero, recursion_output].
+fn parity_constraints() -> Vec<Expr<Val>> {
+    let m = Expr::main(0);
+    let input = Expr::main(1);
+    let input_inv = Expr::main(2);
+    let is_zero = Expr::main(3);
+    let not_zero = Expr::main(4);
+    let one = || Expr::constant(Val::ONE);
+    vec![
+        is_zero.clone() * (one() - is_zero.clone()),
+        not_zero.clone() * (one() - not_zero.clone()),
+        m * (is_zero.clone() + not_zero.clone() - one()),
+        is_zero * input.clone(),
+        not_zero * (input * input_inv - one()),
+    ]
 }
 
-impl ParityAir {
-    fn lookups(&self) -> Vec<Lookup<SymbolicExpression<Val>>> {
-        let multiplicity = var(0);
-        let input = var(1);
-        let input_is_zero = var(3);
-        let input_not_zero = var(4);
-        let recursion_output = var(5);
-        let even_index = Val::ZERO.into();
-        let odd_index = Val::ONE.into();
-        let one: SymbolicExpression<_> = Val::ONE.into();
-        match self {
-            Self::Even => vec![
-                Lookup::pull(
-                    multiplicity,
-                    vec![
-                        even_index,
-                        input.clone(),
-                        input_not_zero.clone() * recursion_output.clone() + input_is_zero,
-                    ],
-                ),
-                Lookup::push(
-                    input_not_zero,
-                    vec![odd_index, input - one, recursion_output],
-                ),
+fn even_lookups() -> Vec<Lookup<Expr<Val>>> {
+    let (m, input) = (Expr::main(0), Expr::main(1));
+    let (is_zero, not_zero, rec) = (Expr::main(3), Expr::main(4), Expr::main(5));
+    let even = Expr::constant(Val::ZERO);
+    let odd = Expr::constant(Val::ONE);
+    vec![
+        // pull: negated multiplicity.
+        Lookup {
+            multiplicity: -m,
+            args: vec![
+                even,
+                input.clone(),
+                not_zero.clone() * rec.clone() + is_zero,
             ],
-            Self::Odd => vec![
-                Lookup::pull(
-                    multiplicity,
-                    vec![
-                        odd_index,
-                        input.clone(),
-                        input_not_zero.clone() * recursion_output.clone(),
-                    ],
-                ),
-                Lookup::push(
-                    input_not_zero,
-                    vec![even_index, input - one, recursion_output],
-                ),
-            ],
-        }
-    }
+        },
+        Lookup {
+            multiplicity: not_zero,
+            args: vec![odd, input - Expr::constant(Val::ONE), rec],
+        },
+    ]
 }
 
-impl<F> BaseAir<F> for ParityAir {
-    fn width(&self) -> usize {
-        6
-    }
-}
-
-impl<AB> Air<AB> for ParityAir
-where
-    AB: AirBuilder,
-    AB::Var: Copy,
-{
-    fn eval(&self, builder: &mut AB) {
-        let main = builder.main();
-        let local = main.current_slice();
-        let multiplicity = local[0];
-        let input = local[1];
-        let input_inverse = local[2];
-        let input_is_zero = local[3];
-        let input_not_zero = local[4];
-        builder.assert_bools([input_is_zero, input_not_zero]);
-        builder
-            .when(multiplicity)
-            .assert_one(input_is_zero + input_not_zero);
-        builder.when(input_is_zero).assert_zero(input);
-        builder
-            .when(input_not_zero)
-            .assert_one(input * input_inverse);
-    }
+fn odd_lookups() -> Vec<Lookup<Expr<Val>>> {
+    let (m, input) = (Expr::main(0), Expr::main(1));
+    let (not_zero, rec) = (Expr::main(4), Expr::main(5));
+    let even = Expr::constant(Val::ZERO);
+    let odd = Expr::constant(Val::ONE);
+    vec![
+        Lookup {
+            multiplicity: -m,
+            args: vec![odd, input.clone(), not_zero.clone() * rec.clone()],
+        },
+        Lookup {
+            multiplicity: not_zero,
+            args: vec![even, input - Expr::constant(Val::ONE), rec],
+        },
+    ]
 }
 
 fn main() {
@@ -117,8 +93,18 @@ fn main() {
         },
     );
 
-    let even = LookupAir::new(ParityAir::Even, ParityAir::Even.lookups());
-    let odd = LookupAir::new(ParityAir::Odd, ParityAir::Odd.lookups());
+    let even = CircuitInputs {
+        main_width: 6,
+        constraints: parity_constraints(),
+        lookups: even_lookups(),
+        ..Default::default()
+    };
+    let odd = CircuitInputs {
+        main_width: 6,
+        constraints: parity_constraints(),
+        lookups: odd_lookups(),
+        ..Default::default()
+    };
     let (system, key) = System::new(config, [even, odd]);
 
     let f = Val::from_u32;
@@ -149,7 +135,7 @@ fn main() {
         &system,
     );
 
-    // Claim: [even_index=0, input=4, expected_output=1] — is_even(4) should be 1
+    // Claim: [even_index=0, input=4, expected_output=1] — is_even(4) should be 1.
     let claim = &[f(0), f(4), f(1)];
 
     let proof = system.prove(&key, claim, witness);

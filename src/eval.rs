@@ -7,9 +7,9 @@
 
 use p3_field::{Algebra, Field};
 
-use super::circuit::{Circuit, ExtensionParams, Node, NodeId};
-use super::expr::{ColRef, Expr, ExtExpr, RowOffset, Source};
-use super::lookup::Lookup;
+use crate::circuit::{Circuit, ExtensionParams, Node, NodeId};
+use crate::expr::{ColRef, Expr, ExtExpr, RowOffset, Source};
+use crate::lookup::Lookup;
 
 /// Concrete leaf values for a sweep, in the working type `W`: the two-row
 /// window of each trace matrix, the public inputs and the selector values.

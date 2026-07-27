@@ -15,8 +15,8 @@ use std::collections::HashMap;
 
 use p3_field::Field;
 
-use super::expr::{CircuitSpec, ColRef, Expr, ExtExpr, Source};
-use super::lookup::Lookup;
+use crate::expr::{CircuitSpec, ColRef, Expr, ExtExpr, Source};
+use crate::lookup::Lookup;
 
 /// Index of a node in the compiled vector.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]

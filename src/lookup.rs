@@ -1,74 +1,99 @@
-use p3_air::{Air, BaseAir, ExtensionBuilder, WindowAccess};
+//! Lookups: the [`Lookup`] type, the logUp stage-2 constraint synthesis, and
+//! the concrete lookup witness ([`LookupValues`]) plus its stage-2 trace
+//! construction.
+//!
+//! Synthesis is a frontend-to-frontend function: given the lookups, it
+//! produces the extension-field constraints for the running-accumulator
+//! argument as ordinary [`ExtExpr`] data. [`crate::system::System::new`]
+//! appends these to a circuit's `ext_constraints` before compilation, so they
+//! are interned, coordinate-expanded and canonicalized like any other
+//! constraint.
+//!
+//! # Layout conventions (owned here)
+//!
+//! - **Publics** (each an extension value, stored as `d` base coordinates):
+//!   slot 0 = β (lookup challenge), 1 = γ (fingerprint challenge),
+//!   2 = current accumulator, 3 = next accumulator. So `num_publics = 4·d`.
+//! - **Stage-2 columns** (extension values, flattened to base): slot 0 = the
+//!   running accumulator, slots `1..=L` = the message inverse of each lookup,
+//!   in lookup order. So `stage2_width = (1 + L)·d` base columns.
+
 use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, batch_multiplicative_inverse};
-use p3_matrix::{Matrix, dense::RowMajorMatrix};
+use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
 
-use crate::builder::{TwoStagedBuilder, symbolic::SymbolicExpression};
+use crate::expr::{Expr, ExtExpr, RowOffset};
 
-/// Each circuit is required to have 4 arguments for the second stage. Namely,
-/// the lookup challenge, fingerprint challenge, current accumulator and next
-/// accumulator.
+/// A lookup: a multiplicity and a vector of arguments. `E` is a frontend
+/// expression in a [`crate::expr::CircuitSpec`] and a node id once compiled.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Lookup<E> {
+    pub multiplicity: E,
+    pub args: Vec<E>,
+}
+
+/// Number of extension-valued public inputs the lookup argument uses:
+/// β, γ, current accumulator, next accumulator.
 pub const LOOKUP_PUBLIC_SIZE: usize = 4;
 
-#[derive(Clone)]
-pub struct Lookup<Expr> {
-    pub multiplicity: Expr,
-    pub args: Vec<Expr>,
+/// Public-input width (base coordinates) for a circuit whose extension
+/// degree is `d`.
+pub fn num_publics(d: usize) -> usize {
+    LOOKUP_PUBLIC_SIZE * d
 }
 
-impl<Expr> Lookup<Expr> {
-    /// Returns a [`Lookup`] with multiplicity zero and no arguments.
-    #[inline]
-    pub fn empty() -> Self
-    where
-        Expr: PrimeCharacteristicRing,
-    {
-        Self {
-            multiplicity: Expr::ZERO,
-            args: vec![],
-        }
-    }
-
-    /// "Pushing" has the semantics of adding a claim to the claim set.
-    #[inline]
-    pub fn push(multiplicity: Expr, args: Vec<Expr>) -> Self {
-        Self { multiplicity, args }
-    }
-
-    /// "Pulling" has the semantics of removing a claim from the claim set.
-    #[inline]
-    pub fn pull(multiplicity: Expr, args: Vec<Expr>) -> Self
-    where
-        Expr: std::ops::Neg<Output = Expr>,
-    {
-        Self {
-            multiplicity: -multiplicity,
-            args,
-        }
-    }
+/// Stage-2 trace width (flattened base columns) for `num_lookups` lookups
+/// at extension degree `d`: one accumulator column plus one inverse column
+/// per lookup.
+pub fn stage2_width(num_lookups: usize, d: usize) -> usize {
+    (1 + num_lookups) * d
 }
 
-pub struct LookupAir<A, F: Field> {
-    pub inner_air: A,
-    pub lookups: Vec<Lookup<SymbolicExpression<F>>>,
-    pub preprocessed: Option<RowMajorMatrix<F>>,
-}
+/// Builds the logUp stage-2 constraints for `lookups` at extension degree
+/// `d`. Order: the per-lookup message/inverse constraints in lookup order,
+/// then the first-row, transition, and last-row accumulator constraints.
+pub fn synthesize_lookups<F: Field>(lookups: &[Lookup<Expr<F>>], d: usize) -> Vec<ExtExpr<F>> {
+    let d = u32::try_from(d).expect("extension degree exceeds u32");
+    let beta = ExtExpr::public(0, d);
+    let gamma = ExtExpr::public(1, d);
+    let acc = ExtExpr::public(2, d);
+    let next_acc = ExtExpr::public(3, d);
+    let acc_col = ExtExpr::stage2(0, d, RowOffset::Current);
+    let next_acc_col = ExtExpr::stage2(0, d, RowOffset::Next);
 
-impl<A: BaseAir<F>, F: Field> LookupAir<A, F> {
-    pub fn new(inner_air: A, lookups: Vec<Lookup<SymbolicExpression<F>>>) -> Self {
-        let preprocessed = inner_air.preprocessed_trace();
-        Self {
-            inner_air,
-            lookups,
-            preprocessed,
+    let mut constraints = Vec::with_capacity(lookups.len() + 3);
+    // acc_expr = acc_col + Σ_j multiplicity_j · inv_j, built once and reused
+    // by the transition and last-row constraints (the interner shares it).
+    let mut acc_expr = acc_col.clone();
+    for (j, lookup) in lookups.iter().enumerate() {
+        let slot = 1 + u32::try_from(j).expect("lookup count exceeds u32");
+        let inv = ExtExpr::stage2(slot, d, RowOffset::Current);
+
+        // fingerprint = Σ_i args[i] · γ^i, via Horner over the reversed args.
+        let mut coeffs = lookup.args.iter().rev();
+        let mut fingerprint = match coeffs.next() {
+            Some(arg) => ExtExpr::from(arg.clone()),
+            None => ExtExpr::from(Expr::constant(F::ZERO)),
+        };
+        for arg in coeffs {
+            fingerprint = fingerprint * gamma.clone() + arg.clone();
         }
+
+        // message = β + fingerprint; constraint: message · inv − 1 = 0.
+        let message = beta.clone() + fingerprint;
+        constraints.push(message * inv.clone() - Expr::constant(F::ONE));
+
+        acc_expr = acc_expr + lookup.multiplicity.clone() * inv;
     }
 
-    /// One column for the accumulator and one column for the inverse of the
-    /// message associated with each lookup.
-    pub fn stage_2_width(&self) -> usize {
-        1 + self.lookups.len()
-    }
+    // First row: acc_col = acc.
+    constraints.push(Expr::IsFirstRow * (acc_col - acc));
+    // Transition: acc_expr = next row's accumulator column.
+    constraints.push(Expr::IsTransition * (acc_expr.clone() - next_acc_col));
+    // Last row: acc_expr = next_acc.
+    constraints.push(Expr::IsLastRow * (acc_expr - next_acc));
+
+    constraints
 }
 
 /// Computes a fingerprint of the coefficients using Horner's method.
@@ -106,54 +131,13 @@ pub struct LookupValues<F> {
 }
 
 impl<F: Field> LookupValues<F> {
-    /// Evaluates the symbolic lookups of a circuit on every row of its trace.
-    pub fn compute(
-        lookups: &[Lookup<SymbolicExpression<F>>],
-        trace: &RowMajorMatrix<F>,
-        preprocessed: Option<&RowMajorMatrix<F>>,
-    ) -> Self {
-        let height = trace.height();
-        let num_lookups = lookups.len();
-        let mut arg_offsets = Vec::with_capacity(num_lookups + 1);
-        arg_offsets.push(0);
-        for lookup in lookups {
-            arg_offsets.push(arg_offsets.last().unwrap() + lookup.args.len());
-        }
-        let args_width = *arg_offsets.last().unwrap();
-        let mut multiplicities = Vec::with_capacity(height * num_lookups);
-        let mut args = Vec::with_capacity(height * args_width);
-        let mut eval_row = |row: &[F], preprocessed_row: Option<&[F]>| {
-            for lookup in lookups {
-                multiplicities.push(lookup.multiplicity.interpret(row, preprocessed_row));
-                for arg in &lookup.args {
-                    args.push(arg.interpret(row, preprocessed_row));
-                }
-            }
-        };
-        match preprocessed {
-            Some(preprocessed) => trace
-                .row_slices()
-                .zip(preprocessed.row_slices())
-                .for_each(|(row, preprocessed_row)| eval_row(row, Some(preprocessed_row))),
-            None => trace.row_slices().for_each(|row| eval_row(row, None)),
-        }
-        Self {
-            height,
-            num_lookups,
-            multiplicities,
-            arg_offsets,
-            args,
-        }
-    }
-
     /// Builds flat lookup values from per-row, per-lookup concrete lookups.
     ///
     /// Every row must have the same number of lookups. Argument counts may
-    /// vary across rows within a lookup slot (e.g. rows holding
-    /// [`Lookup::empty`]); shorter argument lists are zero-padded to the
-    /// slot's maximum width. Padding is transparent to the protocol: the
-    /// message fingerprint is a Horner evaluation, so trailing zero
-    /// coefficients do not change its value.
+    /// vary across rows within a lookup slot; shorter argument lists are
+    /// zero-padded to the slot's maximum width. Padding is transparent to the
+    /// protocol: the message fingerprint is a Horner evaluation, so trailing
+    /// zero coefficients do not change its value.
     ///
     /// # Panics
     /// Panics if rows have differing numbers of lookups.
@@ -291,10 +275,10 @@ impl<F: Field> LookupValues<F> {
 
 /// Incremental, allocation-free constructor for [`LookupValues`].
 ///
-/// Rows start zeroed — multiplicity zero and zero arguments in every slot,
-/// i.e. [`Lookup::empty`] — and are filled in place through the parallel row
-/// writers of [`Self::par_rows_mut`]. Values are written directly into the
-/// final flat storage, so no per-lookup allocation ever happens.
+/// Rows start zeroed — multiplicity zero and zero arguments in every slot —
+/// and are filled in place through the parallel row writers of
+/// [`Self::rows_mut`]. Values are written directly into the final flat
+/// storage, so no per-lookup allocation ever happens.
 pub struct LookupValuesBuilder<F> {
     height: usize,
     num_lookups: usize,
@@ -328,10 +312,7 @@ impl<F: Field> LookupValuesBuilder<F> {
         }
     }
 
-    /// Row writers, one per row, in row order. Returned as a `Vec` so the
-    /// caller can parallelize with its own runtime (e.g. rayon's
-    /// `into_par_iter`, zipped with a parallel iterator over trace rows)
-    /// regardless of how this crate's `parallel` feature is set.
+    /// Row writers, one per row, in row order.
     ///
     /// # Panics
     /// Panics if the builder has no lookup slots (nothing to write; call
@@ -382,7 +363,7 @@ pub struct LookupRowMut<'a, F> {
 }
 
 impl<F: Field> LookupRowMut<'_, F> {
-    /// Writes lookup slot `slot` with "push" semantics (adds a claim).
+    /// Writes lookup slot `slot` with the given multiplicity and arguments.
     /// Fewer arguments than the slot's width leave zero padding.
     ///
     /// # Panics
@@ -400,380 +381,9 @@ impl<F: Field> LookupRowMut<'_, F> {
         self.args[start + args.len()..end].fill(F::ZERO);
     }
 
-    /// Writes lookup slot `slot` with "pull" semantics (removes a claim):
-    /// same as [`Self::push`] with negated multiplicity.
+    /// Writes lookup slot `slot` with negated multiplicity ("pull").
     #[inline]
     pub fn pull(&mut self, slot: usize, multiplicity: F, args: &[F]) {
         self.push(slot, -multiplicity, args);
-    }
-}
-
-impl<A, F> BaseAir<F> for LookupAir<A, F>
-where
-    A: BaseAir<F>,
-    F: Field,
-{
-    fn width(&self) -> usize {
-        self.inner_air.width()
-    }
-
-    fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
-        self.preprocessed.clone()
-    }
-}
-
-impl<A, F, AB> Air<AB> for LookupAir<A, F>
-where
-    A: Air<AB>,
-    F: Field,
-    AB: TwoStagedBuilder<F = F>,
-{
-    fn eval(&self, builder: &mut AB) {
-        if self.preprocessed.is_some() {
-            let preprocessed = builder.preprocessed().clone();
-            let preprocessed_row = preprocessed.current_slice();
-            self.eval_with_preprocessed_row(builder, Some(preprocessed_row))
-        } else {
-            self.eval_with_preprocessed_row(builder, None)
-        }
-    }
-}
-
-impl<A, F: Field> LookupAir<A, F> {
-    fn eval_with_preprocessed_row<AB>(&self, builder: &mut AB, preprocessed_row: Option<&[AB::Var]>)
-    where
-        A: Air<AB>,
-        AB: TwoStagedBuilder<F = F>,
-    {
-        // Call `eval` for regular stage 1 constraints.
-        self.inner_air.eval(builder);
-
-        // Extract challenges and accumulators from stage 2 public values.
-        let stage_2_public_values = builder.stage_2_public_values();
-        debug_assert_eq!(stage_2_public_values.len(), LOOKUP_PUBLIC_SIZE);
-        let lookup_challenge = stage_2_public_values[0].into();
-        let fingerprint_challenge = stage_2_public_values[1].into();
-        let acc = stage_2_public_values[2];
-        let next_acc = stage_2_public_values[3];
-
-        // Bind relevant variables to construct the stage 2 constraints.
-        let stage_2 = builder.stage_2();
-        let stage_2_row = stage_2.row_slice(0).unwrap();
-        let stage_2_next_row = stage_2.row_slice(1).unwrap();
-        let acc_col = stage_2_row[0];
-        let next_acc_col = stage_2_next_row[0];
-        let messages_inverses = &stage_2_row[1..];
-        let lookups = &self.lookups;
-        debug_assert_eq!(messages_inverses.len(), lookups.len());
-
-        // Compute the final accumulator for the current row with the inverses
-        // of the messages from the stage 2 trace while asserting that these
-        // inverses are indeed the inverses of the messages computed on the main
-        // trace.
-        let main = builder.main();
-        let row = main.current_slice();
-        let mut acc_expr = acc_col.into();
-        for (lookup, &message_inverse) in lookups.iter().zip(messages_inverses) {
-            let multiplicity: AB::ExprEF =
-                lookup.multiplicity.interpret(row, preprocessed_row).into();
-            let args = lookup
-                .args
-                .iter()
-                .map(|arg| arg.interpret(row, preprocessed_row));
-            let fingerprint = fingerprint(&fingerprint_challenge, args);
-            let message: AB::ExprEF = lookup_challenge.clone() + fingerprint;
-            let message_inverse = message_inverse.into();
-            builder.assert_one_ext(message * message_inverse.clone());
-            acc_expr += multiplicity * message_inverse;
-        }
-
-        // The initial accumulator value must be set correctly.
-        builder.when_first_row().assert_eq_ext(acc_col, acc);
-
-        // The accumulator computed on the main trace for the current row must
-        // equal the accumulator of the next row from the stage 2 trace.
-        builder
-            .when_transition()
-            .assert_eq_ext(acc_expr.clone(), next_acc_col);
-
-        // The final accumulator must match the expected value.
-        builder.when_last_row().assert_eq_ext(acc_expr, next_acc);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use p3_air::{AirBuilder, WindowAccess};
-    use p3_field::Field;
-
-    use crate::{
-        builder::symbolic::var,
-        system::{ProverKey, System, SystemWitness},
-        types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val},
-    };
-
-    use super::*;
-
-    enum CS {
-        Even,
-        Odd,
-        /// A circuit on its own channel that nothing references; used by the
-        /// sparse-activation tests as the deactivated table.
-        Dead,
-    }
-    impl<F> BaseAir<F> for CS {
-        fn width(&self) -> usize {
-            6
-        }
-    }
-    impl CS {
-        fn lookups(&self) -> Vec<Lookup<SymbolicExpression<Val>>> {
-            // provide removes multiplicity
-            let multiplicity = var(0);
-            let input = var(1);
-            let input_is_zero = var(3);
-            let input_not_zero = var(4);
-            let recursion_output = var(5);
-            let even_index = Val::ZERO.into();
-            let odd_index = Val::ONE.into();
-            let one: SymbolicExpression<_> = Val::ONE.into();
-            match self {
-                Self::Even => vec![
-                    Lookup::pull(
-                        multiplicity,
-                        vec![
-                            even_index,
-                            input.clone(),
-                            input_not_zero.clone() * recursion_output.clone() + input_is_zero,
-                        ],
-                    ),
-                    Lookup::push(
-                        input_not_zero,
-                        vec![odd_index, input - one, recursion_output],
-                    ),
-                ],
-                Self::Odd => vec![
-                    Lookup::pull(
-                        multiplicity,
-                        vec![
-                            odd_index,
-                            input.clone(),
-                            input_not_zero.clone() * recursion_output.clone(),
-                        ],
-                    ),
-                    Lookup::push(
-                        input_not_zero,
-                        vec![even_index, input - one, recursion_output],
-                    ),
-                ],
-                Self::Dead => vec![Lookup::pull(
-                    multiplicity,
-                    vec![Val::from_u32(2).into(), input],
-                )],
-            }
-        }
-    }
-    impl<AB> Air<AB> for CS
-    where
-        AB: AirBuilder,
-        AB::Var: Copy,
-    {
-        fn eval(&self, builder: &mut AB) {
-            // both even and odd have the same constraints, they only differ on the lookups
-            let main = builder.main();
-            let local = main.current_slice();
-            let multiplicity = local[0];
-            let input = local[1];
-            let input_inverse = local[2];
-            let input_is_zero = local[3];
-            let input_not_zero = local[4];
-            builder.assert_bools([input_is_zero, input_not_zero]);
-            builder
-                .when(multiplicity)
-                .assert_one(input_is_zero + input_not_zero);
-            builder.when(input_is_zero).assert_zero(input);
-            builder
-                .when(input_not_zero)
-                .assert_one(input * input_inverse);
-        }
-    }
-    const COMMITMENT_PARAMETERS: CommitmentParameters = CommitmentParameters {
-        log_blowup: 1,
-        cap_height: 0,
-    };
-
-    const FRI_PARAMETERS: FriParameters = FriParameters {
-        log_final_poly_len: 0,
-        max_log_arity: 1,
-        num_queries: 64,
-        commit_proof_of_work_bits: 0,
-        query_proof_of_work_bits: 0,
-    };
-
-    fn system() -> (
-        System<GoldilocksBlake3Config, CS>,
-        ProverKey<GoldilocksBlake3Config>,
-    ) {
-        let config = GoldilocksBlake3Config::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
-        let even = LookupAir::new(CS::Even, CS::Even.lookups());
-        let odd = LookupAir::new(CS::Odd, CS::Odd.lookups());
-        System::new(config, [even, odd])
-    }
-
-    fn witness_traces() -> Vec<RowMajorMatrix<Val>> {
-        let f = Val::from_u32;
-        #[rustfmt::skip]
-        let traces = vec![
-            RowMajorMatrix::new(
-                vec![
-                    // row 1
-                    f(1), f(4), f(4).inverse(), f(0), f(1), f(1),
-                    // row 2
-                    f(1), f(2), f(2).inverse(), f(0), f(1), f(1),
-                    // row 3
-                    f(1), f(0), f(0), f(1), f(0), f(0),
-                    // row 4
-                    f(0), f(0), f(0), f(0), f(0), f(0),
-                ],
-                6,
-            ),
-            RowMajorMatrix::new(
-                vec![
-                    // row 1
-                    f(1), f(3), f(3).inverse(), f(0), f(1), f(1),
-                    // row 2
-                    f(1), f(1), f(1).inverse(), f(0), f(1), f(1),
-                    // row 3
-                    f(0), f(0), f(0), f(0), f(0), f(0),
-                    // row 4
-                    f(0), f(0), f(0), f(0), f(0), f(0),
-                ],
-                6,
-            ),
-        ];
-        traces
-    }
-
-    fn witness(system: &System<GoldilocksBlake3Config, CS>) -> SystemWitness<Val> {
-        SystemWitness::from_stage_1(witness_traces(), system)
-    }
-
-    /// The builder must produce the exact same flat storage as the nested
-    /// conversion, including zero padding for short and empty slots.
-    #[test]
-    fn builder_matches_from_rows() {
-        let f = Val::from_u32;
-        let rows = vec![
-            vec![
-                Lookup::push(f(1), vec![f(2), f(3)]),
-                Lookup::pull(f(4), vec![f(5), f(6), f(7)]),
-            ],
-            vec![Lookup::empty(), Lookup::push(f(8), vec![f(9)])],
-        ];
-        let a = LookupValues::from_rows(rows);
-        let mut builder = LookupValues::builder(2, &[2, 3]);
-        for (i, row) in builder.rows_mut().iter_mut().enumerate() {
-            if i == 0 {
-                row.push(0, f(1), &[f(2), f(3)]);
-                row.pull(1, f(4), &[f(5), f(6), f(7)]);
-            } else {
-                row.push(1, f(8), &[f(9)]);
-            }
-        }
-        let b = builder.finish();
-        assert_eq!(a.height, b.height);
-        assert_eq!(a.num_lookups, b.num_lookups);
-        assert_eq!(a.arg_offsets, b.arg_offsets);
-        assert_eq!(a.multiplicities, b.multiplicities);
-        assert_eq!(a.args, b.args);
-    }
-
-    #[test]
-    fn lookup_test() {
-        let (system, key) = system();
-        let witness = witness(&system);
-        let f = Val::from_u32;
-        let claim = &[f(0), f(4), f(1)];
-        let proof = system.prove(&key, claim, witness);
-        system.verify(claim, &proof).unwrap();
-    }
-
-    /// A three-circuit system where the third circuit (`Dead`, its own
-    /// channel, referenced by nothing) gets an empty trace: the prover must
-    /// deactivate it, the proof must carry per-circuit data for the two
-    /// active circuits only, and verification must accept.
-    #[test]
-    fn sparse_inactive_circuit_accepted() {
-        let config = GoldilocksBlake3Config::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
-        let even = LookupAir::new(CS::Even, CS::Even.lookups());
-        let odd = LookupAir::new(CS::Odd, CS::Odd.lookups());
-        let dead = LookupAir::new(CS::Dead, CS::Dead.lookups());
-        let (system, key) = System::new(config, [even, odd, dead]);
-        let mut witness = witness_traces();
-        witness.push(RowMajorMatrix::new(vec![], 6));
-        let witness = SystemWitness::from_stage_1(witness, &system);
-        let f = Val::from_u32;
-        let claim = &[f(0), f(4), f(1)];
-        let proof = system.prove(&key, claim, witness);
-        assert_eq!(proof.active, vec![true, true, false]);
-        assert_eq!(proof.log_degrees.len(), 2);
-        assert_eq!(proof.intermediate_accumulators.len(), 2);
-        assert_eq!(proof.stage_1_opened_values.len(), 2);
-        system.verify(claim, &proof).unwrap();
-    }
-
-    /// Tampering with the activation bitmap must be rejected: activating a
-    /// circuit the proof carries no data for, or deactivating one it does.
-    #[test]
-    fn sparse_bitmap_tamper_rejected() {
-        let config = GoldilocksBlake3Config::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
-        let even = LookupAir::new(CS::Even, CS::Even.lookups());
-        let odd = LookupAir::new(CS::Odd, CS::Odd.lookups());
-        let dead = LookupAir::new(CS::Dead, CS::Dead.lookups());
-        let (system, key) = System::new(config, [even, odd, dead]);
-        let mut witness = witness_traces();
-        witness.push(RowMajorMatrix::new(vec![], 6));
-        let witness = SystemWitness::from_stage_1(witness, &system);
-        let f = Val::from_u32;
-        let claim = &[f(0), f(4), f(1)];
-        let mut proof = system.prove(&key, claim, witness);
-        proof.active[2] = true;
-        assert!(system.verify(claim, &proof).is_err());
-        proof.active[2] = false;
-        proof.active[1] = false;
-        assert!(system.verify(claim, &proof).is_err());
-    }
-
-    /// Deactivating a circuit the claim's execution NEEDS (here: emptying the
-    /// Odd table while Even still pushes into the odd channel) must leave the
-    /// lookup accumulator unbalanced and be rejected.
-    #[test]
-    fn sparse_needed_circuit_rejected() {
-        let (system, key) = system();
-        let mut traces = witness_traces();
-        // Empty the Odd table: Even's pushes into the odd channel and the
-        // claim's pull can no longer be matched.
-        traces[1] = RowMajorMatrix::new(vec![], 6);
-        let witness = SystemWitness::from_stage_1(traces, &system);
-        let f = Val::from_u32;
-        let claim = &[f(0), f(4), f(1)];
-        let proof = system.prove(&key, claim, witness);
-        assert_eq!(proof.active, vec![true, false]);
-        assert!(system.verify(claim, &proof).is_err());
-    }
-
-    #[test]
-    fn test_claim_split_rejected() {
-        let (system, key) = system();
-        let witness = witness(&system);
-        let f = Val::from_u32;
-        // Prove a single claim, then attempt to verify with the same values
-        // regrouped into two claims. The transcript is length-prefixed, so the
-        // regrouped claims must yield different challenges and fail.
-        let claim = &[f(0), f(4), f(1)];
-        let proof = system.prove(&key, claim, witness);
-        let split_claims: &[&[Val]] = &[&[f(0), f(4)], &[f(1)]];
-        let result = system.verify_multiple_claims(split_claims, &proof);
-        assert!(result.is_err());
     }
 }

@@ -41,10 +41,6 @@ tracing-texray = { git = "https://github.com/argumentcomputer/tracing-texray", r
 name = "multi_stark"
 harness = false
 
-[[bench]]
-name = "compare_provers"
-harness = false
-
 [features]
 parallel = ["p3-maybe-rayon/parallel"]
 

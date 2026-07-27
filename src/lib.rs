@@ -1,11 +1,12 @@
-pub mod builder;
+pub mod circuit;
 pub mod config;
-pub mod constraint;
+pub mod eval;
+pub mod expr;
 pub mod lookup;
 pub mod prover;
 pub mod system;
 #[cfg(test)]
-mod test_circuits;
+mod tests;
 pub mod types;
 pub mod verifier;
 
