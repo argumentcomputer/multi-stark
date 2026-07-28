@@ -333,7 +333,7 @@ fn extension_params<SC: StarkGenericConfig>() -> ExtensionParams<Val<SC>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config};
+    use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
 
     const COMMITMENT_PARAMETERS: CommitmentParameters = CommitmentParameters {
         log_blowup: 1,
@@ -355,7 +355,7 @@ mod tests {
     fn extension_params_goldilocks_quadratic() {
         let p = extension_params::<GoldilocksBlake3Config>();
         assert_eq!(p.degree, 2);
-        assert_eq!(p.w, crate::types::Val::from_u64(7));
+        assert_eq!(p.w, Val::from_u64(7));
         assert!(p.karatsuba);
     }
 
@@ -384,5 +384,71 @@ mod tests {
         // shape binding must not panic.
         let mut challenger = system.config.initialise_challenger();
         system.observe_shape(&mut challenger);
+    }
+
+    /// A degree-5 circuit: `x^5 == y`, width 2 `[x, y]`, no lookups.
+    fn high_degree_circuit() -> CircuitInputs<Val> {
+        let x = Expr::main(0);
+        let y = Expr::main(1);
+        let x5 = x.clone() * x.clone() * x.clone() * x.clone() * x;
+        CircuitInputs {
+            main_width: 2,
+            constraints: vec![x5 - y],
+            ..Default::default()
+        }
+    }
+
+    /// The prover evaluates constraints on a domain `2^log_blowup` times the
+    /// trace domain, so at `log_blowup = 1` the quotient degree is capped at 2.
+    /// A degree-5 constraint needs quotient degree 4; it used to silently
+    /// produce invalid proofs, so it must be rejected at setup.
+    #[test]
+    #[should_panic(expected = "needs quotient degree 4, but the PCS only supports 2")]
+    fn excessive_constraint_degree_rejected() {
+        System::new(config(), [high_degree_circuit()]);
+    }
+
+    /// The same degree-5 circuit is fine at `log_blowup = 2` (quotient degree 4
+    /// = blowup factor 4), end to end.
+    #[test]
+    fn high_degree_constraint_with_larger_blowup() {
+        let config = GoldilocksBlake3Config::new(
+            CommitmentParameters {
+                log_blowup: 2,
+                cap_height: 0,
+            },
+            FriParameters {
+                log_final_poly_len: 0,
+                max_log_arity: 1,
+                num_queries: 40,
+                commit_proof_of_work_bits: 0,
+                query_proof_of_work_bits: 0,
+            },
+        );
+        let (system, key) = System::new(config, [high_degree_circuit()]);
+        let f = Val::from_u32;
+        // Rows: (2,32), (1,1), (3,243), (0,0) — each satisfies x^5 == y.
+        let trace = RowMajorMatrix::new(vec![f(2), f(32), f(1), f(1), f(3), f(243), f(0), f(0)], 2);
+        let witness = SystemWitness::from_stage_1(vec![trace], &system);
+        let no_claims: &[&[Val]] = &[];
+        let proof = system.prove_multiple_claims(&key, no_claims, witness);
+        system.verify_multiple_claims(no_claims, &proof).unwrap();
+    }
+
+    /// A circuit with a preprocessed trace whose height differs from the main
+    /// trace must panic in `from_stage_1` (both are opened on the same domain,
+    /// so the rows would otherwise be silently truncated) rather than proceed.
+    #[test]
+    #[should_panic(expected = "preprocessed trace height")]
+    fn mismatched_preprocessed_height_panics() {
+        let circuit = CircuitInputs {
+            main_width: 1,
+            preprocessed: Some(RowMajorMatrix::new(vec![Val::ZERO; 4], 1)),
+            ..Default::default()
+        };
+        let (system, _key) = System::new(config(), [circuit]);
+        // Main trace has 8 rows but the preprocessed trace has 4.
+        let trace = RowMajorMatrix::new(vec![Val::ZERO; 8], 1);
+        SystemWitness::from_stage_1(vec![trace], &system);
     }
 }

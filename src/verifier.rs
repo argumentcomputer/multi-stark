@@ -666,8 +666,9 @@ fn from_ext_basis<F: Field, EF: ExtensionField<F>>(coeffs: &[EF]) -> EF {
 mod tests {
     use super::super::expr::Expr;
     use super::super::lookup::Lookup;
+    use super::super::prover::Proof;
     use super::super::system::{CircuitInputs, System, SystemWitness};
-    use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
+    use crate::types::{CommitmentParameters, ExtVal, FriParameters, GoldilocksBlake3Config, Val};
     use p3_field::{Field, PrimeCharacteristicRing};
     use p3_matrix::dense::RowMajorMatrix;
 
@@ -816,5 +817,77 @@ mod tests {
         // A different claimed output must fail (unbalanced accumulator).
         let bad_claim = &[f(0), f(4), f(2)];
         assert!(system.verify(bad_claim, &proof).is_err());
+    }
+
+    // -- Negative / adversarial tests --
+
+    /// The honest claim `is_even(4) == 1` the proofs below are made against.
+    fn honest_claim() -> [Val; 3] {
+        let f = Val::from_u32;
+        [f(0), f(4), f(1)]
+    }
+
+    /// Builds the even/odd system and a valid proof for [`honest_claim`], used
+    /// by the adversarial tests to isolate each tampering from claim mismatch.
+    fn valid_system_and_proof() -> (
+        System<GoldilocksBlake3Config>,
+        Proof<GoldilocksBlake3Config>,
+    ) {
+        let (system, key) = even_odd_system();
+        let witness = SystemWitness::from_stage_1(witness_traces(), &system);
+        let proof = system.prove(&key, &honest_claim(), witness);
+        (system, proof)
+    }
+
+    #[test]
+    fn proof_serialization_round_trips() {
+        let (system, proof) = valid_system_and_proof();
+        let bytes = proof.to_bytes().expect("serialize");
+        let proof = Proof::from_bytes(&bytes).expect("deserialize");
+        system.verify(&honest_claim(), &proof).unwrap();
+    }
+
+    #[test]
+    fn tampered_stage_1_values_rejected() {
+        let (system, mut proof) = valid_system_and_proof();
+        // Mutate a stage-1 opened value — the PCS opening check must catch it.
+        proof.stage_1_opened_values[0][0][0] += ExtVal::ONE;
+        assert!(system.verify(&honest_claim(), &proof).is_err());
+    }
+
+    #[test]
+    fn tampered_accumulator_rejected() {
+        let (system, mut proof) = valid_system_and_proof();
+        // Force the final accumulator non-zero: the lookup argument no longer
+        // balances to zero, so the channel check must reject the proof.
+        let last = proof.intermediate_accumulators.len() - 1;
+        proof.intermediate_accumulators[last] = ExtVal::ONE;
+        assert!(system.verify(&honest_claim(), &proof).is_err());
+    }
+
+    #[test]
+    fn truncated_log_degrees_rejected() {
+        let (system, mut proof) = valid_system_and_proof();
+        // A missing log degree must be caught by the shape check instead of
+        // panicking on an out-of-bounds index later in verification.
+        proof.log_degrees.pop();
+        assert!(system.verify(&honest_claim(), &proof).is_err());
+    }
+
+    #[test]
+    fn oversized_log_degree_rejected() {
+        let (system, mut proof) = valid_system_and_proof();
+        // A log degree beyond the field's two-adicity must be rejected instead
+        // of overflowing a `1 << log_degree` shift or panicking in the PCS.
+        proof.log_degrees[0] = 200;
+        assert!(system.verify(&honest_claim(), &proof).is_err());
+    }
+
+    #[test]
+    fn truncated_proof_rejected() {
+        let (system, mut proof) = valid_system_and_proof();
+        // Dropping a quotient opened value must fail the shape check.
+        proof.quotient_opened_values.pop();
+        assert!(system.verify(&honest_claim(), &proof).is_err());
     }
 }
