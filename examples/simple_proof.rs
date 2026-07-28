@@ -51,11 +51,15 @@ fn main() {
     );
     let witness = SystemWitness::from_stage_1(vec![trace], &system);
 
+    // Prove
     let no_claims: &[&[Val]] = &[];
     let proof = system.prove_multiple_claims(&key, no_claims, witness);
+
+    // Verify
     system.verify_multiple_claims(no_claims, &proof).unwrap();
     println!("Proof verified successfully!");
 
+    // Show proof size
     let bytes = proof.to_bytes().expect("serialization failed");
     println!("Proof size: {} bytes", bytes.len());
 }

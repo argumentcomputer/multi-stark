@@ -1,13 +1,163 @@
-//! Multi-circuit STARK verifier, constraint-IR version.
+//! Multi-circuit STARK verifier (constraint-IR version).
 //!
-//! Parallel to [`crate::verifier`]. The transcript and PCS-verification are
-//! identical; the out-of-domain check recomputes each circuit's composition
-//! polynomial by running the compiled circuit's dense sweep in the challenge
-//! field at ζ, then folding the constraint values with the constraint
-//! challenge. Opened stage-2 columns are fed as base columns directly (no
-//! `from_ext_basis` reassembly): the coordinate-expanded constraints are
-//! base-field polynomial identities, so evaluating them at the ζ-openings is
-//! correct.
+//! The out-of-domain check recomputes each circuit's composition polynomial by
+//! running the compiled circuit's dense constraint sweep in the challenge field
+//! at ζ, then folding the constraint values with the constraint challenge.
+//! Opened stage-2 columns are fed as base columns directly (no `from_ext_basis`
+//! reassembly): the coordinate-expanded constraints are base-field polynomial
+//! identities, so evaluating them at the ζ-openings is correct.
+//!
+//! # Verification steps
+//!
+//! 1. **Shape check** ([`System::verify_shape`]): Validate the activation bitmap
+//!    (it must cover the canonical circuit set and activate at least one circuit)
+//!    and that the proof's array dimensions (opened values, accumulators, quotient
+//!    chunks) match the ACTIVE circuit count and the canonical column widths.
+//!
+//! 2. **Accumulator balance**: Assert that the last intermediate accumulator is zero,
+//!    ensuring that all lookup pushes and pulls cancel out across circuits.
+//!
+//! 3. **Fiat-Shamir replay**: Reconstruct the challenger state identically to the
+//!    prover: starting from the parameter-seeded challenger, observe the system
+//!    shape, the activation bitmap, commitments, trace heights, length-prefixed
+//!    claims, and intermediate accumulators, sampling the same challenges (lookup,
+//!    fingerprint, constraint alpha, OOD zeta) at the same points in the
+//!    transcript.
+//!
+//! 4. **PCS verification**: Verify the FRI opening proofs against the committed
+//!    polynomials at the sampled points.
+//!
+//! 5. **OOD evaluation**: For each ACTIVE circuit, recompute the composition
+//!    polynomial at zeta from the opened values and verify that
+//!    `composition(zeta) * inv_vanishing(zeta) == quotient(zeta)`.
+//!
+//! See [`VerificationError`] for the possible failure modes.
+//!
+//! # Soundness argument
+//!
+//! The protocol is sound in the random oracle model, instantiated by the
+//! configuration's Fiat-Shamir challenger.
+//! Informally: if a prover produces a proof that the verifier accepts, then with
+//! overwhelming probability the claimed computation is correct.
+//!
+//! We use the following notation throughout:
+//! - |F_ext| — size of the challenge (extension) field. All Schwartz-Zippel
+//!   terms below scale with 1/|F_ext|, so the configuration must pick an
+//!   extension large enough for the target security level: the reference
+//!   config's degree-2 Goldilocks extension gives |F_ext| ≈ 2^128; a degree-4
+//!   BabyBear extension gives ≈ 2^124; a degree-2 BabyBear extension (≈ 2^62)
+//!   would be far too small.
+//! - ρ = 2^(-log_blowup) — FRI rate parameter (inverse of the blowup factor)
+//! - n — number of FRI queries (`num_queries`)
+//! - k — number of constraints (after lookup expansion)
+//! - N — total number of lookup rows across all circuits
+//! - D — maximum degree of the quotient polynomial (trace_degree × quotient_degree)
+//!
+//! ## FRI proximity test
+//!
+//! The FRI-based PCS guarantees that committed polynomials are close to polynomials
+//! of the claimed degree. Two regimes must be distinguished when picking parameters:
+//!
+//! - **Conjectured soundness** (up to list-decoding capacity): each query catches a
+//!   cheating prover with probability ≈ 1 - ρ, giving a query-phase error of ≈ **ρ^n**.
+//!   With `log_blowup = 1` and `num_queries = 100`, this is ≈ 2^(-100).
+//! - **Proven soundness** (Johnson bound): each query only provably catches a
+//!   cheating prover with probability ≈ 1 - √ρ, giving ≈ **(√ρ)^n** — roughly half
+//!   the bits of the conjectured bound. The same parameters provably give only
+//!   ≈ 2^(-50).
+//!
+//! Like most production STARKs, parameters here are typically chosen against the
+//! conjectured bound; be aware of the distinction when quoting a security level.
+//! For the precise bounds, see the FRI soundness analysis in the Plonky3
+//! documentation.
+//!
+//! The proof-of-work (PoW) phases add grinding cost: a cheating prover must perform
+//! 2^(commit_proof_of_work_bits) work per batching challenge and
+//! 2^(query_proof_of_work_bits) work before query sampling. This increases the
+//! concrete cost of attack without affecting honest verification time.
+//!
+//! ## Constraint folding (α)
+//!
+//! All k constraints are folded into a single composition polynomial using
+//! powers of a random challenge α. The folded polynomial Σ α^i · C_i(x) has degree
+//! k - 1 in α. By the Schwartz-Zippel lemma, if any individual constraint C_i is
+//! nonzero, the folded sum is nonzero with probability at least
+//! **1 - (k - 1) / |F_ext|**, which is negligible for practical constraint counts
+//! when |F_ext| is around 2^128.
+//!
+//! ## Out-of-domain evaluation (ζ)
+//!
+//! The verifier checks `composition(ζ) · inv_vanishing(ζ) = quotient(ζ)` at a
+//! random point ζ. If the composition polynomial is not divisible by the vanishing
+//! polynomial (i.e. some constraint is violated on the trace domain), the
+//! difference `composition · inv_vanishing - quotient` is a nonzero polynomial of
+//! degree at most D. By Schwartz-Zippel, this check passes incorrectly with
+//! probability at most **D / |F_ext|**, which is negligible.
+//!
+//! ## Lookup argument
+//!
+//! The accumulator-based lookup argument uses two random challenges (β, γ) to
+//! compress lookup messages into field elements. For each lookup interaction, the
+//! message `m = β + fingerprint(γ, args)` is a random affine function of the
+//! challenges. If the multiset of "pushed" values differs from the multiset of
+//! "pulled" values, the running accumulator `Σ multiplicity_i / m_i` is a nonzero
+//! rational function of the challenges. By Schwartz-Zippel (applied to the
+//! numerator after clearing denominators), the accumulator evaluates to zero with
+//! probability at most **N / |F_ext|**. Crucially, the challenges are sampled
+//! *after* the prover has committed to the stage-1 traces and the claims have been
+//! observed, so the prover cannot adapt them.
+//!
+//! ## Fiat-Shamir (random oracle model)
+//!
+//! All challenges (α, ζ, β, γ) are derived from the transcript via the
+//! configuration's challenger. Security relies on the underlying hash behaving
+//! as a random oracle. The ordering of
+//! observations is critical: in particular, claims must be observed *before* lookup
+//! challenges are sampled, otherwise the prover could choose claims adaptively to
+//! make the accumulator balance.
+//!
+//! ## Overall soundness
+//!
+//! By a union bound, the total soundness error is at most:
+//!
+//! ```text
+//! ε ≤ ε_FRI + (k - 1 + D + N) / |F_ext|
+//! ```
+//!
+//! where ε_FRI is the FRI soundness error (see above for the conjectured vs proven
+//! regimes). With a sufficiently large challenge field (|F_ext| ≈ 2^128) the
+//! second term is negligible for any practical parameters, so **FRI dominates**.
+//! With `log_blowup = 1` and
+//! `num_queries = 100`, the protocol provides approximately 100 bits of conjectured
+//! security (≈ 50 bits proven) from FRI alone, plus additional grinding cost from
+//! PoW.
+//!
+//! ## Sparse activation
+//!
+//! A proof covers only the circuits its activation bitmap marks active
+//! ([`Proof::active`]); inactive circuits are neither committed, opened,
+//! accumulated, nor constraint-evaluated. An accepted sparse proof is
+//! equivalent to a dense proof in which every inactive circuit has an empty
+//! table: an inactive circuit contributes no lookup sends or receives, so
+//! honest deactivation leaves the global balance unchanged, while
+//! dishonestly deactivating a circuit the execution needs leaves an
+//! unmatched channel message and the final accumulator is a nonzero
+//! rational function of (β, γ) — caught by the balance check with the same
+//! N / |F_ext| bound as above. The bitmap cannot be chosen adaptively: it
+//! is observed before any commitment or challenge, and the verifier takes
+//! every active circuit's widths, constraints, and lookup structure from
+//! the canonical system by bitmap index. The one contract change relative
+//! to dense proofs: a circuit can no longer force its own presence through
+//! must-hold padding rows — sparse verification guarantees the constraints
+//! of ACTIVE circuits plus global lookup balance, and nothing about
+//! inactive ones.
+//!
+//! ## Not zero-knowledge
+//!
+//! This protocol is a succinct argument of knowledge, **not** a zero-knowledge
+//! proof: traces are committed without blinding, and FRI query responses reveal
+//! actual low-degree-extension values of the witness. Do not use it when the
+//! witness must remain hidden from the verifier.
 
 use crate::config::{PcsError, StarkGenericConfig, Val};
 use crate::ensure_eq;
@@ -24,7 +174,10 @@ use p3_util::log2_strict_usize;
 /// Errors that can occur during proof verification.
 #[derive(Debug)]
 pub enum VerificationError<PcsErr> {
-    /// A provided claim is invalid. Reserved for future claim validation.
+    /// A provided claim is invalid.
+    ///
+    /// Note: this variant is not currently returned by any verification path.
+    /// It is reserved for future claim validation checks.
     InvalidClaim,
     /// The PCS opening proof failed to verify.
     InvalidOpeningArgument(PcsErr),
@@ -65,24 +218,42 @@ impl<SC: StarkGenericConfig> System<SC> {
             stage_1_opened_values,
             stage_2_opened_values,
         } = proof;
+        // first, verify the proof shape (also validates the activation bitmap)
         let quotient_degrees = self.verify_shape(proof)?;
+        // Canonical index of each active circuit; every per-circuit sequence
+        // in the proof is indexed by position in this list.
         let active_indices: Vec<usize> = active
             .iter()
             .enumerate()
             .filter_map(|(i, &a)| a.then_some(i))
             .collect();
 
-        // Lookup argument must balance to zero overall.
+        // Soundness: lookup argument. The accumulator was computed by the prover
+        // under challenges (β, γ) that were sampled after the traces and claims were
+        // committed. If the pushed and pulled multisets differ, the accumulator is a
+        // nonzero rational function of (β, γ) and evaluates to zero with probability
+        // ≤ N / |F_ext| (Schwartz-Zippel on the numerator polynomial).
         ensure_eq!(
             intermediate_accumulators.last(),
             Some(&SC::Challenge::ZERO),
             VerificationError::UnbalancedChannel
         );
 
+        // Soundness: Fiat-Shamir. All challenges below are derived deterministically
+        // from the transcript via the configuration's challenger, whose hash is
+        // modeled as a random oracle. The verifier replays exactly the same
+        // observations as the prover, so any divergence (e.g. different
+        // commitments) produces different challenges, making it infeasible for a
+        // cheating prover to predict them.
         let pcs = self.config.pcs();
         let mut challenger = self.config.initialise_challenger();
 
+        // Bind the system shape into the transcript. The protocol parameters
+        // are already bound via the challenger seed.
         self.observe_shape(&mut challenger);
+
+        // Bind the activation bitmap — before any commitment or challenge, so
+        // every sample depends on which circuits this proof covers.
         for &is_active in active {
             challenger.observe(Val::<SC>::from_bool(is_active));
         }
@@ -90,25 +261,42 @@ impl<SC: StarkGenericConfig> System<SC> {
             challenger.observe(commit.clone());
         }
         challenger.observe(commitments.stage_1_trace.clone());
+
+        // Observe trace heights to bind the proof to specific domain sizes.
         for log_degree in log_degrees {
             challenger.observe(Val::<SC>::from_u8(*log_degree));
         }
+
+        // Soundness: claims must be observed BEFORE lookup challenges are sampled.
+        // Otherwise, the prover could choose claims adaptively after seeing the
+        // challenges, breaking the lookup argument's binding property. The claims
+        // are length-prefixed so that distinct claim structures (e.g. [[a, b]]
+        // vs [[a], [b]]) yield distinct transcripts.
         challenger.observe(Val::<SC>::from_usize(claims.len()));
         for claim in claims {
             challenger.observe(Val::<SC>::from_usize(claim.len()));
             challenger.observe_slice(claim);
         }
 
+        // Soundness: lookup argument. The challenges are random elements of F_ext.
+        // The message m_i = lookup_challenge + fingerprint(fingerprint_challenge, args_i)
+        // is an affine function of the challenges, ensuring that distinct argument
+        // tuples produce distinct messages with probability ≥ 1 - 1/|F_ext|.
         let lookup_argument_challenge: SC::Challenge = challenger.sample_algebra_element();
         challenger.observe_algebra_element(lookup_argument_challenge);
         let fingerprint_challenge: SC::Challenge = challenger.sample_algebra_element();
         challenger.observe_algebra_element(fingerprint_challenge);
 
         challenger.observe(commitments.stage_2_trace.clone());
+
+        // Observe the intermediate accumulators. They enter the constraints as
+        // public values, so later challenges (α, ζ) must depend on them
+        // directly rather than only through the quotient commitment.
         for acc in intermediate_accumulators {
             challenger.observe_algebra_element(*acc);
         }
 
+        // construct the accumulator from the claims
         let mut acc = SC::Challenge::ZERO;
         for claim in claims {
             let message = lookup_argument_challenge
@@ -116,8 +304,14 @@ impl<SC: StarkGenericConfig> System<SC> {
             acc += message.inverse();
         }
 
+        // Soundness: constraint folding. All k constraints are combined via powers
+        // of α. The folded sum has degree k-1 in α, so by Schwartz-Zippel a violated
+        // constraint survives folding with probability ≥ 1 - (k-1)/|F_ext|.
         let constraint_challenge: SC::Challenge = challenger.sample_algebra_element();
         challenger.observe(commitments.quotient_chunks.clone());
+
+        // Soundness: OOD evaluation. ζ is sampled after all commitments are fixed.
+        // A nonzero polynomial of degree ≤ D vanishes at ζ with probability ≤ D/|F_ext|.
         let zeta: SC::Challenge = challenger.sample_algebra_element();
 
         // Reconstruct the PCS opening rounds (identical to the prover).
@@ -144,11 +338,16 @@ impl<SC: StarkGenericConfig> System<SC> {
                     (zeta_next, stage_2_opened_values[pos][1].clone()),
                 ],
             ));
+            // All of a circuit's quotient coefficient slices live in one
+            // matrix on the trace domain, opened once at ζ.
             quotient_chunks_evaluations.push((
                 trace_domain,
                 vec![(zeta, quotient_opened_values[pos][0].clone())],
             ));
         }
+        // The preprocessed commitment covers ALL preprocessed matrices, in
+        // canonical slot order; inactive circuits' matrices are opened at no
+        // points (mirroring the prover's round construction).
         let mut preprocessed_trace_evaluations = vec![];
         {
             let mut active_pos: Vec<Option<usize>> = vec![None; active.len()];
@@ -196,10 +395,16 @@ impl<SC: StarkGenericConfig> System<SC> {
                 preprocessed_trace_evaluations,
             ));
         }
+        // Soundness: FRI proximity test. Verifies that the committed polynomials
+        // are close to low-degree polynomials and that the claimed evaluations are
+        // consistent with the commitments. Soundness error ≤ ρ^num_queries, where
+        // ρ = 2^(-log_blowup). This is the dominant term in the overall bound.
         pcs.verify(coms_to_verify, opening_proof, &mut challenger)
             .map_err(VerificationError::InvalidOpeningArgument)?;
 
-        // Out-of-domain check per active circuit.
+        // use the opened values to compute the composition polynomial for each circuit
+        // and check that the evaluation of the composition polynomial equals the
+        // product of the zerofier with the quotient
         let extension_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
         let empty: [SC::Challenge; 0] = [];
         for (pos, &ci) in active_indices.iter().enumerate() {
@@ -255,7 +460,9 @@ impl<SC: StarkGenericConfig> System<SC> {
                     acc * constraint_challenge + v
                 });
 
-            // Recombine the quotient from its coefficient slices at ζ.
+            // Recombine the quotient from its coefficient slices:
+            // `Q(ζ) = Σᵢ ζ^{i·n}·cᵢ(ζ)`, with each slice's value read from
+            // the wide quotient matrix opened at ζ.
             let quotient_row = &quotient_opened_values[pos][0];
             debug_assert_eq!(quotient_row.len(), quotient_degree * extension_d);
             let zeta_pow_n = zeta.exp_power_of_2(log2_strict_usize(degree));
@@ -265,18 +472,26 @@ impl<SC: StarkGenericConfig> System<SC> {
                 .map(|(chunk, zeta_pow)| zeta_pow * from_ext_basis::<Val<SC>, SC::Challenge>(chunk))
                 .sum::<SC::Challenge>();
 
+            // Soundness: OOD check. If any constraint is violated on the trace
+            // domain, the composition polynomial is not divisible by the vanishing
+            // polynomial, so their ratio differs from the committed quotient. At
+            // the random point ζ, this difference is nonzero with probability
+            // ≥ 1 - D/|F_ext| (Schwartz-Zippel). Combined with the FRI check above,
+            // this ensures that the opened values are consistent with actually
+            // low-degree polynomials satisfying all constraints.
             ensure_eq!(
                 composition * sels.inv_vanishing,
                 quotient,
                 VerificationError::OodEvaluationMismatch
             );
+            // the accumulator must become the next accumulator for the next iteration
             acc = next_acc;
         }
         Ok(())
     }
 
-    /// Validates the structural shape of the proof. Returns the quotient
-    /// degrees per active circuit on success.
+    /// Validates the structural shape of the proof without checking any cryptographic
+    /// properties. Returns the quotient degrees per active circuit on success.
     pub fn verify_shape(
         &self,
         proof: &Proof<SC>,
@@ -320,6 +535,10 @@ impl<SC: StarkGenericConfig> System<SC> {
             num_preprocessed == 0,
             VerificationError::InvalidSystem
         );
+        // Stage 0 round: the preprocessed commitment is built once over ALL
+        // preprocessed traces at system construction, so its round carries one
+        // entry per preprocessed matrix regardless of activation; an inactive
+        // circuit's matrix must be opened at no points.
         ensure_eq!(
             preprocessed_opened_values
                 .as_ref()
@@ -394,6 +613,10 @@ impl<SC: StarkGenericConfig> System<SC> {
         let mut quotient_degrees = vec![];
         for (&ci, log_degree) in active_indices.iter().zip(log_degrees) {
             let quotient_degree = self.circuits[ci].quotient_degree();
+            // The claimed log degree must be small enough that the quotient
+            // domain can still be committed and opened by the PCS. This also
+            // guards the `1 << log_degree` shifts used during verification
+            // against overflow on adversarial proofs.
             crate::ensure!(
                 usize::from(*log_degree) + log2_strict_usize(quotient_degree)
                     <= self.config.max_log_degree(),
@@ -401,6 +624,8 @@ impl<SC: StarkGenericConfig> System<SC> {
             );
             quotient_degrees.push(quotient_degree);
         }
+        // One wide quotient matrix per active circuit, holding all its
+        // coefficient slices, opened at the single point ζ.
         ensure_eq!(
             quotient_opened_values.len(),
             num_active,
@@ -458,8 +683,7 @@ mod tests {
         query_proof_of_work_bits: 0,
     };
 
-    /// The shared even/odd constraints (a mirror of the `CS` AIR in
-    /// `crate::lookup`'s tests), authored with the new frontend.
+    /// The shared even/odd parity constraints, authored with the frontend.
     fn cs_constraints() -> Vec<Expr<Val>> {
         let m = Expr::main(0);
         let input = Expr::main(1);

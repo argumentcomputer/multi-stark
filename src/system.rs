@@ -1,10 +1,10 @@
-//! Multi-circuit STARK system, constraint-IR version.
+//! Multi-circuit STARK system.
 //!
-//! Parallel to [`crate::system`], but circuits are compiled constraint data
-//! ([`super::circuit::Circuit`]) instead of AIRs, so there is no `A` type
-//! parameter. `System::new` derives each circuit's stage-2 and public-input
-//! layout from its lookups and the challenge field's extension degree,
-//! appends the synthesized lookup constraints, and compiles.
+//! Circuits are compiled constraint data ([`crate::circuit::Circuit`]) rather
+//! than AIRs, so there is no `A` type parameter. `System::new` derives each
+//! circuit's stage-2 and public-input layout from its lookups and the
+//! challenge field's extension degree, appends the synthesized lookup
+//! constraints, and compiles.
 
 use p3_challenger::CanObserve;
 use p3_commit::{Pcs, PolynomialSpace};
@@ -70,12 +70,17 @@ impl<F: Field> Circuit<F> {
     }
 
     /// Degree of the quotient polynomial as a multiple of the trace degree.
+    /// Division by the vanishing polynomial reduces the composition
+    /// polynomial's degree by 1; the result is padded to a power of two so
+    /// the quotient can be split into equally-sized chunks.
     pub fn quotient_degree(&self) -> usize {
         (self.max_constraint_degree().max(2) - 1).next_power_of_two()
     }
 }
 
-/// A multi-circuit STARK system over compiled constraint circuits.
+/// A multi-circuit STARK system over compiled constraint circuits. Contains
+/// all circuits together with their shared preprocessed commitment and the
+/// protocol configuration.
 pub struct System<SC: StarkGenericConfig> {
     pub config: SC,
     pub circuits: Vec<Circuit<Val<SC>>>,
@@ -88,6 +93,7 @@ pub struct System<SC: StarkGenericConfig> {
 
 /// Prover-side data retained between system setup and proving.
 pub struct ProverKey<SC: StarkGenericConfig> {
+    /// PCS prover data for the preprocessed traces.
     pub preprocessed_data: Option<PcsData<SC>>,
 }
 
@@ -139,6 +145,11 @@ impl<SC: StarkGenericConfig> System<SC> {
                 stage_2_width: s2_width,
                 num_publics: n_publics,
             };
+            // The prover obtains trace evaluations on the quotient domain
+            // from the PCS, which can only serve domains up to
+            // `max_quotient_degree` times the trace domain (the blowup
+            // factor for FRI). Beyond that, proving would silently produce
+            // invalid proofs, so reject the circuit upfront.
             assert!(
                 circuit.quotient_degree() <= config.max_quotient_degree(),
                 "circuit {i}: constraint degree {} needs quotient degree {}, but the PCS only \
@@ -173,8 +184,12 @@ impl<SC: StarkGenericConfig> System<SC> {
         (system, ProverKey { preprocessed_data })
     }
 
-    /// Binds the system shape into the Fiat-Shamir transcript. Prover and
-    /// verifier call this identically, before observing any commitment.
+    /// Binds the system shape into the Fiat-Shamir transcript. The prover and
+    /// the verifier must call this identically, before observing any
+    /// commitment, so that transcripts of systems with different circuit
+    /// shapes never collide. The protocol parameters are bound separately,
+    /// via the challenger seed (see
+    /// [`StarkGenericConfig::initialise_challenger`]).
     pub fn observe_shape(&self, challenger: &mut SC::Challenger) {
         let mut observe = |x: usize| challenger.observe(Val::<SC>::from_usize(x));
         observe(self.circuits.len());
@@ -193,7 +208,9 @@ impl<SC: StarkGenericConfig> System<SC> {
 /// values derived from them.
 #[derive(Clone)]
 pub struct SystemWitness<F: Field> {
+    /// Stage 1 (main) execution traces, one per circuit.
     pub traces: Vec<RowMajorMatrix<F>>,
+    /// Lookup values per circuit, stored flat.
     pub lookups: Vec<LookupValues<F>>,
 }
 
@@ -202,9 +219,10 @@ impl<F: Field> SystemWitness<F> {
     /// lookup values by sweeping the compiled lookup prefix over its rows.
     ///
     /// # Panics
-    /// Panics if the number of traces differs from the number of circuits,
-    /// or if a circuit with a preprocessed trace receives a main trace of a
-    /// different height.
+    /// Panics if the number of traces differs from the number of circuits, or
+    /// if a circuit with a preprocessed trace receives a main trace of a
+    /// different height (both traces are opened on the same domain, so their
+    /// heights must match; the rows would otherwise be silently truncated).
     pub fn from_stage_1<SC>(traces: Vec<RowMajorMatrix<F>>, system: &System<SC>) -> Self
     where
         SC: StarkGenericConfig,

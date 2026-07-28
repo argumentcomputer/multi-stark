@@ -47,7 +47,7 @@ fn squares() -> CircuitInputs<Val> {
         constraints: vec![
             // x² == x * x
             x_squared.clone() - x.clone() * x,
-            // x² == low + 256 * high
+            // x² == low + 256 * high  (byte decomposition)
             x_squared - (low.clone() + high.clone() * Expr::constant(Val::from_u32(256))),
         ],
         // Push each byte into the range table for validation.
@@ -86,7 +86,9 @@ fn main() {
     let n = 16u32;
     let f = Val::from_u32;
 
+    // Range-table main trace: multiplicity per byte value (256 rows × 1 col)
     let mut range_mults = vec![Val::ZERO; 256];
+    // Squares trace: 16 rows × 5 cols
     let mut sq_values = Vec::with_capacity(5 * n as usize);
     for x in 0..n {
         let sq = x * x;

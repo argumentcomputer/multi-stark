@@ -312,7 +312,10 @@ impl<F: Field> LookupValuesBuilder<F> {
         }
     }
 
-    /// Row writers, one per row, in row order.
+    /// Row writers, one per row, in row order. Returned as a `Vec` so the
+    /// caller can parallelize with its own runtime (e.g. rayon's
+    /// `into_par_iter`, zipped with a parallel iterator over trace rows)
+    /// regardless of how this crate's `parallel` feature is set.
     ///
     /// # Panics
     /// Panics if the builder has no lookup slots (nothing to write; call
@@ -363,7 +366,7 @@ pub struct LookupRowMut<'a, F> {
 }
 
 impl<F: Field> LookupRowMut<'_, F> {
-    /// Writes lookup slot `slot` with the given multiplicity and arguments.
+    /// Writes lookup slot `slot` with "push" semantics (adds a claim).
     /// Fewer arguments than the slot's width leave zero padding.
     ///
     /// # Panics
@@ -381,7 +384,8 @@ impl<F: Field> LookupRowMut<'_, F> {
         self.args[start + args.len()..end].fill(F::ZERO);
     }
 
-    /// Writes lookup slot `slot` with negated multiplicity ("pull").
+    /// Writes lookup slot `slot` with "pull" semantics (removes a claim):
+    /// same as [`Self::push`] with negated multiplicity.
     #[inline]
     pub fn pull(&mut self, slot: usize, multiplicity: F, args: &[F]) {
         self.push(slot, -multiplicity, args);

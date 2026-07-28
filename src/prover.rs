@@ -1,16 +1,174 @@
 //! Multi-circuit STARK prover, constraint-IR version.
 //!
-//! Parallel to [`crate::prover`]. The protocol (transcript, commitments,
-//! lookup argument, quotient, FRI) is identical; the only difference is how
-//! the composition polynomial is built: instead of evaluating an AIR against
-//! a folder, the prover runs the compiled circuit's dense sweep in
-//! `PackedVal` on the quotient domain and folds the constraint values with
-//! the constraint challenge. Stage-2 columns are treated as ordinary base
-//! columns (they were committed flattened), so no extension packing is
-//! needed here.
+//! The composition polynomial is built by running the compiled circuit's
+//! dense sweep in `PackedVal` on the quotient domain and folding the
+//! constraint values with the constraint challenge. Stage-2 columns are
+//! treated as ordinary base columns (they were committed flattened), so no
+//! extension packing is needed here.
 //!
-//! Reuses the proof types, lookup witness, and PCS plumbing of the existing
-//! prover unchanged.
+//! The proving protocol proceeds in several stages sharing one Fiat-Shamir
+//! transcript. The challenger starts from a seed binding a domain tag and all
+//! protocol parameters (see the transcript contract on
+//! [`StarkGenericConfig::initialise_challenger`]), and the system shape
+//! (circuit count, widths, constraint counts, degrees)
+//! is observed before any commitment.
+//!
+//! 0. **Sparse activation**: circuits whose stage-1 trace is empty are
+//!    deactivated for this proof — skipped by every stage below — and the
+//!    activation bitmap over the canonical circuit set is observed
+//!    immediately after the shape, before any commitment or challenge. See
+//!    [`Proof::active`] for the soundness contract.
+//!
+//! 1. **Stage 1 — Main traces**: Each circuit's execution trace is committed via the
+//!    configuration's PCS. The preprocessed commitment (if any), stage-1 commitment,
+//!    trace heights, and length-prefixed claims are observed into the challenger.
+//!    Claims must be observed before lookup challenges are sampled; otherwise the
+//!    prover could choose claims adaptively to balance the lookup accumulator.
+//!
+//! 2. **Lookup challenges**: The challenger samples two independent challenges:
+//!    `lookup_argument_challenge` (β) and `fingerprint_challenge` (γ). An initial
+//!    accumulator is computed from the claims:
+//!    `acc = Σ (β + fingerprint(γ, claim_i))⁻¹`.
+//!
+//! 3. **Stage 2 — Lookup traces**: For each circuit, the lookup traces are computed
+//!    (running accumulator and message inverses per row) and committed via PCS. Each
+//!    circuit produces an intermediate accumulator value recording where its running
+//!    sum ended up; these are observed into the challenger, and the verifier will
+//!    check that the last one is zero.
+//!
+//! 4. **Quotient polynomial**: A constraint challenge (α) is sampled and used to fold
+//!    all constraints via powers of α. The folded constraint polynomial is divided by
+//!    the vanishing polynomial, split into degree-bounded chunks, and committed.
+//!
+//! 5. **Opening**: An out-of-domain point (ζ) is sampled. All polynomials are opened
+//!    at ζ and ζ·g (where g is the trace domain generator) via the PCS, producing
+//!    the FRI opening proof.
+//!
+//! The resulting [`Proof`] can be serialized with [`Proof::to_bytes`] and deserialized
+//! with [`Proof::from_bytes`] for transport or storage.
+//!
+//! # Prover cost analysis
+//!
+//! The prover's computational work divides into polynomial commitments (FFT +
+//! Merkle hashing), lookup trace construction, constraint evaluation, and the
+//! FRI opening protocol. This section gives a concrete cost breakdown.
+//!
+//! ## Notation
+//!
+//! We use the following notation throughout:
+//! - C — number of circuits in the system
+//! - n_i — trace height (rows, power of two) of circuit i
+//! - w_i — stage 1 trace width (columns) of circuit i
+//! - p_i — preprocessed trace width of circuit i (0 if none)
+//! - L_i — number of lookups in circuit i
+//! - k_i — number of constraints in circuit i (after lookup expansion)
+//! - d_i — maximum constraint degree multiple of circuit i
+//! - q_i = next_pow2(max(d_i, 2) − 1) — quotient polynomial degree
+//! - D — dimension of the challenge (extension) field over the base field
+//!   (2 in the reference config)
+//! - B = 2^log_blowup — FRI blowup factor
+//! - Q = num_queries — FRI query repetitions
+//! - a = max_log_arity — FRI folding arity (log₂)
+//!
+//! Derived quantities:
+//! - w2_i = 1 + L_i — stage 2 width in extension field elements
+//! - W_i = w_i + w2_i · D + q_i · D — total committed width per circuit (base field)
+//! - H = max_i(n_i) · B — largest LDE height
+//! - R = ⌈(log₂ H − log_final_poly_len) / a⌉ — FRI folding rounds
+//!
+//! ## Stage 1 commit
+//!
+//! Each circuit's main trace (n_i × w_i) undergoes a coset LDE (FFT-based)
+//! expanding from n_i to n_i · B evaluations, followed by Merkle tree
+//! construction over the LDE rows. All circuits are committed together.
+//!
+//! ```text
+//! FFT work:   Σ_i  w_i · n_i · B · log₂(n_i · B)   field multiplications
+//! Hashing:    Σ_i  n_i · B                            Merkle leaf hashes
+//! ```
+//!
+//! ## Lookup trace construction
+//!
+//! For each circuit with L_i > 0 lookups, the prover computes per-row
+//! fingerprints (Horner evaluations in the extension field), batch-inverts
+//! all messages via Montgomery's trick (≈ 3 extension multiplications per
+//! element), and builds the running accumulator.
+//!
+//! ```text
+//! Fingerprints:  Σ_i  n_i · L_i · |args|   extension field multiplications
+//! Inversions:    Σ_i  3 · n_i · L_i         extension field multiplications
+//! Accumulator:   Σ_i  n_i · L_i             extension field multiply-adds
+//! ```
+//!
+//! ## Stage 2 commit
+//!
+//! Stage 2 traces (n_i × w2_i extension elements, flattened to
+//! n_i × w2_i · D base elements) are committed identically to stage 1.
+//!
+//! ```text
+//! FFT work:   Σ_i  w2_i · D · n_i · B · log₂(n_i · B)   field multiplications
+//! Hashing:    Σ_i  n_i · B                                 Merkle leaf hashes
+//! ```
+//!
+//! ## Quotient computation and commit
+//!
+//! For each circuit, the prover evaluates all k_i constraints at every point
+//! of the quotient domain (size n_i · q_i) and divides by the vanishing
+//! polynomial. If q_i ≤ B, the trace evaluations on the quotient domain are
+//! obtained by subsetting the LDE (essentially free); otherwise an additional
+//! iFFT + FFT is required.
+//!
+//! The quotient polynomial is split into q_i coefficient slices (each of
+//! degree n_i) and committed as a single q_i·D-column matrix per circuit on
+//! the trace domain, so the opening phase pays its per-matrix costs once per
+//! circuit rather than once per slice.
+//!
+//! ```text
+//! Constraint eval:  Σ_i  n_i · q_i · eval_cost(k_i)         field operations
+//! Quotient FFT:     Σ_i  q_i · D · n_i · B · log₂(n_i · B)  field multiplications
+//! Hashing:          Σ_i  q_i · n_i · B                        Merkle leaf hashes
+//! ```
+//!
+//! Here eval_cost(k_i) denotes the per-row cost of evaluating all k_i folded
+//! constraints, which depends on the compiled constraint sweep.
+//!
+//! ## FRI opening
+//!
+//! All polynomials (stage 1, stage 2, quotient, and preprocessed if present)
+//! are opened at ζ and ζ·g via barycentric interpolation, then verified
+//! through FRI. The preprocessed traces' LDE was computed at setup time
+//! ([`System::new`]); only their opening contributes to per-proof cost.
+//!
+//! ```text
+//! Interpolation:  Σ_i  n_i · B · W_i     field multiply-adds (barycentric)
+//! FRI folding:    ≈ H · 2^a / (2^a − 1)  extension field operations
+//! FRI queries:    Q · R · log₂ H          hash operations (Merkle paths)
+//! FRI grinding:   2^pow_commit · R + 2^pow_query   hash invocations
+//! ```
+//!
+//! ## Overall cost
+//!
+//! The total per-proof cost is approximately:
+//!
+//! ```text
+//! C_prove  ≈  Σ_i  n_i · B · log₂(n_i · B) · W_i     (FFT — all commit rounds)
+//!           + Σ_i  n_i · q_i · eval_cost(k_i)          (constraint evaluation)
+//!           + Σ_i  n_i · B · W_i                        (barycentric interpolation)
+//!           + Q · R · log₂ H                            (FRI query phase)
+//!           + 2^pow_commit · R + 2^pow_query            (FRI grinding)
+//! ```
+//!
+//! For typical parameters (B = 2, Q = 100, a = 1):
+//! - **FFT dominates** when traces have large n_i · W_i products.
+//! - **Constraint evaluation** can dominate for circuits with many complex
+//!   constraints (large k_i) or high quotient degree (large q_i).
+//! - **FRI queries** grow logarithmically in trace height but linearly in Q.
+//! - **Lookup computation** is subdominant unless L_i is very large.
+//! - **Grinding** is a constant overhead per FRI round (or once for queries).
+//!
+//! Cost scales **linearly** in trace height n_i for fixed circuit structure,
+//! with a logarithmic factor from the FFT. Doubling n_i approximately doubles
+//! the prover's work.
 
 use crate::config::{
     Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsProof, StarkGenericConfig, Val,
@@ -49,8 +207,14 @@ pub struct Commitments<Com> {
 #[serde(bound = "")]
 pub struct Proof<SC: StarkGenericConfig> {
     /// Activation bitmap over the system's canonical circuit set: circuit i
-    /// is covered by this proof iff `active[i]`. Every other per-circuit
-    /// sequence in this proof is indexed by ACTIVE position.
+    /// is covered by this proof iff `active[i]`. Inactive circuits (empty
+    /// execution traces) are not committed, opened, accumulated, or
+    /// constraint-evaluated; the lookup accumulator polices dishonest
+    /// deactivation (an omitted-but-needed circuit leaves an unmatched
+    /// channel send, so the final accumulator cannot be zero). Bound into
+    /// the Fiat-Shamir transcript before any commitment or challenge.
+    /// Every other per-circuit sequence in this proof (accumulators,
+    /// log_degrees, opened values) is indexed by ACTIVE position.
     pub active: Vec<bool>,
     pub commitments: Commitments<Com<SC>>,
     /// Per-active-circuit intermediate accumulator values for the lookup
@@ -86,9 +250,13 @@ impl<SC: StarkGenericConfig> Proof<SC> {
 impl<SC> System<SC>
 where
     SC: StarkGenericConfig,
+    // Two-adicity is needed to re-base the quotient's coefficient slices
+    // onto the trace domain; every FRI-based config is two-adic anyway.
     Val<SC>: TwoAdicField + Ord,
 {
     /// Generates a STARK proof for the system with a single claim.
+    ///
+    /// This is a convenience wrapper around [`Self::prove_multiple_claims`].
     pub fn prove(
         &self,
         key: &ProverKey<SC>,
@@ -99,6 +267,14 @@ where
     }
 
     /// Generates a STARK proof for the system with multiple claims.
+    ///
+    /// Each claim is a slice of field elements that is observed by the challenger
+    /// before lookup challenges are sampled, binding the proof to the claimed values.
+    ///
+    /// Circuits whose stage-1 trace is empty are deactivated for this proof:
+    /// they are neither committed, opened, accumulated, nor
+    /// constraint-evaluated, and the activation bitmap is recorded in
+    /// [`Proof::active`].
     ///
     /// # Panics
     /// Panics if every circuit's trace is empty (nothing to prove).
@@ -112,14 +288,25 @@ where
         let pcs = self.config.pcs();
         let mut challenger = self.config.initialise_challenger();
 
+        // Bind the system shape into the transcript. The protocol parameters
+        // are already bound via the challenger seed.
         self.observe_shape(&mut challenger);
 
-        // Sparse activation: a circuit with an empty stage-1 trace is
-        // inactive for this proof. The bitmap is bound before any commitment.
+        // Sparse activation: a circuit whose stage-1 trace is empty is
+        // INACTIVE for this proof — nothing of it is committed, opened,
+        // accumulated, or constraint-evaluated. Soundness of the omission
+        // rests on the lookup accumulator: an inactive circuit has no rows,
+        // hence no sends or receives, so omitting it leaves the global
+        // balance unchanged — while dishonestly deactivating a circuit the
+        // execution needs leaves an unmatched channel send and the final
+        // accumulator cannot be zero. The activation bitmap is bound into
+        // the transcript here, before any commitment or challenge.
         let active: Vec<bool> = witness.traces.iter().map(|t| t.height() > 0).collect();
         for &is_active in &active {
             challenger.observe(Val::<SC>::from_bool(is_active));
         }
+        // Canonical index of each active circuit, in order; matrix position
+        // within every per-proof commitment == position in this list.
         let active_indices: Vec<usize> = active
             .iter()
             .enumerate()
@@ -129,12 +316,14 @@ where
             !active_indices.is_empty(),
             "cannot prove with every circuit deactivated (all traces empty)"
         );
+        // Canonical index -> active position (None = inactive).
         let mut active_pos: Vec<Option<usize>> = vec![None; active.len()];
         for (pos, &ci) in active_indices.iter().enumerate() {
             active_pos[ci] = Some(pos);
         }
 
-        // Stage 1 commit.
+        // Cost: "Stage 1 commit" — coset LDE (FFT) of each trace from n_i to
+        // n_i·B rows, then Merkle tree. FFT work: Σ w_i · n_i · B · log₂(n_i·B).
         let _g = tracing::info_span!("stark/stage1_commit").entered();
         let mut log_degrees = vec![];
         let evaluations = witness
@@ -156,11 +345,18 @@ where
             challenger.observe(commit.clone());
         }
         challenger.observe(stage_1_trace_commit.clone());
+
+        // Observe the traces' heights. This binds the proof to specific domain
+        // sizes; the verifier reads these from the (untrusted) proof, so they
+        // must influence every subsequent challenge.
         for log_degree in &log_degrees {
             challenger.observe(Val::<SC>::from_usize(*log_degree));
         }
 
-        // Observe the claims, length-prefixed, before sampling challenges.
+        // Observe the claims, length-prefixed so that distinct claim
+        // structures (e.g. [[a, b]] vs [[a], [b]]) yield distinct transcripts.
+        // This has to be done before generating the lookup argument challenge,
+        // otherwise the lookup argument can be attacked.
         challenger.observe(Val::<SC>::from_usize(claims.len()));
         for claim in claims {
             challenger.observe(Val::<SC>::from_usize(claim.len()));
@@ -181,8 +377,11 @@ where
             acc += message.inverse();
         }
 
-        // Stage 2 (lookup) trace construction.
+        // Cost: "Lookup trace construction" — fingerprint (Horner), batch
+        // inversion, and accumulator update. Total: Σ n_i·L_i extension field ops.
         let _g = tracing::info_span!("stark/lookup_construction").entered();
+        // Only active circuits enter the accumulator chain; the chain (and
+        // `intermediate_accumulators`) is indexed by active position.
         let active_lookups: Vec<_> = witness
             .lookups
             .into_iter()
@@ -195,10 +394,13 @@ where
             &fingerprint_challenge,
             acc,
         );
+        // The lookup witness can be as large as the traces themselves; free it
+        // now instead of holding it through the commit/quotient/FRI stages.
         drop(active_lookups);
         drop(_g);
 
-        // Stage 2 commit (flattened extension traces).
+        // Cost: "Stage 2 commit" — LDE + Merkle for flattened extension traces.
+        // FFT work: Σ w2_i · D · n_i · B · log₂(n_i·B).
         let _g = tracing::info_span!("stark/stage2_commit").entered();
         let evaluations = stage_2_traces.into_iter().map(|trace| {
             let degree = trace.height();
@@ -209,6 +411,9 @@ where
         drop(_g);
         challenger.observe(stage_2_trace_commit.clone());
 
+        // Observe the intermediate accumulators. They enter the constraints as
+        // public values, so later challenges (α, ζ) must depend on them
+        // directly rather than only through the quotient commitment.
         for acc in &intermediate_accumulators {
             challenger.observe_algebra_element(*acc);
         }
@@ -216,7 +421,9 @@ where
         // Constraint challenge.
         let constraint_challenge: SC::Challenge = challenger.sample_algebra_element();
 
-        // Quotient computation and commit.
+        // Cost: "Quotient computation and commit" — constraint evaluation on the
+        // quotient domain (Σ n_i·q_i·eval_cost(k_i)) plus LDE + Merkle of the
+        // quotient sub-polynomials (Σ q_i·D·n_i·B·log₂(n_i·B)).
         let _g = tracing::info_span!("stark/quotient").entered();
         debug_assert_eq!(intermediate_accumulators.len(), active_indices.len());
         debug_assert_eq!(log_degrees.len(), active_indices.len());
@@ -261,6 +468,7 @@ where
                     lookup_publics.extend_from_slice(ef.as_basis_coefficients_slice());
                 }
 
+                // compute the quotient values which are elements of the extension field and flatten it to the base field
                 let quotient_values = quotient_values::<SC>(
                     circuit,
                     &lookup_publics,
@@ -274,6 +482,14 @@ where
                 );
                 let quotient_flat =
                     RowMajorMatrix::new_col(quotient_values).flatten_to_base::<Val<SC>>();
+                // The quotient has degree greater than the trace polynomials,
+                // so for FRI to work it must be split into `quotient_degree`
+                // sub-polynomials of trace degree. Slice its COEFFICIENTS:
+                // `Q(X) = Σᵢ X^{i·n}·cᵢ(X)` with each `cᵢ` of degree < n, and
+                // commit all slices as ONE `q·D`-column matrix on the trace
+                // domain — instead of one matrix per slice on the split
+                // cosets — so the opening phase pays its per-matrix costs
+                // once per circuit rather than once per slice.
                 let coefficients =
                     dft.coset_idft_batch(quotient_flat, quotient_domain.first_point());
                 let ext_degree = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
@@ -307,7 +523,8 @@ where
             quotient_chunks: quotient_commit,
         };
 
-        // FRI opening.
+        // Cost: "FRI opening" — barycentric interpolation (Σ n_i·B·W_i),
+        // FRI folding (≈ H), and FRI queries (Q·R·log₂ H hash ops).
         let _g = tracing::info_span!("stark/fri_open").entered();
         let zeta: SC::Challenge = challenger.sample_algebra_element();
         let mut round0_openings = vec![];
@@ -321,8 +538,13 @@ where
                 .expect("domain has no next point");
             round1_openings.push(vec![zeta, zeta_next]);
             round2_openings.push(vec![zeta, zeta_next]);
+            // One wide matrix per circuit holds all its quotient slices.
             round3_openings.push(vec![zeta]);
         }
+        // The preprocessed commitment is built once over ALL preprocessed
+        // traces at system construction, so its round must carry one entry
+        // per preprocessed matrix regardless of activation: an inactive
+        // circuit's preprocessed matrix is opened at no points.
         for (prep_index, &pos) in self.preprocessed_indices.iter().zip(&active_pos) {
             if prep_index.is_some() {
                 match pos {
