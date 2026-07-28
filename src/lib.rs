@@ -1,6 +1,9 @@
-pub mod builder;
 pub mod config;
+pub mod eval;
+pub mod expr;
+pub mod graph;
 pub mod lookup;
+pub mod p3_adapter;
 pub mod prover;
 pub mod system;
 #[cfg(test)]

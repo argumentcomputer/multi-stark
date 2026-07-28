@@ -6,9 +6,9 @@
 //! change compiles only for the reference config, the smoke test here
 //! catches it.
 
-use crate::builder::symbolic::{SymbolicExpression, var};
 use crate::config::StarkGenericConfig;
-use crate::lookup::{Lookup, LookupAir};
+use crate::lookup::Lookup;
+use crate::p3_adapter::{LookupAir, SymbolicExpression, var};
 use crate::system::{System, SystemWitness};
 use crate::types::{CommitmentParameters, FriParameters};
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};

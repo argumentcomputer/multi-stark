@@ -12,8 +12,8 @@
 //! cargo run --example lookup_proof --release
 //! ```
 
-use multi_stark::builder::symbolic::{SymbolicExpression, var};
-use multi_stark::lookup::{Lookup, LookupAir};
+use multi_stark::lookup::Lookup;
+use multi_stark::p3_adapter::{LookupAir, SymbolicExpression, var};
 use multi_stark::system::{System, SystemWitness};
 use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
 use multi_stark::{
