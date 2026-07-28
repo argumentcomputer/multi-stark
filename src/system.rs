@@ -1,6 +1,6 @@
 //! Multi-circuit STARK system.
 //!
-//! Circuits are compiled constraint data ([`crate::circuit::Circuit`]) rather
+//! Circuits are compiled constraint data ([`crate::graph::ConstraintGraph`]) rather
 //! than AIRs, so there is no `A` type parameter. `System::new` derives each
 //! circuit's stage-2 and public-input layout from its lookups and the
 //! challenge field's extension degree, appends the synthesized lookup
@@ -14,9 +14,9 @@ use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use crate::config::{Com, PcsData, StarkGenericConfig, Val};
 use crate::lookup::LookupValues;
 
-use crate::circuit::{Circuit as CompiledCircuit, ExtensionParams, compile};
 use crate::eval::VarValues;
 use crate::expr::{CircuitSpec, Expr, ExtExpr};
+use crate::graph::{ConstraintGraph, ExtensionParams, compile};
 use crate::lookup::{Lookup, num_publics, stage2_width, synthesize_lookups};
 
 /// User-facing definition of one circuit: main-trace width, optional
@@ -47,7 +47,7 @@ impl<F: Field> Default for CircuitInputs<F> {
 /// verifier need. The preprocessed trace is retained for witness-time
 /// lookup evaluation (it is also committed at setup).
 pub struct Circuit<F: Field> {
-    pub compiled: CompiledCircuit<F>,
+    pub graph: ConstraintGraph<F>,
     pub main_width: usize,
     pub preprocessed: Option<RowMajorMatrix<F>>,
     pub preprocessed_width: usize,
@@ -62,11 +62,11 @@ pub struct Circuit<F: Field> {
 impl<F: Field> Circuit<F> {
     /// Number of constraint roots (after canonicalization).
     pub fn constraint_count(&self) -> usize {
-        self.compiled.zeros.len()
+        self.graph.zeros.len()
     }
 
     pub fn max_constraint_degree(&self) -> usize {
-        self.compiled.max_constraint_degree as usize
+        self.graph.max_constraint_degree as usize
     }
 
     /// Degree of the quotient polynomial as a multiple of the trace degree.
@@ -132,11 +132,11 @@ impl<SC: StarkGenericConfig> System<SC> {
                 ext_constraints,
                 lookups: input.lookups,
             };
-            let compiled = compile(&spec, &params)
+            let graph = compile(&spec, &params)
                 .unwrap_or_else(|e| panic!("circuit {i}: constraint compilation failed: {e:?}"));
 
             let circuit = Circuit {
-                compiled,
+                graph,
                 main_width: input.main_width,
                 preprocessed: input.preprocessed,
                 preprocessed_width,
@@ -260,7 +260,7 @@ fn compute_lookup_values<F: Field>(
 ) -> LookupValues<F> {
     let height = trace.height();
     let slot_widths: Vec<usize> = circuit
-        .compiled
+        .graph
         .lookups
         .iter()
         .map(|lookup| lookup.args.len())
@@ -295,8 +295,8 @@ fn compute_lookup_values<F: Field>(
             is_last_row: if r == height - 1 { F::ONE } else { F::ZERO },
             is_transition: if r == height - 1 { F::ZERO } else { F::ONE },
         };
-        circuit.compiled.sweep_lookup_prefix(&view, &mut buf);
-        for (slot, lookup) in circuit.compiled.lookups.iter().enumerate() {
+        circuit.graph.sweep_lookup_prefix(&view, &mut buf);
+        for (slot, lookup) in circuit.graph.lookups.iter().enumerate() {
             let multiplicity = buf[lookup.multiplicity.index()];
             args.clear();
             args.extend(lookup.args.iter().map(|a| buf[a.index()]));

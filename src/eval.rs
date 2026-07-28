@@ -7,8 +7,8 @@
 
 use p3_field::{Algebra, Field};
 
-use crate::circuit::{Circuit, ExtensionParams, Node, NodeId};
 use crate::expr::{ColRef, Expr, ExtExpr, RowOffset, Source};
+use crate::graph::{ConstraintGraph, ExtensionParams, Node, NodeId};
 use crate::lookup::Lookup;
 
 /// Concrete leaf values for a sweep, in the working type `W`: the two-row
@@ -47,7 +47,7 @@ impl<W: Copy> VarValues<'_, W> {
     }
 }
 
-impl<F: Field> Circuit<F> {
+impl<F: Field> ConstraintGraph<F> {
     /// Dense forward sweep over the whole node vector, in working type `W`;
     /// fills `buf` with one value per node.
     pub fn sweep<W: Algebra<F> + Copy>(&self, values: &VarValues<'_, W>, buf: &mut Vec<W>) {
@@ -200,7 +200,7 @@ pub fn eval_ext_expr<F: Field>(
 
 /// Checks the topological invariant: every node's children have strictly
 /// smaller indices. Test helper, but useful as a deserialization check too.
-pub fn check_topological_order<F: Field>(circuit: &Circuit<F>) -> bool {
+pub fn check_topological_order<F: Field>(circuit: &ConstraintGraph<F>) -> bool {
     circuit.nodes.iter().enumerate().all(|(i, node)| {
         let ok = |child: NodeId| child.index() < i;
         match *node {

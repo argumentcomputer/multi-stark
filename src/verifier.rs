@@ -451,7 +451,7 @@ impl<SC: StarkGenericConfig> System<SC> {
                 is_last_row: sels.is_last_row,
                 is_transition: sels.is_transition,
             };
-            let constraint_values = circuit.compiled.evaluate_constraints(&view);
+            let constraint_values = circuit.graph.evaluate_constraints(&view);
             // Fold with α (Horner): Σ_i α^{k-1-i} · value_i, matching the
             // prover's reversed α-power weighting.
             let composition = constraint_values

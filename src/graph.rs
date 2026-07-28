@@ -56,9 +56,10 @@ pub struct ExtensionParams<F> {
     pub karatsuba: bool,
 }
 
-/// A compiled circuit.
+/// A compiled constraint graph: the hash-consed DAG of expression nodes
+/// shared by all constraints and lookups of one circuit.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Circuit<F> {
+pub struct ConstraintGraph<F> {
     /// The unique expression vector; all constraints and lookups share it.
     pub nodes: Vec<Node<F>>,
     /// Degree multiple of each node.
@@ -116,10 +117,10 @@ pub enum CompileError {
 /// and the survivors are sorted by node id and deduplicated. The compiled
 /// constraint set is therefore independent of the order and multiplicity
 /// in which constraints were authored.
-pub fn compile<F: Field>(
+pub(crate) fn compile<F: Field>(
     spec: &CircuitSpec<F>,
     params: &ExtensionParams<F>,
-) -> Result<Circuit<F>, CompileError> {
+) -> Result<ConstraintGraph<F>, CompileError> {
     let mut interner = Interner::new();
 
     let mut lookups = Vec::with_capacity(spec.lookups.len());
@@ -155,7 +156,7 @@ pub fn compile<F: Field>(
     zeros.dedup();
 
     // Bottom-up interning guarantees children precede parents. The dense
-    // evaluator's unchecked sweep (`eval::Circuit::sweep_range`) relies on
+    // evaluator's unchecked sweep (`ConstraintGraph::sweep_range`) relies on
     // this, so pin it here.
     debug_assert!(
         interner
@@ -176,7 +177,7 @@ pub fn compile<F: Field>(
         .map(|z| interner.degrees[z.index()])
         .max()
         .unwrap_or(0);
-    Ok(Circuit {
+    Ok(ConstraintGraph {
         nodes: interner.nodes,
         degrees: interner.degrees,
         zeros,

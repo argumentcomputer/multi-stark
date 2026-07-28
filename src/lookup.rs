@@ -25,7 +25,8 @@ use p3_maybe_rayon::prelude::*;
 use crate::expr::{Expr, ExtExpr, RowOffset};
 
 /// A lookup: a multiplicity and a vector of arguments. `E` is a frontend
-/// expression in a [`crate::expr::CircuitSpec`] and a node id once compiled.
+/// expression in a [`crate::system::CircuitInputs`] and a node id once
+/// compiled.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Lookup<E> {
     pub multiplicity: E,

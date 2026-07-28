@@ -1,8 +1,8 @@
 use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
 
-use super::circuit::{Circuit, CompileError, ExtensionParams, Node, compile};
 use super::eval::{VarValues, check_topological_order, eval_expr, eval_ext_expr};
 use super::expr::{CircuitSpec, Expr, ExtExpr, RowOffset, Source};
+use super::graph::{CompileError, ConstraintGraph, ExtensionParams, Node, compile};
 use super::lookup::{Lookup, num_publics, stage2_width, synthesize_lookups};
 use crate::types::Val;
 
@@ -88,7 +88,7 @@ impl OwnedValues {
     }
 }
 
-fn count_nodes<F: Field>(circuit: &Circuit<F>, pred: impl Fn(&Node<F>) -> bool) -> usize {
+fn count_nodes<F: Field>(circuit: &ConstraintGraph<F>, pred: impl Fn(&Node<F>) -> bool) -> usize {
     circuit.nodes.iter().filter(|n| pred(n)).count()
 }
 

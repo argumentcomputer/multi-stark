@@ -1,7 +1,7 @@
-pub mod circuit;
 pub mod config;
 pub mod eval;
 pub mod expr;
+pub mod graph;
 pub mod lookup;
 pub mod prover;
 pub mod system;

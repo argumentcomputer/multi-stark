@@ -734,8 +734,8 @@ where
         is_transition,
     };
     let mut buf = Vec::new();
-    circuit.compiled.sweep(&view, &mut buf);
-    let constraint_values = circuit.compiled.constraint_values(&buf);
+    circuit.graph.sweep(&view, &mut buf);
+    let constraint_values = circuit.graph.constraint_values(&buf);
 
     // Fold the base constraint values with α through the decomposed path,
     // reassembling one packed extension accumulator.

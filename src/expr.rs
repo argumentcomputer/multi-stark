@@ -65,9 +65,12 @@ pub enum ExtExpr<F> {
     Neg(Box<Self>),
 }
 
-/// What the user hands to the system, per circuit.
+/// What the constraint compiler consumes, per circuit: the authored
+/// [`crate::system::CircuitInputs`] with the derived widths filled in and
+/// the synthesized lookup constraints appended. Built internally by
+/// `System::new`; not part of the public API.
 #[derive(Clone, Debug)]
-pub struct CircuitSpec<F> {
+pub(crate) struct CircuitSpec<F> {
     pub main_width: usize,
     pub preprocessed_width: usize,
     /// Width of the stage-2 trace in flattened base columns.
