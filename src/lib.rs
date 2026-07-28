@@ -6,6 +6,8 @@ pub mod lookup;
 pub mod prover;
 pub mod system;
 #[cfg(test)]
+mod test_circuits;
+#[cfg(test)]
 mod tests;
 pub mod types;
 pub mod verifier;
