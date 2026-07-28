@@ -11,11 +11,18 @@
 //! ```sh
 //! cargo bench --bench multi_stark --features parallel
 //! ```
+//!
+//! Before each criterion measurement, one prove/verify runs under a
+//! `tracing-texray`-examined span: every `info_span!` in the prover streams
+//! a `[texray] <span>: <dur>  ── RAM Δ +X peak Y` line to stderr as it
+//! closes, followed by the full span-tree timeline when the root exits.
+//! By default only multi-stark's `stark/*` spans are rendered; set
+//! `TEXRAY_PREFIXES=` (empty) to also render Plonky3's internal spans.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group};
 use multi_stark::builder::symbolic::{SymbolicExpression, preprocessed_var, var};
 use multi_stark::lookup::{Lookup, LookupAir};
-use multi_stark::system::{System, SystemWitness};
+use multi_stark::system::{ProverKey, System, SystemWitness};
 use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
 use multi_stark::{
     p3_air::{Air, AirBuilder, BaseAir, WindowAccess},
@@ -24,6 +31,40 @@ use multi_stark::{
 };
 
 type SymbExpr = SymbolicExpression<Val>;
+
+/// Install `tracing-texray` as the global subscriber, with per-span RAM
+/// sampling and streaming output.
+///
+/// Spans are filtered by name prefix, like Ix's `rs_texray_init`:
+/// `TEXRAY_PREFIXES` is a comma-separated list of span-name prefixes to
+/// render, defaulting to `stark/,bench/` (multi-stark's own spans only).
+/// An explicitly empty list (`TEXRAY_PREFIXES=`) disables filtering and
+/// renders everything — including Plonky3's internal spans at every level
+/// (FRI folds, merkle-tree builds, per-matrix DFTs, …).
+fn init_texray() {
+    use tracing_subscriber::{
+        Layer, Registry, filter::FilterFn, layer::SubscriberExt, util::SubscriberInitExt,
+    };
+    let prefixes: Vec<String> = std::env::var("TEXRAY_PREFIXES")
+        .unwrap_or_else(|_| "stark/,bench/".to_string())
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    let layer = tracing_texray::TeXRayLayer::new().track_ram().streaming();
+    let filter = FilterFn::new(move |metadata| {
+        if !metadata.is_span() || prefixes.is_empty() {
+            return true;
+        }
+        let name = metadata.name();
+        prefixes.iter().any(|p| name.starts_with(p.as_str()))
+    });
+    Registry::default()
+        .with(layer.with_filter(filter))
+        .try_init()
+        .ok();
+}
 
 // ---------------------------------------------------------------------------
 // Circuits
@@ -203,10 +244,10 @@ fn build_claims(num_adds: usize) -> Vec<[Val; 4]> {
 // Benchmarks
 // ---------------------------------------------------------------------------
 
-fn bench_prove(c: &mut Criterion) {
-    let config = GoldilocksBlake3Config::new(
+fn bench_config() -> GoldilocksBlake3Config {
+    GoldilocksBlake3Config::new(
         CommitmentParameters {
-            log_blowup: 1,
+            log_blowup: 2,
             cap_height: 0,
         },
         FriParameters {
@@ -216,10 +257,20 @@ fn bench_prove(c: &mut Criterion) {
             commit_proof_of_work_bits: 10,
             query_proof_of_work_bits: 10,
         },
-    );
+    )
+}
+
+fn build_system() -> (
+    System<GoldilocksBlake3Config, U32CS>,
+    ProverKey<GoldilocksBlake3Config>,
+) {
     let byte_table = LookupAir::new(U32CS::ByteTable, U32CS::ByteTable.lookups());
     let u32_add = LookupAir::new(U32CS::U32Add, U32CS::U32Add.lookups());
-    let (system, key) = System::new(config, [byte_table, u32_add]);
+    System::new(bench_config(), [byte_table, u32_add])
+}
+
+fn bench_prove(c: &mut Criterion) {
+    let (system, key) = build_system();
 
     let mut group = c.benchmark_group("prove");
     group.sample_size(10);
@@ -229,6 +280,15 @@ fn bench_prove(c: &mut Criterion) {
         let num_adds = 1 << log_height;
         let claims = build_claims(num_adds);
         let claim_refs: Vec<&[Val]> = claims.iter().map(|c| c.as_slice()).collect();
+
+        // One examined proof outside the measurement loop; spans opened during
+        // criterion's iterations have no examined root and print nothing.
+        let witness = build_witness(num_adds, &system);
+        eprintln!("\n═══ texray: prove/u32_add/2^{log_height} (single traced run) ═══");
+        tracing_texray::examine(tracing::info_span!("bench/prove", log_height))
+            .in_scope(|| system.prove_multiple_claims(&key, &claim_refs, witness));
+        eprintln!();
+
         group.bench_function(
             BenchmarkId::new("u32_add", format!("2^{log_height}")),
             |b| {
@@ -244,22 +304,7 @@ fn bench_prove(c: &mut Criterion) {
 }
 
 fn bench_verify(c: &mut Criterion) {
-    let config = GoldilocksBlake3Config::new(
-        CommitmentParameters {
-            log_blowup: 1,
-            cap_height: 0,
-        },
-        FriParameters {
-            log_final_poly_len: 0,
-            max_log_arity: 1,
-            num_queries: 100,
-            commit_proof_of_work_bits: 10,
-            query_proof_of_work_bits: 10,
-        },
-    );
-    let byte_table = LookupAir::new(U32CS::ByteTable, U32CS::ByteTable.lookups());
-    let u32_add = LookupAir::new(U32CS::U32Add, U32CS::U32Add.lookups());
-    let (system, key) = System::new(config, [byte_table, u32_add]);
+    let (system, key) = build_system();
 
     let mut group = c.benchmark_group("verify");
     group.sample_size(10);
@@ -271,6 +316,12 @@ fn bench_verify(c: &mut Criterion) {
         let claim_refs: Vec<&[Val]> = claims.iter().map(|c| c.as_slice()).collect();
         let witness = build_witness(num_adds, &system);
         let proof = system.prove_multiple_claims(&key, &claim_refs, witness);
+
+        eprintln!("\n═══ texray: verify/u32_add/2^{log_height} (single traced run) ═══");
+        tracing_texray::examine(tracing::info_span!("bench/verify", log_height))
+            .in_scope(|| system.verify_multiple_claims(&claim_refs, &proof).unwrap());
+        eprintln!();
+
         group.bench_function(
             BenchmarkId::new("u32_add", format!("2^{log_height}")),
             |b| {
@@ -282,4 +333,11 @@ fn bench_verify(c: &mut Criterion) {
 }
 
 criterion_group!(benches, bench_prove, bench_verify);
-criterion_main!(benches);
+
+// Expanded `criterion_main!` so the texray subscriber installs before any
+// span is created.
+fn main() {
+    init_texray();
+    benches();
+    Criterion::default().configure_from_args().final_summary();
+}
