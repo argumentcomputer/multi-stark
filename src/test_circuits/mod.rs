@@ -7,4 +7,5 @@
 mod baby_bear_config;
 mod blake3;
 mod byte_operations;
+mod p3_u32_add;
 mod u32_add;

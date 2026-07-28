@@ -33,9 +33,9 @@ use p3_field::PrimeCharacteristicRing;
 use p3_matrix::dense::RowMajorMatrix;
 
 /// Lookup channel discriminant for the byte (range-check) table.
-const BYTE_INDEX: u32 = 0;
+pub(super) const BYTE_INDEX: u32 = 0;
 /// Lookup channel discriminant for u32-addition claims.
-const U32_INDEX: u32 = 1;
+pub(super) const U32_INDEX: u32 = 1;
 
 fn c(value: u32) -> Expr<Val> {
     Expr::constant(Val::from_u32(value))
@@ -56,7 +56,7 @@ fn word(base: u32) -> Expr<Val> {
 /// |            4 |    1 |
 /// |            8 |    2 |
 /// |          ... |  ... |
-fn byte_table() -> CircuitInputs<Val> {
+pub(super) fn byte_table() -> CircuitInputs<Val> {
     CircuitInputs {
         main_width: 1,
         preprocessed: Some(RowMajorMatrix::new(
@@ -80,7 +80,7 @@ fn byte_table() -> CircuitInputs<Val> {
 /// - `8..12` : bytes of `z`
 /// - `12`    : overflow carry (boolean)
 /// - `13`    : multiplicity (1 on active rows, 0 on padding)
-fn u32_add() -> CircuitInputs<Val> {
+pub(super) fn u32_add() -> CircuitInputs<Val> {
     let carry = Expr::main(12);
     let expr1 = word(0) + word(4);
     let expr2 = word(8) + carry.clone() * Expr::constant(Val::from_u64(256 * 256 * 256 * 256));
@@ -129,7 +129,7 @@ fn add_inputs(num_adds: usize) -> Vec<(u32, u32)> {
 /// Build the two stage-1 traces (byte table, then u32 add) for `num_adds`
 /// additions. The add trace is padded to a power-of-two height with zero rows;
 /// padding rows have multiplicity 0 so they contribute nothing to the argument.
-fn build_traces(num_adds: usize) -> Vec<RowMajorMatrix<Val>> {
+pub(super) fn build_traces(num_adds: usize) -> Vec<RowMajorMatrix<Val>> {
     let byte_width = 1;
     let add_width = 14;
     let add_height = num_adds.next_power_of_two();
@@ -164,7 +164,7 @@ fn build_traces(num_adds: usize) -> Vec<RowMajorMatrix<Val>> {
 
 /// External claims: one `[U32_INDEX, x, y, z]` per active add row, matching
 /// exactly the tuples pulled by the u32-add circuit so the argument balances.
-fn build_claims(num_adds: usize) -> Vec<[Val; 4]> {
+pub(super) fn build_claims(num_adds: usize) -> Vec<[Val; 4]> {
     let f = Val::from_u32;
     add_inputs(num_adds)
         .into_iter()
@@ -175,7 +175,7 @@ fn build_claims(num_adds: usize) -> Vec<[Val; 4]> {
         .collect()
 }
 
-fn config() -> GoldilocksBlake3Config {
+pub(super) fn config() -> GoldilocksBlake3Config {
     GoldilocksBlake3Config::new(
         CommitmentParameters {
             log_blowup: 1,
