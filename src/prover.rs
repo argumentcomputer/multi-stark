@@ -647,6 +647,7 @@ where
         .map(|&c| PackedVal::<SC>::from(c))
         .collect();
 
+    let ext_params = crate::system::extension_params::<SC>();
     let inner = |i_start: usize| {
         quotient_values_inner::<SC>(
             circuit,
@@ -662,6 +663,8 @@ where
             &decomposed_alpha_powers,
             next_step,
             i_start,
+            ext_params.w,
+            ext_params.degree,
         )
     };
     #[cfg(feature = "parallel")]
@@ -696,6 +699,8 @@ fn quotient_values_inner<SC>(
     decomposed_alpha_powers: &[Vec<Val<SC>>],
     next_step: usize,
     i_start: usize,
+    ext_w: Val<SC>,
+    ext_degree: usize,
 ) -> impl Iterator<Item = SC::Challenge>
 where
     SC: StarkGenericConfig,
@@ -735,7 +740,25 @@ where
     };
     let mut buf = Vec::new();
     circuit.graph.sweep(&view, &mut buf);
-    let constraint_values = circuit.graph.constraint_values(&buf);
+    let mut constraint_values = circuit.graph.constraint_values(&buf);
+    // The logUp constraint values are evaluated directly (they are not
+    // compiled into the graph), appended after the user roots in the
+    // canonical protocol order. Coordinate-expanded logUp constraints are
+    // base-field-only, so they evaluate in `PackedVal` like everything else.
+    let lookup_vals = circuit.graph.lookup_values(&buf);
+    crate::lookup::logup_constraint_values(
+        &lookup_vals,
+        stage_2_cur,
+        stage_2_next,
+        publics_packed,
+        is_first_row,
+        is_last_row,
+        is_transition,
+        ext_w,
+        ext_degree,
+        &mut constraint_values,
+    );
+    debug_assert_eq!(constraint_values.len(), circuit.constraint_count());
 
     // Fold the base constraint values with α through the decomposed path,
     // reassembling one packed extension accumulator.

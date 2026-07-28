@@ -3,8 +3,11 @@
 //! Circuits are compiled constraint data ([`crate::graph::ConstraintGraph`]) rather
 //! than AIRs, so there is no `A` type parameter. `System::new` derives each
 //! circuit's stage-2 and public-input layout from its lookups and the
-//! challenge field's extension degree, appends the synthesized lookup
-//! constraints, and compiles.
+//! challenge field's extension degree, and compiles the user constraints
+//! plus the lookup-expression prefix. The logUp constraints are NOT
+//! compiled: prover and verifier evaluate them directly
+//! ([`crate::lookup::logup_constraint_values`]), folding their values after
+//! the user roots.
 
 use p3_challenger::CanObserve;
 use p3_commit::{Pcs, PolynomialSpace};
@@ -17,7 +20,7 @@ use crate::lookup::LookupValues;
 use crate::eval::VarValues;
 use crate::expr::{CircuitSpec, Expr, ExtExpr};
 use crate::graph::{ConstraintGraph, ExtensionParams, compile};
-use crate::lookup::{Lookup, num_publics, stage2_width, synthesize_lookups};
+use crate::lookup::{Lookup, logup_constraint_count, logup_max_degree, num_publics, stage2_width};
 
 /// User-facing definition of one circuit: main-trace width, optional
 /// preprocessed trace, base and extension constraints, and lookups. The
@@ -57,16 +60,22 @@ pub struct Circuit<F: Field> {
     pub stage_2_width: usize,
     /// Public-input width in base coordinates: `4·D`.
     pub num_publics: usize,
+    /// Total constraint count folded with α: the graph's user-constraint
+    /// roots plus the directly-evaluated logUp values, `(L + 3)·D`.
+    pub constraint_count: usize,
+    /// Maximum degree multiple over user constraints AND the logUp
+    /// constraints (the latter computed analytically, not compiled).
+    pub max_constraint_degree: usize,
 }
 
 impl<F: Field> Circuit<F> {
-    /// Number of constraint roots (after canonicalization).
+    /// Number of constraint values folded with α (user roots + logUp).
     pub fn constraint_count(&self) -> usize {
-        self.graph.zeros.len()
+        self.constraint_count
     }
 
     pub fn max_constraint_degree(&self) -> usize {
-        self.graph.max_constraint_degree as usize
+        self.max_constraint_degree
     }
 
     /// Degree of the quotient polynomial as a multiple of the trace degree.
@@ -122,20 +131,26 @@ impl<SC: StarkGenericConfig> System<SC> {
             let s2_width = stage2_width(num_lookups, d);
             let n_publics = num_publics(d);
 
-            let mut ext_constraints = input.ext_constraints;
-            ext_constraints.extend(synthesize_lookups(&input.lookups, d));
+            // The logUp constraints are NOT compiled into the graph: the
+            // prover and verifier evaluate them directly (see
+            // `lookup::logup_constraint_values`), folded after the user
+            // roots in the canonical protocol order. The graph carries only
+            // the user constraints and the lookup-expression prefix.
             let spec = CircuitSpec {
                 main_width: input.main_width,
                 preprocessed_width,
                 stage2_width: s2_width,
                 num_publics: n_publics,
                 constraints: input.constraints,
-                ext_constraints,
+                ext_constraints: input.ext_constraints,
                 lookups: input.lookups,
             };
             let graph = compile(&spec, &params)
                 .unwrap_or_else(|e| panic!("circuit {i}: constraint compilation failed: {e:?}"));
 
+            let constraint_count = graph.zeros.len() + logup_constraint_count(num_lookups, d);
+            let max_constraint_degree =
+                (graph.max_constraint_degree.max(logup_max_degree(&graph))) as usize;
             let circuit = Circuit {
                 graph,
                 main_width: input.main_width,
@@ -145,6 +160,8 @@ impl<SC: StarkGenericConfig> System<SC> {
                 num_lookups,
                 stage_2_width: s2_width,
                 num_publics: n_publics,
+                constraint_count,
+                max_constraint_degree,
             };
             // The prover obtains trace evaluations on the quotient domain
             // from the PCS, which can only serve domains up to
@@ -314,7 +331,7 @@ fn compute_lookup_values<F: Field>(
 /// generically: the degree is `Challenge::DIMENSION`, and the modulus
 /// constant `W` (with `X^D = W`) is recovered by evaluating `X^D` and
 /// reading its base coordinate — no dependence on a concrete field type.
-fn extension_params<SC: StarkGenericConfig>() -> ExtensionParams<Val<SC>> {
+pub(crate) fn extension_params<SC: StarkGenericConfig>() -> ExtensionParams<Val<SC>> {
     let d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
     let x = <SC::Challenge as BasedVectorSpace<Val<SC>>>::ith_basis_element(1)
         .expect("challenge field must have extension degree >= 2");

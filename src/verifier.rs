@@ -456,7 +456,27 @@ impl<SC: StarkGenericConfig> System<SC> {
                 is_last_row: sels.is_last_row,
                 is_transition: sels.is_transition,
             };
-            let constraint_values = circuit.graph.evaluate_constraints(&view);
+            // One sweep serves both the user-constraint roots and the
+            // evaluated lookup expressions; the logUp constraint values are
+            // then computed directly (never compiled) and folded after the
+            // user roots, in the canonical protocol order.
+            let mut buf = Vec::new();
+            circuit.graph.sweep(&view, &mut buf);
+            let mut constraint_values = circuit.graph.constraint_values(&buf);
+            let lookup_vals = circuit.graph.lookup_values(&buf);
+            crate::lookup::logup_constraint_values(
+                &lookup_vals,
+                view.stage2[0],
+                view.stage2[1],
+                &publics,
+                view.is_first_row,
+                view.is_last_row,
+                view.is_transition,
+                crate::system::extension_params::<SC>().w,
+                extension_d,
+                &mut constraint_values,
+            );
+            debug_assert_eq!(constraint_values.len(), circuit.constraint_count());
             // Fold with α (Horner): Σ_i α^{k-1-i} · value_i, matching the
             // prover's reversed α-power weighting.
             let composition = constraint_values
