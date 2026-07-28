@@ -287,6 +287,27 @@ impl<F: Field> AirBuilder for P3AirBuilder<F> {
     }
 }
 
+/// Whether an expression references the NEXT row of the main or
+/// preprocessed trace (stage-2 next-row references don't count: stage-2 is
+/// always opened at both points).
+fn expr_uses_next_row<F>(expr: &Expr<F>) -> bool {
+    match expr {
+        Expr::Var(col) => {
+            col.offset == RowOffset::Next
+                && matches!(col.source, Source::Main | Source::Preprocessed)
+        }
+        Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) => {
+            expr_uses_next_row(a) || expr_uses_next_row(b)
+        }
+        Expr::Neg(a) => expr_uses_next_row(a),
+        Expr::Const(_)
+        | Expr::Public(_)
+        | Expr::IsFirstRow
+        | Expr::IsLastRow
+        | Expr::IsTransition => false,
+    }
+}
+
 /// A Plonky3-style AIR paired with its lookups.
 ///
 /// This is the unit `System::new` accepts for AIR-authored circuits: it
@@ -314,6 +335,13 @@ impl<F: Field, A: Air<P3AirBuilder<F>>> From<LookupAir<A, F>> for CircuitInputs<
                 args: lookup.args.into_iter().map(|arg| arg.0).collect(),
             })
             .collect();
+        // Lookup expressions land in the compiled constraints (message
+        // fingerprints), so they count toward next-row usage too.
+        inputs.uses_next_row = inputs.uses_next_row
+            || inputs.lookups.iter().any(|lookup| {
+                expr_uses_next_row(&lookup.multiplicity)
+                    || lookup.args.iter().any(expr_uses_next_row)
+            });
         inputs
     }
 }
@@ -345,10 +373,14 @@ pub fn circuit_inputs_from_air<F: Field, A: Air<P3AirBuilder<F>>>(air: &A) -> Ci
         constraints: vec![],
     };
     air.eval(&mut builder);
+    // Derived, not declared: an AIR that reads `next_slice()` gets its
+    // ζ·g opening automatically (see `CircuitInputs::uses_next_row`).
+    let uses_next_row = builder.constraints.iter().any(expr_uses_next_row);
     CircuitInputs {
         main_width,
         preprocessed,
         constraints: builder.constraints,
+        uses_next_row,
         ..Default::default()
     }
 }

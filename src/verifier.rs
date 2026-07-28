@@ -323,19 +323,20 @@ impl<SC: StarkGenericConfig> System<SC> {
         let mut stage_1_trace_evaluations = vec![];
         let mut stage_2_trace_evaluations = vec![];
         let mut quotient_chunks_evaluations = vec![];
-        for pos in 0..active_indices.len() {
+        for (pos, &ci) in active_indices.iter().enumerate() {
             let log_degree = log_degrees[pos];
             let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
             let zeta_next = trace_domain
                 .next_point(zeta)
                 .ok_or(VerificationError::InvalidProofShape)?;
-            stage_1_trace_evaluations.push((
-                trace_domain,
-                vec![
-                    (zeta, stage_1_opened_values[pos][0].clone()),
-                    (zeta_next, stage_1_opened_values[pos][1].clone()),
-                ],
-            ));
+            // Main is opened at ζ·g only for circuits whose constraints
+            // reference the next row (mirroring the prover); stage 2 always
+            // is (the lookup accumulator's transition constraint needs it).
+            let mut main_evals = vec![(zeta, stage_1_opened_values[pos][0].clone())];
+            if self.circuits[ci].uses_next_row {
+                main_evals.push((zeta_next, stage_1_opened_values[pos][1].clone()));
+            }
+            stage_1_trace_evaluations.push((trace_domain, main_evals));
             stage_2_trace_evaluations.push((
                 trace_domain,
                 vec![
@@ -369,13 +370,13 @@ impl<SC: StarkGenericConfig> System<SC> {
                                 .ok_or(VerificationError::InvalidProofShape)?;
                             let preprocessed_opened_values =
                                 preprocessed_opened_values.as_ref().unwrap();
-                            preprocessed_trace_evaluations.push((
-                                trace_domain,
-                                vec![
-                                    (zeta, preprocessed_opened_values[slot][0].clone()),
-                                    (zeta_next, preprocessed_opened_values[slot][1].clone()),
-                                ],
-                            ));
+                            let mut prep_evals =
+                                vec![(zeta, preprocessed_opened_values[slot][0].clone())];
+                            if self.circuits[ci].uses_next_row {
+                                prep_evals
+                                    .push((zeta_next, preprocessed_opened_values[slot][1].clone()));
+                            }
+                            preprocessed_trace_evaluations.push((trace_domain, prep_evals));
                         }
                         None => {
                             let domain = pcs
@@ -434,10 +435,16 @@ impl<SC: StarkGenericConfig> System<SC> {
                 }
             }
 
+            // For circuits that never reference the next row, only the ζ
+            // opening exists; the compiled graph provably contains no
+            // next-row main/preprocessed nodes (checked at setup), so the
+            // "next" slice is never read — feed the ζ row to keep widths
+            // consistent.
+            let next_idx = usize::from(circuit.uses_next_row);
             let (preprocessed_cur, preprocessed_next): (&[SC::Challenge], &[SC::Challenge]) =
                 if let Some(slot) = self.preprocessed_indices[ci] {
                     let values = preprocessed_opened_values.as_ref().unwrap();
-                    (&values[slot][0], &values[slot][1])
+                    (&values[slot][0], &values[slot][next_idx])
                 } else {
                     (&empty, &empty)
                 };
@@ -445,7 +452,7 @@ impl<SC: StarkGenericConfig> System<SC> {
                 preprocessed: [preprocessed_cur, preprocessed_next],
                 main: [
                     &stage_1_opened_values[pos][0],
-                    &stage_1_opened_values[pos][1],
+                    &stage_1_opened_values[pos][next_idx],
                 ],
                 stage2: [
                     &stage_2_opened_values[pos][0],
@@ -575,42 +582,48 @@ impl<SC: StarkGenericConfig> System<SC> {
         for (pos, &ci) in active_indices.iter().enumerate() {
             let circuit = &self.circuits[ci];
             let preprocessed_i = self.preprocessed_indices[ci];
-            // zeta and zeta_next
-            let num_openings = 2;
+            // Main/preprocessed: ζ, plus ζ·g only for circuits that
+            // reference the next row. Stage-2: always ζ and ζ·g (the lookup
+            // accumulator's transition constraint needs the next row).
+            let num_main_openings = if circuit.uses_next_row { 2 } else { 1 };
             ensure_eq!(
                 stage_1_opened_values[pos].len(),
-                num_openings,
+                num_main_openings,
                 VerificationError::InvalidProofShape
             );
             ensure_eq!(
                 stage_2_opened_values[pos].len(),
-                num_openings,
+                2,
                 VerificationError::InvalidProofShape
             );
             if let Some(slot) = preprocessed_i {
                 ensure_eq!(
                     preprocessed_opened_values.as_ref().unwrap()[slot].len(),
-                    num_openings,
+                    num_main_openings,
                     VerificationError::InvalidProofShape
                 );
             }
-            for j in 0..num_openings {
-                if let Some(slot) = preprocessed_i {
+            for opening in &stage_1_opened_values[pos] {
+                ensure_eq!(
+                    opening.len(),
+                    circuit.main_width,
+                    VerificationError::InvalidProofShape
+                );
+            }
+            if let Some(slot) = preprocessed_i {
+                for opening in &preprocessed_opened_values.as_ref().unwrap()[slot] {
                     ensure_eq!(
-                        preprocessed_opened_values.as_ref().unwrap()[slot][j].len(),
+                        opening.len(),
                         circuit.preprocessed_width,
                         VerificationError::InvalidProofShape
                     );
                 }
+            }
+            // Stage-2 is committed as flattened base columns, so the
+            // opened width is already the flattened width.
+            for opening in &stage_2_opened_values[pos] {
                 ensure_eq!(
-                    stage_1_opened_values[pos][j].len(),
-                    circuit.main_width,
-                    VerificationError::InvalidProofShape
-                );
-                // Stage-2 is committed as flattened base columns, so the
-                // opened width is already the flattened width.
-                ensure_eq!(
-                    stage_2_opened_values[pos][j].len(),
+                    opening.len(),
                     circuit.stage_2_width,
                     VerificationError::InvalidProofShape
                 );

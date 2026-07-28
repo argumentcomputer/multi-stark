@@ -531,12 +531,20 @@ where
         let mut round1_openings = vec![];
         let mut round2_openings = vec![];
         let mut round3_openings = vec![];
-        for &log_degree in log_degrees.iter() {
+        for (&log_degree, &ci) in log_degrees.iter().zip(&active_indices) {
             let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
             let zeta_next = trace_domain
                 .next_point(zeta)
                 .expect("domain has no next point");
-            round1_openings.push(vec![zeta, zeta_next]);
+            // Main is opened at ζ·g only when the circuit's constraints
+            // reference the next row; stage 2 always is (the lookup
+            // accumulator's transition constraint needs it).
+            let main_points = if self.circuits[ci].uses_next_row {
+                vec![zeta, zeta_next]
+            } else {
+                vec![zeta]
+            };
+            round1_openings.push(main_points);
             round2_openings.push(vec![zeta, zeta_next]);
             // One wide matrix per circuit holds all its quotient slices.
             round3_openings.push(vec![zeta]);
@@ -545,16 +553,22 @@ where
         // traces at system construction, so its round must carry one entry
         // per preprocessed matrix regardless of activation: an inactive
         // circuit's preprocessed matrix is opened at no points.
-        for (prep_index, &pos) in self.preprocessed_indices.iter().zip(&active_pos) {
+        for ((ci, prep_index), &pos) in self
+            .preprocessed_indices
+            .iter()
+            .enumerate()
+            .zip(&active_pos)
+        {
             if prep_index.is_some() {
                 match pos {
-                    Some(pos) => {
+                    Some(pos) if self.circuits[ci].uses_next_row => {
                         let trace_domain = pcs.natural_domain_for_degree(1 << log_degrees[pos]);
                         let zeta_next = trace_domain
                             .next_point(zeta)
                             .expect("domain has no next point");
                         round0_openings.push(vec![zeta, zeta_next]);
                     }
+                    Some(_) => round0_openings.push(vec![zeta]),
                     None => round0_openings.push(vec![]),
                 }
             }

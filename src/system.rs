@@ -15,8 +15,8 @@ use crate::config::{Com, PcsData, StarkGenericConfig, Val};
 use crate::lookup::LookupValues;
 
 use crate::eval::VarValues;
-use crate::expr::{CircuitSpec, Expr, ExtExpr};
-use crate::graph::{ConstraintGraph, ExtensionParams, compile};
+use crate::expr::{CircuitSpec, Expr, ExtExpr, RowOffset, Source};
+use crate::graph::{ConstraintGraph, ExtensionParams, Node, compile};
 use crate::lookup::{Lookup, num_publics, stage2_width, synthesize_lookups};
 
 /// User-facing definition of one circuit: main-trace width, optional
@@ -29,6 +29,14 @@ pub struct CircuitInputs<F: Field> {
     pub constraints: Vec<Expr<F>>,
     pub ext_constraints: Vec<ExtExpr<F>>,
     pub lookups: Vec<Lookup<Expr<F>>>,
+    /// Whether this circuit's constraints or lookups reference the NEXT row
+    /// of the main or preprocessed trace. When `false` (the default), those
+    /// traces are opened at ζ only, halving their share of the opening cost;
+    /// `System::new` rejects the circuit if the compiled constraints
+    /// reference a next-row column anyway. Stage-2 columns are unaffected:
+    /// the lookup accumulator's transition constraint always needs ζ·g, so
+    /// stage-2 is always opened at both points.
+    pub uses_next_row: bool,
 }
 
 impl<F: Field> Default for CircuitInputs<F> {
@@ -39,6 +47,7 @@ impl<F: Field> Default for CircuitInputs<F> {
             constraints: vec![],
             ext_constraints: vec![],
             lookups: vec![],
+            uses_next_row: false,
         }
     }
 }
@@ -57,6 +66,9 @@ pub struct Circuit<F: Field> {
     pub stage_2_width: usize,
     /// Public-input width in base coordinates: `4·D`.
     pub num_publics: usize,
+    /// Whether the main/preprocessed traces are opened at ζ·g in addition
+    /// to ζ (see [`CircuitInputs::uses_next_row`]).
+    pub uses_next_row: bool,
 }
 
 impl<F: Field> Circuit<F> {
@@ -136,6 +148,23 @@ impl<SC: StarkGenericConfig> System<SC> {
             let graph = compile(&spec, &params)
                 .unwrap_or_else(|e| panic!("circuit {i}: constraint compilation failed: {e:?}"));
 
+            // With `uses_next_row = false` the main/preprocessed traces are
+            // opened at ζ only, so a compiled constraint referencing a
+            // next-row column would have no opened value to evaluate
+            // against — reject at setup rather than produce invalid proofs.
+            if !input.uses_next_row {
+                let refs_next = graph.nodes.iter().any(|node| {
+                    matches!(node, Node::Var(col)
+                        if col.offset == RowOffset::Next
+                            && matches!(col.source, Source::Main | Source::Preprocessed))
+                });
+                assert!(
+                    !refs_next,
+                    "circuit {i}: constraints or lookups reference the next row of the \
+                     main/preprocessed trace, but `uses_next_row` is false; set it to true",
+                );
+            }
+
             let circuit = Circuit {
                 graph,
                 main_width: input.main_width,
@@ -145,6 +174,7 @@ impl<SC: StarkGenericConfig> System<SC> {
                 num_lookups,
                 stage_2_width: s2_width,
                 num_publics: n_publics,
+                uses_next_row: input.uses_next_row,
             };
             // The prover obtains trace evaluations on the quotient domain
             // from the PCS, which can only serve domains up to
@@ -201,6 +231,8 @@ impl<SC: StarkGenericConfig> System<SC> {
             observe(circuit.preprocessed_width);
             observe(circuit.main_width);
             observe(circuit.stage_2_width);
+            // The opening shape depends on it, so bind it like the widths.
+            observe(usize::from(circuit.uses_next_row));
         }
     }
 }
@@ -337,6 +369,117 @@ mod tests {
     use crate::p3_adapter::LookupAir;
     use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
     use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
+
+    /// A Fibonacci-style transition AIR: next row = (b, a + b). Reads the
+    /// next row, so the adapter must derive `uses_next_row = true` and the
+    /// prover must open its main trace at ζ·g.
+    struct FibAir;
+
+    impl<F> BaseAir<F> for FibAir {
+        fn width(&self) -> usize {
+            2
+        }
+    }
+
+    impl<AB> Air<AB> for FibAir
+    where
+        AB: AirBuilder,
+        AB::Var: Copy,
+    {
+        fn eval(&self, builder: &mut AB) {
+            let main = builder.main();
+            let local = main.current_slice();
+            let next = main.next_slice();
+            let (a, b) = (local[0], local[1]);
+            let (a_next, b_next) = (next[0], next[1]);
+            let mut when_transition = builder.when_transition();
+            when_transition.assert_eq(a_next, b);
+            when_transition.assert_eq(b_next, a + b);
+        }
+    }
+
+    /// Next-row transition constraints prove and verify end to end: the
+    /// adapter derives `uses_next_row`, and the main trace is opened at
+    /// both ζ and ζ·g while single-row circuits in the same system are not.
+    #[test]
+    fn next_row_circuit_proves() {
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        };
+        let fri_parameters = FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 64,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        };
+        let config = GoldilocksBlake3Config::new(commitment_parameters, fri_parameters);
+        let (system, key) = System::new(
+            config,
+            [
+                CircuitInputs::from(LookupAir::new(FibAir, vec![])),
+                // A single-row circuit alongside, to cover the mixed case.
+                CircuitInputs::from(LookupAir::new(Preprocessed, vec![])),
+            ],
+        );
+        assert!(system.circuits[0].uses_next_row);
+        assert!(!system.circuits[1].uses_next_row);
+        let f = Val::from_u32;
+        let fib = RowMajorMatrix::new(
+            vec![
+                f(1),
+                f(1),
+                f(1),
+                f(2),
+                f(2),
+                f(3),
+                f(3),
+                f(5),
+                f(5),
+                f(8),
+                f(8),
+                f(13),
+                f(13),
+                f(21),
+                f(21),
+                f(34),
+            ],
+            2,
+        );
+        let other = RowMajorMatrix::new(vec![Val::ZERO; 4], 1);
+        let witness = SystemWitness::from_stage_1(vec![fib, other], &system);
+        let no_claims: &[&[Val]] = &[];
+        let proof = system.prove_multiple_claims(&key, no_claims, witness);
+        system.verify_multiple_claims(no_claims, &proof).unwrap();
+    }
+
+    /// A constraint referencing the next row while `uses_next_row` is false
+    /// must be rejected at setup (there would be no ζ·g opening to evaluate
+    /// it against).
+    #[test]
+    #[should_panic(expected = "uses_next_row")]
+    fn undeclared_next_row_rejected() {
+        let commitment_parameters = CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        };
+        let fri_parameters = FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 64,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        };
+        let config = GoldilocksBlake3Config::new(commitment_parameters, fri_parameters);
+        let inputs = CircuitInputs {
+            main_width: 1,
+            constraints: vec![Expr::IsTransition * (Expr::main_next(0) - Expr::main(0))],
+            uses_next_row: false,
+            ..Default::default()
+        };
+        System::new(config, [inputs]);
+    }
 
     /// A trivial AIR with a preprocessed trace of 4 rows and no constraints.
     struct Preprocessed;
