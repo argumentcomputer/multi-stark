@@ -744,10 +744,11 @@ where
     // The logUp constraint values are evaluated directly (they are not
     // compiled into the graph), appended after the user roots in the
     // canonical protocol order. Coordinate-expanded logUp constraints are
-    // base-field-only, so they evaluate in `PackedVal` like everything else.
-    let lookup_vals = circuit.graph.lookup_values(&buf);
+    // base-field-only, so they evaluate in `PackedVal` like everything else;
+    // the lookup expressions are read straight out of the sweep buffer.
     crate::lookup::logup_constraint_values(
-        &lookup_vals,
+        &circuit.graph.lookups,
+        &buf,
         stage_2_cur,
         stage_2_next,
         publics_packed,

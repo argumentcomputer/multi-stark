@@ -463,9 +463,9 @@ impl<SC: StarkGenericConfig> System<SC> {
             let mut buf = Vec::new();
             circuit.graph.sweep(&view, &mut buf);
             let mut constraint_values = circuit.graph.constraint_values(&buf);
-            let lookup_vals = circuit.graph.lookup_values(&buf);
             crate::lookup::logup_constraint_values(
-                &lookup_vals,
+                &circuit.graph.lookups,
+                &buf,
                 view.stage2[0],
                 view.stage2[1],
                 &publics,

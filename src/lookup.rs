@@ -94,7 +94,8 @@ pub fn logup_constraint_count(num_lookups: usize, d: usize) -> usize {
 }
 
 /// Coordinate product in the binomial extension `X^d = w`, schoolbook:
-/// `out[k] = Σ_{i+j=k} a_i·b_j + w · Σ_{i+j=k+d} a_i·b_j`.
+/// `out[k] = Σ_{i+j=k} a_i·b_j + w · Σ_{i+j=k+d} a_i·b_j`. Generic-degree
+/// fallback; the hot D=2 path uses [`mul2`].
 fn coord_mul<F: Field, A: Algebra<F> + Copy>(a: &[A], b: &[A], w: F) -> Vec<A> {
     let d = a.len();
     let mut out = vec![A::ZERO; d];
@@ -109,6 +110,16 @@ fn coord_mul<F: Field, A: Algebra<F> + Copy>(a: &[A], b: &[A], w: F) -> Vec<A> {
         }
     }
     out
+}
+
+/// Degree-2 coordinate product `X² = w`, Karatsuba (3 multiplications,
+/// matching the compiled graph's expansion): allocation-free.
+#[inline]
+fn mul2<F: Field, A: Algebra<F> + Copy>(a: (A, A), b: (A, A), w: F) -> (A, A) {
+    let v0 = a.0 * b.0;
+    let v1 = a.1 * b.1;
+    let cross = (a.0 + a.1) * (b.0 + b.1) - v0 - v1;
+    (v0 + v1 * w, cross)
 }
 
 /// Directly evaluates the logUp constraint values at one evaluation context,
@@ -130,7 +141,8 @@ fn coord_mul<F: Field, A: Algebra<F> + Copy>(a: &[A], b: &[A], w: F) -> Vec<A> {
 /// expressions (multiplicity and args embed in coordinate 0).
 #[allow(clippy::too_many_arguments)]
 pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
-    lookups: &[Lookup<A>],
+    lookups: &[Lookup<crate::graph::NodeId>],
+    node_vals: &[A],
     stage2: &[A],
     stage2_next: &[A],
     publics: &[A],
@@ -141,6 +153,44 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
     d: usize,
     out: &mut Vec<A>,
 ) {
+    // Allocation-free Karatsuba fast path for the reference degree-2
+    // extension; this runs per point-packet on the prover's quotient
+    // domain, so it must not touch the heap.
+    if d == 2 {
+        let nv = |id: crate::graph::NodeId| node_vals[id.index()];
+        let beta = (publics[0], publics[1]);
+        let gamma = (publics[2], publics[3]);
+        let acc = (publics[4], publics[5]);
+        let next_acc = (publics[6], publics[7]);
+        let acc_col = (stage2[0], stage2[1]);
+        let next_acc_col = (stage2_next[0], stage2_next[1]);
+
+        let mut acc_expr = acc_col;
+        for (j, lookup) in lookups.iter().enumerate() {
+            let inv = (stage2[2 + 2 * j], stage2[3 + 2 * j]);
+            // fingerprint = Σ_i args[i] · γ^i, Horner over the reversed args.
+            let mut f = (A::ZERO, A::ZERO);
+            for &arg in lookup.args.iter().rev() {
+                f = mul2(f, gamma, w);
+                f.0 += nv(arg);
+            }
+            // message = β + fingerprint; constraint: message · inv − 1 = 0.
+            let c = mul2((f.0 + beta.0, f.1 + beta.1), inv, w);
+            out.push(c.0 - A::ONE);
+            out.push(c.1);
+            let m = nv(lookup.multiplicity);
+            acc_expr.0 += inv.0 * m;
+            acc_expr.1 += inv.1 * m;
+        }
+        out.push(is_first_row * (acc_col.0 - acc.0));
+        out.push(is_first_row * (acc_col.1 - acc.1));
+        out.push(is_transition * (acc_expr.0 - next_acc_col.0));
+        out.push(is_transition * (acc_expr.1 - next_acc_col.1));
+        out.push(is_last_row * (acc_expr.0 - next_acc.0));
+        out.push(is_last_row * (acc_expr.1 - next_acc.1));
+        return;
+    }
+
     let beta = &publics[..d];
     let gamma = &publics[d..2 * d];
     let acc = &publics[2 * d..3 * d];
@@ -159,7 +209,7 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
         let mut fingerprint = vec![A::ZERO; d];
         for &arg in lookup.args.iter().rev() {
             fingerprint = coord_mul(&fingerprint, gamma, w);
-            fingerprint[0] += arg;
+            fingerprint[0] += node_vals[arg.index()];
         }
 
         // message = β + fingerprint; constraint: message · inv − 1 = 0.
@@ -171,8 +221,9 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
         constraint[0] -= A::ONE;
         out.extend_from_slice(&constraint);
 
+        let mv = node_vals[lookup.multiplicity.index()];
         for (a, &i) in acc_expr.iter_mut().zip(inv) {
-            *a += i * lookup.multiplicity;
+            *a += i * mv;
         }
     }
 
@@ -646,16 +697,24 @@ mod tests {
             reference.extend(eval_ext_expr(constraint, &view, &ref_params));
         }
 
-        let lookup_vals: Vec<Lookup<Val>> = lookups
+        // The direct evaluator reads lookup expressions out of a node-value
+        // buffer by id; build a synthetic buffer with consecutive ids.
+        let mut node_vals: Vec<Val> = vec![];
+        let mut fresh = |v: Val| {
+            node_vals.push(v);
+            crate::graph::NodeId(u32::try_from(node_vals.len() - 1).unwrap())
+        };
+        let lookup_ids: Vec<Lookup<crate::graph::NodeId>> = lookups
             .iter()
             .map(|l| Lookup {
-                multiplicity: eval_expr(&l.multiplicity, &view),
-                args: l.args.iter().map(|a| eval_expr(a, &view)).collect(),
+                multiplicity: fresh(eval_expr(&l.multiplicity, &view)),
+                args: l.args.iter().map(|a| fresh(eval_expr(a, &view))).collect(),
             })
             .collect();
         let mut direct: Vec<Val> = vec![];
         logup_constraint_values(
-            &lookup_vals,
+            &lookup_ids,
+            &node_vals,
             &s2_cur,
             &s2_next,
             &publics,
