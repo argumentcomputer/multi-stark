@@ -6,8 +6,8 @@ mod tests {
 
     use crate::test_circuits::SymbExpr;
     use crate::{
-        builder::symbolic::{preprocessed_var, var},
-        lookup::{Lookup, LookupAir},
+        lookup::Lookup,
+        p3_adapter::{LookupAir, preprocessed_var, var},
         system::{ProverKey, System, SystemWitness},
         types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val},
     };
@@ -128,7 +128,7 @@ mod tests {
     fn byte_system(
         config: GoldilocksBlake3Config,
     ) -> (
-        System<GoldilocksBlake3Config, U32CS>,
+        System<GoldilocksBlake3Config>,
         ProverKey<GoldilocksBlake3Config>,
     ) {
         let byte_table = LookupAir::new(U32CS::ByteTable, U32CS::ByteTable.lookups());
@@ -141,7 +141,7 @@ mod tests {
     }
 
     impl AddCalls {
-        fn witness(&self, system: &System<GoldilocksBlake3Config, U32CS>) -> SystemWitness<Val> {
+        fn witness(&self, system: &System<GoldilocksBlake3Config>) -> SystemWitness<Val> {
             let byte_width = 1;
             let add_width = 14;
             let mut byte_trace = RowMajorMatrix::new(vec![Val::ZERO; byte_width * 256], byte_width);

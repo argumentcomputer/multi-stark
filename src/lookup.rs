@@ -1,45 +1,65 @@
-use p3_air::{Air, BaseAir, ExtensionBuilder, WindowAccess};
-use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, batch_multiplicative_inverse};
-use p3_matrix::{Matrix, dense::RowMajorMatrix};
+//! Lookups: the [`Lookup`] type, the direct logUp constraint evaluation, and
+//! the concrete lookup witness ([`LookupValues`]) plus its stage-2 trace
+//! construction.
+//!
+//! The logUp constraints are protocol machinery, not user data, so they are
+//! NOT compiled into the circuit graph: [`logup_constraint_values`] evaluates
+//! them directly — in `PackedVal` on the prover's quotient domain and in the
+//! challenge field at ζ for the verifier — and their values are folded after
+//! the user-constraint roots in the canonical protocol order.
+//! [`synthesize_lookups`] remains as the executable specification the direct
+//! evaluation is pinned against in tests.
+//!
+//! # Layout conventions (owned here)
+//!
+//! - **Publics** (each an extension value, stored as `d` base coordinates):
+//!   slot 0 = β (lookup challenge), 1 = γ (fingerprint challenge),
+//!   2 = current accumulator, 3 = next accumulator. So `num_publics = 4·d`.
+//! - **Stage-2 columns** (extension values, flattened to base): slot 0 = the
+//!   running accumulator, slots `1..=L` = the message inverse of each lookup,
+//!   in lookup order. So `stage2_width = (1 + L)·d` base columns.
+
+use p3_field::{
+    Algebra, ExtensionField, Field, PrimeCharacteristicRing, batch_multiplicative_inverse,
+};
+use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
 
-use crate::builder::{TwoStagedBuilder, symbolic::SymbolicExpression};
+use crate::expr::{Expr, ExtExpr, RowOffset};
 
-/// Each circuit is required to have 4 arguments for the second stage. Namely,
-/// the lookup challenge, fingerprint challenge, current accumulator and next
-/// accumulator.
-pub const LOOKUP_PUBLIC_SIZE: usize = 4;
-
-#[derive(Clone)]
-pub struct Lookup<Expr> {
-    pub multiplicity: Expr,
-    pub args: Vec<Expr>,
+/// A lookup: a multiplicity and a vector of arguments. `E` is a frontend
+/// expression in a [`crate::system::CircuitInputs`] and a node id once
+/// compiled.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Lookup<E> {
+    pub multiplicity: E,
+    pub args: Vec<E>,
 }
 
-impl<Expr> Lookup<Expr> {
+impl<E> Lookup<E> {
     /// Returns a [`Lookup`] with multiplicity zero and no arguments.
     #[inline]
     pub fn empty() -> Self
     where
-        Expr: PrimeCharacteristicRing,
+        E: PrimeCharacteristicRing,
     {
         Self {
-            multiplicity: Expr::ZERO,
+            multiplicity: E::ZERO,
             args: vec![],
         }
     }
 
     /// "Pushing" has the semantics of adding a claim to the claim set.
     #[inline]
-    pub fn push(multiplicity: Expr, args: Vec<Expr>) -> Self {
+    pub fn push(multiplicity: E, args: Vec<E>) -> Self {
         Self { multiplicity, args }
     }
 
     /// "Pulling" has the semantics of removing a claim from the claim set.
     #[inline]
-    pub fn pull(multiplicity: Expr, args: Vec<Expr>) -> Self
+    pub fn pull(multiplicity: E, args: Vec<E>) -> Self
     where
-        Expr: std::ops::Neg<Output = Expr>,
+        E: std::ops::Neg<Output = E>,
     {
         Self {
             multiplicity: -multiplicity,
@@ -48,27 +68,253 @@ impl<Expr> Lookup<Expr> {
     }
 }
 
-pub struct LookupAir<A, F: Field> {
-    pub inner_air: A,
-    pub lookups: Vec<Lookup<SymbolicExpression<F>>>,
-    pub preprocessed: Option<RowMajorMatrix<F>>,
+/// Number of extension-valued public inputs the lookup argument uses:
+/// β, γ, current accumulator, next accumulator.
+pub const LOOKUP_PUBLIC_SIZE: usize = 4;
+
+/// Public-input width (base coordinates) for a circuit whose extension
+/// degree is `d`.
+pub fn num_publics(d: usize) -> usize {
+    LOOKUP_PUBLIC_SIZE * d
 }
 
-impl<A: BaseAir<F>, F: Field> LookupAir<A, F> {
-    pub fn new(inner_air: A, lookups: Vec<Lookup<SymbolicExpression<F>>>) -> Self {
-        let preprocessed = inner_air.preprocessed_trace();
-        Self {
-            inner_air,
-            lookups,
-            preprocessed,
+/// Stage-2 trace width (flattened base columns) for `num_lookups` lookups
+/// at extension degree `d`: one accumulator column plus one inverse column
+/// per lookup.
+pub fn stage2_width(num_lookups: usize, d: usize) -> usize {
+    (1 + num_lookups) * d
+}
+
+/// Number of base-field constraint values the logUp argument contributes:
+/// one extension constraint per lookup (message · inverse = 1) plus the
+/// three accumulator constraints (first/transition/last row), each expanded
+/// into `d` coordinates.
+pub fn logup_constraint_count(num_lookups: usize, d: usize) -> usize {
+    (num_lookups + 3) * d
+}
+
+/// Coordinate product in the binomial extension `X^d = w`, schoolbook:
+/// `out[k] = Σ_{i+j=k} a_i·b_j + w · Σ_{i+j=k+d} a_i·b_j`. Generic-degree
+/// fallback; the hot D=2 path uses [`mul2`].
+fn coord_mul<F: Field, A: Algebra<F> + Copy>(a: &[A], b: &[A], w: F) -> Vec<A> {
+    let d = a.len();
+    let mut out = vec![A::ZERO; d];
+    for i in 0..d {
+        for j in 0..d {
+            let prod = a[i] * b[j];
+            if i + j < d {
+                out[i + j] += prod;
+            } else {
+                out[i + j - d] += prod * w;
+            }
+        }
+    }
+    out
+}
+
+/// Degree-2 coordinate product `X² = w`, Karatsuba (3 multiplications,
+/// matching the compiled graph's expansion): allocation-free.
+#[inline]
+fn mul2<F: Field, A: Algebra<F> + Copy>(a: (A, A), b: (A, A), w: F) -> (A, A) {
+    let v0 = a.0 * b.0;
+    let v1 = a.1 * b.1;
+    let cross = (a.0 + a.1) * (b.0 + b.1) - v0 - v1;
+    (v0 + v1 * w, cross)
+}
+
+/// Directly evaluates the logUp constraint values at one evaluation context,
+/// in the canonical protocol order: for each lookup (in order) the `d`
+/// coordinates of `(β + fingerprint(γ, args)) · inv − 1`, then the `d`
+/// coordinates each of the first-row, transition, and last-row accumulator
+/// constraints. Semantically identical to compiling
+/// [`synthesize_lookups`]'s constraints and evaluating their roots (see the
+/// pin test), without materializing them.
+///
+/// Everything is base-field coordinate arithmetic, so the working type `A`
+/// is generic: `PackedVal` on the prover's quotient domain, the challenge
+/// field at ζ for the verifier — both sides share this one implementation.
+///
+/// Layout contracts (see the module docs): `publics` holds the 4·d base
+/// coordinates of (β, γ, acc, next_acc); `stage2` / `stage2_next` are the
+/// flattened stage-2 base columns, slot 0 the accumulator, slot `1+j` the
+/// message inverse of lookup `j`. `lookups` carries the evaluated lookup
+/// expressions (multiplicity and args embed in coordinate 0).
+#[allow(clippy::too_many_arguments)]
+pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
+    lookups: &[Lookup<crate::graph::NodeId>],
+    node_vals: &[A],
+    stage2: &[A],
+    stage2_next: &[A],
+    publics: &[A],
+    is_first_row: A,
+    is_last_row: A,
+    is_transition: A,
+    w: F,
+    d: usize,
+    out: &mut Vec<A>,
+) {
+    // Allocation-free Karatsuba fast path for the reference degree-2
+    // extension; this runs per point-packet on the prover's quotient
+    // domain, so it must not touch the heap.
+    if d == 2 {
+        let nv = |id: crate::graph::NodeId| node_vals[id.index()];
+        let beta = (publics[0], publics[1]);
+        let gamma = (publics[2], publics[3]);
+        let acc = (publics[4], publics[5]);
+        let next_acc = (publics[6], publics[7]);
+        let acc_col = (stage2[0], stage2[1]);
+        let next_acc_col = (stage2_next[0], stage2_next[1]);
+
+        let mut acc_expr = acc_col;
+        for (j, lookup) in lookups.iter().enumerate() {
+            let inv = (stage2[2 + 2 * j], stage2[3 + 2 * j]);
+            // fingerprint = Σ_i args[i] · γ^i, Horner over the reversed args.
+            let mut f = (A::ZERO, A::ZERO);
+            for &arg in lookup.args.iter().rev() {
+                f = mul2(f, gamma, w);
+                f.0 += nv(arg);
+            }
+            // message = β + fingerprint; constraint: message · inv − 1 = 0.
+            let c = mul2((f.0 + beta.0, f.1 + beta.1), inv, w);
+            out.push(c.0 - A::ONE);
+            out.push(c.1);
+            let m = nv(lookup.multiplicity);
+            acc_expr.0 += inv.0 * m;
+            acc_expr.1 += inv.1 * m;
+        }
+        out.push(is_first_row * (acc_col.0 - acc.0));
+        out.push(is_first_row * (acc_col.1 - acc.1));
+        out.push(is_transition * (acc_expr.0 - next_acc_col.0));
+        out.push(is_transition * (acc_expr.1 - next_acc_col.1));
+        out.push(is_last_row * (acc_expr.0 - next_acc.0));
+        out.push(is_last_row * (acc_expr.1 - next_acc.1));
+        return;
+    }
+
+    let beta = &publics[..d];
+    let gamma = &publics[d..2 * d];
+    let acc = &publics[2 * d..3 * d];
+    let next_acc = &publics[3 * d..4 * d];
+    let acc_col = &stage2[..d];
+    let next_acc_col = &stage2_next[..d];
+
+    // acc_expr = acc_col + Σ_j multiplicity_j · inv_j, built alongside the
+    // message constraints exactly as `synthesize_lookups` does.
+    let mut acc_expr: Vec<A> = acc_col.to_vec();
+    for (j, lookup) in lookups.iter().enumerate() {
+        let inv = &stage2[(1 + j) * d..(2 + j) * d];
+
+        // fingerprint = Σ_i args[i] · γ^i, via Horner over the reversed args
+        // (base values embed in coordinate 0).
+        let mut fingerprint = vec![A::ZERO; d];
+        for &arg in lookup.args.iter().rev() {
+            fingerprint = coord_mul(&fingerprint, gamma, w);
+            fingerprint[0] += node_vals[arg.index()];
+        }
+
+        // message = β + fingerprint; constraint: message · inv − 1 = 0.
+        let mut message = fingerprint;
+        for (m, &b) in message.iter_mut().zip(beta) {
+            *m += b;
+        }
+        let mut constraint = coord_mul(&message, inv, w);
+        constraint[0] -= A::ONE;
+        out.extend_from_slice(&constraint);
+
+        let mv = node_vals[lookup.multiplicity.index()];
+        for (a, &i) in acc_expr.iter_mut().zip(inv) {
+            *a += i * mv;
         }
     }
 
-    /// One column for the accumulator and one column for the inverse of the
-    /// message associated with each lookup.
-    pub fn stage_2_width(&self) -> usize {
-        1 + self.lookups.len()
+    // First row: acc_col = acc.
+    for k in 0..d {
+        out.push(is_first_row * (acc_col[k] - acc[k]));
     }
+    // Transition: acc_expr = next row's accumulator column.
+    for k in 0..d {
+        out.push(is_transition * (acc_expr[k] - next_acc_col[k]));
+    }
+    // Last row: acc_expr = next_acc.
+    for k in 0..d {
+        out.push(is_last_row * (acc_expr[k] - next_acc[k]));
+    }
+}
+
+/// The maximum degree multiple over the logUp constraints, computed
+/// analytically from the compiled lookup-expression degrees (mirroring the
+/// graph compiler's rules: columns degree 1, publics/IsTransition 0,
+/// IsFirstRow/IsLastRow 1, add = max, mul = sum).
+pub fn logup_max_degree<F: Field>(graph: &crate::graph::ConstraintGraph<F>) -> u32 {
+    let node_degree = |id: crate::graph::NodeId| graph.degrees[id.index()];
+    // acc_expr = acc_col (deg 1) + Σ mult·inv (deg mult + 1).
+    let acc_degree = graph
+        .lookups
+        .iter()
+        .map(|l| node_degree(l.multiplicity) + 1)
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    // Per lookup: (β + fingerprint(args)) · inv, degree = max arg degree + 1.
+    let message_degree = graph
+        .lookups
+        .iter()
+        .map(|l| l.args.iter().map(|&a| node_degree(a)).max().unwrap_or(0) + 1)
+        .max()
+        .unwrap_or(0);
+    // First row: 1 + 1; transition: 0 + acc; last: 1 + acc.
+    message_degree.max(2).max(acc_degree + 1)
+}
+
+/// Builds the logUp stage-2 constraints for `lookups` at extension degree
+/// `d`. Order: the per-lookup message/inverse constraints in lookup order,
+/// then the first-row, transition, and last-row accumulator constraints.
+///
+/// Since the direct-evaluation change this is no longer compiled into the
+/// circuit graph; it remains as the executable specification that
+/// [`logup_constraint_values`] is pinned against in tests.
+pub fn synthesize_lookups<F: Field>(lookups: &[Lookup<Expr<F>>], d: usize) -> Vec<ExtExpr<F>> {
+    let d = u32::try_from(d).expect("extension degree exceeds u32");
+    let beta = ExtExpr::public(0, d);
+    let gamma = ExtExpr::public(1, d);
+    let acc = ExtExpr::public(2, d);
+    let next_acc = ExtExpr::public(3, d);
+    let acc_col = ExtExpr::stage2(0, d, RowOffset::Current);
+    let next_acc_col = ExtExpr::stage2(0, d, RowOffset::Next);
+
+    let mut constraints = Vec::with_capacity(lookups.len() + 3);
+    // acc_expr = acc_col + Σ_j multiplicity_j · inv_j, built once and reused
+    // by the transition and last-row constraints (the interner shares it).
+    let mut acc_expr = acc_col.clone();
+    for (j, lookup) in lookups.iter().enumerate() {
+        let slot = 1 + u32::try_from(j).expect("lookup count exceeds u32");
+        let inv = ExtExpr::stage2(slot, d, RowOffset::Current);
+
+        // fingerprint = Σ_i args[i] · γ^i, via Horner over the reversed args.
+        let mut coeffs = lookup.args.iter().rev();
+        let mut fingerprint = match coeffs.next() {
+            Some(arg) => ExtExpr::from(arg.clone()),
+            None => ExtExpr::from(Expr::constant(F::ZERO)),
+        };
+        for arg in coeffs {
+            fingerprint = fingerprint * gamma.clone() + arg.clone();
+        }
+
+        // message = β + fingerprint; constraint: message · inv − 1 = 0.
+        let message = beta.clone() + fingerprint;
+        constraints.push(message * inv.clone() - Expr::constant(F::ONE));
+
+        acc_expr = acc_expr + lookup.multiplicity.clone() * inv;
+    }
+
+    // First row: acc_col = acc.
+    constraints.push(Expr::IsFirstRow * (acc_col - acc));
+    // Transition: acc_expr = next row's accumulator column.
+    constraints.push(Expr::IsTransition * (acc_expr.clone() - next_acc_col));
+    // Last row: acc_expr = next_acc.
+    constraints.push(Expr::IsLastRow * (acc_expr - next_acc));
+
+    constraints
 }
 
 /// Computes a fingerprint of the coefficients using Horner's method.
@@ -106,54 +352,13 @@ pub struct LookupValues<F> {
 }
 
 impl<F: Field> LookupValues<F> {
-    /// Evaluates the symbolic lookups of a circuit on every row of its trace.
-    pub fn compute(
-        lookups: &[Lookup<SymbolicExpression<F>>],
-        trace: &RowMajorMatrix<F>,
-        preprocessed: Option<&RowMajorMatrix<F>>,
-    ) -> Self {
-        let height = trace.height();
-        let num_lookups = lookups.len();
-        let mut arg_offsets = Vec::with_capacity(num_lookups + 1);
-        arg_offsets.push(0);
-        for lookup in lookups {
-            arg_offsets.push(arg_offsets.last().unwrap() + lookup.args.len());
-        }
-        let args_width = *arg_offsets.last().unwrap();
-        let mut multiplicities = Vec::with_capacity(height * num_lookups);
-        let mut args = Vec::with_capacity(height * args_width);
-        let mut eval_row = |row: &[F], preprocessed_row: Option<&[F]>| {
-            for lookup in lookups {
-                multiplicities.push(lookup.multiplicity.interpret(row, preprocessed_row));
-                for arg in &lookup.args {
-                    args.push(arg.interpret(row, preprocessed_row));
-                }
-            }
-        };
-        match preprocessed {
-            Some(preprocessed) => trace
-                .row_slices()
-                .zip(preprocessed.row_slices())
-                .for_each(|(row, preprocessed_row)| eval_row(row, Some(preprocessed_row))),
-            None => trace.row_slices().for_each(|row| eval_row(row, None)),
-        }
-        Self {
-            height,
-            num_lookups,
-            multiplicities,
-            arg_offsets,
-            args,
-        }
-    }
-
     /// Builds flat lookup values from per-row, per-lookup concrete lookups.
     ///
     /// Every row must have the same number of lookups. Argument counts may
-    /// vary across rows within a lookup slot (e.g. rows holding
-    /// [`Lookup::empty`]); shorter argument lists are zero-padded to the
-    /// slot's maximum width. Padding is transparent to the protocol: the
-    /// message fingerprint is a Horner evaluation, so trailing zero
-    /// coefficients do not change its value.
+    /// vary across rows within a lookup slot; shorter argument lists are
+    /// zero-padded to the slot's maximum width. Padding is transparent to the
+    /// protocol: the message fingerprint is a Horner evaluation, so trailing
+    /// zero coefficients do not change its value.
     ///
     /// # Panics
     /// Panics if rows have differing numbers of lookups.
@@ -291,10 +496,10 @@ impl<F: Field> LookupValues<F> {
 
 /// Incremental, allocation-free constructor for [`LookupValues`].
 ///
-/// Rows start zeroed — multiplicity zero and zero arguments in every slot,
-/// i.e. [`Lookup::empty`] — and are filled in place through the parallel row
-/// writers of [`Self::par_rows_mut`]. Values are written directly into the
-/// final flat storage, so no per-lookup allocation ever happens.
+/// Rows start zeroed — multiplicity zero and zero arguments in every slot —
+/// and are filled in place through the parallel row writers of
+/// [`Self::rows_mut`]. Values are written directly into the final flat
+/// storage, so no per-lookup allocation ever happens.
 pub struct LookupValuesBuilder<F> {
     height: usize,
     num_lookups: usize,
@@ -408,111 +613,122 @@ impl<F: Field> LookupRowMut<'_, F> {
     }
 }
 
-impl<A, F> BaseAir<F> for LookupAir<A, F>
-where
-    A: BaseAir<F>,
-    F: Field,
-{
-    fn width(&self) -> usize {
-        self.inner_air.width()
-    }
-
-    fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
-        self.preprocessed.clone()
-    }
-}
-
-impl<A, F, AB> Air<AB> for LookupAir<A, F>
-where
-    A: Air<AB>,
-    F: Field,
-    AB: TwoStagedBuilder<F = F>,
-{
-    fn eval(&self, builder: &mut AB) {
-        if self.preprocessed.is_some() {
-            let preprocessed = builder.preprocessed().clone();
-            let preprocessed_row = preprocessed.current_slice();
-            self.eval_with_preprocessed_row(builder, Some(preprocessed_row))
-        } else {
-            self.eval_with_preprocessed_row(builder, None)
-        }
-    }
-}
-
-impl<A, F: Field> LookupAir<A, F> {
-    fn eval_with_preprocessed_row<AB>(&self, builder: &mut AB, preprocessed_row: Option<&[AB::Var]>)
-    where
-        A: Air<AB>,
-        AB: TwoStagedBuilder<F = F>,
-    {
-        // Call `eval` for regular stage 1 constraints.
-        self.inner_air.eval(builder);
-
-        // Extract challenges and accumulators from stage 2 public values.
-        let stage_2_public_values = builder.stage_2_public_values();
-        debug_assert_eq!(stage_2_public_values.len(), LOOKUP_PUBLIC_SIZE);
-        let lookup_challenge = stage_2_public_values[0].into();
-        let fingerprint_challenge = stage_2_public_values[1].into();
-        let acc = stage_2_public_values[2];
-        let next_acc = stage_2_public_values[3];
-
-        // Bind relevant variables to construct the stage 2 constraints.
-        let stage_2 = builder.stage_2();
-        let stage_2_row = stage_2.row_slice(0).unwrap();
-        let stage_2_next_row = stage_2.row_slice(1).unwrap();
-        let acc_col = stage_2_row[0];
-        let next_acc_col = stage_2_next_row[0];
-        let messages_inverses = &stage_2_row[1..];
-        let lookups = &self.lookups;
-        debug_assert_eq!(messages_inverses.len(), lookups.len());
-
-        // Compute the final accumulator for the current row with the inverses
-        // of the messages from the stage 2 trace while asserting that these
-        // inverses are indeed the inverses of the messages computed on the main
-        // trace.
-        let main = builder.main();
-        let row = main.current_slice();
-        let mut acc_expr = acc_col.into();
-        for (lookup, &message_inverse) in lookups.iter().zip(messages_inverses) {
-            let multiplicity: AB::ExprEF =
-                lookup.multiplicity.interpret(row, preprocessed_row).into();
-            let args = lookup
-                .args
-                .iter()
-                .map(|arg| arg.interpret(row, preprocessed_row));
-            let fingerprint = fingerprint(&fingerprint_challenge, args);
-            let message: AB::ExprEF = lookup_challenge.clone() + fingerprint;
-            let message_inverse = message_inverse.into();
-            builder.assert_one_ext(message * message_inverse.clone());
-            acc_expr += multiplicity * message_inverse;
-        }
-
-        // The initial accumulator value must be set correctly.
-        builder.when_first_row().assert_eq_ext(acc_col, acc);
-
-        // The accumulator computed on the main trace for the current row must
-        // equal the accumulator of the next row from the stage 2 trace.
-        builder
-            .when_transition()
-            .assert_eq_ext(acc_expr.clone(), next_acc_col);
-
-        // The final accumulator must match the expected value.
-        builder.when_last_row().assert_eq_ext(acc_expr, next_acc);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use p3_air::{AirBuilder, WindowAccess};
+    use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
     use p3_field::Field;
 
     use crate::{
-        builder::symbolic::var,
+        p3_adapter::{LookupAir, SymbolicExpression, var},
         system::{ProverKey, System, SystemWitness},
         types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val},
     };
 
     use super::*;
+
+    /// Pin: `logup_constraint_values` (the direct evaluation the prover and
+    /// verifier run) computes exactly the values of the constraints
+    /// `synthesize_lookups` specifies, coordinate for coordinate, in order —
+    /// checked against the reference `ExtExpr` evaluator at pseudo-random
+    /// points. This is the executable mirror contract between the two.
+    #[test]
+    fn direct_logup_matches_synthesized_reference() {
+        use crate::eval::{VarValues, eval_expr, eval_ext_expr};
+        use crate::graph::ExtensionParams;
+        use p3_field::PrimeCharacteristicRing;
+
+        let params = crate::system::extension_params::<GoldilocksBlake3Config>();
+        let (w, d) = (params.w, params.degree);
+
+        // Lookups with assorted shapes: multi-arg with a product, single
+        // arg, and the degenerate empty-args case.
+        let lookups = vec![
+            Lookup::push(
+                Expr::main(0),
+                vec![
+                    Expr::constant(Val::from_u32(7)),
+                    Expr::main(1),
+                    Expr::main(2) * Expr::main(3),
+                ],
+            ),
+            Lookup::pull(Expr::main(4), vec![Expr::main(5)]),
+            Lookup {
+                multiplicity: Expr::constant(Val::ONE),
+                args: vec![],
+            },
+        ];
+        let synthesized = synthesize_lookups(&lookups, d);
+
+        // Deterministic pseudo-random base-field values (an equality of
+        // polynomials checked at random points).
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            Val::from_u64(seed >> 8)
+        };
+        let main_cur: Vec<Val> = (0..6).map(|_| next()).collect();
+        let main_next: Vec<Val> = (0..6).map(|_| next()).collect();
+        let s2_width = stage2_width(lookups.len(), d);
+        let s2_cur: Vec<Val> = (0..s2_width).map(|_| next()).collect();
+        let s2_next: Vec<Val> = (0..s2_width).map(|_| next()).collect();
+        let publics: Vec<Val> = (0..num_publics(d)).map(|_| next()).collect();
+        let (isf, isl, ist) = (next(), next(), next());
+
+        let empty: [Val; 0] = [];
+        let view = VarValues {
+            preprocessed: [&empty, &empty],
+            main: [&main_cur, &main_next],
+            stage2: [&s2_cur, &s2_next],
+            publics: &publics,
+            is_first_row: isf,
+            is_last_row: isl,
+            is_transition: ist,
+        };
+
+        let ref_params = ExtensionParams {
+            degree: d,
+            w,
+            karatsuba: false,
+        };
+        let mut reference: Vec<Val> = vec![];
+        for constraint in &synthesized {
+            reference.extend(eval_ext_expr(constraint, &view, &ref_params));
+        }
+
+        // The direct evaluator reads lookup expressions out of a node-value
+        // buffer by id; build a synthetic buffer with consecutive ids.
+        let mut node_vals: Vec<Val> = vec![];
+        let mut fresh = |v: Val| {
+            node_vals.push(v);
+            crate::graph::NodeId(u32::try_from(node_vals.len() - 1).unwrap())
+        };
+        let lookup_ids: Vec<Lookup<crate::graph::NodeId>> = lookups
+            .iter()
+            .map(|l| Lookup {
+                multiplicity: fresh(eval_expr(&l.multiplicity, &view)),
+                args: l.args.iter().map(|a| fresh(eval_expr(a, &view))).collect(),
+            })
+            .collect();
+        let mut direct: Vec<Val> = vec![];
+        logup_constraint_values(
+            &lookup_ids,
+            &node_vals,
+            &s2_cur,
+            &s2_next,
+            &publics,
+            isf,
+            isl,
+            ist,
+            w,
+            d,
+            &mut direct,
+        );
+
+        assert_eq!(direct.len(), logup_constraint_count(lookups.len(), d));
+        assert_eq!(direct, reference);
+    }
 
     enum CS {
         Even,
@@ -611,7 +827,7 @@ mod tests {
     };
 
     fn system() -> (
-        System<GoldilocksBlake3Config, CS>,
+        System<GoldilocksBlake3Config>,
         ProverKey<GoldilocksBlake3Config>,
     ) {
         let config = GoldilocksBlake3Config::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
@@ -654,7 +870,7 @@ mod tests {
         traces
     }
 
-    fn witness(system: &System<GoldilocksBlake3Config, CS>) -> SystemWitness<Val> {
+    fn witness(system: &System<GoldilocksBlake3Config>) -> SystemWitness<Val> {
         SystemWitness::from_stage_1(witness_traces(), system)
     }
 

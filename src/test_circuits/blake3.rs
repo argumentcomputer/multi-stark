@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::builder::symbolic::{preprocessed_var, var};
-    use crate::lookup::{Lookup, LookupAir};
+    use crate::lookup::Lookup;
+    use crate::p3_adapter::{LookupAir, preprocessed_var, var};
     use crate::system::{System, SystemWitness};
     use crate::test_circuits::SymbExpr;
     use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
@@ -1515,7 +1515,7 @@ mod tests {
     impl Blake3CompressionClaims {
         fn witness(
             &self,
-            system: &System<GoldilocksBlake3Config, Blake3CompressionCircuit>,
+            system: &System<GoldilocksBlake3Config>,
         ) -> (Vec<RowMajorMatrix<Val>>, SystemWitness<Val>) {
             // Grabbing values from a claims
 

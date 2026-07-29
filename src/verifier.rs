@@ -1,4 +1,11 @@
-//! Multi-circuit STARK verifier.
+//! Multi-circuit STARK verifier (constraint-IR version).
+//!
+//! The out-of-domain check recomputes each circuit's composition polynomial by
+//! running the compiled circuit's dense constraint sweep in the challenge field
+//! at ζ, then folding the constraint values with the constraint challenge.
+//! Opened stage-2 columns are fed as base columns directly (no `from_ext_basis`
+//! reassembly): the coordinate-expanded constraints are base-field polynomial
+//! identities, so evaluating them at the ζ-openings is correct.
 //!
 //! # Verification steps
 //!
@@ -42,7 +49,7 @@
 //!   would be far too small.
 //! - ρ = 2^(-log_blowup) — FRI rate parameter (inverse of the blowup factor)
 //! - n — number of FRI queries (`num_queries`)
-//! - k — number of AIR constraints (after lookup expansion)
+//! - k — number of constraints (after lookup expansion)
 //! - N — total number of lookup rows across all circuits
 //! - D — maximum degree of the quotient polynomial (trace_degree × quotient_degree)
 //!
@@ -71,7 +78,7 @@
 //!
 //! ## Constraint folding (α)
 //!
-//! All k AIR constraints are folded into a single composition polynomial using
+//! All k constraints are folded into a single composition polynomial using
 //! powers of a random challenge α. The folded polynomial Σ α^i · C_i(x) has degree
 //! k - 1 in α. By the Schwartz-Zippel lemma, if any individual constraint C_i is
 //! nonzero, the folded sum is nonzero with probability at least
@@ -140,7 +147,7 @@
 //! is observed before any commitment or challenge, and the verifier takes
 //! every active circuit's widths, constraints, and lookup structure from
 //! the canonical system by bitmap index. The one contract change relative
-//! to dense proofs: an AIR can no longer force its own presence through
+//! to dense proofs: a circuit can no longer force its own presence through
 //! must-hold padding rows — sparse verification guarantees the constraints
 //! of ACTIVE circuits plus global lookup balance, and nothing about
 //! inactive ones.
@@ -152,19 +159,16 @@
 //! actual low-degree-extension values of the witness. Do not use it when the
 //! witness must remain hidden from the verifier.
 
-use crate::{
-    builder::folder::VerifierConstraintFolder,
-    config::{PcsError, StarkGenericConfig, Val},
-    ensure, ensure_eq,
-    lookup::fingerprint,
-    prover::Proof,
-    system::System,
-};
-use p3_air::{Air, BaseAir, RowWindow};
+use crate::config::{PcsError, StarkGenericConfig, Val};
+use crate::ensure_eq;
+use crate::eval::VarValues;
+use crate::lookup::fingerprint;
+use crate::prover::Proof;
+use crate::system::System;
+
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing};
-use p3_matrix::{dense::RowMajorMatrixView, stack::VerticalPair};
 use p3_util::log2_strict_usize;
 
 /// Errors that can occur during proof verification.
@@ -187,15 +191,8 @@ pub enum VerificationError<PcsErr> {
     UnbalancedChannel,
 }
 
-impl<SC, A> System<SC, A>
-where
-    SC: StarkGenericConfig,
-    A: BaseAir<Val<SC>> + for<'a> Air<VerifierConstraintFolder<'a, Val<SC>, SC::Challenge>>,
-{
+impl<SC: StarkGenericConfig> System<SC> {
     /// Verifies a STARK proof against a single claim.
-    ///
-    /// Returns `Ok(())` if the proof is valid, or a [`VerificationError`] describing
-    /// the first check that failed.
     pub fn verify(
         &self,
         claim: &[Val<SC>],
@@ -321,6 +318,8 @@ where
         // Soundness: OOD evaluation. ζ is sampled after all commitments are fixed.
         // A nonzero polynomial of degree ≤ D vanishes at ζ with probability ≤ D/|F_ext|.
         let zeta: SC::Challenge = challenger.sample_algebra_element();
+
+        // Reconstruct the PCS opening rounds (identical to the prover).
         let mut stage_1_trace_evaluations = vec![];
         let mut stage_2_trace_evaluations = vec![];
         let mut quotient_chunks_evaluations = vec![];
@@ -396,10 +395,10 @@ where
             ),
         ];
         if let Some(preprocessed_commitment) = &self.preprocessed_commit {
-            coms_to_verify.extend([(
+            coms_to_verify.push((
                 preprocessed_commitment.clone(),
                 preprocessed_trace_evaluations,
-            )])
+            ));
         }
         // Soundness: FRI proximity test. Verifies that the committed polynomials
         // are close to low-degree polynomials and that the claimed evaluations are
@@ -411,76 +410,92 @@ where
         // use the opened values to compute the composition polynomial for each circuit
         // and check that the evaluation of the composition polynomial equals the
         // product of the zerofier with the quotient
+        let extension_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
+        let empty: [SC::Challenge; 0] = [];
         for (pos, &ci) in active_indices.iter().enumerate() {
             let circuit = &self.circuits[ci];
             let degree = 1 << log_degrees[pos];
             let quotient_degree = quotient_degrees[pos];
             let next_acc = intermediate_accumulators[pos];
-            let stage_1_row = &stage_1_opened_values[pos][0];
-            let stage_1_next_row = &stage_1_opened_values[pos][1];
-            let stage_2_row = &stage_2_opened_values[pos][0];
-            let stage_2_next_row = &stage_2_opened_values[pos][1];
-            let quotient_row = &quotient_opened_values[pos][0];
-
-            // compute the composition polynomial evaluation
             let trace_domain = pcs.natural_domain_for_degree(degree);
             let sels = trace_domain.selectors_at_point(zeta);
-            let preprocessed = if let Some(slot) = self.preprocessed_indices[ci] {
-                let preprocessed_opened_values = preprocessed_opened_values.as_ref().unwrap();
-                let preprocessed_row = &preprocessed_opened_values[slot][0];
-                let preprocessed_next_row = &preprocessed_opened_values[slot][1];
-                RowWindow::from_two_rows(preprocessed_row, preprocessed_next_row)
-            } else {
-                RowWindow::from_two_rows(&[], &[])
-            };
-            let stage_1 = VerticalPair::new(
-                RowMajorMatrixView::new_row(stage_1_row),
-                RowMajorMatrixView::new_row(stage_1_next_row),
-            );
-            let extension_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
-            let stage_2_row = &stage_2_row
-                .chunks_exact(extension_d)
-                .map(from_ext_basis::<Val<SC>, SC::Challenge>)
-                .collect::<Vec<_>>();
-            let stage_2_next_row = &stage_2_next_row
-                .chunks_exact(extension_d)
-                .map(from_ext_basis::<Val<SC>, SC::Challenge>)
-                .collect::<Vec<_>>();
-            let stage_2 = VerticalPair::new(
-                RowMajorMatrixView::new_row(stage_2_row),
-                RowMajorMatrixView::new_row(stage_2_next_row),
-            );
-            let stage_1_public_values = &[];
-            let stage_2_public_values = &[
+
+            // The four lookup publics (β, γ, acc, next_acc) as base
+            // coordinates embedded into the challenge field.
+            let mut publics: Vec<SC::Challenge> = Vec::with_capacity(4 * extension_d);
+            for ef in [
                 lookup_argument_challenge,
                 fingerprint_challenge,
                 acc,
                 next_acc,
-            ];
-            let mut folder = VerifierConstraintFolder {
-                preprocessed,
-                stage_1,
-                stage_2,
-                stage_1_public_values,
-                stage_2_public_values,
+            ] {
+                for &coord in ef.as_basis_coefficients_slice() {
+                    publics.push(SC::Challenge::from(coord));
+                }
+            }
+
+            let (preprocessed_cur, preprocessed_next): (&[SC::Challenge], &[SC::Challenge]) =
+                if let Some(slot) = self.preprocessed_indices[ci] {
+                    let values = preprocessed_opened_values.as_ref().unwrap();
+                    (&values[slot][0], &values[slot][1])
+                } else {
+                    (&empty, &empty)
+                };
+            let view = VarValues {
+                preprocessed: [preprocessed_cur, preprocessed_next],
+                main: [
+                    &stage_1_opened_values[pos][0],
+                    &stage_1_opened_values[pos][1],
+                ],
+                stage2: [
+                    &stage_2_opened_values[pos][0],
+                    &stage_2_opened_values[pos][1],
+                ],
+                publics: &publics,
                 is_first_row: sels.is_first_row,
                 is_last_row: sels.is_last_row,
                 is_transition: sels.is_transition,
-                alpha: constraint_challenge,
-                accumulator: SC::Challenge::ZERO,
             };
-            circuit.air.eval(&mut folder);
-            let composition_polynomial = folder.accumulator;
+            // One sweep serves both the user-constraint roots and the
+            // evaluated lookup expressions; the logUp constraint values are
+            // then computed directly (never compiled) and folded after the
+            // user roots, in the canonical protocol order.
+            let mut buf = Vec::new();
+            circuit.graph.sweep(&view, &mut buf);
+            let mut constraint_values = circuit.graph.constraint_values(&buf);
+            crate::lookup::logup_constraint_values(
+                &circuit.graph.lookups,
+                &buf,
+                view.stage2[0],
+                view.stage2[1],
+                &publics,
+                view.is_first_row,
+                view.is_last_row,
+                view.is_transition,
+                crate::system::extension_params::<SC>().w,
+                extension_d,
+                &mut constraint_values,
+            );
+            debug_assert_eq!(constraint_values.len(), circuit.constraint_count());
+            // Fold with α (Horner): Σ_i α^{k-1-i} · value_i, matching the
+            // prover's reversed α-power weighting.
+            let composition = constraint_values
+                .iter()
+                .fold(SC::Challenge::ZERO, |acc, &v| {
+                    acc * constraint_challenge + v
+                });
+
             // Recombine the quotient from its coefficient slices:
             // `Q(ζ) = Σᵢ ζ^{i·n}·cᵢ(ζ)`, with each slice's value read from
             // the wide quotient matrix opened at ζ.
+            let quotient_row = &quotient_opened_values[pos][0];
+            debug_assert_eq!(quotient_row.len(), quotient_degree * extension_d);
             let zeta_pow_n = zeta.exp_power_of_2(log2_strict_usize(degree));
             let quotient = quotient_row
                 .chunks_exact(extension_d)
                 .zip(zeta_pow_n.powers())
                 .map(|(chunk, zeta_pow)| zeta_pow * from_ext_basis::<Val<SC>, SC::Challenge>(chunk))
                 .sum::<SC::Challenge>();
-            debug_assert_eq!(quotient_row.len(), quotient_degree * extension_d);
 
             // Soundness: OOD check. If any constraint is violated on the trace
             // domain, the composition polynomial is not divisible by the vanishing
@@ -490,19 +505,18 @@ where
             // this ensures that the opened values are consistent with actually
             // low-degree polynomials satisfying all constraints.
             ensure_eq!(
-                composition_polynomial * sels.inv_vanishing,
+                composition * sels.inv_vanishing,
                 quotient,
                 VerificationError::OodEvaluationMismatch
             );
             // the accumulator must become the next accumulator for the next iteration
             acc = next_acc;
         }
-
         Ok(())
     }
 
     /// Validates the structural shape of the proof without checking any cryptographic
-    /// properties. Returns the quotient degrees per circuit on success.
+    /// properties. Returns the quotient degrees per active circuit on success.
     pub fn verify_shape(
         &self,
         proof: &Proof<SC>,
@@ -517,11 +531,8 @@ where
             stage_2_opened_values,
             ..
         } = proof;
-        // The following are proof shape checks
         let num_circuits = self.circuits.len();
-        // there must be at least one circuit
-        ensure!(num_circuits > 0, VerificationError::InvalidSystem);
-        // the activation bitmap covers the canonical circuit set
+        crate::ensure!(num_circuits > 0, VerificationError::InvalidSystem);
         ensure_eq!(
             active.len(),
             num_circuits,
@@ -533,15 +544,12 @@ where
             .filter_map(|(i, &a)| a.then_some(i))
             .collect();
         let num_active = active_indices.len();
-        // an empty activation proves nothing
-        ensure!(num_active > 0, VerificationError::InvalidProofShape);
-        // there must be one log degree per active circuit
+        crate::ensure!(num_active > 0, VerificationError::InvalidProofShape);
         ensure_eq!(
             log_degrees.len(),
             num_active,
             VerificationError::InvalidProofShape
         );
-        // the preprocessed commitment is empty if and only if there are zero preprocessed circuits
         let num_preprocessed = self
             .preprocessed_indices
             .iter()
@@ -574,13 +582,11 @@ where
                 );
             }
         }
-        // stage 1 round: one entry per active circuit
         ensure_eq!(
             stage_1_opened_values.len(),
             num_active,
             VerificationError::InvalidProofShape
         );
-        // stage 2 round: one entry per active circuit
         ensure_eq!(
             stage_2_opened_values.len(),
             num_active,
@@ -618,18 +624,18 @@ where
                 }
                 ensure_eq!(
                     stage_1_opened_values[pos][j].len(),
-                    circuit.stage_1_width,
+                    circuit.main_width,
                     VerificationError::InvalidProofShape
                 );
-                let extension_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
+                // Stage-2 is committed as flattened base columns, so the
+                // opened width is already the flattened width.
                 ensure_eq!(
                     stage_2_opened_values[pos][j].len(),
-                    circuit.stage_2_width * extension_d,
+                    circuit.stage_2_width,
                     VerificationError::InvalidProofShape
                 );
             }
         }
-        // quotient round: per active circuit
         let mut quotient_degrees = vec![];
         for (&ci, log_degree) in active_indices.iter().zip(log_degrees) {
             let quotient_degree = self.circuits[ci].quotient_degree();
@@ -637,7 +643,7 @@ where
             // domain can still be committed and opened by the PCS. This also
             // guards the `1 << log_degree` shifts used during verification
             // against overflow on adversarial proofs.
-            ensure!(
+            crate::ensure!(
                 usize::from(*log_degree) + log2_strict_usize(quotient_degree)
                     <= self.config.max_log_degree(),
                 VerificationError::InvalidProofShape
@@ -651,21 +657,19 @@ where
             num_active,
             VerificationError::InvalidProofShape
         );
+        let extension_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
         for (pos, quotient_degree) in quotient_degrees.iter().enumerate() {
-            // zeta
-            let num_openings = 1;
             ensure_eq!(
                 quotient_opened_values[pos].len(),
-                num_openings,
+                1,
                 VerificationError::InvalidProofShape
             );
             ensure_eq!(
                 quotient_opened_values[pos][0].len(),
-                quotient_degree * <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION,
+                quotient_degree * extension_d,
                 VerificationError::InvalidProofShape
             );
         }
-        // there must be as many intermediate accumulators as active circuits
         ensure_eq!(
             intermediate_accumulators.len(),
             num_active,
@@ -675,6 +679,7 @@ where
     }
 }
 
+/// Reassembles an extension element from its base coordinates.
 fn from_ext_basis<F: Field, EF: ExtensionField<F>>(coeffs: &[EF]) -> EF {
     coeffs
         .iter()
@@ -687,12 +692,12 @@ fn from_ext_basis<F: Field, EF: ExtensionField<F>>(coeffs: &[EF]) -> EF {
 mod tests {
     use super::*;
     use crate::{
-        lookup::LookupAir,
+        p3_adapter::LookupAir,
         prover::Proof,
         system::{ProverKey, SystemWitness},
         types::{CommitmentParameters, ExtVal, FriParameters, GoldilocksBlake3Config, Val},
     };
-    use p3_air::{AirBuilder, BaseAir, WindowAccess};
+    use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
     use p3_matrix::dense::RowMajorMatrix;
 
     enum CS {
@@ -750,7 +755,7 @@ mod tests {
     };
 
     fn system() -> (
-        System<GoldilocksBlake3Config, CS>,
+        System<GoldilocksBlake3Config>,
         ProverKey<GoldilocksBlake3Config>,
     ) {
         let config = GoldilocksBlake3Config::new(COMMITMENT_PARAMETERS, FRI_PARAMETERS);
@@ -808,7 +813,7 @@ mod tests {
 
     /// Helper: creates a small system and valid proof for negative tests.
     fn small_system_and_proof() -> (
-        System<GoldilocksBlake3Config, CS>,
+        System<GoldilocksBlake3Config>,
         Proof<GoldilocksBlake3Config>,
     ) {
         let (system, key) = system();

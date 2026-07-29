@@ -20,8 +20,8 @@
 //! `TEXRAY_PREFIXES=` (empty) to also render Plonky3's internal spans.
 
 use criterion::{BenchmarkId, Criterion, criterion_group};
-use multi_stark::builder::symbolic::{SymbolicExpression, preprocessed_var, var};
-use multi_stark::lookup::{Lookup, LookupAir};
+use multi_stark::lookup::Lookup;
+use multi_stark::p3_adapter::{LookupAir, SymbolicExpression, preprocessed_var, var};
 use multi_stark::system::{ProverKey, System, SystemWitness};
 use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
 use multi_stark::{
@@ -168,10 +168,7 @@ impl U32CS {
 // Witness generation
 // ---------------------------------------------------------------------------
 
-fn build_witness(
-    num_adds: usize,
-    system: &System<GoldilocksBlake3Config, U32CS>,
-) -> SystemWitness<Val> {
+fn build_witness(num_adds: usize, system: &System<GoldilocksBlake3Config>) -> SystemWitness<Val> {
     let byte_width = 1;
     let add_width = 14;
     let add_height = num_adds.next_power_of_two();
@@ -261,7 +258,7 @@ fn bench_config() -> GoldilocksBlake3Config {
 }
 
 fn build_system() -> (
-    System<GoldilocksBlake3Config, U32CS>,
+    System<GoldilocksBlake3Config>,
     ProverKey<GoldilocksBlake3Config>,
 ) {
     let byte_table = LookupAir::new(U32CS::ByteTable, U32CS::ByteTable.lookups());
