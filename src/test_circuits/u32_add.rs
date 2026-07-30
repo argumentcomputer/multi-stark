@@ -8,7 +8,7 @@ mod tests {
     use crate::{
         lookup::Lookup,
         p3_adapter::{LookupAir, preprocessed_var, var},
-        system::{ProverKey, System, SystemWitness},
+        system::{CircuitInputs, ProverKey, System, SystemWitness},
         types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val},
     };
 
@@ -132,8 +132,14 @@ mod tests {
         ProverKey<GoldilocksBlake3Config>,
     ) {
         let byte_table = LookupAir::new(U32CS::ByteTable, U32CS::ByteTable.lookups());
-        let u32_add = LookupAir::new(U32CS::U32Add, U32CS::U32Add.lookups());
-        System::new(config, [byte_table, u32_add])
+        // Exercise circuit-local logUp grouping end to end: 13 degree-1
+        // messages in pairs (6 pairs + a singleton tail) — constraint degree
+        // 3, half the stage-2 columns. The byte table keeps the default
+        // ungrouped argument, covering mixed group sizes in one system.
+        let mut u32_add: CircuitInputs<Val> =
+            LookupAir::new(U32CS::U32Add, U32CS::U32Add.lookups()).into();
+        u32_add.lookup_group_size = 2;
+        System::new(config, [CircuitInputs::from(byte_table), u32_add])
     }
 
     struct AddCalls {

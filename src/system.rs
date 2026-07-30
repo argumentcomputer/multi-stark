@@ -32,6 +32,14 @@ pub struct CircuitInputs<F: Field> {
     pub constraints: Vec<Expr<F>>,
     pub ext_constraints: Vec<ExtExpr<F>>,
     pub lookups: Vec<Lookup<Expr<F>>>,
+    /// How many logUp messages share one chained-accumulator step (and one
+    /// committed accumulator column): stage-2 width becomes `⌈L/k⌉·D` at
+    /// the cost of raising the logUp constraint degree to roughly
+    /// `k·deg(args) + 1`. Circuit-local because the degree budget depends
+    /// on each circuit's message degrees; `1` (the default) is the
+    /// ungrouped chained argument. Bounded by
+    /// [`crate::lookup::MAX_LOOKUP_GROUP`].
+    pub lookup_group_size: usize,
 }
 
 impl<F: Field> Default for CircuitInputs<F> {
@@ -42,6 +50,7 @@ impl<F: Field> Default for CircuitInputs<F> {
             constraints: vec![],
             ext_constraints: vec![],
             lookups: vec![],
+            lookup_group_size: 1,
         }
     }
 }
@@ -60,8 +69,10 @@ pub struct Circuit<F: Field> {
     pub stage_2_width: usize,
     /// Public-input width in base coordinates: `4·D`.
     pub num_publics: usize,
+    /// Lookup group size (see [`CircuitInputs::lookup_group_size`]).
+    pub lookup_group_size: usize,
     /// Total constraint count folded with α: the graph's user-constraint
-    /// roots plus the directly-evaluated logUp values, `(L + 3)·D`.
+    /// roots plus the directly-evaluated logUp values, `⌈L/k⌉·D`.
     pub constraint_count: usize,
     /// Maximum degree multiple over user constraints AND the logUp
     /// constraints (the latter computed analytically, not compiled).
@@ -126,9 +137,14 @@ impl<SC: StarkGenericConfig> System<SC> {
         for (i, input) in inputs.into_iter().enumerate() {
             let input = input.into();
             let num_lookups = input.lookups.len();
+            let group_size = input.lookup_group_size.max(1);
+            assert!(
+                group_size <= crate::lookup::MAX_LOOKUP_GROUP,
+                "circuit {i}: lookup_group_size {group_size} exceeds MAX_LOOKUP_GROUP",
+            );
             let preprocessed_width = input.preprocessed.as_ref().map_or(0, |m| m.width());
             let preprocessed_height = input.preprocessed.as_ref().map_or(0, |m| m.height());
-            let s2_width = stage2_width(num_lookups, d);
+            let s2_width = stage2_width(num_lookups, group_size, d);
             let n_publics = num_publics(d);
 
             // The logUp constraints are NOT compiled into the graph: the
@@ -148,9 +164,12 @@ impl<SC: StarkGenericConfig> System<SC> {
             let graph = compile(&spec, &params)
                 .unwrap_or_else(|e| panic!("circuit {i}: constraint compilation failed: {e:?}"));
 
-            let constraint_count = graph.zeros.len() + logup_constraint_count(num_lookups, d);
-            let max_constraint_degree =
-                (graph.max_constraint_degree.max(logup_max_degree(&graph))) as usize;
+            let constraint_count =
+                graph.zeros.len() + logup_constraint_count(num_lookups, group_size, d);
+            let max_constraint_degree = (graph
+                .max_constraint_degree
+                .max(logup_max_degree(&graph, group_size)))
+                as usize;
             let circuit = Circuit {
                 graph,
                 main_width: input.main_width,
@@ -160,6 +179,7 @@ impl<SC: StarkGenericConfig> System<SC> {
                 num_lookups,
                 stage_2_width: s2_width,
                 num_publics: n_publics,
+                lookup_group_size: group_size,
                 constraint_count,
                 max_constraint_degree,
             };
@@ -218,6 +238,9 @@ impl<SC: StarkGenericConfig> System<SC> {
             observe(circuit.preprocessed_width);
             observe(circuit.main_width);
             observe(circuit.stage_2_width);
+            // The group size changes the constraint STRUCTURE (count and
+            // degree alone don't determine it), so bind it like the widths.
+            observe(circuit.lookup_group_size);
         }
     }
 }

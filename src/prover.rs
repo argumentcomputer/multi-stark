@@ -72,7 +72,8 @@
 //! - a = max_log_arity — FRI folding arity (log₂)
 //!
 //! Derived quantities:
-//! - w2_i = max(L_i, 1) — stage 2 width in extension field elements
+//! - s_i — lookup group size of circuit i (1 = ungrouped)
+//! - w2_i = max(⌈L_i/s_i⌉, 1) — stage 2 width in extension field elements
 //! - W_i = w_i + w2_i · D + q_i · D — total committed width per circuit (base field)
 //! - H = max_i(n_i) · B — largest LDE height
 //! - R = ⌈(log₂ H − log_final_poly_len) / a⌉ — FRI folding rounds
@@ -397,8 +398,13 @@ where
             .zip(&active)
             .filter_map(|(l, &is_active)| is_active.then_some(l))
             .collect();
+        let group_sizes: Vec<usize> = active_indices
+            .iter()
+            .map(|&ci| self.circuits[ci].lookup_group_size)
+            .collect();
         let (stage_2_traces, intermediate_accumulators) = LookupValues::stage_2_traces(
             &active_lookups,
+            &group_sizes,
             lookup_argument_challenge,
             &fingerprint_challenge,
             acc,
@@ -937,6 +943,7 @@ where
         is_last_row,
         ext_w,
         ext_degree,
+        circuit.lookup_group_size,
         &mut constraint_values,
     );
     debug_assert_eq!(constraint_values.len(), circuit.constraint_count());
