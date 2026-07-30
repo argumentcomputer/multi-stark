@@ -14,10 +14,15 @@
 //!
 //! - **Publics** (each an extension value, stored as `d` base coordinates):
 //!   slot 0 = β (lookup challenge), 1 = γ (fingerprint challenge),
-//!   2 = current accumulator, 3 = next accumulator. So `num_publics = 4·d`.
-//! - **Stage-2 columns** (extension values, flattened to base): slot 0 = the
-//!   running accumulator, slots `1..=L` = the message inverse of each lookup,
-//!   in lookup order. So `stage2_width = (1 + L)·d` base columns.
+//!   2 = the accumulator entering the circuit (`acc_initial`), 3 = the
+//!   accumulator leaving it (`acc_final`). So `num_publics = 4·d`.
+//! - **Stage-2 columns** (extension values, flattened to base): slot `j` =
+//!   the partial accumulator entering lookup `j`'s chained step (a single
+//!   pass-through accumulator when the circuit has no lookups). So
+//!   `stage2_width = max(L, 1)·d` base columns. No message inverses are
+//!   committed — see `synthesize_lookups` for how the chained-accumulator
+//!   argument works. The committed accumulator is gauge-free (only
+//!   differences are constrained); the prover starts it at zero.
 
 use p3_field::{
     Algebra, ExtensionField, Field, PrimeCharacteristicRing, batch_multiplicative_inverse,
@@ -79,18 +84,18 @@ pub fn num_publics(d: usize) -> usize {
 }
 
 /// Stage-2 trace width (flattened base columns) for `num_lookups` lookups
-/// at extension degree `d`: one accumulator column plus one inverse column
-/// per lookup.
+/// at extension degree `d`: one partial-accumulator column per lookup
+/// (`acc_j` entering lookup `j`'s step), or a single pass-through
+/// accumulator column when the circuit has no lookups.
 pub fn stage2_width(num_lookups: usize, d: usize) -> usize {
-    (1 + num_lookups) * d
+    num_lookups.max(1) * d
 }
 
 /// Number of base-field constraint values the logUp argument contributes:
-/// one extension constraint per lookup (message · inverse = 1) plus the
-/// three accumulator constraints (first/transition/last row), each expanded
-/// into `d` coordinates.
+/// one chained-accumulator step per lookup (or the single pass-through
+/// constraint when there are none), each expanded into `d` coordinates.
 pub fn logup_constraint_count(num_lookups: usize, d: usize) -> usize {
-    (num_lookups + 3) * d
+    num_lookups.max(1) * d
 }
 
 /// Coordinate product in the binomial extension `X^d = w`, schoolbook:
@@ -124,21 +129,23 @@ fn mul2<F: Field, A: Algebra<F> + Copy>(a: (A, A), b: (A, A), w: F) -> (A, A) {
 
 /// Directly evaluates the logUp constraint values at one evaluation context,
 /// in the canonical protocol order: for each lookup (in order) the `d`
-/// coordinates of `(β + fingerprint(γ, args)) · inv − 1`, then the `d`
-/// coordinates each of the first-row, transition, and last-row accumulator
-/// constraints. Semantically identical to compiling
-/// [`synthesize_lookups`]'s constraints and evaluating their roots (see the
-/// pin test), without materializing them.
+/// coordinates of its chained-accumulator step — interior steps
+/// `m_j·(acc_{j+1} − acc_j) − mult_j`, the wrap step carrying the
+/// `is_last_row·Δ` boundary injection (see [`synthesize_lookups`] for the full
+/// derivation). Semantically identical to compiling the synthesized
+/// constraints and evaluating their roots (see the pin test), without
+/// materializing them.
 ///
 /// Everything is base-field coordinate arithmetic, so the working type `A`
 /// is generic: `PackedVal` on the prover's quotient domain, the challenge
 /// field at ζ for the verifier — both sides share this one implementation.
 ///
 /// Layout contracts (see the module docs): `publics` holds the 4·d base
-/// coordinates of (β, γ, acc, next_acc); `stage2` / `stage2_next` are the
-/// flattened stage-2 base columns, slot 0 the accumulator, slot `1+j` the
-/// message inverse of lookup `j`. `lookups` carries the evaluated lookup
-/// expressions (multiplicity and args embed in coordinate 0).
+/// coordinates of (β, γ, acc_initial, acc_final); `stage2` / `stage2_next`
+/// are the flattened stage-2 base columns, slot `j` the partial accumulator
+/// entering lookup `j`'s step. `is_last_row` is the NORMALIZED last-row
+/// selector value. `lookups` carries node ids into `node_vals` (multiplicity
+/// and args embed in coordinate 0).
 #[allow(clippy::too_many_arguments)]
 pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
     lookups: &[Lookup<crate::graph::NodeId>],
@@ -146,9 +153,7 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
     stage2: &[A],
     stage2_next: &[A],
     publics: &[A],
-    is_first_row: A,
     is_last_row: A,
-    is_transition: A,
     w: F,
     d: usize,
     out: &mut Vec<A>,
@@ -160,49 +165,78 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
         let nv = |id: crate::graph::NodeId| node_vals[id.index()];
         let beta = (publics[0], publics[1]);
         let gamma = (publics[2], publics[3]);
-        let acc = (publics[4], publics[5]);
-        let next_acc = (publics[6], publics[7]);
-        let acc_col = (stage2[0], stage2[1]);
-        let next_acc_col = (stage2_next[0], stage2_next[1]);
+        // The boundary injection: is_last_row·(acc_final − acc_initial).
+        let inj = (
+            is_last_row * (publics[6] - publics[4]),
+            is_last_row * (publics[7] - publics[5]),
+        );
 
-        let mut acc_expr = acc_col;
+        if lookups.is_empty() {
+            // Pass-through accumulator: acc′ − acc + is_last_row·Δ = 0.
+            out.push(stage2_next[0] - stage2[0] + inj.0);
+            out.push(stage2_next[1] - stage2[1] + inj.1);
+            return;
+        }
+
+        let last = lookups.len() - 1;
         for (j, lookup) in lookups.iter().enumerate() {
-            let inv = (stage2[2 + 2 * j], stage2[3 + 2 * j]);
+            let source = (stage2[2 * j], stage2[2 * j + 1]);
+            let target = if j < last {
+                (stage2[2 * j + 2], stage2[2 * j + 3])
+            } else {
+                (stage2_next[0] + inj.0, stage2_next[1] + inj.1)
+            };
             // fingerprint = Σ_i args[i] · γ^i, Horner over the reversed args.
             let mut f = (A::ZERO, A::ZERO);
             for &arg in lookup.args.iter().rev() {
                 f = mul2(f, gamma, w);
                 f.0 += nv(arg);
             }
-            // message = β + fingerprint; constraint: message · inv − 1 = 0.
-            let c = mul2((f.0 + beta.0, f.1 + beta.1), inv, w);
-            out.push(c.0 - A::ONE);
+            // step: (β + fingerprint)·(target − source) − mult = 0.
+            let c = mul2(
+                (f.0 + beta.0, f.1 + beta.1),
+                (target.0 - source.0, target.1 - source.1),
+                w,
+            );
+            out.push(c.0 - nv(lookup.multiplicity));
             out.push(c.1);
-            let m = nv(lookup.multiplicity);
-            acc_expr.0 += inv.0 * m;
-            acc_expr.1 += inv.1 * m;
         }
-        out.push(is_first_row * (acc_col.0 - acc.0));
-        out.push(is_first_row * (acc_col.1 - acc.1));
-        out.push(is_transition * (acc_expr.0 - next_acc_col.0));
-        out.push(is_transition * (acc_expr.1 - next_acc_col.1));
-        out.push(is_last_row * (acc_expr.0 - next_acc.0));
-        out.push(is_last_row * (acc_expr.1 - next_acc.1));
         return;
     }
 
     let beta = &publics[..d];
     let gamma = &publics[d..2 * d];
-    let acc = &publics[2 * d..3 * d];
-    let next_acc = &publics[3 * d..4 * d];
-    let acc_col = &stage2[..d];
-    let next_acc_col = &stage2_next[..d];
+    let acc_initial = &publics[2 * d..3 * d];
+    let acc_final = &publics[3 * d..4 * d];
+    // The boundary injection: is_last_row·(acc_final − acc_initial).
+    let inj: Vec<A> = acc_final
+        .iter()
+        .zip(acc_initial)
+        .map(|(&f, &i)| is_last_row * (f - i))
+        .collect();
 
-    // acc_expr = acc_col + Σ_j multiplicity_j · inv_j, built alongside the
-    // message constraints exactly as `synthesize_lookups` does.
-    let mut acc_expr: Vec<A> = acc_col.to_vec();
+    if lookups.is_empty() {
+        for k in 0..d {
+            out.push(stage2_next[k] - stage2[k] + inj[k]);
+        }
+        return;
+    }
+
+    let last = lookups.len() - 1;
     for (j, lookup) in lookups.iter().enumerate() {
-        let inv = &stage2[(1 + j) * d..(2 + j) * d];
+        let source = &stage2[j * d..(j + 1) * d];
+        let mut target: Vec<A> = if j < last {
+            stage2[(j + 1) * d..(j + 2) * d].to_vec()
+        } else {
+            stage2_next[..d]
+                .iter()
+                .zip(&inj)
+                .map(|(&t, &i)| t + i)
+                .collect()
+        };
+        for (t, &s) in target.iter_mut().zip(source) {
+            *t -= s;
+        }
 
         // fingerprint = Σ_i args[i] · γ^i, via Horner over the reversed args
         // (base values embed in coordinate 0).
@@ -212,32 +246,14 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
             fingerprint[0] += node_vals[arg.index()];
         }
 
-        // message = β + fingerprint; constraint: message · inv − 1 = 0.
+        // step: (β + fingerprint)·(target − source) − mult = 0.
         let mut message = fingerprint;
         for (m, &b) in message.iter_mut().zip(beta) {
             *m += b;
         }
-        let mut constraint = coord_mul(&message, inv, w);
-        constraint[0] -= A::ONE;
+        let mut constraint = coord_mul(&message, &target, w);
+        constraint[0] -= node_vals[lookup.multiplicity.index()];
         out.extend_from_slice(&constraint);
-
-        let mv = node_vals[lookup.multiplicity.index()];
-        for (a, &i) in acc_expr.iter_mut().zip(inv) {
-            *a += i * mv;
-        }
-    }
-
-    // First row: acc_col = acc.
-    for k in 0..d {
-        out.push(is_first_row * (acc_col[k] - acc[k]));
-    }
-    // Transition: acc_expr = next row's accumulator column.
-    for k in 0..d {
-        out.push(is_transition * (acc_expr[k] - next_acc_col[k]));
-    }
-    // Last row: acc_expr = next_acc.
-    for k in 0..d {
-        out.push(is_last_row * (acc_expr[k] - next_acc[k]));
     }
 }
 
@@ -247,48 +263,92 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
 /// IsFirstRow/IsLastRow 1, add = max, mul = sum).
 pub fn logup_max_degree<F: Field>(graph: &crate::graph::ConstraintGraph<F>) -> u32 {
     let node_degree = |id: crate::graph::NodeId| graph.degrees[id.index()];
-    // acc_expr = acc_col (deg 1) + Σ mult·inv (deg mult + 1).
-    let acc_degree = graph
+    // Every step is m_j·(accumulator difference) − mult_j, and the
+    // difference — including the wrap step's is_last_row·Δ injection
+    // (selector·publics) — has degree multiple 1. So per lookup:
+    // max(max arg degree + 1, mult degree); a lookup-free circuit's
+    // pass-through constraint is degree 1.
+    graph
         .lookups
         .iter()
-        .map(|l| node_degree(l.multiplicity) + 1)
+        .map(|l| {
+            let message_degree = l.args.iter().map(|&a| node_degree(a)).max().unwrap_or(0);
+            (message_degree + 1).max(node_degree(l.multiplicity))
+        })
         .max()
-        .unwrap_or(0)
-        .max(1);
-    // Per lookup: (β + fingerprint(args)) · inv, degree = max arg degree + 1.
-    let message_degree = graph
-        .lookups
-        .iter()
-        .map(|l| l.args.iter().map(|&a| node_degree(a)).max().unwrap_or(0) + 1)
-        .max()
-        .unwrap_or(0);
-    // First row: 1 + 1; transition: 0 + acc; last: 1 + acc.
-    message_degree.max(2).max(acc_degree + 1)
+        .unwrap_or(1)
 }
 
-/// Builds the logUp stage-2 constraints for `lookups` at extension degree
-/// `d`. Order: the per-lookup message/inverse constraints in lookup order,
-/// then the first-row, transition, and last-row accumulator constraints.
+/// Builds the chained-accumulator logUp constraints for `lookups` at
+/// extension degree `d` (the executable specification that
+/// [`logup_constraint_values`] is pinned against in tests; it is not
+/// compiled into the circuit graph).
 ///
-/// Since the direct-evaluation change this is no longer compiled into the
-/// circuit graph; it remains as the executable specification that
-/// [`logup_constraint_values`] is pinned against in tests.
+/// # How the chained-accumulator argument works
+///
+/// Stage 2 commits one partial accumulator per lookup: `acc_j` (slot `j`)
+/// is the running sum entering lookup `j`'s step on that row. Each step
+/// asserts `acc_{j+1} − acc_j = mult_j / m_j`, multiplied through by the
+/// message `m_j = β + fingerprint(γ, args_j)` to stay polynomial:
+///
+/// ```text
+/// interior (j < L−1):  m_j · (acc_{j+1} − acc_j) − mult_j = 0
+/// wrap     (j = L−1):  m_j · (acc_0′ − acc_j + is_last_row·Δ) − mult_j = 0
+/// ```
+///
+/// where `acc_0′` is the NEXT row's first slot, `Δ = acc_final −
+/// acc_initial` (publics slots 3 and 2), and `is_last_row` is the NORMALIZED
+/// last-row Lagrange selector (value exactly 1 on the last row — see the
+/// selector-normalization pin test).
+///
+/// The wrap step needs no transition selector: on the trace subgroup
+/// "next row" is rotation by the generator, so the last row's `acc_0′` IS
+/// the first row's `acc_0` and the chain is a cycle. Telescoping the step
+/// constraints around that cycle cancels every accumulator term, leaving
+/// `Σ_rows Σ_j mult_j/m_j = Δ` — the injected `is_last_row·Δ` perturbs
+/// exactly one link, converting "the multiset sum is zero" into "the
+/// multiset sum is the public accumulator difference". No first-row,
+/// transition, or last-row constraints remain: the committed accumulator
+/// is gauge-free (only differences are constrained; the prover starts it
+/// at zero by convention).
+///
+/// A circuit with no lookups gets a single pass-through column with
+/// `acc′ − acc + is_last_row·Δ = 0`, forcing `Δ = 0`.
+///
+/// Zero-multiplicity rows (padding) force `acc_{j+1} = acc_j` through a
+/// (whp) nonzero message — the accumulators simply ride through.
+///
+/// Degrees are uniform: every constraint is `max(deg(args)+1, deg(mult))`
+/// (the injected term is selector·publics, degree multiple 1, absorbed by
+/// `add = max`).
 pub fn synthesize_lookups<F: Field>(lookups: &[Lookup<Expr<F>>], d: usize) -> Vec<ExtExpr<F>> {
     let d = u32::try_from(d).expect("extension degree exceeds u32");
     let beta = ExtExpr::public(0, d);
     let gamma = ExtExpr::public(1, d);
-    let acc = ExtExpr::public(2, d);
-    let next_acc = ExtExpr::public(3, d);
-    let acc_col = ExtExpr::stage2(0, d, RowOffset::Current);
-    let next_acc_col = ExtExpr::stage2(0, d, RowOffset::Next);
+    let acc_initial = ExtExpr::public(2, d);
+    let acc_final = ExtExpr::public(3, d);
+    // The boundary injection: is_last_row·Δ. `Expr::IsLastRow` is the
+    // normalized last-row selector protocol-wide.
+    let injection = ExtExpr::from(Expr::IsLastRow) * (acc_final - acc_initial);
 
-    let mut constraints = Vec::with_capacity(lookups.len() + 3);
-    // acc_expr = acc_col + Σ_j multiplicity_j · inv_j, built once and reused
-    // by the transition and last-row constraints (the interner shares it).
-    let mut acc_expr = acc_col.clone();
+    if lookups.is_empty() {
+        // Pass-through accumulator: acc′ − acc + is_last_row·Δ = 0.
+        return vec![
+            ExtExpr::stage2(0, d, RowOffset::Next) - ExtExpr::stage2(0, d, RowOffset::Current)
+                + injection,
+        ];
+    }
+
+    let last = lookups.len() - 1;
+    let mut constraints = Vec::with_capacity(lookups.len());
     for (j, lookup) in lookups.iter().enumerate() {
-        let slot = 1 + u32::try_from(j).expect("lookup count exceeds u32");
-        let inv = ExtExpr::stage2(slot, d, RowOffset::Current);
+        let slot = u32::try_from(j).expect("lookup count exceeds u32");
+        let source = ExtExpr::stage2(slot, d, RowOffset::Current);
+        let target = if j < last {
+            ExtExpr::stage2(slot + 1, d, RowOffset::Current)
+        } else {
+            ExtExpr::stage2(0, d, RowOffset::Next) + injection.clone()
+        };
 
         // fingerprint = Σ_i args[i] · γ^i, via Horner over the reversed args.
         let mut coeffs = lookup.args.iter().rev();
@@ -300,19 +360,10 @@ pub fn synthesize_lookups<F: Field>(lookups: &[Lookup<Expr<F>>], d: usize) -> Ve
             fingerprint = fingerprint * gamma.clone() + arg.clone();
         }
 
-        // message = β + fingerprint; constraint: message · inv − 1 = 0.
+        // message = β + fingerprint; step: m·(target − source) − mult = 0.
         let message = beta.clone() + fingerprint;
-        constraints.push(message * inv.clone() - Expr::constant(F::ONE));
-
-        acc_expr = acc_expr + lookup.multiplicity.clone() * inv;
+        constraints.push(message * (target - source) - lookup.multiplicity.clone());
     }
-
-    // First row: acc_col = acc.
-    constraints.push(Expr::IsFirstRow * (acc_col - acc));
-    // Transition: acc_expr = next row's accumulator column.
-    constraints.push(Expr::IsTransition * (acc_expr.clone() - next_acc_col));
-    // Last row: acc_expr = next_acc.
-    constraints.push(Expr::IsLastRow * (acc_expr - next_acc));
 
     constraints
 }
@@ -462,28 +513,36 @@ impl<F: Field> LookupValues<F> {
             offset += num_circuit_messages;
 
             let vec = if circuit.num_lookups == 0 {
-                // No row lookup. Just repeat the accumulator for each row.
-                vec![accumulator; circuit.height]
+                // Pass-through accumulator column; the committed values are
+                // gauge-free (only differences are constrained), zero by
+                // convention.
+                vec![EF::ZERO; circuit.height]
             } else {
-                // Flatten each row accumulator followed by the inverse of the message
-                // associated with each row lookup.
-                let mut vec = Vec::with_capacity(circuit.height * (1 + circuit.num_lookups));
+                // One partial accumulator per lookup slot: `acc_j` is the
+                // running sum ENTERING lookup j's step; the last step's
+                // result carries into the next row's slot 0. Single pass,
+                // one multiply-add per (row, lookup). The column is
+                // gauge-free, so it starts at zero regardless of the global
+                // accumulator; the circuit's total contribution is added to
+                // the global chain at the end.
+                let mut vec = Vec::with_capacity(circuit.height * circuit.num_lookups);
+                let mut local = EF::ZERO;
                 for (row_multiplicities, row_messages_inverses) in circuit
                     .multiplicities
                     .chunks_exact(circuit.num_lookups)
                     .zip(circuit_messages_inverses.chunks_exact(circuit.num_lookups))
                 {
-                    vec.push(accumulator);
                     for (&multiplicity, &message_inverse) in
                         row_multiplicities.iter().zip(row_messages_inverses)
                     {
-                        accumulator += EF::from(multiplicity) * message_inverse;
-                        vec.push(message_inverse);
+                        vec.push(local);
+                        local += EF::from(multiplicity) * message_inverse;
                     }
                 }
+                accumulator += local;
                 vec
             };
-            let width = 1 + circuit.num_lookups;
+            let width = circuit.num_lookups.max(1);
             debug_assert_eq!(vec.len() % width, 0);
             let trace = RowMajorMatrix::new(vec, width);
             intermediate_accumulators.push(accumulator);
@@ -626,6 +685,74 @@ mod tests {
 
     use super::*;
 
+    /// The selector `p3` provides is the UNNORMALIZED Lagrange numerator
+    /// `is_last_row(x) = (x^n − 1)/(x − g^{−1})`; its value at the last row
+    /// is `n·g` (the zerofier derivative there). The chained logUp wrap
+    /// constraint uses the selector additively, so it must be normalized to
+    /// value exactly 1 at the last row: `is_last_row/(n·g)` has value 1 there.
+    /// This pins that constant (and `1/n` for the first row) against the
+    /// textbook Lagrange basis product, at arbitrary points, several sizes.
+    #[test]
+    fn selector_normalization_constants() {
+        use crate::config::StarkGenericConfig;
+        use crate::types::ExtVal;
+        use p3_commit::PolynomialSpace;
+        use p3_field::{PrimeCharacteristicRing, TwoAdicField};
+
+        let config = GoldilocksBlake3Config::new(
+            CommitmentParameters {
+                log_blowup: 1,
+                cap_height: 0,
+            },
+            FriParameters {
+                log_final_poly_len: 0,
+                max_log_arity: 1,
+                num_queries: 1,
+                commit_proof_of_work_bits: 0,
+                query_proof_of_work_bits: 0,
+            },
+        );
+        for log_n in [2usize, 3, 5, 8] {
+            let n = 1usize << log_n;
+            let g = Val::two_adic_generator(log_n);
+            let domain: crate::types::Domain = <crate::types::Pcs as p3_commit::Pcs<
+                ExtVal,
+                crate::types::Challenger,
+            >>::natural_domain_for_degree(
+                config.pcs(), n
+            );
+            for seed in [3u64, 12345, 0xdead_beef] {
+                let zeta: ExtVal =
+                    ExtVal::from_u64(seed).exp_u64(7) + ExtVal::from_u64(seed * 31 + 1);
+                let sels = domain.selectors_at_point(zeta);
+                // Textbook Lagrange basis of the last row:
+                // Π_{i≠n−1} (ζ − g^i)/(g^{n−1} − g^i).
+                let last = g.exp_u64((n - 1) as u64);
+                let mut ref_last = ExtVal::ONE;
+                for i in 0..n - 1 {
+                    let gi = g.exp_u64(i as u64);
+                    ref_last *= (zeta - ExtVal::from(gi)) * ExtVal::from(last - gi).inverse();
+                }
+                let norm = (Val::from_usize(n) * g).inverse();
+                assert_eq!(
+                    sels.is_last_row * ExtVal::from(norm),
+                    ref_last,
+                    "last-row normalization, log_n={log_n}"
+                );
+                let mut ref_first = ExtVal::ONE;
+                for i in 1..n {
+                    let gi = g.exp_u64(i as u64);
+                    ref_first *= (zeta - ExtVal::from(gi)) * ExtVal::from(Val::ONE - gi).inverse();
+                }
+                assert_eq!(
+                    sels.is_first_row * ExtVal::from(Val::from_usize(n).inverse()),
+                    ref_first,
+                    "first-row normalization, log_n={log_n}"
+                );
+            }
+        }
+    }
+
     /// Pin: `logup_constraint_values` (the direct evaluation the prover and
     /// verifier run) computes exactly the values of the constraints
     /// `synthesize_lookups` specifies, coordinate for coordinate, in order —
@@ -718,9 +845,10 @@ mod tests {
             &s2_cur,
             &s2_next,
             &publics,
-            isf,
+            // the (normalized) last-row selector value; the
+            // reference evaluation reads the same value through the view's
+            // `is_last_row`, so any value pins the identity.
             isl,
-            ist,
             w,
             d,
             &mut direct,

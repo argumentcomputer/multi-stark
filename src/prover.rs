@@ -31,7 +31,8 @@
 //!    `acc = Σ (β + fingerprint(γ, claim_i))⁻¹`.
 //!
 //! 3. **Stage 2 — Lookup traces**: For each circuit, the lookup traces are computed
-//!    (running accumulator and message inverses per row) and committed via PCS. Each
+//!    (one chained partial accumulator per lookup; no message inverses are
+//!    committed) and committed via PCS. Each
 //!    circuit produces an intermediate accumulator value recording where its running
 //!    sum ended up; these are observed into the challenger, and the verifier will
 //!    check that the last one is zero.
@@ -71,7 +72,7 @@
 //! - a = max_log_arity — FRI folding arity (log₂)
 //!
 //! Derived quantities:
-//! - w2_i = 1 + L_i — stage 2 width in extension field elements
+//! - w2_i = max(L_i, 1) — stage 2 width in extension field elements
 //! - W_i = w_i + w2_i · D + q_i · D — total committed width per circuit (base field)
 //! - H = max_i(n_i) · B — largest LDE height
 //! - R = ⌈(log₂ H − log_final_poly_len) / a⌉ — FRI folding rounds
@@ -616,6 +617,17 @@ where
     let stage_2_width = circuit.stage_2_width;
     let preprocessed_width = circuit.preprocessed_width;
     let mut sels = trace_domain.selectors_on_coset(quotient_domain);
+    // Normalize the Lagrange selectors to value exactly 1 at their row
+    // (p3's are unnormalized: L_first(1) = n, L_last(g^{n−1}) = n·g; see
+    // the selector-normalization pin test). The logUp wrap constraint
+    // consumes is_last_row ADDITIVELY, so its scale is load-bearing;
+    // vanishing-form user constraints are unaffected.
+    let n_val = Val::<SC>::from_usize(trace_domain.size());
+    let g = Val::<SC>::two_adic_generator(log2_strict_usize(trace_domain.size()));
+    let first_norm = n_val.inverse();
+    let last_norm = (n_val * g).inverse();
+    sels.is_first_row.iter_mut().for_each(|v| *v *= first_norm);
+    sels.is_last_row.iter_mut().for_each(|v| *v *= last_norm);
 
     let qdb = log2_strict_usize(quotient_domain.size()) - log2_strict_usize(trace_domain.size());
     let next_step = 1 << qdb;
@@ -752,9 +764,9 @@ where
         stage_2_cur,
         stage_2_next,
         publics_packed,
-        is_first_row,
+        // the NORMALIZED last-row selector (scaled in
+        // `quotient_values` above).
         is_last_row,
-        is_transition,
         ext_w,
         ext_degree,
         &mut constraint_values,

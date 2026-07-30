@@ -168,7 +168,7 @@ use crate::system::System;
 
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs, PolynomialSpace};
-use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing};
+use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_util::log2_strict_usize;
 
 /// Errors that can occur during proof verification.
@@ -197,7 +197,10 @@ impl<SC: StarkGenericConfig> System<SC> {
         &self,
         claim: &[Val<SC>],
         proof: &Proof<SC>,
-    ) -> Result<(), VerificationError<PcsError<SC>>> {
+    ) -> Result<(), VerificationError<PcsError<SC>>>
+    where
+        Val<SC>: TwoAdicField,
+    {
         self.verify_multiple_claims(&[claim], proof)
     }
 
@@ -206,7 +209,10 @@ impl<SC: StarkGenericConfig> System<SC> {
         &self,
         claims: &[&[Val<SC>]],
         proof: &Proof<SC>,
-    ) -> Result<(), VerificationError<PcsError<SC>>> {
+    ) -> Result<(), VerificationError<PcsError<SC>>>
+    where
+        Val<SC>: TwoAdicField,
+    {
         let Proof {
             active,
             commitments,
@@ -418,7 +424,14 @@ impl<SC: StarkGenericConfig> System<SC> {
             let quotient_degree = quotient_degrees[pos];
             let next_acc = intermediate_accumulators[pos];
             let trace_domain = pcs.natural_domain_for_degree(degree);
-            let sels = trace_domain.selectors_at_point(zeta);
+            let mut sels = trace_domain.selectors_at_point(zeta);
+            // Normalize the Lagrange selectors to value exactly 1 at their
+            // row, mirroring the prover (the logUp wrap constraint consumes
+            // is_last_row additively).
+            let n_val = Val::<SC>::from_usize(degree);
+            let g = Val::<SC>::two_adic_generator(usize::from(log_degrees[pos]));
+            sels.is_first_row *= SC::Challenge::from(n_val.inverse());
+            sels.is_last_row *= SC::Challenge::from((n_val * g).inverse());
 
             // The four lookup publics (β, γ, acc, next_acc) as base
             // coordinates embedded into the challenge field.
@@ -469,9 +482,8 @@ impl<SC: StarkGenericConfig> System<SC> {
                 view.stage2[0],
                 view.stage2[1],
                 &publics,
-                view.is_first_row,
+                // the normalized last-row selector (value 1 at the last row).
                 view.is_last_row,
-                view.is_transition,
                 crate::system::extension_params::<SC>().w,
                 extension_d,
                 &mut constraint_values,
