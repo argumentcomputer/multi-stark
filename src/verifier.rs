@@ -490,6 +490,7 @@ impl<SC: StarkGenericConfig> System<SC> {
                 view.is_last_row,
                 crate::system::extension_params::<SC>().w,
                 extension_d,
+                circuit.lookup_group_size,
                 &mut constraint_values,
             );
             debug_assert_eq!(constraint_values.len(), circuit.constraint_count());
