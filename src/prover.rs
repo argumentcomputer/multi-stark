@@ -617,17 +617,15 @@ where
     let stage_2_width = circuit.stage_2_width;
     let preprocessed_width = circuit.preprocessed_width;
     let mut sels = trace_domain.selectors_on_coset(quotient_domain);
-    // Normalize the Lagrange selectors to value exactly 1 at their row
-    // (p3's are unnormalized: L_first(1) = n, L_last(g^{n−1}) = n·g; see
-    // the selector-normalization pin test). The logUp wrap constraint
-    // consumes is_last_row ADDITIVELY, so its scale is load-bearing;
-    // vanishing-form user constraints are unaffected.
+    // The logUp wrap constraint consumes the last-row selector ADDITIVELY,
+    // so its normalization matters — but the selector multiplies Δ, which
+    // is constant across the domain, so the normalization constant
+    // 1/(n·g) is absorbed into Δ once per circuit instead of rescaling
+    // the selector vectors (p3's unnormalized L_last has value n·g at the
+    // last row; see the selector-normalization pin test).
     let n_val = Val::<SC>::from_usize(trace_domain.size());
     let g = Val::<SC>::two_adic_generator(log2_strict_usize(trace_domain.size()));
-    let first_norm = n_val.inverse();
-    let last_norm = (n_val * g).inverse();
-    sels.is_first_row.iter_mut().for_each(|v| *v *= first_norm);
-    sels.is_last_row.iter_mut().for_each(|v| *v *= last_norm);
+    let inj_norm = (n_val * g).inverse();
 
     let qdb = log2_strict_usize(quotient_domain.size()) - log2_strict_usize(trace_domain.size());
     let next_step = 1 << qdb;
@@ -659,6 +657,17 @@ where
         .map(|&c| PackedVal::<SC>::from(c))
         .collect();
 
+    // Δ/(n·g) per coordinate, broadcast: the logUp boundary injection with
+    // the last-row selector's normalization constant pre-absorbed.
+    let ext_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
+    let delta_scaled: Vec<PackedVal<SC>> = (0..ext_d)
+        .map(|k| {
+            PackedVal::<SC>::from(
+                (lookup_publics[3 * ext_d + k] - lookup_publics[2 * ext_d + k]) * inj_norm,
+            )
+        })
+        .collect();
+
     let ext_params = crate::system::extension_params::<SC>();
     let inner = |i_start: usize| {
         quotient_values_inner::<SC>(
@@ -672,6 +681,7 @@ where
             stage_2_width,
             preprocessed_width,
             &publics_packed,
+            &delta_scaled,
             &decomposed_alpha_powers,
             next_step,
             i_start,
@@ -708,6 +718,7 @@ fn quotient_values_inner<SC>(
     stage_2_width: usize,
     preprocessed_width: usize,
     publics_packed: &[PackedVal<SC>],
+    delta_scaled: &[PackedVal<SC>],
     decomposed_alpha_powers: &[Vec<Val<SC>>],
     next_step: usize,
     i_start: usize,
@@ -764,8 +775,9 @@ where
         stage_2_cur,
         stage_2_next,
         publics_packed,
-        // the NORMALIZED last-row selector (scaled in
-        // `quotient_values` above).
+        delta_scaled,
+        // p3's (unnormalized) last-row selector; the normalization
+        // constant is pre-absorbed into `delta_scaled`.
         is_last_row,
         ext_w,
         ext_degree,

@@ -143,9 +143,11 @@ fn mul2<F: Field, A: Algebra<F> + Copy>(a: (A, A), b: (A, A), w: F) -> (A, A) {
 /// Layout contracts (see the module docs): `publics` holds the 4·d base
 /// coordinates of (β, γ, acc_initial, acc_final); `stage2` / `stage2_next`
 /// are the flattened stage-2 base columns, slot `j` the partial accumulator
-/// entering lookup `j`'s step. `is_last_row` is the NORMALIZED last-row
-/// selector value. `lookups` carries node ids into `node_vals` (multiplicity
-/// and args embed in coordinate 0).
+/// entering lookup `j`'s step. `is_last_row` is p3's RAW (unnormalized)
+/// selector value; `delta_scaled` is `(acc_final − acc_initial)/(n·g)` — the
+/// normalization constant pre-absorbed by the caller, valid because Δ is
+/// constant across the domain. `lookups` carries node ids into `node_vals`
+/// (multiplicity and args embed in coordinate 0).
 #[allow(clippy::too_many_arguments)]
 pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
     lookups: &[Lookup<crate::graph::NodeId>],
@@ -153,6 +155,7 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
     stage2: &[A],
     stage2_next: &[A],
     publics: &[A],
+    delta_scaled: &[A],
     is_last_row: A,
     w: F,
     d: usize,
@@ -165,11 +168,11 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
         let nv = |id: crate::graph::NodeId| node_vals[id.index()];
         let beta = (publics[0], publics[1]);
         let gamma = (publics[2], publics[3]);
-        // The boundary injection: is_last_row·(acc_final − acc_initial).
-        let inj = (
-            is_last_row * (publics[6] - publics[4]),
-            is_last_row * (publics[7] - publics[5]),
-        );
+        // The boundary injection: the caller supplies Δ with the last-row
+        // selector's normalization constant pre-absorbed
+        // (`delta_scaled = (acc_final − acc_initial)/(n·g)`), so the raw
+        // p3 selector value is used directly.
+        let inj = (is_last_row * delta_scaled[0], is_last_row * delta_scaled[1]);
 
         if lookups.is_empty() {
             // Pass-through accumulator: acc′ − acc + is_last_row·Δ = 0.
@@ -206,14 +209,9 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
 
     let beta = &publics[..d];
     let gamma = &publics[d..2 * d];
-    let acc_initial = &publics[2 * d..3 * d];
-    let acc_final = &publics[3 * d..4 * d];
-    // The boundary injection: is_last_row·(acc_final − acc_initial).
-    let inj: Vec<A> = acc_final
-        .iter()
-        .zip(acc_initial)
-        .map(|(&f, &i)| is_last_row * (f - i))
-        .collect();
+    // The boundary injection: Δ arrives with the normalization constant
+    // pre-absorbed (see the fast path above).
+    let inj: Vec<A> = delta_scaled.iter().map(|&x| is_last_row * x).collect();
 
     if lookups.is_empty() {
         for k in 0..d {
@@ -297,9 +295,13 @@ pub fn logup_max_degree<F: Field>(graph: &crate::graph::ConstraintGraph<F>) -> u
 /// ```
 ///
 /// where `acc_0′` is the NEXT row's first slot, `Δ = acc_final −
-/// acc_initial` (publics slots 3 and 2), and `is_last_row` is the NORMALIZED
-/// last-row Lagrange selector (value exactly 1 on the last row — see the
-/// selector-normalization pin test).
+/// acc_initial` (publics slots 3 and 2), and `is_last_row·Δ` denotes the
+/// NORMALIZED last-row Lagrange selector (value exactly 1 on the last row)
+/// times Δ. In the implementation the normalization constant is absorbed
+/// into Δ — `is_last_norm·Δ = is_last_raw·(Δ/(n·g))`, valid because Δ is
+/// constant across the domain — so the selectors stay exactly as p3
+/// provides them (unnormalized; `L_last(last) = n·g`, pinned by the
+/// selector-normalization test).
 ///
 /// The wrap step needs no transition selector: on the trace subgroup
 /// "next row" is rotation by the generator, so the last row's `acc_0′` IS
@@ -838,6 +840,14 @@ mod tests {
                 args: l.args.iter().map(|a| fresh(eval_expr(a, &view))).collect(),
             })
             .collect();
+        // The reference spec expresses the injection as
+        // IsLastRow·(acc_final − acc_initial), so the pin passes Δ raw and
+        // the view's is_last_row value directly — the identity holds for
+        // any selector value; the normalization constant is a CALLER
+        // contract (callers pass p3's raw selector with Δ/(n·g)).
+        let delta: Vec<Val> = (0..d)
+            .map(|k| publics[3 * d + k] - publics[2 * d + k])
+            .collect();
         let mut direct: Vec<Val> = vec![];
         logup_constraint_values(
             &lookup_ids,
@@ -845,9 +855,7 @@ mod tests {
             &s2_cur,
             &s2_next,
             &publics,
-            // the (normalized) last-row selector value; the
-            // reference evaluation reads the same value through the view's
-            // `is_last_row`, so any value pins the identity.
+            &delta,
             isl,
             w,
             d,

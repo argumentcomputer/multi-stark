@@ -424,14 +424,13 @@ impl<SC: StarkGenericConfig> System<SC> {
             let quotient_degree = quotient_degrees[pos];
             let next_acc = intermediate_accumulators[pos];
             let trace_domain = pcs.natural_domain_for_degree(degree);
-            let mut sels = trace_domain.selectors_at_point(zeta);
-            // Normalize the Lagrange selectors to value exactly 1 at their
-            // row, mirroring the prover (the logUp wrap constraint consumes
-            // is_last_row additively).
+            let sels = trace_domain.selectors_at_point(zeta);
+            // The logUp boundary injection absorbs the last-row selector's
+            // normalization constant into Δ (mirroring the prover): p3's
+            // unnormalized L_last has value n·g at the last row.
             let n_val = Val::<SC>::from_usize(degree);
             let g = Val::<SC>::two_adic_generator(usize::from(log_degrees[pos]));
-            sels.is_first_row *= SC::Challenge::from(n_val.inverse());
-            sels.is_last_row *= SC::Challenge::from((n_val * g).inverse());
+            let inj_norm = SC::Challenge::from((n_val * g).inverse());
 
             // The four lookup publics (β, γ, acc, next_acc) as base
             // coordinates embedded into the challenge field.
@@ -476,13 +475,18 @@ impl<SC: StarkGenericConfig> System<SC> {
             let mut buf = Vec::new();
             circuit.graph.sweep(&view, &mut buf);
             let mut constraint_values = circuit.graph.constraint_values(&buf);
+            let delta_scaled: Vec<SC::Challenge> = (0..extension_d)
+                .map(|k| (publics[3 * extension_d + k] - publics[2 * extension_d + k]) * inj_norm)
+                .collect();
             crate::lookup::logup_constraint_values(
                 &circuit.graph.lookups,
                 &buf,
                 view.stage2[0],
                 view.stage2[1],
                 &publics,
-                // the normalized last-row selector (value 1 at the last row).
+                &delta_scaled,
+                // p3's (unnormalized) last-row selector; the normalization
+                // constant is pre-absorbed into `delta_scaled`.
                 view.is_last_row,
                 crate::system::extension_params::<SC>().w,
                 extension_d,
