@@ -31,7 +31,8 @@
 //!    `acc = Σ (β + fingerprint(γ, claim_i))⁻¹`.
 //!
 //! 3. **Stage 2 — Lookup traces**: For each circuit, the lookup traces are computed
-//!    (running accumulator and message inverses per row) and committed via PCS. Each
+//!    (one chained partial accumulator per lookup; no message inverses are
+//!    committed) and committed via PCS. Each
 //!    circuit produces an intermediate accumulator value recording where its running
 //!    sum ended up; these are observed into the challenger, and the verifier will
 //!    check that the last one is zero.
@@ -71,7 +72,7 @@
 //! - a = max_log_arity — FRI folding arity (log₂)
 //!
 //! Derived quantities:
-//! - w2_i = 1 + L_i — stage 2 width in extension field elements
+//! - w2_i = max(L_i, 1) — stage 2 width in extension field elements
 //! - W_i = w_i + w2_i · D + q_i · D — total committed width per circuit (base field)
 //! - H = max_i(n_i) · B — largest LDE height
 //! - R = ⌈(log₂ H − log_final_poly_len) / a⌉ — FRI folding rounds
@@ -616,6 +617,15 @@ where
     let stage_2_width = circuit.stage_2_width;
     let preprocessed_width = circuit.preprocessed_width;
     let mut sels = trace_domain.selectors_on_coset(quotient_domain);
+    // The logUp wrap constraint consumes the last-row selector ADDITIVELY,
+    // so its normalization matters — but the selector multiplies Δ, which
+    // is constant across the domain, so the normalization constant
+    // 1/(n·g) is absorbed into Δ once per circuit instead of rescaling
+    // the selector vectors (p3's unnormalized L_last has value n·g at the
+    // last row; see the selector-normalization pin test).
+    let n_val = Val::<SC>::from_usize(trace_domain.size());
+    let g = Val::<SC>::two_adic_generator(log2_strict_usize(trace_domain.size()));
+    let inj_norm = (n_val * g).inverse();
 
     let qdb = log2_strict_usize(quotient_domain.size()) - log2_strict_usize(trace_domain.size());
     let next_step = 1 << qdb;
@@ -647,6 +657,17 @@ where
         .map(|&c| PackedVal::<SC>::from(c))
         .collect();
 
+    // Δ/(n·g) per coordinate, broadcast: the logUp boundary injection with
+    // the last-row selector's normalization constant pre-absorbed.
+    let ext_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
+    let delta_scaled: Vec<PackedVal<SC>> = (0..ext_d)
+        .map(|k| {
+            PackedVal::<SC>::from(
+                (lookup_publics[3 * ext_d + k] - lookup_publics[2 * ext_d + k]) * inj_norm,
+            )
+        })
+        .collect();
+
     let ext_params = crate::system::extension_params::<SC>();
     let inner = |i_start: usize| {
         quotient_values_inner::<SC>(
@@ -660,6 +681,7 @@ where
             stage_2_width,
             preprocessed_width,
             &publics_packed,
+            &delta_scaled,
             &decomposed_alpha_powers,
             next_step,
             i_start,
@@ -696,6 +718,7 @@ fn quotient_values_inner<SC>(
     stage_2_width: usize,
     preprocessed_width: usize,
     publics_packed: &[PackedVal<SC>],
+    delta_scaled: &[PackedVal<SC>],
     decomposed_alpha_powers: &[Vec<Val<SC>>],
     next_step: usize,
     i_start: usize,
@@ -752,9 +775,10 @@ where
         stage_2_cur,
         stage_2_next,
         publics_packed,
-        is_first_row,
+        delta_scaled,
+        // p3's (unnormalized) last-row selector; the normalization
+        // constant is pre-absorbed into `delta_scaled`.
         is_last_row,
-        is_transition,
         ext_w,
         ext_degree,
         &mut constraint_values,
