@@ -84,7 +84,7 @@
 //! construction over the LDE rows. All circuits are committed together.
 //!
 //! ```text
-//! FFT work:   Σ_i  w_i · n_i · B · log₂(n_i · B)   field multiplications
+//! FFT work:   Σ_i  w_i · (B+1) · n_i · log₂(n_i)   field multiplications
 //! Hashing:    Σ_i  n_i · B                            Merkle leaf hashes
 //! ```
 //!
@@ -107,7 +107,7 @@
 //! n_i × w2_i · D base elements) are committed identically to stage 1.
 //!
 //! ```text
-//! FFT work:   Σ_i  w2_i · D · n_i · B · log₂(n_i · B)   field multiplications
+//! FFT work:   Σ_i  w2_i · D · (B+1) · n_i · log₂(n_i)   field multiplications
 //! Hashing:    Σ_i  n_i · B                                 Merkle leaf hashes
 //! ```
 //!
@@ -122,11 +122,14 @@
 //! The quotient polynomial is split into q_i coefficient slices (each of
 //! degree n_i) and committed as a single q_i·D-column matrix per circuit on
 //! the trace domain, so the opening phase pays its per-matrix costs once per
-//! circuit rather than once per slice.
+//! circuit rather than once per slice. The committed LDE is built directly
+//! from the slice coefficients (`lde_from_coefficients`), skipping the
+//! trace-domain DFT whose output `Pcs::commit` would immediately invert.
 //!
 //! ```text
 //! Constraint eval:  Σ_i  n_i · q_i · eval_cost(k_i)         field operations
-//! Quotient FFT:     Σ_i  q_i · D · n_i · B · log₂(n_i · B)  field multiplications
+//! Quotient iFFT:    Σ_i  D · q_i · n_i · log₂(q_i · n_i)    field multiplications
+//! Quotient LDE:     Σ_i  q_i · D · B · n_i · log₂(B · n_i)  field multiplications
 //! Hashing:          Σ_i  q_i · n_i · B                        Merkle leaf hashes
 //! ```
 //!
@@ -152,7 +155,7 @@
 //! The total per-proof cost is approximately:
 //!
 //! ```text
-//! C_prove  ≈  Σ_i  n_i · B · log₂(n_i · B) · W_i     (FFT — all commit rounds)
+//! C_prove  ≈  Σ_i  (B+1) · n_i · log₂(n_i) · W_i     (FFT — all commit rounds)
 //!           + Σ_i  n_i · q_i · eval_cost(k_i)          (constraint evaluation)
 //!           + Σ_i  n_i · B · W_i                        (barycentric interpolation)
 //!           + Q · R · log₂ H                            (FRI query phase)
@@ -187,7 +190,7 @@ use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
 use p3_field::{
     Algebra, BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing, TwoAdicField,
 };
-use p3_matrix::{Matrix, dense::RowMajorMatrix};
+use p3_matrix::{Matrix, bitrev::BitReversibleMatrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use serde::{Deserialize, Serialize};
@@ -251,8 +254,9 @@ impl<SC: StarkGenericConfig> Proof<SC> {
 impl<SC> System<SC>
 where
     SC: StarkGenericConfig,
-    // Two-adicity is needed to re-base the quotient's coefficient slices
-    // onto the trace domain; every FRI-based config is two-adic anyway.
+    // Two-adicity is needed to slice the quotient into coefficient slices
+    // and rebuild their committed LDE from those coefficients; every
+    // FRI-based config is two-adic anyway.
     Val<SC>: TwoAdicField + Ord,
 {
     /// Generates a STARK proof for the system with a single claim.
@@ -324,7 +328,8 @@ where
         }
 
         // Cost: "Stage 1 commit" — coset LDE (FFT) of each trace from n_i to
-        // n_i·B rows, then Merkle tree. FFT work: Σ w_i · n_i · B · log₂(n_i·B).
+        // n_i·B rows (an iDFT plus B coset DFTs per column), then Merkle
+        // tree. FFT work: Σ w_i · (B+1) · n_i · log₂(n_i).
         let _g = tracing::info_span!("stark/stage1_commit").entered();
         let mut log_degrees = vec![];
         let evaluations = witness
@@ -401,7 +406,7 @@ where
         drop(_g);
 
         // Cost: "Stage 2 commit" — LDE + Merkle for flattened extension traces.
-        // FFT work: Σ w2_i · D · n_i · B · log₂(n_i·B).
+        // FFT work: Σ w2_i · D · (B+1) · n_i · log₂(n_i).
         let _g = tracing::info_span!("stark/stage2_commit").entered();
         let evaluations = stage_2_traces.into_iter().map(|trace| {
             let degree = trace.height();
@@ -422,14 +427,16 @@ where
         // Constraint challenge.
         let constraint_challenge: SC::Challenge = challenger.sample_algebra_element();
 
-        // Cost: "Quotient computation and commit" — constraint evaluation on the
-        // quotient domain (Σ n_i·q_i·eval_cost(k_i)) plus LDE + Merkle of the
-        // quotient sub-polynomials (Σ q_i·D·n_i·B·log₂(n_i·B)).
+        // Cost: "Quotient computation and commit" — constraint evaluation on
+        // the quotient domain (Σ n_i·q_i·eval_cost(k_i)), the iDFT of the
+        // flattened quotient (Σ D·q_i·n_i·log₂(q_i·n_i)), then LDE + Merkle
+        // of the sub-polynomials (Σ q_i·D·B·n_i·log₂(B·n_i)).
         let _g = tracing::info_span!("stark/quotient").entered();
         debug_assert_eq!(intermediate_accumulators.len(), active_indices.len());
         debug_assert_eq!(log_degrees.len(), active_indices.len());
         let dft = Radix2DitParallel::<Val<SC>>::default();
-        let quotient_evaluations = active_indices
+        let log_blowup = self.config.log_blowup();
+        let quotient_ldes: Vec<_> = active_indices
             .iter()
             .zip(log_degrees.iter())
             .zip(intermediate_accumulators.iter())
@@ -490,7 +497,11 @@ where
                 // commit all slices as ONE `q·D`-column matrix on the trace
                 // domain — instead of one matrix per slice on the split
                 // cosets — so the opening phase pays its per-matrix costs
-                // once per circuit rather than once per slice.
+                // once per circuit rather than once per slice. The committed
+                // LDE is built straight from these coefficients: evaluating
+                // them onto the trace domain only for `Pcs::commit` to
+                // inverse-DFT that evaluation right back would waste two
+                // size-n transforms per column.
                 let coefficients =
                     dft.coset_idft_batch(quotient_flat, quotient_domain.first_point());
                 let ext_degree = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
@@ -505,16 +516,17 @@ where
                         );
                     }
                 }
-                let quotient_chunks_evals = dft
-                    .coset_dft_batch(
-                        RowMajorMatrix::new(sliced, width),
-                        trace_domain.first_point(),
-                    )
-                    .to_row_major_matrix();
                 acc = *next_acc;
-                (trace_domain, quotient_chunks_evals)
-            });
-        let (quotient_commit, quotient_data) = pcs.commit(quotient_evaluations);
+                lde_from_coefficients(&dft, RowMajorMatrix::new(sliced, width), log_blowup)
+            })
+            .collect();
+        // `commit_ldes` skips the randomization a hiding PCS applies inside
+        // `commit`; this prover targets non-hiding configurations only.
+        assert!(
+            !<SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::ZK,
+            "committing the quotient from coefficients bypasses hiding-PCS randomization"
+        );
+        let (quotient_commit, quotient_data) = pcs.commit_ldes(quotient_ldes);
         challenger.observe(quotient_commit.clone());
         drop(_g);
 
@@ -592,6 +604,62 @@ where
             stage_2_opened_values,
         }
     }
+}
+
+/// Low-degree extension of column polynomials given by their COEFFICIENTS,
+/// in the exact layout `Pcs::commit` stores for evaluations on the natural
+/// domain: `2^log_blowup` row blocks, where block `b` holds the evaluations
+/// on the coset `GENERATOR · w^rev(b) · H` in bit-reversed row order (`H`
+/// is the size-`n` subgroup, `w` generates the size-`2^log_blowup · n`
+/// subgroup, and `rev` reverses `log_blowup` bits). Globally that is the
+/// bit-reversal of the natural order of the whole blown-up coset — i.e.
+/// `coset_lde_batch(evals, log_blowup, GENERATOR).bit_reverse_rows()`,
+/// which is what `TwoAdicFriPcs::commit` computes.
+///
+/// Committing the result via `Pcs::commit_ldes` is therefore bit-identical
+/// to `Pcs::commit` on the columns' trace-domain evaluations — field
+/// arithmetic is exact, so equal polynomials give equal evaluations no
+/// matter which transform produced them — while skipping both that
+/// evaluation DFT and the inverse DFT `commit` would open with.
+///
+/// The whole extension is ONE size-`2^log_blowup · n` transform: scale row
+/// `j` by `GENERATOR^j` (turning the plain subgroup DFT into an evaluation
+/// on the `GENERATOR` coset), zero-pad the coefficients to the LDE height
+/// (which leaves the column polynomials unchanged), and DFT. That spends
+/// `log_blowup` more butterfly layers than `2^log_blowup` separate size-`n`
+/// coset DFTs would, but one batched transform is what the memory traffic
+/// wants: no per-coset matrix clones, no per-coset serial shift-scaling
+/// passes inside `coset_dft_batch`, no reassembly copies, and
+/// `Radix2DitParallel`'s native output order is already the bit-reversed
+/// storage order, so the final unwrap is copy-free.
+fn lde_from_coefficients<F: TwoAdicField + Ord>(
+    dft: &Radix2DitParallel<F>,
+    mut coefficients: RowMajorMatrix<F>,
+    log_blowup: usize,
+) -> RowMajorMatrix<F> {
+    scale_rows_by_powers(&mut coefficients, F::GENERATOR);
+    let height = coefficients.height();
+    coefficients.pad_to_height(height << log_blowup, F::ZERO);
+    dft.dft_batch(coefficients).bit_reverse_rows()
+}
+
+/// Multiplies row `j` of `mat` by `base^j`, in parallel: each chunk of rows
+/// pays one exponentiation and steps serially from there.
+fn scale_rows_by_powers<F: Field>(mat: &mut RowMajorMatrix<F>, base: F) {
+    const ROWS_PER_CHUNK: usize = 512;
+    let width = mat.width();
+    mat.values
+        .par_chunks_mut(ROWS_PER_CHUNK * width)
+        .enumerate()
+        .for_each(|(chunk, rows)| {
+            let mut weight = base.exp_u64((chunk * ROWS_PER_CHUNK) as u64);
+            for row in rows.chunks_mut(width) {
+                for value in row {
+                    *value *= weight;
+                }
+                weight *= base;
+            }
+        });
 }
 
 /// Evaluates the folded constraints on the quotient domain and divides by
@@ -803,4 +871,42 @@ where
                 .as_slice()[idx_in_packing]
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Val;
+    use rand::{RngExt, SeedableRng, rngs::SmallRng};
+
+    /// `lde_from_coefficients` must reproduce, value for value, the matrix
+    /// `TwoAdicFriPcs::commit` stores for the same polynomials given as
+    /// trace-domain evaluations: `coset_lde_batch` with the generator shift
+    /// (the natural domain's shift is one), then a bit-reversal. This pins
+    /// the exact substitution the quotient commit relies on.
+    #[test]
+    fn lde_from_coefficients_matches_commit_transform() {
+        let mut rng = SmallRng::seed_from_u64(0);
+        let dft = Radix2DitParallel::<Val>::default();
+        for log_height in [0usize, 1, 2, 5, 8] {
+            for log_blowup in [1usize, 2, 3] {
+                for width in [1usize, 2, 7] {
+                    let height = 1 << log_height;
+                    let coefficients = RowMajorMatrix::new(
+                        (0..height * width).map(|_| rng.random()).collect(),
+                        width,
+                    );
+                    let evaluations = dft
+                        .coset_dft_batch(coefficients.clone(), Val::ONE)
+                        .to_row_major_matrix();
+                    let expected = dft
+                        .coset_lde_batch(evaluations, log_blowup, Val::GENERATOR)
+                        .bit_reverse_rows()
+                        .to_row_major_matrix();
+                    let got = lde_from_coefficients(&dft, coefficients, log_blowup);
+                    assert_eq!(got, expected, "h=2^{log_height} B=2^{log_blowup} w={width}");
+                }
+            }
+        }
+    }
 }
