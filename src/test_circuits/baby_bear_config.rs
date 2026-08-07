@@ -46,6 +46,7 @@ struct BabyBearPoseidon2Config {
     challenger_seed: Vec<Val>,
     max_log_degree: usize,
     max_quotient_degree: usize,
+    log_blowup: usize,
 }
 
 impl BabyBearPoseidon2Config {
@@ -90,6 +91,7 @@ impl BabyBearPoseidon2Config {
             challenger_seed,
             max_log_degree,
             max_quotient_degree,
+            log_blowup: commitment_parameters.log_blowup,
         }
     }
 }
@@ -117,6 +119,10 @@ impl StarkGenericConfig for BabyBearPoseidon2Config {
 
     fn max_quotient_degree(&self) -> usize {
         self.max_quotient_degree
+    }
+
+    fn log_blowup(&self) -> usize {
+        self.log_blowup
     }
 }
 

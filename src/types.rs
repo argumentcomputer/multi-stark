@@ -103,6 +103,8 @@ pub struct GoldilocksBlake3Config {
     /// Largest quotient degree the PCS can serve trace evaluations for
     /// (the FRI blowup factor).
     max_quotient_degree: usize,
+    /// Log2 of the blowup the PCS applies when committing.
+    log_blowup: usize,
 }
 
 impl GoldilocksBlake3Config {
@@ -133,6 +135,7 @@ impl GoldilocksBlake3Config {
             challenger_seed,
             max_log_degree,
             max_quotient_degree,
+            log_blowup: commitment_parameters.log_blowup,
         }
     }
 }
@@ -156,6 +159,10 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
 
     fn max_quotient_degree(&self) -> usize {
         self.max_quotient_degree
+    }
+
+    fn log_blowup(&self) -> usize {
+        self.log_blowup
     }
 }
 

@@ -109,4 +109,15 @@ pub trait StarkGenericConfig {
     /// [`System::new`](crate::system::System::new) rejects circuits whose
     /// constraint degree requires a larger quotient degree.
     fn max_quotient_degree(&self) -> usize;
+
+    /// Log2 of the blowup the PCS applies when committing: a degree-`N`
+    /// trace is stored as a low-degree extension with `2^log_blowup · N`
+    /// evaluations.
+    ///
+    /// This must be the blowup `Pcs::commit` ACTUALLY applies, not a bound:
+    /// the prover uses it to rebuild committed LDEs directly from
+    /// polynomial coefficients (see `lde_from_coefficients` in the prover
+    /// module), and a mismatch produces commitments to the wrong
+    /// evaluations.
+    fn log_blowup(&self) -> usize;
 }
