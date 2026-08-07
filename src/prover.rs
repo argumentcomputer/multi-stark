@@ -123,8 +123,11 @@
 //! degree n_i) and committed as a single q_i·D-column matrix per circuit on
 //! the trace domain, so the opening phase pays its per-matrix costs once per
 //! circuit rather than once per slice. The committed LDE is built directly
-//! from the slice coefficients (`lde_from_coefficients`), skipping the
-//! trace-domain DFT whose output `Pcs::commit` would immediately invert.
+//! from the slice coefficients, skipping the trace-domain DFT whose output
+//! `Pcs::commit` would immediately invert: one forward DFT recovers the
+//! coefficients, a fused parallel gather slices them with the LDE's coset
+//! shift folded in (`shifted_quotient_slices`), and one zero-padded DFT
+//! produces the committed LDE (`lde_from_shifted_coefficients`).
 //!
 //! ```text
 //! Constraint eval:  Σ_i  n_i · q_i · eval_cost(k_i)         field operations
@@ -192,7 +195,7 @@ use p3_field::{
 };
 use p3_matrix::{Matrix, bitrev::BitReversibleMatrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
-use p3_util::log2_strict_usize;
+use p3_util::{log2_strict_usize, reverse_bits_len};
 use serde::{Deserialize, Serialize};
 
 /// Polynomial commitments included in the proof.
@@ -428,9 +431,9 @@ where
         let constraint_challenge: SC::Challenge = challenger.sample_algebra_element();
 
         // Cost: "Quotient computation and commit" — constraint evaluation on
-        // the quotient domain (Σ n_i·q_i·eval_cost(k_i)), the iDFT of the
-        // flattened quotient (Σ D·q_i·n_i·log₂(q_i·n_i)), then LDE + Merkle
-        // of the sub-polynomials (Σ q_i·D·B·n_i·log₂(B·n_i)).
+        // the quotient domain (Σ n_i·q_i·eval_cost(k_i)), the forward DFT of
+        // the flattened quotient (Σ D·q_i·n_i·log₂(q_i·n_i)), then LDE +
+        // Merkle of the sub-polynomials (Σ q_i·D·B·n_i·log₂(B·n_i)).
         let _g = tracing::info_span!("stark/quotient").entered();
         debug_assert_eq!(intermediate_accumulators.len(), active_indices.len());
         debug_assert_eq!(log_degrees.len(), active_indices.len());
@@ -501,23 +504,17 @@ where
                 // LDE is built straight from these coefficients: evaluating
                 // them onto the trace domain only for `Pcs::commit` to
                 // inverse-DFT that evaluation right back would waste two
-                // size-n transforms per column.
-                let coefficients =
-                    dft.coset_idft_batch(quotient_flat, quotient_domain.first_point());
-                let ext_degree = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
-                let n = 1 << log_degree;
-                let width = quotient_degree * ext_degree;
-                let mut sliced = Vec::with_capacity(n * width);
-                for row in 0..n {
-                    for chunk in 0..quotient_degree {
-                        sliced.extend_from_slice(
-                            &coefficients.values[(chunk * n + row) * ext_degree
-                                ..(chunk * n + row + 1) * ext_degree],
-                        );
-                    }
-                }
+                // size-n transforms per column. The slicing itself is fused
+                // with the iDFT's scaling passes into one parallel gather
+                // (see `shifted_quotient_slices`).
                 acc = *next_acc;
-                lde_from_coefficients(&dft, RowMajorMatrix::new(sliced, width), log_blowup)
+                let sliced = shifted_quotient_slices(
+                    &dft,
+                    quotient_flat,
+                    quotient_domain.first_point(),
+                    quotient_degree,
+                );
+                lde_from_shifted_coefficients(&dft, sliced, log_blowup)
             })
             .collect();
         // `commit_ldes` skips the randomization a hiding PCS applies inside
@@ -606,13 +603,91 @@ where
     }
 }
 
-/// Low-degree extension of column polynomials given by their COEFFICIENTS,
-/// in the exact layout `Pcs::commit` stores for evaluations on the natural
-/// domain: `2^log_blowup` row blocks, where block `b` holds the evaluations
-/// on the coset `GENERATOR · w^rev(b) · H` in bit-reversed row order (`H`
-/// is the size-`n` subgroup, `w` generates the size-`2^log_blowup · n`
-/// subgroup, and `rev` reverses `log_blowup` bits). Globally that is the
-/// bit-reversal of the natural order of the whole blown-up coset — i.e.
+/// From the quotient's evaluations on its disjoint domain — `q·n` rows of
+/// `D` base columns on the coset `shift·H` with `|H| = q·n` — produce the
+/// `n`-row, `q·D`-column matrix of slice coefficients with the committed
+/// LDE's `GENERATOR` shift already folded in: the input
+/// [`lde_from_shifted_coefficients`] expects.
+///
+/// Semantically this is three steps: coset iDFT to coefficients, slicing
+/// `Q(X) = Σₖ X^{k·n}·cₖ(X)` into rows `[c₀ | … | c_{q−1}]`, and
+/// pre-scaling row `r` by `GENERATOR^r`. Executed literally (the library
+/// entry points) those steps cost a bit-reversal materialization, a serial
+/// row-swap pass, two serial full-matrix scaling passes, and a serial
+/// gather. But the composition collapses: with `N = q·n` and `S` the raw
+/// bit-reversed storage of the forward DFT,
+///
+/// ```text
+///   idft(f)ⱼ = N⁻¹ · dft(f)_{(N−j) mod N} = N⁻¹ · S[rev((N−j) mod N)]
+/// ```
+///
+/// and the coset-unscale factor `shift^{−j}` at `j = k·n + r` splits into
+/// `shift^{−k·n} · shift^{−r}`, whose row-dependent part cancels the LDE
+/// pre-scale `GENERATOR^r` exactly, because the disjoint quotient domain's
+/// shift IS the generator (asserted below; `create_disjoint_domain` on a
+/// natural trace domain guarantees it). What survives is a single parallel
+/// gather off the DFT storage with ONE constant weight per slice:
+/// `wₖ = N⁻¹ · GENERATOR^{−k·n}`.
+fn shifted_quotient_slices<F: TwoAdicField + Ord>(
+    dft: &Radix2DitParallel<F>,
+    quotient_evals: RowMajorMatrix<F>,
+    domain_shift: F,
+    quotient_degree: usize,
+) -> RowMajorMatrix<F> {
+    assert_eq!(
+        domain_shift,
+        F::GENERATOR,
+        "quotient domain shift must equal the LDE shift for the scalings to cancel"
+    );
+    let ext_degree = quotient_evals.width();
+    let big_height = quotient_evals.height();
+    let log_big_height = log2_strict_usize(big_height);
+    debug_assert_eq!(big_height % quotient_degree, 0);
+    let n = big_height / quotient_degree;
+    let width = quotient_degree * ext_degree;
+    // Raw storage of the forward DFT: natural index `k` lives at row
+    // `rev(k)`, and the unwrap out of the bit-reversed view is copy-free.
+    let storage = dft.dft_batch(quotient_evals).bit_reverse_rows();
+    let n_inv = F::ONE.div_2exp_u64(log_big_height as u64);
+    let weight_step = F::GENERATOR.exp_u64(n as u64).inverse();
+    let weights: Vec<F> = weight_step
+        .powers()
+        .take(quotient_degree)
+        .map(|w| w * n_inv)
+        .collect();
+    let mut values = F::zero_vec(n * width);
+    values
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(row, out)| {
+            for (chunk, weight) in weights.iter().enumerate() {
+                let j = chunk * n + row;
+                let src = reverse_bits_len(
+                    big_height.wrapping_sub(j) & (big_height - 1),
+                    log_big_height,
+                );
+                let src = &storage.values[src * ext_degree..(src + 1) * ext_degree];
+                for (out, src) in out[chunk * ext_degree..(chunk + 1) * ext_degree]
+                    .iter_mut()
+                    .zip(src)
+                {
+                    *out = *src * *weight;
+                }
+            }
+        });
+    RowMajorMatrix::new(values, width)
+}
+
+/// Low-degree extension of column polynomials given by their COEFFICIENTS
+/// with the `GENERATOR` coset shift already folded in (row `j`
+/// pre-multiplied by `GENERATOR^j`, which [`shifted_quotient_slices`]
+/// produces for free), in the exact layout `Pcs::commit` stores for
+/// evaluations on the natural domain: `2^log_blowup` row blocks, where
+/// block `b` holds the evaluations on the coset `GENERATOR · w^rev(b) · H`
+/// in bit-reversed row order (`H` is the size-`n` subgroup, `w` generates
+/// the size-`2^log_blowup · n` subgroup, and `rev` reverses `log_blowup`
+/// bits). Globally that is the bit-reversal of the natural order of the
+/// whole blown-up coset — i.e.
 /// `coset_lde_batch(evals, log_blowup, GENERATOR).bit_reverse_rows()`,
 /// which is what `TwoAdicFriPcs::commit` computes.
 ///
@@ -622,29 +697,42 @@ where
 /// matter which transform produced them — while skipping both that
 /// evaluation DFT and the inverse DFT `commit` would open with.
 ///
-/// The whole extension is ONE size-`2^log_blowup · n` transform: scale row
-/// `j` by `GENERATOR^j` (turning the plain subgroup DFT into an evaluation
-/// on the `GENERATOR` coset), zero-pad the coefficients to the LDE height
-/// (which leaves the column polynomials unchanged), and DFT. That spends
-/// `log_blowup` more butterfly layers than `2^log_blowup` separate size-`n`
-/// coset DFTs would, but one batched transform is what the memory traffic
-/// wants: no per-coset matrix clones, no per-coset serial shift-scaling
-/// passes inside `coset_dft_batch`, no reassembly copies, and
-/// `Radix2DitParallel`'s native output order is already the bit-reversed
-/// storage order, so the final unwrap is copy-free.
+/// The whole extension is ONE size-`2^log_blowup · n` transform: zero-pad
+/// the shifted coefficients to the LDE height (which leaves the column
+/// polynomials unchanged) and DFT. That spends `log_blowup` more butterfly
+/// layers than `2^log_blowup` separate size-`n` coset DFTs would, but one
+/// batched transform is what the memory traffic wants: no per-coset matrix
+/// clones, no per-coset serial shift-scaling passes inside
+/// `coset_dft_batch`, no reassembly copies, and `Radix2DitParallel`'s
+/// native output order is already the bit-reversed storage order, so the
+/// final unwrap is copy-free.
+fn lde_from_shifted_coefficients<F: TwoAdicField + Ord>(
+    dft: &Radix2DitParallel<F>,
+    mut coefficients: RowMajorMatrix<F>,
+    log_blowup: usize,
+) -> RowMajorMatrix<F> {
+    let height = coefficients.height();
+    coefficients.pad_to_height(height << log_blowup, F::ZERO);
+    dft.dft_batch(coefficients).bit_reverse_rows()
+}
+
+/// Reference form of [`lde_from_shifted_coefficients`] taking PLAIN
+/// coefficients: folds the `GENERATOR` shift in explicitly. Only the
+/// pinning tests need it; the prover gets the shift for free inside
+/// [`shifted_quotient_slices`].
+#[cfg(test)]
 fn lde_from_coefficients<F: TwoAdicField + Ord>(
     dft: &Radix2DitParallel<F>,
     mut coefficients: RowMajorMatrix<F>,
     log_blowup: usize,
 ) -> RowMajorMatrix<F> {
     scale_rows_by_powers(&mut coefficients, F::GENERATOR);
-    let height = coefficients.height();
-    coefficients.pad_to_height(height << log_blowup, F::ZERO);
-    dft.dft_batch(coefficients).bit_reverse_rows()
+    lde_from_shifted_coefficients(dft, coefficients, log_blowup)
 }
 
 /// Multiplies row `j` of `mat` by `base^j`, in parallel: each chunk of rows
 /// pays one exponentiation and steps serially from there.
+#[cfg(test)]
 fn scale_rows_by_powers<F: Field>(mat: &mut RowMajorMatrix<F>, base: F) {
     const ROWS_PER_CHUNK: usize = 512;
     let width = mat.width();
@@ -905,6 +993,48 @@ mod tests {
                         .to_row_major_matrix();
                     let got = lde_from_coefficients(&dft, coefficients, log_blowup);
                     assert_eq!(got, expected, "h=2^{log_height} B=2^{log_blowup} w={width}");
+                }
+            }
+        }
+    }
+
+    /// `shifted_quotient_slices` must reproduce, value for value, the naive
+    /// composition it replaces: coset iDFT off the quotient domain, slicing
+    /// the coefficients into `q` chunks per row, and folding the committed
+    /// LDE's `GENERATOR` shift into the rows. This pins the scaling
+    /// cancellation the fused gather relies on.
+    #[test]
+    fn shifted_quotient_slices_matches_naive_composition() {
+        let mut rng = SmallRng::seed_from_u64(1);
+        let dft = Radix2DitParallel::<Val>::default();
+        for log_n in [0usize, 1, 2, 5, 7] {
+            for quotient_degree in [1usize, 2, 4] {
+                for ext_degree in [1usize, 2] {
+                    let n = 1 << log_n;
+                    let big_height = n * quotient_degree;
+                    let evals = RowMajorMatrix::new(
+                        (0..big_height * ext_degree).map(|_| rng.random()).collect(),
+                        ext_degree,
+                    );
+                    // Naive path: coset iDFT, slice, fold the LDE shift in.
+                    let coefficients = dft.coset_idft_batch(evals.clone(), Val::GENERATOR);
+                    let width = quotient_degree * ext_degree;
+                    let mut sliced = Vec::with_capacity(n * width);
+                    for row in 0..n {
+                        for chunk in 0..quotient_degree {
+                            sliced.extend_from_slice(
+                                &coefficients.values[(chunk * n + row) * ext_degree
+                                    ..(chunk * n + row + 1) * ext_degree],
+                            );
+                        }
+                    }
+                    let mut expected = RowMajorMatrix::new(sliced, width);
+                    scale_rows_by_powers(&mut expected, Val::GENERATOR);
+                    let got = shifted_quotient_slices(&dft, evals, Val::GENERATOR, quotient_degree);
+                    assert_eq!(
+                        got, expected,
+                        "n=2^{log_n} q={quotient_degree} D={ext_degree}"
+                    );
                 }
             }
         }
