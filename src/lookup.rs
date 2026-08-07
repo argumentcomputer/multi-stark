@@ -16,13 +16,34 @@
 //!   slot 0 = β (lookup challenge), 1 = γ (fingerprint challenge),
 //!   2 = the accumulator entering the circuit (`acc_initial`), 3 = the
 //!   accumulator leaving it (`acc_final`). So `num_publics = 4·d`.
-//! - **Stage-2 columns** (extension values, flattened to base): slot `j` =
-//!   the partial accumulator entering lookup `j`'s chained step (a single
-//!   pass-through accumulator when the circuit has no lookups). So
-//!   `stage2_width = max(L, 1)·d` base columns. No message inverses are
-//!   committed — see `synthesize_lookups` for how the chained-accumulator
-//!   argument works. The committed accumulator is gauge-free (only
-//!   differences are constrained); the prover starts it at zero.
+//! - **Stage-2 columns** (extension values, flattened to base): slot `g` =
+//!   the partial accumulator entering lookup group `g`'s chained step (a
+//!   single pass-through accumulator when the circuit has no lookups).
+//!   Lookups are chunked into groups of the circuit-local
+//!   `lookup_group_size` `k` (the last group may be smaller), so
+//!   `stage2_width = ⌈L/k⌉·d` base columns, `max(L, 1)·d` in the default
+//!   ungrouped case `k = 1`. No message inverses are committed — see
+//!   `synthesize_lookups` for how the chained-accumulator argument works.
+//!   The committed accumulator is gauge-free (only differences are
+//!   constrained); the prover starts it at zero.
+//!
+//! # Grouping
+//!
+//! One chained step can consume several messages at once: for a group
+//!   `m_0, …, m_{s−1}`,
+//!
+//! ```text
+//! (Π_j m_j)·(acc' − acc) − Σ_j mult_j·Π_{j'≠j} m_{j'} = 0
+//! ```
+//!
+//! which (multiplying the sum-of-fractions identity through by the product)
+//! forces `acc' = acc + Σ_j mult_j/m_j` exactly as `s` ungrouped steps
+//! would, but with one committed accumulator slot instead of `s` — at the
+//! cost of raising the constraint degree to about `Σ_j deg(m_j) + 1`. The
+//! group size is a per-circuit dial (some circuits have degree-1 messages
+//! and degree budget to spare, others don't), bounded by
+//! [`MAX_LOOKUP_GROUP`] so the evaluator's scratch space stays on the
+//! stack.
 
 use p3_field::{
     Algebra, ExtensionField, Field, PrimeCharacteristicRing, batch_multiplicative_inverse,
@@ -83,19 +104,28 @@ pub fn num_publics(d: usize) -> usize {
     LOOKUP_PUBLIC_SIZE * d
 }
 
-/// Stage-2 trace width (flattened base columns) for `num_lookups` lookups
-/// at extension degree `d`: one partial-accumulator column per lookup
-/// (`acc_j` entering lookup `j`'s step), or a single pass-through
-/// accumulator column when the circuit has no lookups.
-pub fn stage2_width(num_lookups: usize, d: usize) -> usize {
-    num_lookups.max(1) * d
+/// Maximum lookup group size the direct evaluator supports (stack-array
+/// bound; the constraint-degree budget caps practical sizes far lower).
+pub const MAX_LOOKUP_GROUP: usize = 8;
+
+/// Number of chained-accumulator steps for `num_lookups` lookups grouped
+/// `group_size` at a time: `⌈L/k⌉`, and always at least one (the
+/// pass-through accumulator when the circuit has no lookups).
+pub fn lookup_groups(num_lookups: usize, group_size: usize) -> usize {
+    num_lookups.div_ceil(group_size.max(1)).max(1)
+}
+
+/// Stage-2 trace width (flattened base columns): one partial-accumulator
+/// column per lookup GROUP (`acc_g` entering group `g`'s step).
+pub fn stage2_width(num_lookups: usize, group_size: usize, d: usize) -> usize {
+    lookup_groups(num_lookups, group_size) * d
 }
 
 /// Number of base-field constraint values the logUp argument contributes:
-/// one chained-accumulator step per lookup (or the single pass-through
-/// constraint when there are none), each expanded into `d` coordinates.
-pub fn logup_constraint_count(num_lookups: usize, d: usize) -> usize {
-    num_lookups.max(1) * d
+/// one chained-accumulator step per lookup group, each expanded into `d`
+/// coordinates.
+pub fn logup_constraint_count(num_lookups: usize, group_size: usize, d: usize) -> usize {
+    lookup_groups(num_lookups, group_size) * d
 }
 
 /// Coordinate product in the binomial extension `X^d = w`, schoolbook:
@@ -159,11 +189,15 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
     is_last_row: A,
     w: F,
     d: usize,
+    group_size: usize,
     out: &mut Vec<A>,
 ) {
+    let group_size = group_size.max(1);
+    debug_assert!(group_size <= MAX_LOOKUP_GROUP);
     // Allocation-free Karatsuba fast path for the reference degree-2
     // extension; this runs per point-packet on the prover's quotient
-    // domain, so it must not touch the heap.
+    // domain, so it must not touch the heap. Group products use
+    // prefix/suffix arrays so each Π_{j'≠j} costs one multiplication.
     if d == 2 {
         let nv = |id: crate::graph::NodeId| node_vals[id.index()];
         let beta = (publics[0], publics[1]);
@@ -181,28 +215,70 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
             return;
         }
 
-        let last = lookups.len() - 1;
-        for (j, lookup) in lookups.iter().enumerate() {
-            let source = (stage2[2 * j], stage2[2 * j + 1]);
-            let target = if j < last {
-                (stage2[2 * j + 2], stage2[2 * j + 3])
+        let last_group = lookups.len().div_ceil(group_size) - 1;
+        for (g, chunk) in lookups.chunks(group_size).enumerate() {
+            let source = (stage2[2 * g], stage2[2 * g + 1]);
+            let target = if g < last_group {
+                (stage2[2 * g + 2], stage2[2 * g + 3])
             } else {
                 (stage2_next[0] + inj.0, stage2_next[1] + inj.1)
             };
-            // fingerprint = Σ_i args[i] · γ^i, Horner over the reversed args.
-            let mut f = (A::ZERO, A::ZERO);
-            for &arg in lookup.args.iter().rev() {
-                f = mul2(f, gamma, w);
-                f.0 += nv(arg);
+
+            // The group's messages.
+            let mut msgs = [(A::ZERO, A::ZERO); MAX_LOOKUP_GROUP];
+            let s_len = chunk.len();
+            for (j, lookup) in chunk.iter().enumerate() {
+                let mut f = (A::ZERO, A::ZERO);
+                for &arg in lookup.args.iter().rev() {
+                    f = mul2(f, gamma, w);
+                    f.0 += nv(arg);
+                }
+                msgs[j] = (f.0 + beta.0, f.1 + beta.1);
             }
-            // step: (β + fingerprint)·(target − source) − mult = 0.
-            let c = mul2(
-                (f.0 + beta.0, f.1 + beta.1),
-                (target.0 - source.0, target.1 - source.1),
-                w,
-            );
-            out.push(c.0 - nv(lookup.multiplicity));
-            out.push(c.1);
+
+            if s_len == 1 {
+                // Ungrouped step: m·(target − source) − mult. Same
+                // arithmetic as before grouping existed — no product
+                // machinery on the default path.
+                let c = mul2(msgs[0], (target.0 - source.0, target.1 - source.1), w);
+                let mv = nv(chunk[0].multiplicity);
+                out.push(c.0 - mv);
+                out.push(c.1);
+                continue;
+            }
+
+            // Prefix/suffix products (prefix[j] = m_0·…·m_{j−1},
+            // suffix[j] = m_j·…·m_{s−1}), seeded from the messages so no
+            // multiplication against the constant one is spent.
+            let one = (A::ONE, A::ZERO);
+            let mut prefix = [one; MAX_LOOKUP_GROUP + 1];
+            prefix[1] = msgs[0];
+            for j in 1..s_len {
+                prefix[j + 1] = mul2(prefix[j], msgs[j], w);
+            }
+            let mut suffix = [one; MAX_LOOKUP_GROUP + 1];
+            suffix[s_len - 1] = msgs[s_len - 1];
+            for j in (0..s_len - 1).rev() {
+                suffix[j] = mul2(msgs[j], suffix[j + 1], w);
+            }
+
+            // (Π m)·(target − source) − Σ_j mult_j·Π_{j'≠j} m_{j'}.
+            let c = mul2(prefix[s_len], (target.0 - source.0, target.1 - source.1), w);
+            let mut rhs = (A::ZERO, A::ZERO);
+            for (j, lookup) in chunk.iter().enumerate() {
+                let others = if j == 0 {
+                    suffix[1]
+                } else if j == s_len - 1 {
+                    prefix[s_len - 1]
+                } else {
+                    mul2(prefix[j], suffix[j + 1], w)
+                };
+                let mv = nv(lookup.multiplicity);
+                rhs.0 += others.0 * mv;
+                rhs.1 += others.1 * mv;
+            }
+            out.push(c.0 - rhs.0);
+            out.push(c.1 - rhs.1);
         }
         return;
     }
@@ -220,11 +296,11 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
         return;
     }
 
-    let last = lookups.len() - 1;
-    for (j, lookup) in lookups.iter().enumerate() {
-        let source = &stage2[j * d..(j + 1) * d];
-        let mut target: Vec<A> = if j < last {
-            stage2[(j + 1) * d..(j + 2) * d].to_vec()
+    let last_group = lookups.len().div_ceil(group_size) - 1;
+    for (g, chunk) in lookups.chunks(group_size).enumerate() {
+        let source = &stage2[g * d..(g + 1) * d];
+        let mut target: Vec<A> = if g < last_group {
+            stage2[(g + 1) * d..(g + 2) * d].to_vec()
         } else {
             stage2_next[..d]
                 .iter()
@@ -232,25 +308,45 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
                 .map(|(&t, &i)| t + i)
                 .collect()
         };
-        for (t, &s) in target.iter_mut().zip(source) {
-            *t -= s;
+        for (t, &sv) in target.iter_mut().zip(source) {
+            *t -= sv;
         }
 
-        // fingerprint = Σ_i args[i] · γ^i, via Horner over the reversed args
-        // (base values embed in coordinate 0).
-        let mut fingerprint = vec![A::ZERO; d];
-        for &arg in lookup.args.iter().rev() {
-            fingerprint = coord_mul(&fingerprint, gamma, w);
-            fingerprint[0] += node_vals[arg.index()];
+        let messages: Vec<Vec<A>> = chunk
+            .iter()
+            .map(|lookup| {
+                let mut fingerprint = vec![A::ZERO; d];
+                for &arg in lookup.args.iter().rev() {
+                    fingerprint = coord_mul(&fingerprint, gamma, w);
+                    fingerprint[0] += node_vals[arg.index()];
+                }
+                for (m, &b) in fingerprint.iter_mut().zip(beta) {
+                    *m += b;
+                }
+                fingerprint
+            })
+            .collect();
+
+        let mut one = vec![A::ZERO; d];
+        one[0] = A::ONE;
+        let mut prefix: Vec<Vec<A>> = vec![one.clone()];
+        for m in &messages {
+            let last = prefix.last().unwrap();
+            prefix.push(coord_mul(last, m, w));
+        }
+        let mut suffix: Vec<Vec<A>> = vec![one.clone(); messages.len() + 1];
+        for j in (0..messages.len()).rev() {
+            suffix[j] = coord_mul(&messages[j], &suffix[j + 1], w);
         }
 
-        // step: (β + fingerprint)·(target − source) − mult = 0.
-        let mut message = fingerprint;
-        for (m, &b) in message.iter_mut().zip(beta) {
-            *m += b;
+        let mut constraint = coord_mul(&prefix[messages.len()], &target, w);
+        for (j, lookup) in chunk.iter().enumerate() {
+            let others = coord_mul(&prefix[j], &suffix[j + 1], w);
+            let mv = node_vals[lookup.multiplicity.index()];
+            for (c, &o) in constraint.iter_mut().zip(&others) {
+                *c -= o * mv;
+            }
         }
-        let mut constraint = coord_mul(&message, &target, w);
-        constraint[0] -= node_vals[lookup.multiplicity.index()];
         out.extend_from_slice(&constraint);
     }
 }
@@ -259,19 +355,34 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
 /// analytically from the compiled lookup-expression degrees (mirroring the
 /// graph compiler's rules: columns degree 1, publics/IsTransition 0,
 /// IsFirstRow/IsLastRow 1, add = max, mul = sum).
-pub fn logup_max_degree<F: Field>(graph: &crate::graph::ConstraintGraph<F>) -> u32 {
+pub fn logup_max_degree<F: Field>(
+    graph: &crate::graph::ConstraintGraph<F>,
+    group_size: usize,
+) -> u32 {
+    let group_size = group_size.max(1);
     let node_degree = |id: crate::graph::NodeId| graph.degrees[id.index()];
-    // Every step is m_j·(accumulator difference) − mult_j, and the
-    // difference — including the wrap step's is_last_row·Δ injection
-    // (selector·publics) — has degree multiple 1. So per lookup:
-    // max(max arg degree + 1, mult degree); a lookup-free circuit's
-    // pass-through constraint is degree 1.
+    // Per group g: (Π_j m_j)·(acc diff) − Σ_j mult_j·Π_{j'≠j} m_{j'}, with
+    // the accumulator difference (incl. the wrap injection —
+    // selector·publics) at degree multiple 1. So per group:
+    // max(Σ deg(m_j) + 1, max_j (deg(mult_j) + Σ_{j'≠j} deg(m_{j'}))); the
+    // lookup-free pass-through constraint is degree 1.
     graph
         .lookups
-        .iter()
-        .map(|l| {
-            let message_degree = l.args.iter().map(|&a| node_degree(a)).max().unwrap_or(0);
-            (message_degree + 1).max(node_degree(l.multiplicity))
+        .chunks(group_size)
+        .map(|chunk| {
+            let m_degs: Vec<u32> = chunk
+                .iter()
+                .map(|l| l.args.iter().map(|&a| node_degree(a)).max().unwrap_or(0))
+                .collect();
+            let sum: u32 = m_degs.iter().sum();
+            let product_term = sum + 1;
+            let mult_term = chunk
+                .iter()
+                .zip(&m_degs)
+                .map(|(l, &md)| node_degree(l.multiplicity) + sum - md)
+                .max()
+                .unwrap_or(0);
+            product_term.max(mult_term)
         })
         .max()
         .unwrap_or(1)
@@ -323,14 +434,19 @@ pub fn logup_max_degree<F: Field>(graph: &crate::graph::ConstraintGraph<F>) -> u
 /// Degrees are uniform: every constraint is `max(deg(args)+1, deg(mult))`
 /// (the injected term is selector·publics, degree multiple 1, absorbed by
 /// `add = max`).
-pub fn synthesize_lookups<F: Field>(lookups: &[Lookup<Expr<F>>], d: usize) -> Vec<ExtExpr<F>> {
+pub fn synthesize_lookups<F: Field>(
+    lookups: &[Lookup<Expr<F>>],
+    d: usize,
+    group_size: usize,
+) -> Vec<ExtExpr<F>> {
     let d = u32::try_from(d).expect("extension degree exceeds u32");
+    let group_size = group_size.max(1);
     let beta = ExtExpr::public(0, d);
     let gamma = ExtExpr::public(1, d);
     let acc_initial = ExtExpr::public(2, d);
     let acc_final = ExtExpr::public(3, d);
-    // The boundary injection: is_last_row·Δ. `Expr::IsLastRow` is the
-    // normalized last-row selector protocol-wide.
+    // The boundary injection: is_last_row·Δ (see the normalization notes —
+    // in the implementation the selector's constant is absorbed into Δ).
     let injection = ExtExpr::from(Expr::IsLastRow) * (acc_final - acc_initial);
 
     if lookups.is_empty() {
@@ -341,30 +457,54 @@ pub fn synthesize_lookups<F: Field>(lookups: &[Lookup<Expr<F>>], d: usize) -> Ve
         ];
     }
 
-    let last = lookups.len() - 1;
-    let mut constraints = Vec::with_capacity(lookups.len());
-    for (j, lookup) in lookups.iter().enumerate() {
-        let slot = u32::try_from(j).expect("lookup count exceeds u32");
+    let chunks: Vec<&[Lookup<Expr<F>>]> = lookups.chunks(group_size).collect();
+    let last_group = chunks.len() - 1;
+    let mut constraints = Vec::with_capacity(chunks.len());
+    for (g, chunk) in chunks.iter().enumerate() {
+        let slot = u32::try_from(g).expect("group count exceeds u32");
         let source = ExtExpr::stage2(slot, d, RowOffset::Current);
-        let target = if j < last {
+        let target = if g < last_group {
             ExtExpr::stage2(slot + 1, d, RowOffset::Current)
         } else {
             ExtExpr::stage2(0, d, RowOffset::Next) + injection.clone()
         };
 
-        // fingerprint = Σ_i args[i] · γ^i, via Horner over the reversed args.
-        let mut coeffs = lookup.args.iter().rev();
-        let mut fingerprint = match coeffs.next() {
-            Some(arg) => ExtExpr::from(arg.clone()),
-            None => ExtExpr::from(Expr::constant(F::ZERO)),
-        };
-        for arg in coeffs {
-            fingerprint = fingerprint * gamma.clone() + arg.clone();
-        }
+        // The group's messages m_j = β + fingerprint(γ, args_j).
+        let messages: Vec<ExtExpr<F>> = chunk
+            .iter()
+            .map(|lookup| {
+                // fingerprint = Σ_i args[i] · γ^i, Horner over reversed args.
+                let mut coeffs = lookup.args.iter().rev();
+                let mut fingerprint = match coeffs.next() {
+                    Some(arg) => ExtExpr::from(arg.clone()),
+                    None => ExtExpr::from(Expr::constant(F::ZERO)),
+                };
+                for arg in coeffs {
+                    fingerprint = fingerprint * gamma.clone() + arg.clone();
+                }
+                beta.clone() + fingerprint
+            })
+            .collect();
 
-        // message = β + fingerprint; step: m·(target − source) − mult = 0.
-        let message = beta.clone() + fingerprint;
-        constraints.push(message * (target - source) - lookup.multiplicity.clone());
+        // (Π_j m_j)·(target − source) − Σ_j mult_j·Π_{j'≠j} m_{j'} = 0.
+        let mut product = messages[0].clone();
+        for m in &messages[1..] {
+            product = product * m.clone();
+        }
+        let mut rhs: Option<ExtExpr<F>> = None;
+        for (j, lookup) in chunk.iter().enumerate() {
+            let mut term = ExtExpr::from(lookup.multiplicity.clone());
+            for (j2, m) in messages.iter().enumerate() {
+                if j2 != j {
+                    term = term * m.clone();
+                }
+            }
+            rhs = Some(match rhs {
+                None => term,
+                Some(r) => r + term,
+            });
+        }
+        constraints.push(product * (target - source) - rhs.unwrap());
     }
 
     constraints
@@ -471,6 +611,7 @@ impl<F: Field> LookupValues<F> {
     /// accumulator value (computed from the initial claims).
     pub fn stage_2_traces<EF: ExtensionField<F>>(
         circuits: &[Self],
+        group_sizes: &[usize],
         lookup_challenge: EF,
         fingerprint_challenge: &EF,
         mut accumulator: EF,
@@ -507,44 +648,50 @@ impl<F: Field> LookupValues<F> {
         let mut intermediate_accumulators = Vec::with_capacity(circuits.len());
         let mut traces = Vec::with_capacity(circuits.len());
         let mut offset = 0;
-        for circuit in circuits {
+        for (circuit, &group_size) in circuits.iter().zip(group_sizes) {
+            let group_size = group_size.max(1);
             // Get the slice containing the messages inverses for the current circuit.
             let num_circuit_messages = circuit.height * circuit.num_lookups;
             let circuit_messages_inverses =
                 &messages_inverses[offset..offset + num_circuit_messages];
             offset += num_circuit_messages;
 
+            let num_slots = lookup_groups(circuit.num_lookups, group_size);
             let vec = if circuit.num_lookups == 0 {
                 // Pass-through accumulator column; the committed values are
                 // gauge-free (only differences are constrained), zero by
                 // convention.
                 vec![EF::ZERO; circuit.height]
             } else {
-                // One partial accumulator per lookup slot: `acc_j` is the
-                // running sum ENTERING lookup j's step; the last step's
+                // One partial accumulator per lookup GROUP: `acc_g` is the
+                // running sum ENTERING group g's step; the last group's
                 // result carries into the next row's slot 0. Single pass,
                 // one multiply-add per (row, lookup). The column is
                 // gauge-free, so it starts at zero regardless of the global
                 // accumulator; the circuit's total contribution is added to
                 // the global chain at the end.
-                let mut vec = Vec::with_capacity(circuit.height * circuit.num_lookups);
+                let mut vec = Vec::with_capacity(circuit.height * num_slots);
                 let mut local = EF::ZERO;
                 for (row_multiplicities, row_messages_inverses) in circuit
                     .multiplicities
                     .chunks_exact(circuit.num_lookups)
                     .zip(circuit_messages_inverses.chunks_exact(circuit.num_lookups))
                 {
-                    for (&multiplicity, &message_inverse) in
-                        row_multiplicities.iter().zip(row_messages_inverses)
+                    for (group_mults, group_invs) in row_multiplicities
+                        .chunks(group_size)
+                        .zip(row_messages_inverses.chunks(group_size))
                     {
                         vec.push(local);
-                        local += EF::from(multiplicity) * message_inverse;
+                        for (&multiplicity, &message_inverse) in group_mults.iter().zip(group_invs)
+                        {
+                            local += EF::from(multiplicity) * message_inverse;
+                        }
                     }
                 }
                 accumulator += local;
                 vec
             };
-            let width = circuit.num_lookups.max(1);
+            let width = num_slots;
             debug_assert_eq!(vec.len() % width, 0);
             let trace = RowMajorMatrix::new(vec, width);
             intermediate_accumulators.push(accumulator);
@@ -786,84 +933,93 @@ mod tests {
                 args: vec![],
             },
         ];
-        let synthesized = synthesize_lookups(&lookups, d);
+        // Cover the ungrouped argument, an uneven grouping (3 lookups in
+        // groups of 2 → a full pair plus a singleton tail), and one full
+        // group of 3.
+        for group_size in [1, 2, 3] {
+            let synthesized = synthesize_lookups(&lookups, d, group_size);
 
-        // Deterministic pseudo-random base-field values (an equality of
-        // polynomials checked at random points).
-        let mut seed = 0x1234_5678_9abc_def0u64;
-        let mut next = move || {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            Val::from_u64(seed >> 8)
-        };
-        let main_cur: Vec<Val> = (0..6).map(|_| next()).collect();
-        let main_next: Vec<Val> = (0..6).map(|_| next()).collect();
-        let s2_width = stage2_width(lookups.len(), d);
-        let s2_cur: Vec<Val> = (0..s2_width).map(|_| next()).collect();
-        let s2_next: Vec<Val> = (0..s2_width).map(|_| next()).collect();
-        let publics: Vec<Val> = (0..num_publics(d)).map(|_| next()).collect();
-        let (isf, isl, ist) = (next(), next(), next());
+            // Deterministic pseudo-random base-field values (an equality of
+            // polynomials checked at random points).
+            let mut seed = 0x1234_5678_9abc_def0u64;
+            let mut next = move || {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                Val::from_u64(seed >> 8)
+            };
+            let main_cur: Vec<Val> = (0..6).map(|_| next()).collect();
+            let main_next: Vec<Val> = (0..6).map(|_| next()).collect();
+            let s2_width = stage2_width(lookups.len(), group_size, d);
+            let s2_cur: Vec<Val> = (0..s2_width).map(|_| next()).collect();
+            let s2_next: Vec<Val> = (0..s2_width).map(|_| next()).collect();
+            let publics: Vec<Val> = (0..num_publics(d)).map(|_| next()).collect();
+            let (isf, isl, ist) = (next(), next(), next());
 
-        let empty: [Val; 0] = [];
-        let view = VarValues {
-            preprocessed: [&empty, &empty],
-            main: [&main_cur, &main_next],
-            stage2: [&s2_cur, &s2_next],
-            publics: &publics,
-            is_first_row: isf,
-            is_last_row: isl,
-            is_transition: ist,
-        };
+            let empty: [Val; 0] = [];
+            let view = VarValues {
+                preprocessed: [&empty, &empty],
+                main: [&main_cur, &main_next],
+                stage2: [&s2_cur, &s2_next],
+                publics: &publics,
+                is_first_row: isf,
+                is_last_row: isl,
+                is_transition: ist,
+            };
 
-        let ref_params = ExtensionParams {
-            degree: d,
-            w,
-            karatsuba: false,
-        };
-        let mut reference: Vec<Val> = vec![];
-        for constraint in &synthesized {
-            reference.extend(eval_ext_expr(constraint, &view, &ref_params));
+            let ref_params = ExtensionParams {
+                degree: d,
+                w,
+                karatsuba: false,
+            };
+            let mut reference: Vec<Val> = vec![];
+            for constraint in &synthesized {
+                reference.extend(eval_ext_expr(constraint, &view, &ref_params));
+            }
+
+            // The direct evaluator reads lookup expressions out of a node-value
+            // buffer by id; build a synthetic buffer with consecutive ids.
+            let mut node_vals: Vec<Val> = vec![];
+            let mut fresh = |v: Val| {
+                node_vals.push(v);
+                crate::graph::NodeId(u32::try_from(node_vals.len() - 1).unwrap())
+            };
+            let lookup_ids: Vec<Lookup<crate::graph::NodeId>> = lookups
+                .iter()
+                .map(|l| Lookup {
+                    multiplicity: fresh(eval_expr(&l.multiplicity, &view)),
+                    args: l.args.iter().map(|a| fresh(eval_expr(a, &view))).collect(),
+                })
+                .collect();
+            // The reference spec expresses the injection as
+            // IsLastRow·(acc_final − acc_initial), so the pin passes Δ raw and
+            // the view's is_last_row value directly — the identity holds for
+            // any selector value; the normalization constant is a CALLER
+            // contract (callers pass p3's raw selector with Δ/(n·g)).
+            let delta: Vec<Val> = (0..d)
+                .map(|k| publics[3 * d + k] - publics[2 * d + k])
+                .collect();
+            let mut direct: Vec<Val> = vec![];
+            logup_constraint_values(
+                &lookup_ids,
+                &node_vals,
+                &s2_cur,
+                &s2_next,
+                &publics,
+                &delta,
+                isl,
+                w,
+                d,
+                group_size,
+                &mut direct,
+            );
+
+            assert_eq!(
+                direct.len(),
+                logup_constraint_count(lookups.len(), group_size, d)
+            );
+            assert_eq!(direct, reference, "group_size={group_size}");
         }
-
-        // The direct evaluator reads lookup expressions out of a node-value
-        // buffer by id; build a synthetic buffer with consecutive ids.
-        let mut node_vals: Vec<Val> = vec![];
-        let mut fresh = |v: Val| {
-            node_vals.push(v);
-            crate::graph::NodeId(u32::try_from(node_vals.len() - 1).unwrap())
-        };
-        let lookup_ids: Vec<Lookup<crate::graph::NodeId>> = lookups
-            .iter()
-            .map(|l| Lookup {
-                multiplicity: fresh(eval_expr(&l.multiplicity, &view)),
-                args: l.args.iter().map(|a| fresh(eval_expr(a, &view))).collect(),
-            })
-            .collect();
-        // The reference spec expresses the injection as
-        // IsLastRow·(acc_final − acc_initial), so the pin passes Δ raw and
-        // the view's is_last_row value directly — the identity holds for
-        // any selector value; the normalization constant is a CALLER
-        // contract (callers pass p3's raw selector with Δ/(n·g)).
-        let delta: Vec<Val> = (0..d)
-            .map(|k| publics[3 * d + k] - publics[2 * d + k])
-            .collect();
-        let mut direct: Vec<Val> = vec![];
-        logup_constraint_values(
-            &lookup_ids,
-            &node_vals,
-            &s2_cur,
-            &s2_next,
-            &publics,
-            &delta,
-            isl,
-            w,
-            d,
-            &mut direct,
-        );
-
-        assert_eq!(direct.len(), logup_constraint_count(lookups.len(), d));
-        assert_eq!(direct, reference);
     }
 
     enum CS {
