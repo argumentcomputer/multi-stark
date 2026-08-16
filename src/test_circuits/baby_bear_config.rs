@@ -40,6 +40,13 @@ type Pcs = crate::p3_adapter::pcs::FriPcs<Val, Challenge, Challenger, Dft, ValMm
 type Com = <InnerPcs as p3_commit::Pcs<Challenge, Challenger>>::Commitment;
 type Domain = p3_field::coset::TwoAdicMultiplicativeCoset<Val>;
 
+// Crate field-trait instantiations for the BabyBear stack.
+use crate::p3_adapter::field::{impl_extension_via_p3, impl_field_via_p3, impl_two_adic_via_p3};
+impl_field_via_p3!(Val);
+impl_two_adic_via_p3!(Val);
+impl_field_via_p3!(Challenge);
+impl_extension_via_p3!(Val, Challenge, 4);
+
 impl crate::traits::EvaluationDomain for Domain {
     type F = Val;
     type Challenge = Challenge;

@@ -184,14 +184,14 @@ use crate::config::{
 use crate::eval::VarValues;
 use crate::lookup::{LookupValues, fingerprint};
 use crate::system::{ProverKey, System, SystemWitness};
-use crate::traits::{EvaluationDomain, LagrangeSelectors, OpenedValuesForRound, Pcs, Transcript};
+use crate::traits::{
+    Algebra, EvaluationDomain, ExtensionOf, Field, LagrangeSelectors, OpenedValuesForRound, Packed,
+    PackedExtension, Pcs, Transcript, TwoAdicField, flatten_to_base,
+};
 
 use bincode::config::{Configuration, Fixint, LittleEndian, standard};
 use bincode::error::{DecodeError, EncodeError};
 use bincode::serde::{decode_from_slice, encode_to_vec};
-use p3_field::{
-    Algebra, BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing, TwoAdicField,
-};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
@@ -379,7 +379,7 @@ where
         challenger.observe_challenge(fingerprint_challenge);
 
         // Initial accumulator from the claims.
-        let mut acc = SC::Challenge::ZERO;
+        let mut acc = <SC::Challenge as Algebra<SC::Challenge>>::ZERO;
         for claim in claims {
             let message = lookup_argument_challenge
                 + fingerprint(&fingerprint_challenge, claim.iter().cloned());
@@ -421,7 +421,7 @@ where
             .map(|trace| {
                 let degree = trace.height();
                 let trace_domain = pcs.natural_domain_for_degree(degree);
-                (trace_domain, trace.flatten_to_base())
+                (trace_domain, flatten_to_base(trace))
             })
             .collect();
         let (stage_2_trace_commit, stage_2_trace_data) = pcs.commit(evaluations);
@@ -498,7 +498,7 @@ where
                     circuit.constraint_count(),
                 );
                 let quotient_flat =
-                    RowMajorMatrix::new_col(quotient_values).flatten_to_base::<Val<SC>>();
+                    flatten_to_base::<Val<SC>, _>(RowMajorMatrix::new_col(quotient_values));
                 // The quotient has degree greater than the trace
                 // polynomials, so it is split into `quotient_degree`
                 // sub-polynomials of trace degree and committed as ONE
@@ -626,25 +626,25 @@ where
     let next_step = 1 << qdb;
 
     for _ in quotient_size..PackedVal::<SC>::WIDTH {
-        sels.is_first_row.push(Val::<SC>::default());
-        sels.is_last_row.push(Val::<SC>::default());
-        sels.is_transition.push(Val::<SC>::default());
-        sels.inv_vanishing.push(Val::<SC>::default());
+        sels.is_first_row.push(Val::<SC>::ZERO);
+        sels.is_last_row.push(Val::<SC>::ZERO);
+        sels.is_transition.push(Val::<SC>::ZERO);
+        sels.inv_vanishing.push(Val::<SC>::ZERO);
     }
 
     // α powers in reverse (constraint i of k weighted by α^{k-1-i}),
     // decomposed per basis coordinate for the batched base-field fold.
-    let mut alpha_powers = alpha.powers().collect_n(constraint_count);
+    let mut alpha_powers: Vec<SC::Challenge> = alpha.powers().take(constraint_count).collect();
     alpha_powers.reverse();
-    let decomposed_alpha_powers: Vec<Vec<Val<SC>>> =
-        (0..<SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION)
-            .map(|i| {
-                alpha_powers
-                    .iter()
-                    .map(|x| x.as_basis_coefficients_slice()[i])
-                    .collect()
-            })
-            .collect();
+    let decomposed_alpha_powers: Vec<Vec<Val<SC>>> = (0
+        ..<SC::Challenge as ExtensionOf<Val<SC>>>::D)
+        .map(|i| {
+            alpha_powers
+                .iter()
+                .map(|x| x.as_basis_coefficients_slice()[i])
+                .collect()
+        })
+        .collect();
 
     // Public coordinates broadcast to packed base values.
     let publics_packed: Vec<PackedVal<SC>> = lookup_publics
@@ -654,7 +654,7 @@ where
 
     // Δ/(n·g) per coordinate, broadcast: the logUp boundary injection with
     // the last-row selector's normalization constant pre-absorbed.
-    let ext_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
+    let ext_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
     let delta_scaled: Vec<PackedVal<SC>> = (0..ext_d)
         .map(|k| {
             PackedVal::<SC>::from(
@@ -733,11 +733,11 @@ where
     // Packed two-row windows of each trace, as base columns.
     let preprocessed_pair: Option<Vec<PackedVal<SC>>> = preprocessed_on_quotient_domain
         .as_ref()
-        .map(|m| m.vertically_packed_row_pair::<PackedVal<SC>>(i_start, next_step));
+        .map(|m| PackedVal::<SC>::packed_row_pair(m, i_start, next_step));
     let stage_1_pair =
-        stage_1_on_quotient_domain.vertically_packed_row_pair::<PackedVal<SC>>(i_start, next_step);
+        PackedVal::<SC>::packed_row_pair(stage_1_on_quotient_domain, i_start, next_step);
     let stage_2_pair =
-        stage_2_on_quotient_domain.vertically_packed_row_pair::<PackedVal<SC>>(i_start, next_step);
+        PackedVal::<SC>::packed_row_pair(stage_2_on_quotient_domain, i_start, next_step);
 
     let (stage_1_cur, stage_1_next) = stage_1_pair.split_at(main_width);
     let (stage_2_cur, stage_2_next) = stage_2_pair.split_at(stage_2_width);
@@ -793,9 +793,8 @@ where
 
     (0..quotient_size.min(PackedVal::<SC>::WIDTH)).map(move |idx_in_packing| {
         SC::Challenge::from_basis_coefficients_fn(|coeff_idx| {
-            <PackedChallenge<SC> as BasedVectorSpace<PackedVal<SC>>>::as_basis_coefficients_slice(
-                &quotient,
-            )[coeff_idx]
+            PackedExtension::<Val<SC>, SC::Challenge>::as_basis_coefficients_slice(&quotient)
+                [coeff_idx]
                 .as_slice()[idx_in_packing]
         })
     })

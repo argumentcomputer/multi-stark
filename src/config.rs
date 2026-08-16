@@ -5,9 +5,7 @@
 //! machinery (packing, extension fields), which the field slice of the
 //! PCS abstraction will absorb later.
 
-use p3_field::{ExtensionField, Field};
-
-use crate::traits::{Pcs, Transcript};
+use crate::traits::{ExtensionOf, Field, Pcs, Transcript};
 
 /// The base (trace) field of a configuration's PCS.
 pub type Val<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::F;
@@ -35,7 +33,7 @@ pub type PackedVal<SC> = <Val<SC> as Field>::Packing;
 
 /// Packed (SIMD) representation of the challenge field.
 pub type PackedChallenge<SC> =
-    <<SC as StarkGenericConfig>::Challenge as ExtensionField<Val<SC>>>::ExtensionPacking;
+    <<SC as StarkGenericConfig>::Challenge as ExtensionOf<Val<SC>>>::ExtPacking;
 
 pub trait StarkGenericConfig {
     /// The PCS used to commit to trace polynomials.
@@ -45,7 +43,7 @@ pub trait StarkGenericConfig {
     /// Schwartz-Zippel terms of the soundness error, so it must be large
     /// enough for the target security level (see the soundness argument in
     /// the verifier module docs).
-    type Challenge: ExtensionField<Val<Self>>;
+    type Challenge: ExtensionOf<Val<Self>>;
 
     /// The Fiat-Shamir challenger.
     type Challenger: Transcript<F = Val<Self>, Challenge = Self::Challenge, Commitment = Com<Self>>;

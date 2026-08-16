@@ -165,9 +165,8 @@ use crate::eval::VarValues;
 use crate::lookup::fingerprint;
 use crate::prover::Proof;
 use crate::system::System;
-use crate::traits::{EvaluationDomain, Pcs, Transcript};
+use crate::traits::{Algebra, EvaluationDomain, ExtensionOf, Field, Pcs, Transcript, TwoAdicField};
 
-use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_util::log2_strict_usize;
 
 /// Errors that can occur during proof verification.
@@ -240,7 +239,7 @@ impl<SC: StarkGenericConfig> System<SC> {
         // ≤ N / |F_ext| (Schwartz-Zippel on the numerator polynomial).
         ensure_eq!(
             intermediate_accumulators.last(),
-            Some(&SC::Challenge::ZERO),
+            Some(&<SC::Challenge as Algebra<SC::Challenge>>::ZERO),
             VerificationError::UnbalancedChannel
         );
 
@@ -305,7 +304,7 @@ impl<SC: StarkGenericConfig> System<SC> {
         }
 
         // construct the accumulator from the claims
-        let mut acc = SC::Challenge::ZERO;
+        let mut acc = <SC::Challenge as Algebra<SC::Challenge>>::ZERO;
         for claim in claims {
             let message = lookup_argument_challenge
                 + fingerprint(&fingerprint_challenge, claim.iter().cloned());
@@ -411,7 +410,7 @@ impl<SC: StarkGenericConfig> System<SC> {
         // use the opened values to compute the composition polynomial for each circuit
         // and check that the evaluation of the composition polynomial equals the
         // product of the zerofier with the quotient
-        let extension_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
+        let extension_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
         let empty: [SC::Challenge; 0] = [];
         for (pos, &ci) in active_indices.iter().enumerate() {
             let circuit = &self.circuits[ci];
@@ -491,11 +490,10 @@ impl<SC: StarkGenericConfig> System<SC> {
             debug_assert_eq!(constraint_values.len(), circuit.constraint_count());
             // Fold with α (Horner): Σ_i α^{k-1-i} · value_i, matching the
             // prover's reversed α-power weighting.
-            let composition = constraint_values
-                .iter()
-                .fold(SC::Challenge::ZERO, |acc, &v| {
-                    acc * constraint_challenge + v
-                });
+            let composition = constraint_values.iter().fold(
+                <SC::Challenge as Algebra<SC::Challenge>>::ZERO,
+                |acc, &v| acc * constraint_challenge + v,
+            );
 
             // Recombine the quotient from its coefficient slices:
             // `Q(ζ) = Σᵢ ζ^{i·n}·cᵢ(ζ)`, with each slice's value read from
@@ -507,7 +505,9 @@ impl<SC: StarkGenericConfig> System<SC> {
                 .chunks_exact(extension_d)
                 .zip(zeta_pow_n.powers())
                 .map(|(chunk, zeta_pow)| zeta_pow * from_ext_basis::<Val<SC>, SC::Challenge>(chunk))
-                .sum::<SC::Challenge>();
+                .fold(<SC::Challenge as Algebra<SC::Challenge>>::ZERO, |a, b| {
+                    a + b
+                });
 
             // Soundness: OOD check. If any constraint is violated on the trace
             // domain, the composition polynomial is not divisible by the vanishing
@@ -669,7 +669,7 @@ impl<SC: StarkGenericConfig> System<SC> {
             num_active,
             VerificationError::InvalidProofShape
         );
-        let extension_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
+        let extension_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
         for (pos, quotient_degree) in quotient_degrees.iter().enumerate() {
             ensure_eq!(
                 quotient_opened_values[pos].len(),
@@ -692,12 +692,14 @@ impl<SC: StarkGenericConfig> System<SC> {
 }
 
 /// Reassembles an extension element from its base coordinates.
-fn from_ext_basis<F: Field, EF: ExtensionField<F>>(coeffs: &[EF]) -> EF {
+fn from_ext_basis<F: Field, EF: ExtensionOf<F>>(coeffs: &[EF]) -> EF {
     coeffs
         .iter()
         .enumerate()
-        .map(|(i, c)| *c * <EF as BasedVectorSpace<F>>::ith_basis_element(i).unwrap())
-        .sum()
+        .fold(<EF as Algebra<EF>>::ZERO, |acc, (i, c)| {
+            let basis = EF::from_basis_coefficients_fn(|j| if j == i { F::ONE } else { F::ZERO });
+            acc + *c * basis
+        })
 }
 
 #[cfg(test)]
@@ -897,7 +899,7 @@ mod tests {
     fn test_tampered_stage_1_values_rejected() {
         let (system, mut proof) = small_system_and_proof();
         // Mutate a value in the stage 1 opened values — FRI should catch this.
-        proof.stage_1_opened_values[0][0][0] += ExtVal::ONE;
+        proof.stage_1_opened_values[0][0][0] += <ExtVal as Algebra<ExtVal>>::ONE;
         let no_claims: &[&[Val]] = &[];
         let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(result.is_err());
@@ -908,7 +910,7 @@ mod tests {
         let (system, mut proof) = small_system_and_proof();
         // Set the last intermediate accumulator to non-zero.
         let last = proof.intermediate_accumulators.len() - 1;
-        proof.intermediate_accumulators[last] = ExtVal::ONE;
+        proof.intermediate_accumulators[last] = <ExtVal as Algebra<ExtVal>>::ONE;
         let no_claims: &[&[Val]] = &[];
         let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(result.is_err());

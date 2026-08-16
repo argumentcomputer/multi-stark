@@ -45,9 +45,7 @@
 //! [`MAX_LOOKUP_GROUP`] so the evaluator's scratch space stays on the
 //! stack.
 
-use p3_field::{
-    Algebra, ExtensionField, Field, PrimeCharacteristicRing, batch_multiplicative_inverse,
-};
+use crate::traits::{Algebra, ExtensionOf, Field, batch_inverse};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
 
@@ -67,7 +65,7 @@ impl<E> Lookup<E> {
     #[inline]
     pub fn empty() -> Self
     where
-        E: PrimeCharacteristicRing,
+        E: Field,
     {
         Self {
             multiplicity: E::ZERO,
@@ -514,13 +512,13 @@ pub fn synthesize_lookups<F: Field>(
 #[inline]
 pub(crate) fn fingerprint<F, I, Iter>(r: &F, coeffs: Iter) -> F
 where
-    F: PrimeCharacteristicRing,
+    F: Field,
     I: Into<F>,
     Iter: DoubleEndedIterator<Item = I>,
 {
     coeffs
         .rev()
-        .fold(F::ZERO, |acc, coeff| acc * r.clone() + coeff.into())
+        .fold(F::ZERO, |acc, coeff| acc * *r + coeff.into())
 }
 
 /// Concrete lookup values of one circuit, stored flat.
@@ -609,7 +607,7 @@ impl<F: Field> LookupValues<F> {
     /// Computes the stage 2 traces and the intermediate accumulators for each
     /// circuit given a lookup challenge, a fingerprint challenge and the current
     /// accumulator value (computed from the initial claims).
-    pub fn stage_2_traces<EF: ExtensionField<F>>(
+    pub fn stage_2_traces<EF: ExtensionOf<F>>(
         circuits: &[Self],
         group_sizes: &[usize],
         lookup_challenge: EF,
@@ -638,8 +636,8 @@ impl<F: Field> LookupValues<F> {
         drop(_g);
 
         // Compute the inverses of all messages in batch.
-        let messages_inverses = tracing::info_span!("stark/batch_inverse")
-            .in_scope(|| batch_multiplicative_inverse(&messages));
+        let messages_inverses =
+            tracing::info_span!("stark/batch_inverse").in_scope(|| batch_inverse(&messages));
         // Only the inverses are consumed below.
         drop(messages);
 
@@ -661,7 +659,7 @@ impl<F: Field> LookupValues<F> {
                 // Pass-through accumulator column; the committed values are
                 // gauge-free (only differences are constrained), zero by
                 // convention.
-                vec![EF::ZERO; circuit.height]
+                vec![<EF as Algebra<EF>>::ZERO; circuit.height]
             } else {
                 // One partial accumulator per lookup GROUP: `acc_g` is the
                 // running sum ENTERING group g's step; the last group's
@@ -671,7 +669,7 @@ impl<F: Field> LookupValues<F> {
                 // accumulator; the circuit's total contribution is added to
                 // the global chain at the end.
                 let mut vec = Vec::with_capacity(circuit.height * num_slots);
-                let mut local = EF::ZERO;
+                let mut local = <EF as Algebra<EF>>::ZERO;
                 for (row_multiplicities, row_messages_inverses) in circuit
                     .multiplicities
                     .chunks_exact(circuit.num_lookups)
@@ -824,7 +822,6 @@ impl<F: Field> LookupRowMut<'_, F> {
 #[cfg(test)]
 mod tests {
     use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
-    use p3_field::Field;
 
     use crate::{
         p3_adapter::{LookupAir, SymbolicExpression, var},
@@ -844,9 +841,8 @@ mod tests {
     #[test]
     fn selector_normalization_constants() {
         use crate::config::StarkGenericConfig;
+        use crate::traits::{Algebra, EvaluationDomain, TwoAdicField};
         use crate::types::ExtVal;
-        use p3_commit::PolynomialSpace;
-        use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 
         let config = GoldilocksBlake3Config::new(
             CommitmentParameters {
@@ -873,7 +869,7 @@ mod tests {
                 // Textbook Lagrange basis of the last row:
                 // Π_{i≠n−1} (ζ − g^i)/(g^{n−1} − g^i).
                 let last = g.exp_u64((n - 1) as u64);
-                let mut ref_last = ExtVal::ONE;
+                let mut ref_last = <ExtVal as Algebra<ExtVal>>::ONE;
                 for i in 0..n - 1 {
                     let gi = g.exp_u64(i as u64);
                     ref_last *= (zeta - ExtVal::from(gi)) * ExtVal::from(last - gi).inverse();
@@ -884,7 +880,7 @@ mod tests {
                     ref_last,
                     "last-row normalization, log_n={log_n}"
                 );
-                let mut ref_first = ExtVal::ONE;
+                let mut ref_first = <ExtVal as Algebra<ExtVal>>::ONE;
                 for i in 1..n {
                     let gi = g.exp_u64(i as u64);
                     ref_first *= (zeta - ExtVal::from(gi)) * ExtVal::from(Val::ONE - gi).inverse();
@@ -907,7 +903,6 @@ mod tests {
     fn direct_logup_matches_synthesized_reference() {
         use crate::eval::{VarValues, eval_expr, eval_ext_expr};
         use crate::graph::ExtensionParams;
-        use p3_field::PrimeCharacteristicRing;
 
         let params = crate::system::extension_params::<GoldilocksBlake3Config>();
         let (w, d) = (params.w, params.degree);

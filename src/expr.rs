@@ -6,7 +6,7 @@
 
 use std::ops::{Add, Mul, Neg, Sub};
 
-use p3_field::Field;
+use crate::traits::Field;
 
 use crate::lookup::Lookup;
 
