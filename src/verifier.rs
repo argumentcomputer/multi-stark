@@ -826,6 +826,45 @@ mod tests {
         system.verify_multiple_claims(no_claims, &proof2).unwrap();
     }
 
+    /// Byte-identity gate for the PCS-abstraction refactor: the serialized
+    /// proof of a fixed system + witness must not change while the core is
+    /// ported onto the crate-owned traits (docs/pcs-abstraction.md, Phase 0).
+    /// Serial builds are deterministic (the `parallel` feature is what
+    /// introduces run-to-run byte drift), so the pin only runs without it.
+    /// If a deliberate protocol change moves this hash, bump it in the same
+    /// commit with the reasoning — never as a refactor side effect.
+    #[cfg(not(feature = "parallel"))]
+    #[test]
+    fn proof_bytes_pin() {
+        use p3_symmetric::CryptographicHasher;
+        let (system, key) = system();
+        let f = Val::from_u32;
+        let mut pythagorean_trace = [3, 4, 5].map(f).to_vec();
+        let mut complex_trace = [4, 2, 3, 1, 10, 10].map(f).to_vec();
+        for _ in 0..4 {
+            pythagorean_trace.extend(pythagorean_trace.clone());
+            complex_trace.extend(complex_trace.clone());
+        }
+        let witness = SystemWitness::from_stage_1(
+            vec![
+                RowMajorMatrix::new(pythagorean_trace, 3),
+                RowMajorMatrix::new(complex_trace, 6),
+            ],
+            &system,
+        );
+        let claim = [f(3), f(4), f(5)];
+        let proof = system.prove_multiple_claims(&key, &[&claim], witness);
+        let bytes = proof.to_bytes().expect("serialize");
+        let hash: [u8; 32] = p3_blake3::Blake3.hash_iter(bytes.iter().copied());
+        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "20e5e4d4ddf9e9c16aa3e47749b3d80e638981e3bb72a4d493697a74736df8d8",
+            "serialized proof bytes changed ({} bytes)",
+            bytes.len()
+        );
+    }
+
     // -- Negative / adversarial tests --
 
     /// Helper: creates a small system and valid proof for negative tests.
