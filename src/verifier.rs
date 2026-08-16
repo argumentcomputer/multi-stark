@@ -165,8 +165,8 @@ use crate::eval::VarValues;
 use crate::lookup::fingerprint;
 use crate::prover::Proof;
 use crate::system::System;
+use crate::traits::Transcript;
 
-use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_util::log2_strict_usize;
@@ -261,18 +261,18 @@ impl<SC: StarkGenericConfig> System<SC> {
         // Bind the activation bitmap — before any commitment or challenge, so
         // every sample depends on which circuits this proof covers.
         for &is_active in active {
-            challenger.observe(Val::<SC>::from_bool(is_active));
+            challenger.observe_field(Val::<SC>::from_bool(is_active));
         }
 
         // observe preprocessed and stage_1 commitment
         if let Some(commit) = &self.preprocessed_commit {
-            challenger.observe(commit.clone());
+            challenger.observe_commitment(commit.clone());
         }
-        challenger.observe(commitments.stage_1_trace.clone());
+        challenger.observe_commitment(commitments.stage_1_trace.clone());
 
         // Observe trace heights to bind the proof to specific domain sizes.
         for log_degree in log_degrees {
-            challenger.observe(Val::<SC>::from_u8(*log_degree));
+            challenger.observe_field(Val::<SC>::from_u8(*log_degree));
         }
 
         // Soundness: claims must be observed BEFORE lookup challenges are sampled.
@@ -280,29 +280,29 @@ impl<SC: StarkGenericConfig> System<SC> {
         // challenges, breaking the lookup argument's binding property. The claims
         // are length-prefixed so that distinct claim structures (e.g. [[a, b]]
         // vs [[a], [b]]) yield distinct transcripts.
-        challenger.observe(Val::<SC>::from_usize(claims.len()));
+        challenger.observe_field(Val::<SC>::from_usize(claims.len()));
         for claim in claims {
-            challenger.observe(Val::<SC>::from_usize(claim.len()));
-            challenger.observe_slice(claim);
+            challenger.observe_field(Val::<SC>::from_usize(claim.len()));
+            challenger.observe_field_slice(claim);
         }
 
         // Soundness: lookup argument. The challenges are random elements of F_ext.
         // The message m_i = lookup_challenge + fingerprint(fingerprint_challenge, args_i)
         // is an affine function of the challenges, ensuring that distinct argument
         // tuples produce distinct messages with probability ≥ 1 - 1/|F_ext|.
-        let lookup_argument_challenge: SC::Challenge = challenger.sample_algebra_element();
-        challenger.observe_algebra_element(lookup_argument_challenge);
-        let fingerprint_challenge: SC::Challenge = challenger.sample_algebra_element();
-        challenger.observe_algebra_element(fingerprint_challenge);
+        let lookup_argument_challenge: SC::Challenge = challenger.sample_challenge();
+        challenger.observe_challenge(lookup_argument_challenge);
+        let fingerprint_challenge: SC::Challenge = challenger.sample_challenge();
+        challenger.observe_challenge(fingerprint_challenge);
 
         // observe stage_2 commitment
-        challenger.observe(commitments.stage_2_trace.clone());
+        challenger.observe_commitment(commitments.stage_2_trace.clone());
 
         // Observe the intermediate accumulators. They enter the constraints as
         // public values, so later challenges (α, ζ) must depend on them
         // directly rather than only through the quotient commitment.
         for acc in intermediate_accumulators {
-            challenger.observe_algebra_element(*acc);
+            challenger.observe_challenge(*acc);
         }
 
         // construct the accumulator from the claims
@@ -316,14 +316,14 @@ impl<SC: StarkGenericConfig> System<SC> {
         // Soundness: constraint folding. All k constraints are combined via powers
         // of α. The folded sum has degree k-1 in α, so by Schwartz-Zippel a violated
         // constraint survives folding with probability ≥ 1 - (k-1)/|F_ext|.
-        let constraint_challenge: SC::Challenge = challenger.sample_algebra_element();
+        let constraint_challenge: SC::Challenge = challenger.sample_challenge();
 
         // observe quotient commitment
-        challenger.observe(commitments.quotient_chunks.clone());
+        challenger.observe_commitment(commitments.quotient_chunks.clone());
 
         // Soundness: OOD evaluation. ζ is sampled after all commitments are fixed.
         // A nonzero polynomial of degree ≤ D vanishes at ζ with probability ≤ D/|F_ext|.
-        let zeta: SC::Challenge = challenger.sample_algebra_element();
+        let zeta: SC::Challenge = challenger.sample_challenge();
 
         // Reconstruct the PCS opening rounds (identical to the prover).
         let mut stage_1_trace_evaluations = vec![];

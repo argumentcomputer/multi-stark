@@ -9,7 +9,6 @@
 //! ([`crate::lookup::logup_constraint_values`]), folding their values after
 //! the user roots.
 
-use p3_challenger::CanObserve;
 use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
@@ -21,6 +20,7 @@ use crate::eval::VarValues;
 use crate::expr::{CircuitSpec, Expr, ExtExpr};
 use crate::graph::{ConstraintGraph, ExtensionParams, compile};
 use crate::lookup::{Lookup, logup_constraint_count, logup_max_degree, num_publics, stage2_width};
+use crate::traits::Transcript;
 
 /// User-facing definition of one circuit: main-trace width, optional
 /// preprocessed trace, base and extension constraints, and lookups. The
@@ -229,7 +229,7 @@ impl<SC: StarkGenericConfig> System<SC> {
     /// via the challenger seed (see
     /// [`StarkGenericConfig::initialise_challenger`]).
     pub fn observe_shape(&self, challenger: &mut SC::Challenger) {
-        let mut observe = |x: usize| challenger.observe(Val::<SC>::from_usize(x));
+        let mut observe = |x: usize| challenger.observe_field(Val::<SC>::from_usize(x));
         observe(self.circuits.len());
         for circuit in &self.circuits {
             observe(circuit.constraint_count());

@@ -72,7 +72,14 @@ pub trait StarkGenericConfig {
     type Challenge: ExtensionField<Val<Self>>;
 
     /// The Fiat-Shamir challenger.
-    type Challenger: FieldChallenger<Val<Self>> + CanObserve<Com<Self>> + CanSample<Self::Challenge>;
+    type Challenger: FieldChallenger<Val<Self>>
+        + CanObserve<Com<Self>>
+        + CanSample<Self::Challenge>
+        + crate::traits::Transcript<
+            F = Val<Self>,
+            Challenge = Self::Challenge,
+            Commitment = Com<Self>,
+        >;
 
     /// Returns a reference to the PCS.
     fn pcs(&self) -> &Self::Pcs;

@@ -184,11 +184,11 @@ use crate::config::{
 use crate::eval::VarValues;
 use crate::lookup::{LookupValues, fingerprint};
 use crate::system::{ProverKey, System, SystemWitness};
+use crate::traits::Transcript;
 
 use bincode::config::{Configuration, Fixint, LittleEndian, standard};
 use bincode::error::{DecodeError, EncodeError};
 use bincode::serde::{decode_from_slice, encode_to_vec};
-use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{LagrangeSelectors, OpenedValuesForRound, Pcs, PolynomialSpace};
 use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
 use p3_field::{
@@ -312,7 +312,7 @@ where
         // the transcript here, before any commitment or challenge.
         let active: Vec<bool> = witness.traces.iter().map(|t| t.height() > 0).collect();
         for &is_active in &active {
-            challenger.observe(Val::<SC>::from_bool(is_active));
+            challenger.observe_field(Val::<SC>::from_bool(is_active));
         }
         // Canonical index of each active circuit, in order; matrix position
         // within every per-proof commitment == position in this list.
@@ -352,32 +352,32 @@ where
         drop(_g);
 
         if let Some(commit) = &self.preprocessed_commit {
-            challenger.observe(commit.clone());
+            challenger.observe_commitment(commit.clone());
         }
-        challenger.observe(stage_1_trace_commit.clone());
+        challenger.observe_commitment(stage_1_trace_commit.clone());
 
         // Observe the traces' heights. This binds the proof to specific domain
         // sizes; the verifier reads these from the (untrusted) proof, so they
         // must influence every subsequent challenge.
         for log_degree in &log_degrees {
-            challenger.observe(Val::<SC>::from_usize(*log_degree));
+            challenger.observe_field(Val::<SC>::from_usize(*log_degree));
         }
 
         // Observe the claims, length-prefixed so that distinct claim
         // structures (e.g. [[a, b]] vs [[a], [b]]) yield distinct transcripts.
         // This has to be done before generating the lookup argument challenge,
         // otherwise the lookup argument can be attacked.
-        challenger.observe(Val::<SC>::from_usize(claims.len()));
+        challenger.observe_field(Val::<SC>::from_usize(claims.len()));
         for claim in claims {
-            challenger.observe(Val::<SC>::from_usize(claim.len()));
-            challenger.observe_slice(claim);
+            challenger.observe_field(Val::<SC>::from_usize(claim.len()));
+            challenger.observe_field_slice(claim);
         }
 
         // Lookup challenges.
-        let lookup_argument_challenge: SC::Challenge = challenger.sample_algebra_element();
-        challenger.observe_algebra_element(lookup_argument_challenge);
-        let fingerprint_challenge: SC::Challenge = challenger.sample_algebra_element();
-        challenger.observe_algebra_element(fingerprint_challenge);
+        let lookup_argument_challenge: SC::Challenge = challenger.sample_challenge();
+        challenger.observe_challenge(lookup_argument_challenge);
+        let fingerprint_challenge: SC::Challenge = challenger.sample_challenge();
+        challenger.observe_challenge(fingerprint_challenge);
 
         // Initial accumulator from the claims.
         let mut acc = SC::Challenge::ZERO;
@@ -424,17 +424,17 @@ where
         });
         let (stage_2_trace_commit, stage_2_trace_data) = pcs.commit(evaluations);
         drop(_g);
-        challenger.observe(stage_2_trace_commit.clone());
+        challenger.observe_commitment(stage_2_trace_commit.clone());
 
         // Observe the intermediate accumulators. They enter the constraints as
         // public values, so later challenges (α, ζ) must depend on them
         // directly rather than only through the quotient commitment.
         for acc in &intermediate_accumulators {
-            challenger.observe_algebra_element(*acc);
+            challenger.observe_challenge(*acc);
         }
 
         // Constraint challenge.
-        let constraint_challenge: SC::Challenge = challenger.sample_algebra_element();
+        let constraint_challenge: SC::Challenge = challenger.sample_challenge();
 
         // Cost: "Quotient computation and commit" — constraint evaluation on
         // the quotient domain (Σ n_i·q_i·eval_cost(k_i)), the forward DFT of
@@ -530,7 +530,7 @@ where
             "committing the quotient from coefficients bypasses hiding-PCS randomization"
         );
         let (quotient_commit, quotient_data) = pcs.commit_ldes(quotient_ldes);
-        challenger.observe(quotient_commit.clone());
+        challenger.observe_commitment(quotient_commit.clone());
         drop(_g);
 
         let commitments = Commitments {
@@ -542,7 +542,7 @@ where
         // Cost: "FRI opening" — barycentric interpolation (Σ n_i·B·W_i),
         // FRI folding (≈ H), and FRI queries (Q·R·log₂ H hash ops).
         let _g = tracing::info_span!("stark/fri_open").entered();
-        let zeta: SC::Challenge = challenger.sample_algebra_element();
+        let zeta: SC::Challenge = challenger.sample_challenge();
         let mut round0_openings = vec![];
         let mut round1_openings = vec![];
         let mut round2_openings = vec![];

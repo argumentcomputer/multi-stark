@@ -36,6 +36,43 @@ type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
 type Challenger = DuplexChallenger<Val, Perm, 16, 8>;
 type Dft = Radix2DitParallel<Val>;
 type Pcs = TwoAdicFriPcs<Val, Dft, ValMmcs, ChallengeMmcs>;
+type Com = <Pcs as p3_commit::Pcs<Challenge, Challenger>>::Commitment;
+
+// Second `Transcript` instantiation — the whole point of this config:
+// prove the crate-owned transcript trait is generic across field/hash
+// choices, not shaped around the reference challenger.
+impl crate::traits::Transcript for Challenger {
+    type F = Val;
+    type Challenge = Challenge;
+    type Commitment = Com;
+
+    #[inline]
+    fn observe_field(&mut self, x: Val) {
+        self.observe(x);
+    }
+
+    #[inline]
+    fn observe_field_slice(&mut self, xs: &[Val]) {
+        self.observe_slice(xs);
+    }
+
+    #[inline]
+    fn observe_challenge(&mut self, x: Challenge) {
+        use p3_challenger::FieldChallenger;
+        self.observe_algebra_element(x);
+    }
+
+    #[inline]
+    fn observe_commitment(&mut self, c: Com) {
+        self.observe(c);
+    }
+
+    #[inline]
+    fn sample_challenge(&mut self) -> Challenge {
+        use p3_challenger::FieldChallenger;
+        self.sample_algebra_element()
+    }
+}
 
 struct BabyBearPoseidon2Config {
     pcs: Pcs,
