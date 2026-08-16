@@ -69,9 +69,14 @@ instantiations concretely (impls must name concrete types anyway:
 coherence cannot see through Pcs-projection aliases in impl headers).
 The one deliberate fancy construct is the `Evaluations<'a>` GAT on
 `Pcs` (borrowed LDE views beat copies in the constraint sweep).
-Status: Transcript, EvaluationDomain, and Pcs slices are LANDED
-(behavioral no-ops under the proof-bytes pin); the field slice below is
-the remaining Phase-0 work. Sketches:
+Status: PHASE 0 IS COMPLETE — Transcript, EvaluationDomain, Pcs, and
+the field layer (Field/TwoAdicField/Algebra/Packed/ExtensionOf/
+PackedExtension) are all landed as behavioral no-ops under the
+proof-bytes pin. Core imports no p3 proof-system traits; p3_matrix
+(container), p3_util (log2), and p3_maybe_rayon (parallelism) remain as
+utility libraries. Next: Phase 1, the ark_adapter. Original sketches
+below (kept for the rationale; the landed signatures in src/traits/ are
+authoritative and differ in detail):
 
 ```rust
 // traits/field.rs
