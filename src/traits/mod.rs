@@ -9,7 +9,11 @@
 //! adapter (`use p3_commit::Pcs as P3Pcs`), never the other way around.
 
 mod domain;
+mod pcs;
 mod transcript;
 
 pub use domain::{EvaluationDomain, LagrangeSelectors};
+pub use pcs::{
+    OpenedValues, OpenedValuesForMatrix, OpenedValuesForRound, OpeningRounds, Pcs, VerifyRounds,
+};
 pub use transcript::Transcript;

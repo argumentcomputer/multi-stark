@@ -10,5 +10,6 @@
 mod air;
 pub mod challenger;
 pub mod domain;
+pub mod pcs;
 
 pub use air::*;

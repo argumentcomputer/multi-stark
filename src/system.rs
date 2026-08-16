@@ -9,7 +9,6 @@
 //! ([`crate::lookup::logup_constraint_values`]), folding their values after
 //! the user roots.
 
-use p3_commit::Pcs;
 use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
@@ -20,7 +19,7 @@ use crate::eval::VarValues;
 use crate::expr::{CircuitSpec, Expr, ExtExpr};
 use crate::graph::{ConstraintGraph, ExtensionParams, compile};
 use crate::lookup::{Lookup, logup_constraint_count, logup_max_degree, num_publics, stage2_width};
-use crate::traits::Transcript;
+use crate::traits::{Pcs, Transcript};
 
 /// User-facing definition of one circuit: main-trace width, optional
 /// preprocessed trace, base and extension constraints, and lookups. The
@@ -267,7 +266,7 @@ impl<F: Field> SystemWitness<F> {
     pub fn from_stage_1<SC>(traces: Vec<RowMajorMatrix<F>>, system: &System<SC>) -> Self
     where
         SC: StarkGenericConfig,
-        SC::Pcs: Pcs<SC::Challenge, SC::Challenger, Domain: p3_commit::PolynomialSpace<Val = F>>,
+        SC::Pcs: Pcs<F = F>,
     {
         assert_eq!(
             traces.len(),

@@ -35,8 +35,9 @@ type Challenge = BinomialExtensionField<Val, 4>;
 type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
 type Challenger = DuplexChallenger<Val, Perm, 16, 8>;
 type Dft = Radix2DitParallel<Val>;
-type Pcs = TwoAdicFriPcs<Val, Dft, ValMmcs, ChallengeMmcs>;
-type Com = <Pcs as p3_commit::Pcs<Challenge, Challenger>>::Commitment;
+type InnerPcs = TwoAdicFriPcs<Val, Dft, ValMmcs, ChallengeMmcs>;
+type Pcs = crate::p3_adapter::pcs::FriPcs<Val, Challenge, Challenger, Dft, ValMmcs, ChallengeMmcs>;
+type Com = <InnerPcs as p3_commit::Pcs<Challenge, Challenger>>::Commitment;
 type Domain = p3_field::coset::TwoAdicMultiplicativeCoset<Val>;
 
 impl crate::traits::EvaluationDomain for Domain {
@@ -86,7 +87,7 @@ impl crate::traits::EvaluationDomain for Domain {
     }
 }
 
-// Second `Transcript` instantiation — the whole point of this config:
+// Second `MsChallenger` instantiation — the whole point of this config:
 // prove the crate-owned transcript trait is generic across field/hash
 // choices, not shaped around the reference challenger.
 impl crate::traits::Transcript for Challenger {
@@ -151,7 +152,10 @@ impl BabyBearPoseidon2Config {
             query_proof_of_work_bits: fri_parameters.query_proof_of_work_bits,
             mmcs: challenge_mmcs,
         };
-        let pcs = Pcs::new(Dft::default(), val_mmcs, inner_parameters);
+        let pcs = Pcs::new(
+            InnerPcs::new(Dft::default(), val_mmcs, inner_parameters),
+            commitment_parameters.log_blowup,
+        );
         let mut challenger_seed: Vec<Val> = b"multi-stark/v0"
             .iter()
             .map(|&byte| Val::from_u8(byte))

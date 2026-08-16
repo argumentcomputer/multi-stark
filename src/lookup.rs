@@ -864,12 +864,8 @@ mod tests {
         for log_n in [2usize, 3, 5, 8] {
             let n = 1usize << log_n;
             let g = Val::two_adic_generator(log_n);
-            let domain: crate::types::Domain = <crate::types::Pcs as p3_commit::Pcs<
-                ExtVal,
-                crate::types::Challenger,
-            >>::natural_domain_for_degree(
-                config.pcs(), n
-            );
+            let domain: crate::types::Domain =
+                crate::traits::Pcs::natural_domain_for_degree(config.pcs(), n);
             for seed in [3u64, 12345, 0xdead_beef] {
                 let zeta: ExtVal =
                     ExtVal::from_u64(seed).exp_u64(7) + ExtVal::from_u64(seed * 31 + 1);

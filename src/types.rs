@@ -82,14 +82,16 @@ impl<C: GrindingChallenger> GrindingChallenger for DeterministicPow<C> {
 pub type Mmcs =
     MerkleTreeMmcs<Val, u8, SerializingHasher<Blake3>, Blake3CompressionFunction, 2, 32>;
 pub type ExtMmcs = ExtensionMmcs<Val, ExtVal, Mmcs>;
-pub type Pcs = TwoAdicFriPcs<Val, Dft, Mmcs, ExtMmcs>;
+pub type InnerPcs = TwoAdicFriPcs<Val, Dft, Mmcs, ExtMmcs>;
+pub type Pcs = crate::p3_adapter::pcs::FriPcs<Val, ExtVal, Challenger, Dft, Mmcs, ExtMmcs>;
 
-pub type Commitment = <Pcs as PcsTrait<ExtVal, Challenger>>::Commitment;
-pub type Domain = <Pcs as PcsTrait<ExtVal, Challenger>>::Domain;
-pub type ProverData = <Pcs as PcsTrait<ExtVal, Challenger>>::ProverData;
-pub type EvaluationsOnDomain<'a> = <Pcs as PcsTrait<ExtVal, Challenger>>::EvaluationsOnDomain<'a>;
-pub type PcsError = <Pcs as PcsTrait<ExtVal, Challenger>>::Error;
-pub type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
+pub type Commitment = <InnerPcs as PcsTrait<ExtVal, Challenger>>::Commitment;
+pub type Domain = <InnerPcs as PcsTrait<ExtVal, Challenger>>::Domain;
+pub type ProverData = <InnerPcs as PcsTrait<ExtVal, Challenger>>::ProverData;
+pub type EvaluationsOnDomain<'a> =
+    <InnerPcs as PcsTrait<ExtVal, Challenger>>::EvaluationsOnDomain<'a>;
+pub type PcsError = <InnerPcs as PcsTrait<ExtVal, Challenger>>::Error;
+pub type PcsProof = <InnerPcs as PcsTrait<ExtVal, Challenger>>::Proof;
 
 /// The reference [`StarkGenericConfig`] implementation.
 pub struct GoldilocksBlake3Config {
@@ -207,6 +209,7 @@ fn new_mmcs(cap_height: usize) -> Mmcs {
 }
 
 fn new_pcs(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Pcs {
+    let log_blowup = commitment_parameters.log_blowup;
     let val_mmcs = new_mmcs(commitment_parameters.cap_height);
     let mmcs = ExtensionMmcs::new(val_mmcs.clone());
     let inner_parameters = InnerFriParameters {
@@ -219,7 +222,7 @@ fn new_pcs(commitment_parameters: CommitmentParameters, fri_parameters: FriParam
         mmcs,
     };
     let dft = Dft::default();
-    Pcs::new(dft, val_mmcs, inner_parameters)
+    Pcs::new(InnerPcs::new(dft, val_mmcs, inner_parameters), log_blowup)
 }
 
 #[cfg(test)]

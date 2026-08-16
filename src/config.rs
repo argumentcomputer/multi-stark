@@ -1,73 +1,45 @@
-//! Generic STARK configuration.
-//!
-//! [`StarkGenericConfig`] bundles the three choices that instantiate the
-//! protocol: the polynomial commitment scheme, the challenge (extension)
-//! field, and the Fiat-Shamir challenger. The base field is determined
-//! transitively by the PCS ([`Val`]). The prover, verifier and system are
-//! generic over an implementation of this trait; see
-//! [`crate::types::GoldilocksBlake3Config`] for the reference instantiation.
+//! Configuration trait binding a PCS, challenge field, and challenger
+//! into one proof system instantiation, plus the projection aliases the
+//! core uses. Everything projects through the crate-owned
+//! [`crate::traits::Pcs`]; Plonky3 appears only through the field
+//! machinery (packing, extension fields), which the field slice of the
+//! PCS abstraction will absorb later.
 
-use p3_challenger::{CanObserve, CanSample, FieldChallenger};
-use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::{ExtensionField, Field};
 
-/// The base field of a configuration, as determined by its PCS domain.
-pub type Val<SC> = <<<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Domain as PolynomialSpace>::Val;
+use crate::traits::{Pcs, Transcript};
+
+/// The base (trace) field of a configuration's PCS.
+pub type Val<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::F;
 
 /// The evaluation domain type of a configuration's PCS.
-pub type Domain<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Domain;
+pub type Domain<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::Domain;
 
 /// The commitment type of a configuration's PCS.
-pub type Com<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Commitment;
+pub type Com<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::Commitment;
 
 /// The opening proof type of a configuration's PCS.
-pub type PcsProof<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Proof;
+pub type PcsProof<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::Proof;
 
 /// The error type of a configuration's PCS.
-pub type PcsError<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Error;
+pub type PcsError<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::Error;
 
 /// The prover data type of a configuration's PCS.
-pub type PcsData<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::ProverData;
+pub type PcsData<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::ProverData;
 
-/// Evaluations of committed polynomials over a domain.
-pub type EvaluationsOnDomain<'a, SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::EvaluationsOnDomain<'a>;
+/// The borrowed evaluations view of a configuration's PCS.
+pub type EvaluationsOnDomain<'a, SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::Evaluations<'a>;
 
-/// Packed base-field values of a configuration.
+/// Packed (SIMD) representation of the base field.
 pub type PackedVal<SC> = <Val<SC> as Field>::Packing;
 
-/// Packed challenge-field values of a configuration.
+/// Packed (SIMD) representation of the challenge field.
 pub type PackedChallenge<SC> =
     <<SC as StarkGenericConfig>::Challenge as ExtensionField<Val<SC>>>::ExtensionPacking;
 
-/// Configuration of a STARK system.
 pub trait StarkGenericConfig {
     /// The PCS used to commit to trace polynomials.
-    type Pcs: Pcs<
-            Self::Challenge,
-            Self::Challenger,
-            Domain: crate::traits::EvaluationDomain<F = Val<Self>, Challenge = Self::Challenge>,
-        >;
+    type Pcs: Pcs<F: Field, Challenge = Self::Challenge, Challenger = Self::Challenger>;
 
     /// The field from which random challenges are drawn. Its size bounds the
     /// Schwartz-Zippel terms of the soundness error, so it must be large
@@ -76,14 +48,7 @@ pub trait StarkGenericConfig {
     type Challenge: ExtensionField<Val<Self>>;
 
     /// The Fiat-Shamir challenger.
-    type Challenger: FieldChallenger<Val<Self>>
-        + CanObserve<Com<Self>>
-        + CanSample<Self::Challenge>
-        + crate::traits::Transcript<
-            F = Val<Self>,
-            Challenge = Self::Challenge,
-            Commitment = Com<Self>,
-        >;
+    type Challenger: Transcript<F = Val<Self>, Challenge = Self::Challenge, Commitment = Com<Self>>;
 
     /// Returns a reference to the PCS.
     fn pcs(&self) -> &Self::Pcs;

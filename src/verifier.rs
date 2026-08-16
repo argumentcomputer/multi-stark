@@ -165,9 +165,8 @@ use crate::eval::VarValues;
 use crate::lookup::fingerprint;
 use crate::prover::Proof;
 use crate::system::System;
-use crate::traits::{EvaluationDomain, Transcript};
+use crate::traits::{EvaluationDomain, Pcs, Transcript};
 
-use p3_commit::Pcs;
 use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_util::log2_strict_usize;
 
