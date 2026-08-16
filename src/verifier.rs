@@ -165,9 +165,9 @@ use crate::eval::VarValues;
 use crate::lookup::fingerprint;
 use crate::prover::Proof;
 use crate::system::System;
-use crate::traits::Transcript;
+use crate::traits::{EvaluationDomain, Transcript};
 
-use p3_commit::{Pcs, PolynomialSpace};
+use p3_commit::Pcs;
 use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_util::log2_strict_usize;
 
@@ -332,9 +332,7 @@ impl<SC: StarkGenericConfig> System<SC> {
         for pos in 0..active_indices.len() {
             let log_degree = log_degrees[pos];
             let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
-            let zeta_next = trace_domain
-                .next_point(zeta)
-                .ok_or(VerificationError::InvalidProofShape)?;
+            let zeta_next = trace_domain.next_point(zeta);
             stage_1_trace_evaluations.push((
                 trace_domain,
                 vec![
@@ -370,9 +368,7 @@ impl<SC: StarkGenericConfig> System<SC> {
                     match active_pos[ci] {
                         Some(pos) => {
                             let trace_domain = pcs.natural_domain_for_degree(1 << log_degrees[pos]);
-                            let zeta_next = trace_domain
-                                .next_point(zeta)
-                                .ok_or(VerificationError::InvalidProofShape)?;
+                            let zeta_next = trace_domain.next_point(zeta);
                             let preprocessed_opened_values =
                                 preprocessed_opened_values.as_ref().unwrap();
                             preprocessed_trace_evaluations.push((

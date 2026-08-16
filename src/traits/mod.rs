@@ -8,6 +8,8 @@
 //! backend's (p3 also has a `Pcs`), the backend import is renamed at the
 //! adapter (`use p3_commit::Pcs as P3Pcs`), never the other way around.
 
+mod domain;
 mod transcript;
 
+pub use domain::{EvaluationDomain, LagrangeSelectors};
 pub use transcript::Transcript;

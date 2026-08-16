@@ -63,7 +63,11 @@ pub type PackedChallenge<SC> =
 /// Configuration of a STARK system.
 pub trait StarkGenericConfig {
     /// The PCS used to commit to trace polynomials.
-    type Pcs: Pcs<Self::Challenge, Self::Challenger>;
+    type Pcs: Pcs<
+            Self::Challenge,
+            Self::Challenger,
+            Domain: crate::traits::EvaluationDomain<F = Val<Self>, Challenge = Self::Challenge>,
+        >;
 
     /// The field from which random challenges are drawn. Its size bounds the
     /// Schwartz-Zippel terms of the soundness error, so it must be large

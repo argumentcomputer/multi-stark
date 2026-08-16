@@ -9,5 +9,6 @@
 
 mod air;
 pub mod challenger;
+pub mod domain;
 
 pub use air::*;

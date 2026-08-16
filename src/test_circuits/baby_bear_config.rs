@@ -37,6 +37,54 @@ type Challenger = DuplexChallenger<Val, Perm, 16, 8>;
 type Dft = Radix2DitParallel<Val>;
 type Pcs = TwoAdicFriPcs<Val, Dft, ValMmcs, ChallengeMmcs>;
 type Com = <Pcs as p3_commit::Pcs<Challenge, Challenger>>::Commitment;
+type Domain = p3_field::coset::TwoAdicMultiplicativeCoset<Val>;
+
+impl crate::traits::EvaluationDomain for Domain {
+    type F = Val;
+    type Challenge = Challenge;
+
+    #[inline]
+    fn size(&self) -> usize {
+        p3_commit::PolynomialSpace::size(self)
+    }
+
+    #[inline]
+    fn first_point(&self) -> Val {
+        p3_commit::PolynomialSpace::first_point(self)
+    }
+
+    #[inline]
+    fn next_point(&self, x: Challenge) -> Challenge {
+        p3_commit::PolynomialSpace::next_point(self, x).expect("two-adic domain has a next point")
+    }
+
+    #[inline]
+    fn create_disjoint_domain(&self, min_size: usize) -> Self {
+        p3_commit::PolynomialSpace::create_disjoint_domain(self, min_size)
+    }
+
+    #[inline]
+    fn selectors_at_point(&self, point: Challenge) -> crate::traits::LagrangeSelectors<Challenge> {
+        let s = p3_commit::PolynomialSpace::selectors_at_point(self, point);
+        crate::traits::LagrangeSelectors {
+            is_first_row: s.is_first_row,
+            is_last_row: s.is_last_row,
+            is_transition: s.is_transition,
+            inv_vanishing: s.inv_vanishing,
+        }
+    }
+
+    #[inline]
+    fn selectors_on_coset(&self, coset: Self) -> crate::traits::LagrangeSelectors<Vec<Val>> {
+        let s = p3_commit::PolynomialSpace::selectors_on_coset(self, coset);
+        crate::traits::LagrangeSelectors {
+            is_first_row: s.is_first_row,
+            is_last_row: s.is_last_row,
+            is_transition: s.is_transition,
+            inv_vanishing: s.inv_vanishing,
+        }
+    }
+}
 
 // Second `Transcript` instantiation — the whole point of this config:
 // prove the crate-owned transcript trait is generic across field/hash

@@ -9,7 +9,7 @@
 //! ([`crate::lookup::logup_constraint_values`]), folding their values after
 //! the user roots.
 
-use p3_commit::{Pcs, PolynomialSpace};
+use p3_commit::Pcs;
 use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
@@ -267,7 +267,7 @@ impl<F: Field> SystemWitness<F> {
     pub fn from_stage_1<SC>(traces: Vec<RowMajorMatrix<F>>, system: &System<SC>) -> Self
     where
         SC: StarkGenericConfig,
-        SC::Pcs: Pcs<SC::Challenge, SC::Challenger, Domain: PolynomialSpace<Val = F>>,
+        SC::Pcs: Pcs<SC::Challenge, SC::Challenger, Domain: p3_commit::PolynomialSpace<Val = F>>,
     {
         assert_eq!(
             traces.len(),

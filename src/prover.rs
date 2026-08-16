@@ -184,12 +184,12 @@ use crate::config::{
 use crate::eval::VarValues;
 use crate::lookup::{LookupValues, fingerprint};
 use crate::system::{ProverKey, System, SystemWitness};
-use crate::traits::Transcript;
+use crate::traits::{EvaluationDomain, LagrangeSelectors, Transcript};
 
 use bincode::config::{Configuration, Fixint, LittleEndian, standard};
 use bincode::error::{DecodeError, EncodeError};
 use bincode::serde::{decode_from_slice, encode_to_vec};
-use p3_commit::{LagrangeSelectors, OpenedValuesForRound, Pcs, PolynomialSpace};
+use p3_commit::{OpenedValuesForRound, Pcs};
 use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
 use p3_field::{
     Algebra, BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing, TwoAdicField,
@@ -549,9 +549,7 @@ where
         let mut round3_openings = vec![];
         for &log_degree in log_degrees.iter() {
             let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
-            let zeta_next = trace_domain
-                .next_point(zeta)
-                .expect("domain has no next point");
+            let zeta_next = trace_domain.next_point(zeta);
             round1_openings.push(vec![zeta, zeta_next]);
             round2_openings.push(vec![zeta, zeta_next]);
             // One wide matrix per circuit holds all its quotient slices.
@@ -566,9 +564,7 @@ where
                 match pos {
                     Some(pos) => {
                         let trace_domain = pcs.natural_domain_for_degree(1 << log_degrees[pos]);
-                        let zeta_next = trace_domain
-                            .next_point(zeta)
-                            .expect("domain has no next point");
+                        let zeta_next = trace_domain.next_point(zeta);
                         round0_openings.push(vec![zeta, zeta_next]);
                     }
                     None => round0_openings.push(vec![]),
