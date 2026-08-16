@@ -59,7 +59,19 @@ Note: today's `p3_adapter.rs` is an **AIR frontend** adapter (p3_air ->
 
 ## 3. The trait layer (crate-owned, in `src/traits/`)
 
-Mirror the measured surface, nothing more. Sketches (names bikesheddable):
+Mirror the measured surface, nothing more. Naming convention (decided):
+natural names, no prefixes — our traits are `Transcript`,
+`EvaluationDomain`, `Pcs`; where a backend's name collides, the backend
+import is renamed at the adapter (`use p3_commit::Pcs as P3Pcs`), never
+ours. Associated types over generics throughout (inference-unambiguous,
+no E0207 blanket-impl traps), no blanket impls — each config states its
+instantiations concretely (impls must name concrete types anyway:
+coherence cannot see through Pcs-projection aliases in impl headers).
+The one deliberate fancy construct is the `Evaluations<'a>` GAT on
+`Pcs` (borrowed LDE views beat copies in the constraint sweep).
+Status: Transcript, EvaluationDomain, and Pcs slices are LANDED
+(behavioral no-ops under the proof-bytes pin); the field slice below is
+the remaining Phase-0 work. Sketches:
 
 ```rust
 // traits/field.rs
@@ -118,10 +130,13 @@ pub trait MsPcs {
     fn commit(&self, evals: Vec<(Self::Domain, Matrix<Self::F>)>)
         -> (Self::Commitment, Self::ProverData);
 
-    /// Fast path: commit polynomials given by coefficient slices (the
-    /// quotient path). FRI builds the LDE from shifted coefficients;
-    /// KZG's MSM consumes coefficients natively — this is its cheap case.
-    fn commit_coefficients(&self, coeffs: Vec<(Self::Domain, Matrix<Self::F>)>)
+    /// Commit the per-circuit quotients given by their EVALUATIONS on
+    /// the disjoint quotient domain plus the quotient degree. (Chosen
+    /// over a coefficients-based boundary: the evals->coeffs transform
+    /// needs a DFT engine, which is backend property, so the whole
+    /// conversion — slicing included — lives behind the trait. FRI:
+    /// fused shifted gather + zero-padded DFT; KZG: coset iDFT + MSM.)
+    fn commit_quotient(&self, quotients: Vec<(Self::Domain, Matrix<Self::F>, usize)>)
         -> (Self::Commitment, Self::ProverData);
 
     /// Prover-side access to committed evaluations (constraint sweep).
