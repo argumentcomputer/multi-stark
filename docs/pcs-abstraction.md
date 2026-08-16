@@ -69,12 +69,19 @@ instantiations concretely (impls must name concrete types anyway:
 coherence cannot see through Pcs-projection aliases in impl headers).
 The one deliberate fancy construct is the `Evaluations<'a>` GAT on
 `Pcs` (borrowed LDE views beat copies in the constraint sweep).
-Status: PHASE 0 IS COMPLETE — Transcript, EvaluationDomain, Pcs, and
-the field layer (Field/TwoAdicField/Algebra/Packed/ExtensionOf/
-PackedExtension) are all landed as behavioral no-ops under the
-proof-bytes pin. Core imports no p3 proof-system traits; p3_matrix
-(container), p3_util (log2), and p3_maybe_rayon (parallelism) remain as
-utility libraries. Next: Phase 1, the ark_adapter. Original sketches
+Status: PHASES 0 AND 1 ARE COMPLETE. Phase 0: Transcript,
+EvaluationDomain, Pcs, and the field layer (Field/TwoAdicField/Algebra/
+Packed/ExtensionOf/PackedExtension) all landed as behavioral no-ops
+under the proof-bytes pin; core imports no p3 proof-system traits —
+p3_matrix (container), p3_util (log2), and p3_maybe_rayon (parallelism)
+remain as utility libraries. Phase 1: `ark_adapter/` (feature `kzg`)
+lands the BLS12-381 backend — `Scalar` (D = 1 challenge field, width-1
+packing), `Radix2Coset`, `Blake3Transcript`, `Srs`, and `KzgPcs`
+(monomial commitments, coefficient-slice quotient, per-point batched
+witness openings, one 2-pairing verification) — with the multi-stark
+proving and verifying end-to-end under `KzgConfig` on hand-authored
+`CircuitInputs`. Next: Phase 2 at scale (recursive-verifier system,
+differential + size/time benches; ceremony SRS loading). Original sketches
 below (kept for the rationale; the landed signatures in src/traits/ are
 authoritative and differ in detail):
 

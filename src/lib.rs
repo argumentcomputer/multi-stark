@@ -1,3 +1,5 @@
+#[cfg(feature = "kzg")]
+pub mod ark_adapter;
 pub mod config;
 pub mod eval;
 pub mod expr;
