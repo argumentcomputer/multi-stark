@@ -24,6 +24,9 @@ pub struct KzgConfig {
 }
 
 impl KzgConfig {
+    /// Public parameters are caller-supplied and taken on trust here:
+    /// call [`Srs::validate`] first on parameters you did not generate.
+    ///
     /// # Panics
     /// Panics if the SRS length is not a power of two (trace domains
     /// are, and `max_log_degree` is read off the SRS).
