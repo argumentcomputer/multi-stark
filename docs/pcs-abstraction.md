@@ -36,7 +36,7 @@ in-circuit, so nothing on the ix/Aiur side changes.
 
 ## 2. Current coupling (measured, not guessed)
 
-`StarkGenericConfig` (config.rs) binds Plonky3 traits directly:
+`ProofConfig` (config.rs) binds Plonky3 traits directly:
 `Pcs<Challenge, Challenger>`, `ExtensionField<Val>`, `FieldChallenger` +
 `CanObserve<Com>`. The full surface the core actually uses:
 
@@ -186,7 +186,7 @@ pub trait MsChallenger<F: MsField, EF, Com> {
     fn sample_algebra(&mut self) -> EF;
 }
 
-// traits/config.rs — replaces StarkGenericConfig
+// traits/config.rs — replaces ProofConfig
 pub trait MsConfig {
     type F: MsTwoAdicField;
     type Challenge: MsChallenge<Self::F>;

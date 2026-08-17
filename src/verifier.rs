@@ -159,7 +159,7 @@
 //! actual low-degree-extension values of the witness. Do not use it when the
 //! witness must remain hidden from the verifier.
 
-use crate::config::{PcsError, StarkGenericConfig, Val};
+use crate::config::{PcsError, ProofConfig, Val};
 use crate::ensure_eq;
 use crate::eval::VarValues;
 use crate::lookup::fingerprint;
@@ -189,7 +189,7 @@ pub enum VerificationError<PcsErr> {
     UnbalancedChannel,
 }
 
-impl<SC: StarkGenericConfig> System<SC> {
+impl<SC: ProofConfig> System<SC> {
     /// Verifies a STARK proof against a single claim.
     pub fn verify(
         &self,

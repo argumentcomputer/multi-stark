@@ -17,10 +17,10 @@
 //!   Fiat-Shamir challenger.
 //! - [`srs`]: the structured reference string.
 //! - [`pcs`]: [`pcs::KzgPcs`] and the proof/commitment types.
-//! - [`config`]: [`config::KzgConfig`], the [`StarkGenericConfig`]
+//! - [`config`]: [`config::KzgConfig`], the [`ProofConfig`]
 //!   instantiation tying it all together.
 //!
-//! [`StarkGenericConfig`]: crate::config::StarkGenericConfig
+//! [`ProofConfig`]: crate::config::ProofConfig
 
 pub mod config;
 pub mod domain;

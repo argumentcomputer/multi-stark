@@ -15,7 +15,7 @@
 //! ```
 
 use bincode::{config::standard, serde::encode_to_vec};
-use multi_stark::config::StarkGenericConfig;
+use multi_stark::config::ProofConfig;
 use multi_stark::traits::{OpenedValues, Pcs as PcsTrait};
 use multi_stark::types::{
     Challenger, Commitment, CommitmentParameters, Domain, ExtVal, FriParameters,

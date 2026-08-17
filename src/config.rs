@@ -1,6 +1,6 @@
-//! Configuration trait binding a PCS, challenge field, and challenger
-//! into one proof system instantiation, plus the projection aliases the
-//! core uses. Everything projects through the crate-owned
+//! [`ProofConfig`]: the complete definition of one proof-system
+//! instance — base field (via the PCS), challenge field, transcript,
+//! and degree budgets — plus the projection aliases the core uses. Everything projects through the crate-owned
 //! [`crate::traits::Pcs`]; Plonky3 appears only through the field
 //! machinery (packing, extension fields), which the field slice of the
 //! PCS abstraction will absorb later.
@@ -8,34 +8,33 @@
 use crate::traits::{ExtensionOf, Field, Pcs, Transcript};
 
 /// The base (trace) field of a configuration's PCS.
-pub type Val<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::F;
+pub type Val<SC> = <<SC as ProofConfig>::Pcs as Pcs>::F;
 
 /// The evaluation domain type of a configuration's PCS.
-pub type Domain<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::Domain;
+pub type Domain<SC> = <<SC as ProofConfig>::Pcs as Pcs>::Domain;
 
 /// The commitment type of a configuration's PCS.
-pub type Com<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::Commitment;
+pub type Com<SC> = <<SC as ProofConfig>::Pcs as Pcs>::Commitment;
 
 /// The opening proof type of a configuration's PCS.
-pub type PcsProof<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::Proof;
+pub type PcsProof<SC> = <<SC as ProofConfig>::Pcs as Pcs>::Proof;
 
 /// The error type of a configuration's PCS.
-pub type PcsError<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::Error;
+pub type PcsError<SC> = <<SC as ProofConfig>::Pcs as Pcs>::Error;
 
 /// The prover data type of a configuration's PCS.
-pub type PcsData<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::ProverData;
+pub type PcsData<SC> = <<SC as ProofConfig>::Pcs as Pcs>::ProverData;
 
 /// The borrowed evaluations view of a configuration's PCS.
-pub type EvaluationsOnDomain<'a, SC> = <<SC as StarkGenericConfig>::Pcs as Pcs>::Evaluations<'a>;
+pub type EvaluationsOnDomain<'a, SC> = <<SC as ProofConfig>::Pcs as Pcs>::Evaluations<'a>;
 
 /// Packed (SIMD) representation of the base field.
 pub type PackedVal<SC> = <Val<SC> as Field>::Packing;
 
 /// Packed (SIMD) representation of the challenge field.
-pub type PackedChallenge<SC> =
-    <<SC as StarkGenericConfig>::Challenge as ExtensionOf<Val<SC>>>::ExtPacking;
+pub type PackedChallenge<SC> = <<SC as ProofConfig>::Challenge as ExtensionOf<Val<SC>>>::ExtPacking;
 
-pub trait StarkGenericConfig {
+pub trait ProofConfig {
     /// The PCS used to commit to trace polynomials.
     type Pcs: Pcs<F: Field, Challenge = Self::Challenge, Challenger = Self::Challenger>;
 

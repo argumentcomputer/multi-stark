@@ -1,4 +1,4 @@
-//! A second [`StarkGenericConfig`] instantiation — BabyBear field with a
+//! A second [`ProofConfig`] instantiation — BabyBear field with a
 //! degree-4 binomial extension and Poseidon2 hashing — differing from the
 //! reference Goldilocks/Keccak config in both the field and the hash axes.
 //!
@@ -6,7 +6,7 @@
 //! change compiles only for the reference config, the smoke test here
 //! catches it.
 
-use crate::config::StarkGenericConfig;
+use crate::config::ProofConfig;
 use crate::lookup::Lookup;
 use crate::p3_adapter::{LookupAir, SymbolicExpression, var};
 use crate::system::{System, SystemWitness};
@@ -135,7 +135,7 @@ struct BabyBearPoseidon2Config {
     perm: Perm,
     /// Field elements observed into every fresh challenger: a domain tag
     /// plus a digest of the protocol parameters (see the transcript contract
-    /// on [`StarkGenericConfig::initialise_challenger`]).
+    /// on [`ProofConfig::initialise_challenger`]).
     challenger_seed: Vec<Val>,
     max_log_degree: usize,
     max_quotient_degree: usize,
@@ -193,7 +193,7 @@ impl BabyBearPoseidon2Config {
     }
 }
 
-impl StarkGenericConfig for BabyBearPoseidon2Config {
+impl ProofConfig for BabyBearPoseidon2Config {
     type Pcs = Pcs;
     type Challenge = Challenge;
     type Challenger = Challenger;

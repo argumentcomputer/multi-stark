@@ -5,7 +5,7 @@
 //! [`crate::prover`] and [`crate::verifier`]; this module only provides a
 //! concrete, batteries-included instantiation.
 
-use crate::config::StarkGenericConfig;
+use crate::config::ProofConfig;
 use p3_blake3::Blake3;
 use p3_challenger::{
     CanObserve, CanSample, CanSampleBits, FieldChallenger, GrindingChallenger, HashChallenger,
@@ -93,7 +93,7 @@ pub type EvaluationsOnDomain<'a> =
 pub type PcsError = <InnerPcs as PcsTrait<ExtVal, Challenger>>::Error;
 pub type PcsProof = <InnerPcs as PcsTrait<ExtVal, Challenger>>::Proof;
 
-/// The reference [`StarkGenericConfig`] implementation.
+/// The reference [`ProofConfig`] implementation.
 pub struct GoldilocksBlake3Config {
     /// The PCS used to commit polynomials and prove opening proofs.
     pcs: Pcs,
@@ -116,7 +116,7 @@ impl GoldilocksBlake3Config {
         // followed by every protocol parameter. Binding the parameters into
         // the seed means transcripts produced under different parameters
         // never collide (see the transcript contract on
-        // [`StarkGenericConfig::initialise_challenger`]).
+        // [`ProofConfig::initialise_challenger`]).
         let mut challenger_seed = b"multi-stark/v0".to_vec();
         for parameter in [
             commitment_parameters.log_blowup,
@@ -142,7 +142,7 @@ impl GoldilocksBlake3Config {
     }
 }
 
-impl StarkGenericConfig for GoldilocksBlake3Config {
+impl ProofConfig for GoldilocksBlake3Config {
     type Pcs = Pcs;
     type Challenge = ExtVal;
     type Challenger = Challenger;

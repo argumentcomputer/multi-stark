@@ -9,7 +9,7 @@
 //! The proving protocol proceeds in several stages sharing one Fiat-Shamir
 //! transcript. The challenger starts from a seed binding a domain tag and all
 //! protocol parameters (see the transcript contract on
-//! [`StarkGenericConfig::initialise_challenger`]), and the system shape
+//! [`ProofConfig::initialise_challenger`]), and the system shape
 //! (circuit count, widths, constraint counts, degrees)
 //! is observed before any commitment.
 //!
@@ -179,7 +179,7 @@
 //! the prover's work.
 
 use crate::config::{
-    Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsProof, StarkGenericConfig, Val,
+    Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsProof, ProofConfig, Val,
 };
 use crate::eval::VarValues;
 use crate::lookup::{LookupValues, fingerprint};
@@ -211,7 +211,7 @@ pub struct Commitments<Com> {
 /// A STARK proof for a multi-circuit system.
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct Proof<SC: StarkGenericConfig> {
+pub struct Proof<SC: ProofConfig> {
     /// Activation bitmap over the system's canonical circuit set: circuit i
     /// is covered by this proof iff `active[i]`. Inactive circuits (empty
     /// execution traces) are not committed, opened, accumulated, or
@@ -236,7 +236,7 @@ pub struct Proof<SC: StarkGenericConfig> {
     pub stage_2_opened_values: OpenedValuesForRound<SC::Challenge>,
 }
 
-impl<SC: StarkGenericConfig> Proof<SC> {
+impl<SC: ProofConfig> Proof<SC> {
     fn serde_config() -> Configuration<LittleEndian, Fixint> {
         standard().with_little_endian().with_fixed_int_encoding()
     }
@@ -255,7 +255,7 @@ impl<SC: StarkGenericConfig> Proof<SC> {
 
 impl<SC> System<SC>
 where
-    SC: StarkGenericConfig,
+    SC: ProofConfig,
     // Two-adicity is needed to slice the quotient into coefficient slices
     // and rebuild their committed LDE from those coefficients; every
     // FRI-based config is two-adic anyway.
@@ -604,7 +604,7 @@ fn quotient_values<SC>(
     constraint_count: usize,
 ) -> Vec<SC::Challenge>
 where
-    SC: StarkGenericConfig,
+    SC: ProofConfig,
     Val<SC>: TwoAdicField + Ord,
 {
     let quotient_size = quotient_domain.size();
@@ -721,7 +721,7 @@ fn quotient_values_inner<SC>(
     ext_degree: usize,
 ) -> impl Iterator<Item = SC::Challenge>
 where
-    SC: StarkGenericConfig,
+    SC: ProofConfig,
     Val<SC>: TwoAdicField + Ord,
 {
     let i_range = i_start..i_start + PackedVal::<SC>::WIDTH;

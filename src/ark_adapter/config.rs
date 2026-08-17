@@ -1,4 +1,4 @@
-//! [`StarkGenericConfig`] instantiation for the KZG backend: BLS12-381
+//! [`ProofConfig`] instantiation for the KZG backend: BLS12-381
 //! scalar field (its own challenge field, `D = 1`), Blake3 transcript,
 //! monomial KZG commitments.
 
@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use ark_serialize::CanonicalSerialize;
 
-use crate::config::StarkGenericConfig;
+use crate::config::ProofConfig;
 use crate::traits::Pcs;
 
 use super::field::Scalar;
@@ -18,7 +18,7 @@ pub struct KzgConfig {
     pcs: KzgPcs,
     /// Bytes observed into every fresh challenger: a domain tag plus a
     /// digest of the protocol parameters INCLUDING the SRS (see the
-    /// transcript contract on [`StarkGenericConfig::initialise_challenger`]).
+    /// transcript contract on [`ProofConfig::initialise_challenger`]).
     transcript_seed: Vec<u8>,
     max_log_degree: usize,
 }
@@ -55,7 +55,7 @@ impl KzgConfig {
     }
 }
 
-impl StarkGenericConfig for KzgConfig {
+impl ProofConfig for KzgConfig {
     type Pcs = KzgPcs;
     type Challenge = Scalar;
     type Challenger = Blake3Transcript;

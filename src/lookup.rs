@@ -840,7 +840,7 @@ mod tests {
     /// textbook Lagrange basis product, at arbitrary points, several sizes.
     #[test]
     fn selector_normalization_constants() {
-        use crate::config::StarkGenericConfig;
+        use crate::config::ProofConfig;
         use crate::traits::{Algebra, EvaluationDomain, TwoAdicField};
         use crate::types::ExtVal;
 
