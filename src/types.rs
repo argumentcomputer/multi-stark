@@ -209,7 +209,6 @@ fn new_mmcs(cap_height: usize) -> Mmcs {
 }
 
 fn new_pcs(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Pcs {
-    let log_blowup = commitment_parameters.log_blowup;
     let val_mmcs = new_mmcs(commitment_parameters.cap_height);
     let mmcs = ExtensionMmcs::new(val_mmcs.clone());
     let inner_parameters = InnerFriParameters {
@@ -222,7 +221,11 @@ fn new_pcs(commitment_parameters: CommitmentParameters, fri_parameters: FriParam
         mmcs,
     };
     let dft = Dft::default();
-    Pcs::new(InnerPcs::new(dft, val_mmcs, inner_parameters), log_blowup)
+    Pcs::new(
+        InnerPcs::new(dft, val_mmcs, inner_parameters),
+        commitment_parameters,
+        fri_parameters,
+    )
 }
 
 #[cfg(test)]

@@ -161,7 +161,8 @@ impl BabyBearPoseidon2Config {
         };
         let pcs = Pcs::new(
             InnerPcs::new(Dft::default(), val_mmcs, inner_parameters),
-            commitment_parameters.log_blowup,
+            commitment_parameters,
+            fri_parameters,
         );
         let mut challenger_seed: Vec<Val> = b"multi-stark/v0"
             .iter()

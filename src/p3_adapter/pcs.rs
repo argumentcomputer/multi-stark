@@ -23,6 +23,7 @@ use p3_maybe_rayon::prelude::*;
 use p3_util::{log2_strict_usize, reverse_bits_len};
 
 use crate::traits::{EvaluationDomain, OpenedValues, Pcs, VerifyRounds};
+use crate::types::{CommitmentParameters, FriParameters};
 
 /// The p3 FRI PCS plus the two pieces of configuration the adapter needs
 /// that p3 keeps internal: the blowup (the quotient-degree budget) and a
@@ -30,20 +31,38 @@ use crate::traits::{EvaluationDomain, OpenedValues, Pcs, VerifyRounds};
 pub struct FriPcs<F, EF, Challenger, Dft, ValMmcs, ChallengeMmcs> {
     inner: TwoAdicFriPcs<F, Dft, ValMmcs, ChallengeMmcs>,
     dft: Dft,
-    log_blowup: usize,
+    /// The construction parameters, retained because p3 keeps them
+    /// private and downstream consumers (the Aiur verifying-key codec)
+    /// need to read them back. They are properties of the PCS — blowup,
+    /// Merkle cap, query count, PoW — so this is where they live.
+    commitment_parameters: CommitmentParameters,
+    fri_parameters: FriParameters,
     _marker: PhantomData<(EF, Challenger)>,
 }
 
 impl<F, EF, Challenger, Dft: Default, ValMmcs, ChallengeMmcs>
     FriPcs<F, EF, Challenger, Dft, ValMmcs, ChallengeMmcs>
 {
-    pub fn new(inner: TwoAdicFriPcs<F, Dft, ValMmcs, ChallengeMmcs>, log_blowup: usize) -> Self {
+    pub fn new(
+        inner: TwoAdicFriPcs<F, Dft, ValMmcs, ChallengeMmcs>,
+        commitment_parameters: CommitmentParameters,
+        fri_parameters: FriParameters,
+    ) -> Self {
         Self {
             inner,
             dft: Dft::default(),
-            log_blowup,
+            commitment_parameters,
+            fri_parameters,
             _marker: PhantomData,
         }
+    }
+
+    pub fn commitment_parameters(&self) -> CommitmentParameters {
+        self.commitment_parameters
+    }
+
+    pub fn fri_parameters(&self) -> FriParameters {
+        self.fri_parameters
     }
 }
 
@@ -81,7 +100,7 @@ where
     fn max_quotient_degree(&self) -> usize {
         // The LDE-subsetting economy: trace evaluations on the quotient
         // domain come for free only up to the blowup.
-        1 << self.log_blowup
+        1 << self.commitment_parameters.log_blowup
     }
 
     #[inline]
@@ -111,7 +130,11 @@ where
                     EvaluationDomain::first_point(&quotient_domain),
                     quotient_degree,
                 );
-                lde_from_shifted_coefficients(&self.dft, sliced, self.log_blowup)
+                lde_from_shifted_coefficients(
+                    &self.dft,
+                    sliced,
+                    self.commitment_parameters.log_blowup,
+                )
             })
             .collect();
         self.inner.commit_ldes(ldes)
