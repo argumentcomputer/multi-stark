@@ -92,6 +92,22 @@ impl MulAssign for Scalar {
     }
 }
 
+impl core::fmt::Display for Scalar {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Scalar {
+    /// Low 64 bits of the canonical value — exact for values < 2^64.
+    /// For Aiur-style consumers that only extract bytes/pointers/counters
+    /// (values small by construction).
+    pub fn canonical_low_u64(&self) -> u64 {
+        use ark_ff::PrimeField;
+        self.0.into_bigint().0[0]
+    }
+}
+
 impl Algebra<Self> for Scalar {
     const ZERO: Self = Self(<Fr as AdditiveGroup>::ZERO);
     const ONE: Self = Self(<Fr as ArkField>::ONE);
