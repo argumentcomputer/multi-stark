@@ -50,9 +50,10 @@ name = "multi_stark"
 harness = false
 
 [features]
-parallel = ["p3-maybe-rayon/parallel"]
+parallel = ["p3-maybe-rayon/parallel", "ark-ec?/parallel", "ark-poly?/parallel", "ark-ff?/parallel"]
 kzg = [
   "dep:ark-bls12-381",
+  "ark-ff/asm",
   "dep:ark-ec",
   "dep:ark-ff",
   "dep:ark-poly",

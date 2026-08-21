@@ -106,6 +106,21 @@ impl Scalar {
         use ark_ff::PrimeField;
         self.0.into_bigint().0[0]
     }
+
+    /// The canonical value as four little-endian 64-bit limbs.
+    pub fn canonical_limbs_le(&self) -> [u64; 4] {
+        use ark_ff::PrimeField;
+        self.0.into_bigint().0
+    }
+
+    /// The element with the given canonical little-endian limbs.
+    ///
+    /// # Panics
+    /// Panics if the limbs are not below the modulus.
+    pub fn from_limbs_le(limbs: [u64; 4]) -> Self {
+        use ark_ff::{BigInt, PrimeField};
+        Self(Fr::from_bigint(BigInt(limbs)).expect("limbs must be below the scalar modulus"))
+    }
 }
 
 impl Algebra<Self> for Scalar {
