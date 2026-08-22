@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Argument Engineering <engineering@argument.xyz>"]
 license = "MIT OR Apache-2.0"
-rust-version = "1.91"
+rust-version = "1.98"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -69,7 +69,6 @@ explicit_into_iter_loop = "warn"
 fallible_impl_from = "warn"
 filter_map_next = "warn"
 flat_map_option = "warn"
-from_iter_instead_of_collect = "warn"
 implicit_clone = "warn"
 inefficient_to_string = "warn"
 large_stack_arrays = "warn"
