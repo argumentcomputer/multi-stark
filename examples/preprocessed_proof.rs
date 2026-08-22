@@ -11,10 +11,10 @@
 //! cargo run --example preprocessed_proof --release
 //! ```
 
-use multi_stark::builder::symbolic::{SymbolicExpression, preprocessed_var, var};
-use multi_stark::lookup::{Lookup, LookupAir};
+use multi_stark::lookup::Lookup;
+use multi_stark::p3_adapter::{LookupAir, SymbolicExpression, preprocessed_var, var};
 use multi_stark::system::{System, SystemWitness};
-use multi_stark::types::{CommitmentParameters, FriParameters, Val};
+use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
 use multi_stark::{
     p3_air::{Air, AirBuilder, BaseAir, WindowAccess},
     p3_field::{Field, PrimeCharacteristicRing},
@@ -87,14 +87,23 @@ impl SquaresCS {
 }
 
 fn main() {
-    let commitment_parameters = CommitmentParameters {
-        log_blowup: 1,
-        cap_height: 0,
-    };
+    let config = GoldilocksBlake3Config::new(
+        CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        },
+        FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 64,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        },
+    );
 
     let range_table = LookupAir::new(SquaresCS::RangeTable, SquaresCS::RangeTable.lookups());
     let squares = LookupAir::new(SquaresCS::Squares, SquaresCS::Squares.lookups());
-    let (system, key) = System::new(commitment_parameters, [range_table, squares]);
+    let (system, key) = System::new(config, [range_table, squares]);
 
     // Build traces: square every value 0..16
     let n = 16u32;
@@ -117,19 +126,9 @@ fn main() {
     let squares_trace = RowMajorMatrix::new(sq_values, 5);
     let witness = SystemWitness::from_stage_1(vec![range_trace, squares_trace], &system);
 
-    let fri_parameters = FriParameters {
-        log_final_poly_len: 0,
-        max_log_arity: 1,
-        num_queries: 64,
-        commit_proof_of_work_bits: 0,
-        query_proof_of_work_bits: 0,
-    };
-
     let no_claims: &[&[Val]] = &[];
-    let proof = system.prove_multiple_claims(fri_parameters, &key, no_claims, witness);
-    system
-        .verify_multiple_claims(fri_parameters, no_claims, &proof)
-        .unwrap();
+    let proof = system.prove_multiple_claims(&key, no_claims, witness);
+    system.verify_multiple_claims(no_claims, &proof).unwrap();
     println!("Preprocessed proof verified successfully!");
 
     let bytes = proof.to_bytes().expect("serialization failed");

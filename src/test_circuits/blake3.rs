@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
-    use crate::builder::symbolic::{preprocessed_var, var};
-    use crate::lookup::{Lookup, LookupAir};
+    use crate::lookup::Lookup;
+    use crate::p3_adapter::{LookupAir, preprocessed_var, var};
     use crate::system::{System, SystemWitness};
     use crate::test_circuits::SymbExpr;
-    use crate::types::{CommitmentParameters, FriParameters, Val};
+    use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
     use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
     use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
     use p3_matrix::Matrix;
@@ -1515,8 +1515,8 @@ mod tests {
     impl Blake3CompressionClaims {
         fn witness(
             &self,
-            system: &System<Blake3CompressionCircuit>,
-        ) -> (Vec<RowMajorMatrix<Val>>, SystemWitness) {
+            system: &System<GoldilocksBlake3Config>,
+        ) -> (Vec<RowMajorMatrix<Val>>, SystemWitness<Val>) {
             // Grabbing values from a claims
 
             let mut u32_xor_values_from_claims = vec![];
@@ -2249,10 +2249,19 @@ mod tests {
         assert_eq!(actual, expected.to_vec());
 
         // circuit testing
-        let commitment_parameters = CommitmentParameters {
-            log_blowup: 1,
-            cap_height: 0,
-        };
+        let config = GoldilocksBlake3Config::new(
+            CommitmentParameters {
+                log_blowup: 1,
+                cap_height: 0,
+            },
+            FriParameters {
+                log_final_poly_len: 0,
+                max_log_arity: 1,
+                num_queries: 64,
+                commit_proof_of_work_bits: 0,
+                query_proof_of_work_bits: 0,
+            },
+        );
         let u8_circuit = LookupAir::new(
             Blake3CompressionCircuit::U8Xor,
             Blake3CompressionCircuit::U8Xor.lookups(),
@@ -2292,7 +2301,7 @@ mod tests {
         );
 
         let (system, prover_key) = System::new(
-            commitment_parameters,
+            config,
             vec![
                 u8_circuit,
                 u32_circuit,
@@ -2324,18 +2333,9 @@ mod tests {
         let claims_slice: Vec<&[Val]> = claims.claims.iter().map(|v| v.as_slice()).collect();
         let claims_slice: &[&[Val]] = &claims_slice;
 
-        let fri_parameters = FriParameters {
-            log_final_poly_len: 0,
-            max_log_arity: 1,
-            num_queries: 64,
-            commit_proof_of_work_bits: 0,
-            query_proof_of_work_bits: 0,
-        };
-
-        let proof =
-            system.prove_multiple_claims(fri_parameters, &prover_key, claims_slice, witness);
+        let proof = system.prove_multiple_claims(&prover_key, claims_slice, witness);
         system
-            .verify_multiple_claims(fri_parameters, claims_slice, &proof)
+            .verify_multiple_claims(claims_slice, &proof)
             .expect("verification issue");
     }
 
@@ -2437,10 +2437,19 @@ mod tests {
 
         fn run_test(claims: &Blake3CompressionClaims) {
             // circuit testing
-            let commitment_parameters = CommitmentParameters {
-                log_blowup: 1,
-                cap_height: 0,
-            };
+            let config = GoldilocksBlake3Config::new(
+                CommitmentParameters {
+                    log_blowup: 1,
+                    cap_height: 0,
+                },
+                FriParameters {
+                    log_final_poly_len: 0,
+                    max_log_arity: 1,
+                    num_queries: 64,
+                    commit_proof_of_work_bits: 0,
+                    query_proof_of_work_bits: 0,
+                },
+            );
             let u8_circuit = LookupAir::new(
                 Blake3CompressionCircuit::U8Xor,
                 Blake3CompressionCircuit::U8Xor.lookups(),
@@ -2480,7 +2489,7 @@ mod tests {
             );
 
             let (system, prover_key) = System::new(
-                commitment_parameters,
+                config,
                 vec![
                     u8_circuit,
                     u32_circuit,
@@ -2499,18 +2508,9 @@ mod tests {
             let claims_slice: Vec<&[Val]> = claims.claims.iter().map(|v| v.as_slice()).collect();
             let claims_slice: &[&[Val]] = &claims_slice;
 
-            let fri_parameters = FriParameters {
-                log_final_poly_len: 0,
-                max_log_arity: 1,
-                num_queries: 64,
-                commit_proof_of_work_bits: 0,
-                query_proof_of_work_bits: 0,
-            };
-
-            let proof =
-                system.prove_multiple_claims(fri_parameters, &prover_key, claims_slice, witness);
+            let proof = system.prove_multiple_claims(&prover_key, claims_slice, witness);
             system
-                .verify_multiple_claims(fri_parameters, claims_slice, &proof)
+                .verify_multiple_claims(claims_slice, &proof)
                 .expect("verification issue");
         }
 

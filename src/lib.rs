@@ -1,5 +1,9 @@
-pub mod builder;
+pub mod config;
+pub mod eval;
+pub mod expr;
+pub mod graph;
 pub mod lookup;
+pub mod p3_adapter;
 pub mod prover;
 pub mod system;
 #[cfg(test)]
@@ -16,7 +20,11 @@ pub use p3_matrix;
 macro_rules! ensure {
     ($condition:expr, $err:expr) => {
         if !$condition {
-            eprintln!("assertion failed on file {} line {}", file!(), line!());
+            tracing::debug!(
+                "verification check failed on file {} line {}",
+                file!(),
+                line!()
+            );
             return std::result::Result::Err($err.into());
         }
     };
@@ -27,15 +35,4 @@ macro_rules! ensure_eq {
     ($a:expr, $b:expr, $err:expr) => {
         $crate::ensure!(($a) == ($b), $err);
     };
-}
-
-#[macro_export]
-macro_rules! benchmark {
-    ($bench:expr, $msg:expr $(,$msg_args:expr)*) => {{
-        let now = std::time::Instant::now();
-        let result = std::hint::black_box($bench);
-        print!($msg $(,$msg_args)*);
-        println!("{:?}", now.elapsed());
-        result
-    }};
 }

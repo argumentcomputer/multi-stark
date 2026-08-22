@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Argument Engineering <engineering@argument.xyz>"]
 license = "MIT OR Apache-2.0"
-rust-version = "1.88"
+rust-version = "1.91"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+# Standalone package: don't get absorbed by an enclosing workspace checkout.
+[workspace]
 
 [dependencies]
 tracing = "0.1"
@@ -20,6 +23,7 @@ p3-dft = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5
 p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
 p3-fri = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
 p3-keccak = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
+p3-blake3 = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
 p3-matrix = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
 p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
 p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
@@ -28,6 +32,10 @@ p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b
 
 [dev-dependencies]
 criterion = "0.5"
+p3-baby-bear = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
+rand = "0.10"
+tracing-subscriber = "0.3"
+tracing-texray = { git = "https://github.com/argumentcomputer/tracing-texray", rev = "465bbca0bea4721e58419c11cabd8cce21757822" }
 
 [[bench]]
 name = "multi_stark"

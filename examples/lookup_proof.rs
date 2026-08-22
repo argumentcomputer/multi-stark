@@ -12,10 +12,10 @@
 //! cargo run --example lookup_proof --release
 //! ```
 
-use multi_stark::builder::symbolic::{SymbolicExpression, var};
-use multi_stark::lookup::{Lookup, LookupAir};
+use multi_stark::lookup::Lookup;
+use multi_stark::p3_adapter::{LookupAir, SymbolicExpression, var};
 use multi_stark::system::{System, SystemWitness};
-use multi_stark::types::{CommitmentParameters, FriParameters, Val};
+use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
 use multi_stark::{
     p3_air::{Air, AirBuilder, BaseAir, WindowAccess},
     p3_field::{Field, PrimeCharacteristicRing},
@@ -103,14 +103,23 @@ where
 }
 
 fn main() {
-    let commitment_parameters = CommitmentParameters {
-        log_blowup: 1,
-        cap_height: 0,
-    };
+    let config = GoldilocksBlake3Config::new(
+        CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        },
+        FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 64,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        },
+    );
 
     let even = LookupAir::new(ParityAir::Even, ParityAir::Even.lookups());
     let odd = LookupAir::new(ParityAir::Odd, ParityAir::Odd.lookups());
-    let (system, key) = System::new(commitment_parameters, [even, odd]);
+    let (system, key) = System::new(config, [even, odd]);
 
     let f = Val::from_u32;
     #[rustfmt::skip]
@@ -142,16 +151,9 @@ fn main() {
 
     // Claim: [even_index=0, input=4, expected_output=1] — is_even(4) should be 1
     let claim = &[f(0), f(4), f(1)];
-    let fri_parameters = FriParameters {
-        log_final_poly_len: 0,
-        max_log_arity: 1,
-        num_queries: 64,
-        commit_proof_of_work_bits: 0,
-        query_proof_of_work_bits: 0,
-    };
 
-    let proof = system.prove(fri_parameters, &key, claim, witness);
-    system.verify(fri_parameters, claim, &proof).unwrap();
+    let proof = system.prove(&key, claim, witness);
+    system.verify(claim, &proof).unwrap();
     println!("Lookup proof verified successfully!");
 
     let bytes = proof.to_bytes().expect("serialization failed");
