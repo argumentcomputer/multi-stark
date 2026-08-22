@@ -10,6 +10,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+# Fail every cargo invocation on warnings from workspace-local packages
+# (cargo's build.warnings, stable since 1.97). CI-only: local builds
+# still just warn.
+env:
+  CARGO_BUILD_WARNINGS: deny
+
 jobs:
   linux-test:
     # Change to warp-ubuntu-latest-x64-16x for a more powerful runner (GitHub App must be enabled for this repo)
@@ -42,7 +48,7 @@ jobs:
       - name: Check *everything* compiles
         run: cargo check --all-targets --all-features --workspace
       - name: Check clippy lints
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features
       - name: Doctests
         run: cargo test --doc --workspace
       - name: Get Rust version
