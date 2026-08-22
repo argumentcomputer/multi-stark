@@ -5,7 +5,7 @@
 //! [`crate::prover`] and [`crate::verifier`]; this module only provides a
 //! concrete, batteries-included instantiation.
 
-use crate::config::StarkGenericConfig;
+use crate::config::ProofConfig;
 use p3_blake3::Blake3;
 use p3_challenger::{
     CanObserve, CanSample, CanSampleBits, FieldChallenger, GrindingChallenger, HashChallenger,
@@ -82,16 +82,18 @@ impl<C: GrindingChallenger> GrindingChallenger for DeterministicPow<C> {
 pub type Mmcs =
     MerkleTreeMmcs<Val, u8, SerializingHasher<Blake3>, Blake3CompressionFunction, 2, 32>;
 pub type ExtMmcs = ExtensionMmcs<Val, ExtVal, Mmcs>;
-pub type Pcs = TwoAdicFriPcs<Val, Dft, Mmcs, ExtMmcs>;
+pub type InnerPcs = TwoAdicFriPcs<Val, Dft, Mmcs, ExtMmcs>;
+pub type Pcs = crate::p3_adapter::pcs::FriPcs<Val, ExtVal, Challenger, Dft, Mmcs, ExtMmcs>;
 
-pub type Commitment = <Pcs as PcsTrait<ExtVal, Challenger>>::Commitment;
-pub type Domain = <Pcs as PcsTrait<ExtVal, Challenger>>::Domain;
-pub type ProverData = <Pcs as PcsTrait<ExtVal, Challenger>>::ProverData;
-pub type EvaluationsOnDomain<'a> = <Pcs as PcsTrait<ExtVal, Challenger>>::EvaluationsOnDomain<'a>;
-pub type PcsError = <Pcs as PcsTrait<ExtVal, Challenger>>::Error;
-pub type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
+pub type Commitment = <InnerPcs as PcsTrait<ExtVal, Challenger>>::Commitment;
+pub type Domain = <InnerPcs as PcsTrait<ExtVal, Challenger>>::Domain;
+pub type ProverData = <InnerPcs as PcsTrait<ExtVal, Challenger>>::ProverData;
+pub type EvaluationsOnDomain<'a> =
+    <InnerPcs as PcsTrait<ExtVal, Challenger>>::EvaluationsOnDomain<'a>;
+pub type PcsError = <InnerPcs as PcsTrait<ExtVal, Challenger>>::Error;
+pub type PcsProof = <InnerPcs as PcsTrait<ExtVal, Challenger>>::Proof;
 
-/// The reference [`StarkGenericConfig`] implementation.
+/// The reference [`ProofConfig`] implementation.
 pub struct GoldilocksBlake3Config {
     /// The PCS used to commit polynomials and prove opening proofs.
     pcs: Pcs,
@@ -114,7 +116,7 @@ impl GoldilocksBlake3Config {
         // followed by every protocol parameter. Binding the parameters into
         // the seed means transcripts produced under different parameters
         // never collide (see the transcript contract on
-        // [`StarkGenericConfig::initialise_challenger`]).
+        // [`ProofConfig::initialise_challenger`]).
         let mut challenger_seed = b"multi-stark/v0".to_vec();
         for parameter in [
             commitment_parameters.log_blowup,
@@ -140,7 +142,7 @@ impl GoldilocksBlake3Config {
     }
 }
 
-impl StarkGenericConfig for GoldilocksBlake3Config {
+impl ProofConfig for GoldilocksBlake3Config {
     type Pcs = Pcs;
     type Challenge = ExtVal;
     type Challenger = Challenger;
@@ -219,7 +221,11 @@ fn new_pcs(commitment_parameters: CommitmentParameters, fri_parameters: FriParam
         mmcs,
     };
     let dft = Dft::default();
-    Pcs::new(dft, val_mmcs, inner_parameters)
+    Pcs::new(
+        InnerPcs::new(dft, val_mmcs, inner_parameters),
+        commitment_parameters,
+        fri_parameters,
+    )
 }
 
 #[cfg(test)]

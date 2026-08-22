@@ -22,7 +22,14 @@ use std::marker::PhantomData;
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use p3_air::{Air, AirBuilder, WindowAccess};
-use p3_field::{Algebra, Dup, Field, PrimeCharacteristicRing};
+use p3_field::{Algebra, Dup, Field as P3Field, PrimeCharacteristicRing};
+
+/// Both field layers as one bound: this module turns p3-air expressions
+/// (p3 arithmetic) into core `CircuitInputs` (crate `Field` bounds), so
+/// its generics need both. Public because the frontend entry points
+/// (`var`, `LookupAir`, `circuit_inputs_from_air`) carry it.
+pub trait Field: P3Field + crate::traits::Field {}
+impl<T: P3Field + crate::traits::Field> Field for T {}
 
 use crate::expr::{Expr, RowOffset, Source};
 use crate::lookup::Lookup;
@@ -99,7 +106,7 @@ impl<F: Field> Dup for P3Expr<F> {
 
 impl<F: Field> Default for P3Expr<F> {
     fn default() -> Self {
-        Self(Expr::Const(F::ZERO))
+        Self(Expr::Const(<F as PrimeCharacteristicRing>::ZERO))
     }
 }
 
@@ -172,8 +179,8 @@ impl<F: Field, T: Into<Self>> Product<T> for P3Expr<F> {
 impl<F: Field> PrimeCharacteristicRing for P3Expr<F> {
     type PrimeSubfield = F::PrimeSubfield;
 
-    const ZERO: Self = Self(Expr::Const(F::ZERO));
-    const ONE: Self = Self(Expr::Const(F::ONE));
+    const ZERO: Self = Self(Expr::Const(<F as PrimeCharacteristicRing>::ZERO));
+    const ONE: Self = Self(Expr::Const(<F as PrimeCharacteristicRing>::ONE));
     const TWO: Self = Self(Expr::Const(F::TWO));
     const NEG_ONE: Self = Self(Expr::Const(F::NEG_ONE));
 

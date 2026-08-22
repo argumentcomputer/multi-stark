@@ -1,4 +1,4 @@
-//! A second [`StarkGenericConfig`] instantiation — BabyBear field with a
+//! A second [`ProofConfig`] instantiation — BabyBear field with a
 //! degree-4 binomial extension and Poseidon2 hashing — differing from the
 //! reference Goldilocks/Keccak config in both the field and the hash axes.
 //!
@@ -6,7 +6,7 @@
 //! change compiles only for the reference config, the smoke test here
 //! catches it.
 
-use crate::config::StarkGenericConfig;
+use crate::config::ProofConfig;
 use crate::lookup::Lookup;
 use crate::p3_adapter::{LookupAir, SymbolicExpression, var};
 use crate::system::{System, SystemWitness};
@@ -35,14 +35,107 @@ type Challenge = BinomialExtensionField<Val, 4>;
 type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
 type Challenger = DuplexChallenger<Val, Perm, 16, 8>;
 type Dft = Radix2DitParallel<Val>;
-type Pcs = TwoAdicFriPcs<Val, Dft, ValMmcs, ChallengeMmcs>;
+type InnerPcs = TwoAdicFriPcs<Val, Dft, ValMmcs, ChallengeMmcs>;
+type Pcs = crate::p3_adapter::pcs::FriPcs<Val, Challenge, Challenger, Dft, ValMmcs, ChallengeMmcs>;
+type Com = <InnerPcs as p3_commit::Pcs<Challenge, Challenger>>::Commitment;
+type Domain = p3_field::coset::TwoAdicMultiplicativeCoset<Val>;
+
+// Crate field-trait instantiations for the BabyBear stack.
+use crate::p3_adapter::field::{impl_extension_via_p3, impl_field_via_p3, impl_two_adic_via_p3};
+impl_field_via_p3!(Val);
+impl_two_adic_via_p3!(Val);
+impl_field_via_p3!(Challenge);
+impl_extension_via_p3!(Val, Challenge, 4);
+
+impl crate::traits::EvaluationDomain for Domain {
+    type F = Val;
+    type Challenge = Challenge;
+
+    #[inline]
+    fn size(&self) -> usize {
+        p3_commit::PolynomialSpace::size(self)
+    }
+
+    #[inline]
+    fn first_point(&self) -> Val {
+        p3_commit::PolynomialSpace::first_point(self)
+    }
+
+    #[inline]
+    fn next_point(&self, x: Challenge) -> Challenge {
+        p3_commit::PolynomialSpace::next_point(self, x).expect("two-adic domain has a next point")
+    }
+
+    #[inline]
+    fn create_disjoint_domain(&self, min_size: usize) -> Self {
+        p3_commit::PolynomialSpace::create_disjoint_domain(self, min_size)
+    }
+
+    #[inline]
+    fn selectors_at_point(&self, point: Challenge) -> crate::traits::LagrangeSelectors<Challenge> {
+        let s = p3_commit::PolynomialSpace::selectors_at_point(self, point);
+        crate::traits::LagrangeSelectors {
+            is_first_row: s.is_first_row,
+            is_last_row: s.is_last_row,
+            is_transition: s.is_transition,
+            inv_vanishing: s.inv_vanishing,
+        }
+    }
+
+    #[inline]
+    fn selectors_on_coset(&self, coset: Self) -> crate::traits::LagrangeSelectors<Vec<Val>> {
+        let s = p3_commit::PolynomialSpace::selectors_on_coset(self, coset);
+        crate::traits::LagrangeSelectors {
+            is_first_row: s.is_first_row,
+            is_last_row: s.is_last_row,
+            is_transition: s.is_transition,
+            inv_vanishing: s.inv_vanishing,
+        }
+    }
+}
+
+// Second `MsChallenger` instantiation — the whole point of this config:
+// prove the crate-owned transcript trait is generic across field/hash
+// choices, not shaped around the reference challenger.
+impl crate::traits::Transcript for Challenger {
+    type F = Val;
+    type Challenge = Challenge;
+    type Commitment = Com;
+
+    #[inline]
+    fn observe_field(&mut self, x: Val) {
+        self.observe(x);
+    }
+
+    #[inline]
+    fn observe_field_slice(&mut self, xs: &[Val]) {
+        self.observe_slice(xs);
+    }
+
+    #[inline]
+    fn observe_challenge(&mut self, x: Challenge) {
+        use p3_challenger::FieldChallenger;
+        self.observe_algebra_element(x);
+    }
+
+    #[inline]
+    fn observe_commitment(&mut self, c: Com) {
+        self.observe(c);
+    }
+
+    #[inline]
+    fn sample_challenge(&mut self) -> Challenge {
+        use p3_challenger::FieldChallenger;
+        self.sample_algebra_element()
+    }
+}
 
 struct BabyBearPoseidon2Config {
     pcs: Pcs,
     perm: Perm,
     /// Field elements observed into every fresh challenger: a domain tag
     /// plus a digest of the protocol parameters (see the transcript contract
-    /// on [`StarkGenericConfig::initialise_challenger`]).
+    /// on [`ProofConfig::initialise_challenger`]).
     challenger_seed: Vec<Val>,
     max_log_degree: usize,
     max_quotient_degree: usize,
@@ -66,7 +159,11 @@ impl BabyBearPoseidon2Config {
             query_proof_of_work_bits: fri_parameters.query_proof_of_work_bits,
             mmcs: challenge_mmcs,
         };
-        let pcs = Pcs::new(Dft::default(), val_mmcs, inner_parameters);
+        let pcs = Pcs::new(
+            InnerPcs::new(Dft::default(), val_mmcs, inner_parameters),
+            commitment_parameters,
+            fri_parameters,
+        );
         let mut challenger_seed: Vec<Val> = b"multi-stark/v0"
             .iter()
             .map(|&byte| Val::from_u8(byte))
@@ -96,7 +193,7 @@ impl BabyBearPoseidon2Config {
     }
 }
 
-impl StarkGenericConfig for BabyBearPoseidon2Config {
+impl ProofConfig for BabyBearPoseidon2Config {
     type Pcs = Pcs;
     type Challenge = Challenge;
     type Challenger = Challenger;

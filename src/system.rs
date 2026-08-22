@@ -9,18 +9,17 @@
 //! ([`crate::lookup::logup_constraint_values`]), folding their values after
 //! the user roots.
 
-use p3_challenger::CanObserve;
-use p3_commit::{Pcs, PolynomialSpace};
-use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
+use crate::traits::{ExtensionOf, Field};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
-use crate::config::{Com, PcsData, StarkGenericConfig, Val};
+use crate::config::{Com, PcsData, ProofConfig, Val};
 use crate::lookup::LookupValues;
 
 use crate::eval::VarValues;
 use crate::expr::{CircuitSpec, Expr, ExtExpr};
 use crate::graph::{ConstraintGraph, ExtensionParams, compile};
 use crate::lookup::{Lookup, logup_constraint_count, logup_max_degree, num_publics, stage2_width};
+use crate::traits::{Pcs, Transcript};
 
 /// User-facing definition of one circuit: main-trace width, optional
 /// preprocessed trace, base and extension constraints, and lookups. The
@@ -101,7 +100,7 @@ impl<F: Field> Circuit<F> {
 /// A multi-circuit STARK system over compiled constraint circuits. Contains
 /// all circuits together with their shared preprocessed commitment and the
 /// protocol configuration.
-pub struct System<SC: StarkGenericConfig> {
+pub struct System<SC: ProofConfig> {
     pub config: SC,
     pub circuits: Vec<Circuit<Val<SC>>>,
     /// Commitment to all preprocessed traces (if any circuit has one).
@@ -112,12 +111,12 @@ pub struct System<SC: StarkGenericConfig> {
 }
 
 /// Prover-side data retained between system setup and proving.
-pub struct ProverKey<SC: StarkGenericConfig> {
+pub struct ProverKey<SC: ProofConfig> {
     /// PCS prover data for the preprocessed traces.
     pub preprocessed_data: Option<PcsData<SC>>,
 }
 
-impl<SC: StarkGenericConfig> System<SC> {
+impl<SC: ProofConfig> System<SC> {
     /// Builds the system from per-circuit inputs.
     ///
     /// # Panics
@@ -227,9 +226,9 @@ impl<SC: StarkGenericConfig> System<SC> {
     /// commitment, so that transcripts of systems with different circuit
     /// shapes never collide. The protocol parameters are bound separately,
     /// via the challenger seed (see
-    /// [`StarkGenericConfig::initialise_challenger`]).
+    /// [`ProofConfig::initialise_challenger`]).
     pub fn observe_shape(&self, challenger: &mut SC::Challenger) {
-        let mut observe = |x: usize| challenger.observe(Val::<SC>::from_usize(x));
+        let mut observe = |x: usize| challenger.observe_field(Val::<SC>::from_usize(x));
         observe(self.circuits.len());
         for circuit in &self.circuits {
             observe(circuit.constraint_count());
@@ -266,8 +265,8 @@ impl<F: Field> SystemWitness<F> {
     /// heights must match; the rows would otherwise be silently truncated).
     pub fn from_stage_1<SC>(traces: Vec<RowMajorMatrix<F>>, system: &System<SC>) -> Self
     where
-        SC: StarkGenericConfig,
-        SC::Pcs: Pcs<SC::Challenge, SC::Challenger, Domain: PolynomialSpace<Val = F>>,
+        SC: ProofConfig,
+        SC::Pcs: Pcs<F = F>,
     {
         assert_eq!(
             traces.len(),
@@ -350,23 +349,13 @@ fn compute_lookup_values<F: Field>(
     builder.finish()
 }
 
-/// Extracts the binomial extension parameters of the challenge field
-/// generically: the degree is `Challenge::DIMENSION`, and the modulus
-/// constant `W` (with `X^D = W`) is recovered by evaluating `X^D` and
-/// reading its base coordinate — no dependence on a concrete field type.
-pub(crate) fn extension_params<SC: StarkGenericConfig>() -> ExtensionParams<Val<SC>> {
-    let d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
-    let x = <SC::Challenge as BasedVectorSpace<Val<SC>>>::ith_basis_element(1)
-        .expect("challenge field must have extension degree >= 2");
-    let x_pow_d = x.powers().nth(d).expect("powers iterator is infinite");
-    let coords = x_pow_d.as_basis_coefficients_slice();
-    debug_assert!(
-        coords[1..].iter().all(|c| c.is_zero()),
-        "challenge field is not a binomial extension: X^D is not a base element"
-    );
+/// The binomial extension parameters of the challenge field, read off
+/// the `ExtensionOf` constants (`X^D = W`; `W` is unused when `D = 1`).
+pub(crate) fn extension_params<SC: ProofConfig>() -> ExtensionParams<Val<SC>> {
+    let d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
     ExtensionParams {
         degree: d,
-        w: coords[0],
+        w: <SC::Challenge as ExtensionOf<Val<SC>>>::W,
         karatsuba: d == 2,
     }
 }
@@ -485,7 +474,8 @@ mod tests {
         let (system, _key) = System::new(config, [LookupAir::new(Preprocessed, vec![])]);
         // The main trace has 8 rows but the preprocessed trace has 4. This
         // must panic instead of silently truncating the lookup rows.
-        let trace = RowMajorMatrix::new(vec![Val::ZERO; 8], 1);
+        let trace =
+            RowMajorMatrix::new(vec![<Val as p3_field::PrimeCharacteristicRing>::ZERO; 8], 1);
         SystemWitness::from_stage_1(vec![trace], &system);
     }
 }

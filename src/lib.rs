@@ -1,3 +1,5 @@
+#[cfg(feature = "kzg")]
+pub mod ark_adapter;
 pub mod config;
 pub mod eval;
 pub mod expr;
@@ -8,6 +10,7 @@ pub mod prover;
 pub mod system;
 #[cfg(test)]
 mod test_circuits;
+pub mod traits;
 pub mod types;
 pub mod verifier;
 

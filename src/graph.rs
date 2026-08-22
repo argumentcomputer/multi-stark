@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use p3_field::Field;
+use crate::traits::Field;
 
 use crate::expr::{CircuitSpec, ColRef, Expr, ExtExpr, Source};
 use crate::lookup::Lookup;
