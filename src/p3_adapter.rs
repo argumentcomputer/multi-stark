@@ -258,6 +258,9 @@ impl<F: Field> AirBuilder for P3AirBuilder<F> {
     // Public inputs are reserved for the lookup argument in this system, so
     // the builder exposes none (the default `public_values()` is empty).
     type PublicVar = P3Var<F>;
+    // Periodic columns are not supported; the default `periodic_values()`
+    // is empty.
+    type PeriodicVar = P3Var<F>;
 
     fn main(&self) -> Self::MainWindow {
         self.main.clone()
@@ -273,6 +276,10 @@ impl<F: Field> AirBuilder for P3AirBuilder<F> {
 
     fn is_last_row(&self) -> Self::Expr {
         P3Expr(Expr::IsLastRow)
+    }
+
+    fn is_transition(&self) -> Self::Expr {
+        P3Expr(Expr::IsTransition)
     }
 
     /// # Panics

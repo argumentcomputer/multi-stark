@@ -7,15 +7,10 @@
 
 use crate::config::StarkGenericConfig;
 use p3_blake3::Blake3;
-use p3_challenger::{
-    CanObserve, CanSample, CanSampleBits, FieldChallenger, GrindingChallenger, HashChallenger,
-    SerializingChallenger64,
-};
+use p3_challenger::{HashChallenger, SerializingChallenger64};
 use p3_commit::{ExtensionMmcs, Pcs as PcsTrait};
 use p3_dft::Radix2DitParallel;
-use p3_field::{
-    ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField, extension::BinomialExtensionField,
-};
+use p3_field::{ExtensionField, Field, TwoAdicField, extension::BinomialExtensionField};
 use p3_fri::{FriParameters as InnerFriParameters, TwoAdicFriPcs};
 use p3_goldilocks::Goldilocks;
 use p3_merkle_tree::MerkleTreeMmcs;
@@ -25,60 +20,7 @@ pub type Val = Goldilocks;
 pub type PackedVal = <Val as Field>::Packing;
 pub type ExtVal = BinomialExtensionField<Val, 2>;
 pub type PackedExtVal = <ExtVal as ExtensionField<Val>>::ExtensionPacking;
-pub type Challenger =
-    DeterministicPow<SerializingChallenger64<Val, HashChallenger<u8, Blake3, 32>>>;
-
-/// Forwarding challenger wrapper that makes zero-bit proof-of-work
-/// deterministic.
-///
-/// p3's `SerializingChallenger64::grind` races `find_any` over every
-/// candidate witness even at 0 bits — where EVERY candidate passes — so the
-/// returned witness is whichever a rayon thread reports first: a
-/// thread-race-dependent value that lands in the proof bytes and makes
-/// zero-PoW proofs nondeterministic run to run. (The duplex challenger
-/// special-cases this; the serializing one doesn't.) Zero bits mean any
-/// witness verifies, so return the canonical ZERO; positive bit counts
-/// delegate to the inner grind unchanged. Transcript semantics are
-/// untouched — `check_witness` at 0 bits observes nothing on either side.
-#[derive(Clone, Debug)]
-pub struct DeterministicPow<C>(pub C);
-
-impl Challenger {
-    pub fn from_hasher(initial_state: Vec<u8>, hasher: Blake3) -> Self {
-        Self(SerializingChallenger64::from_hasher(initial_state, hasher))
-    }
-}
-
-impl<T, C: CanObserve<T>> CanObserve<T> for DeterministicPow<C> {
-    fn observe(&mut self, value: T) {
-        self.0.observe(value);
-    }
-}
-
-impl<T, C: CanSample<T>> CanSample<T> for DeterministicPow<C> {
-    fn sample(&mut self) -> T {
-        self.0.sample()
-    }
-}
-
-impl<C: CanSampleBits<usize>> CanSampleBits<usize> for DeterministicPow<C> {
-    fn sample_bits(&mut self, bits: usize) -> usize {
-        self.0.sample_bits(bits)
-    }
-}
-
-impl<F: Field, C: FieldChallenger<F>> FieldChallenger<F> for DeterministicPow<C> {}
-
-impl<C: GrindingChallenger> GrindingChallenger for DeterministicPow<C> {
-    type Witness = C::Witness;
-
-    fn grind(&mut self, bits: usize) -> Self::Witness {
-        if bits == 0 {
-            return Self::Witness::ZERO;
-        }
-        self.0.grind(bits)
-    }
-}
+pub type Challenger = SerializingChallenger64<Val, HashChallenger<u8, Blake3, 32>>;
 pub type Mmcs =
     MerkleTreeMmcs<Val, u8, SerializingHasher<Blake3>, Blake3CompressionFunction, 2, 32>;
 pub type ExtMmcs = ExtensionMmcs<Val, ExtVal, Mmcs>;

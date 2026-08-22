@@ -184,10 +184,10 @@ impl<SC: StarkGenericConfig> System<SC> {
                 max_constraint_degree,
             };
             // The prover obtains trace evaluations on the quotient domain
-            // from the PCS, which can only serve domains up to
-            // `max_quotient_degree` times the trace domain (the blowup
-            // factor for FRI). Beyond that, proving would silently produce
-            // invalid proofs, so reject the circuit upfront.
+            // from the PCS, which serves domains up to `max_quotient_degree`
+            // times the trace domain (the FRI blowup) by cheap truncation of
+            // the committed LDE; larger domains hit a coefficient-recovery
+            // fallback. Reject the circuit upfront rather than pay it.
             assert!(
                 circuit.quotient_degree() <= config.max_quotient_degree(),
                 "circuit {i}: constraint degree {} needs quotient degree {}, but the PCS only \
@@ -420,10 +420,9 @@ mod tests {
         }
     }
 
-    /// The prover can only evaluate constraints on a domain `2^log_blowup`
-    /// times the trace domain, so the constraint degree is bounded by
-    /// `2^log_blowup + 1` (degree 3 at `log_blowup = 1`). Exceeding it used
-    /// to silently produce invalid proofs; it must be rejected at setup.
+    /// The reference config caps the quotient degree at the FRI blowup, so
+    /// the constraint degree is bounded by `2^log_blowup + 1` (degree 3 at
+    /// `log_blowup = 1`); circuits exceeding it are rejected at setup.
     #[test]
     #[should_panic(expected = "needs quotient degree 4, but the PCS only supports 2")]
     fn excessive_constraint_degree_rejected() {
