@@ -131,7 +131,11 @@ pub(crate) fn compile<F: Field>(
             .iter()
             .map(|arg| interner.compile_expr(arg, spec, false))
             .collect::<Result<Vec<_>, _>>()?;
-        lookups.push(Lookup { multiplicity, args });
+        lookups.push(Lookup {
+            multiplicity,
+            args,
+            max_multiplicity: lookup.max_multiplicity,
+        });
     }
     let lookup_prefix_len = interner.nodes.len();
 

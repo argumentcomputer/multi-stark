@@ -15,6 +15,7 @@ rust-version = "1.91"
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }
+num-bigint = "0.4"
 p3-air = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
 p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }
 p3-challenger = { git = "https://github.com/Plonky3/Plonky3", rev = "e9d75614dd6816f9b5dbb4413c69be63536efd64" }

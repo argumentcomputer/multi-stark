@@ -312,6 +312,7 @@ impl<F: Field, A: Air<P3AirBuilder<F>>> From<LookupAir<A, F>> for CircuitInputs<
             .map(|lookup| Lookup {
                 multiplicity: lookup.multiplicity.0,
                 args: lookup.args.into_iter().map(|arg| arg.0).collect(),
+                max_multiplicity: lookup.max_multiplicity,
             })
             .collect();
         inputs

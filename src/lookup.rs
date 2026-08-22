@@ -44,6 +44,12 @@
 //! and degree budget to spare, others don't), bounded by
 //! [`MAX_LOOKUP_GROUP`] so the evaluator's scratch space stays on the
 //! stack.
+//!
+//! If any message in a group evaluates to zero, the multiplied-through
+//! identity degenerates: the `acc′ − acc` factor is annihilated and the
+//! step no longer constrains the accumulator on that row. Over the random
+//! challenges this is a negligible-probability event, accounted for in the
+//! verifier's soundness bound (see the verifier module docs).
 
 use p3_field::{
     Algebra, ExtensionField, Field, PrimeCharacteristicRing, batch_multiplicative_inverse,
@@ -60,6 +66,15 @@ use crate::expr::{Expr, ExtExpr, RowOffset};
 pub struct Lookup<E> {
     pub multiplicity: E,
     pub args: Vec<E>,
+    /// Per-row bound on the multiplicity's magnitude as a signed integer:
+    /// the circuit must guarantee — by construction or by constraints —
+    /// that on every row the multiplicity evaluates to an integer in
+    /// `[-w, w]`. The prover and verifier enforce the logUp height bound
+    /// `Σ wᵢ·hᵢ + |claims| < p` over all slots (see
+    /// `multiplicity_height_bound_holds`), which makes the accumulator's
+    /// field-level cancellation imply exact integer multiset balance: no
+    /// per-message count can wrap modulo the field characteristic.
+    pub max_multiplicity: u64,
 }
 
 impl<E> Lookup<E> {
@@ -72,16 +87,29 @@ impl<E> Lookup<E> {
         Self {
             multiplicity: E::ZERO,
             args: vec![],
+            max_multiplicity: 0,
         }
     }
 
     /// "Pushing" has the semantics of adding a claim to the claim set.
+    ///
+    /// The per-row multiplicity bound defaults to 1: the multiplicity must
+    /// evaluate to 0 or ±1 on every row. Lookups whose multiplicity can be
+    /// larger (e.g. a committed count column) must declare their bound via
+    /// [`Self::with_max_multiplicity`].
     #[inline]
     pub fn push(multiplicity: E, args: Vec<E>) -> Self {
-        Self { multiplicity, args }
+        Self {
+            multiplicity,
+            args,
+            max_multiplicity: 1,
+        }
     }
 
     /// "Pulling" has the semantics of removing a claim from the claim set.
+    ///
+    /// The per-row multiplicity bound defaults to 1, exactly as for
+    /// [`Self::push`].
     #[inline]
     pub fn pull(multiplicity: E, args: Vec<E>) -> Self
     where
@@ -90,7 +118,16 @@ impl<E> Lookup<E> {
         Self {
             multiplicity: -multiplicity,
             args,
+            max_multiplicity: 1,
         }
+    }
+
+    /// Declares the per-row multiplicity bound (see
+    /// [`Self::max_multiplicity`]).
+    #[inline]
+    pub fn with_max_multiplicity(mut self, max_multiplicity: u64) -> Self {
+        self.max_multiplicity = max_multiplicity;
+        self
     }
 }
 
@@ -228,7 +265,9 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
             let mut msgs = [(A::ZERO, A::ZERO); MAX_LOOKUP_GROUP];
             let s_len = chunk.len();
             for (j, lookup) in chunk.iter().enumerate() {
-                let mut f = (A::ZERO, A::ZERO);
+                // Seed the Horner fold with the argument count so the width
+                // is bound into the fingerprint (see `message_fingerprint`).
+                let mut f = (A::from(F::from_usize(lookup.args.len())), A::ZERO);
                 for &arg in lookup.args.iter().rev() {
                     f = mul2(f, gamma, w);
                     f.0 += nv(arg);
@@ -316,6 +355,8 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
             .iter()
             .map(|lookup| {
                 let mut fingerprint = vec![A::ZERO; d];
+                // Width-bound Horner seed, mirroring the fast path.
+                fingerprint[0] = A::from(F::from_usize(lookup.args.len()));
                 for &arg in lookup.args.iter().rev() {
                     fingerprint = coord_mul(&fingerprint, gamma, w);
                     fingerprint[0] += node_vals[arg.index()];
@@ -473,13 +514,13 @@ pub fn synthesize_lookups<F: Field>(
         let messages: Vec<ExtExpr<F>> = chunk
             .iter()
             .map(|lookup| {
-                // fingerprint = Σ_i args[i] · γ^i, Horner over reversed args.
-                let mut coeffs = lookup.args.iter().rev();
-                let mut fingerprint = match coeffs.next() {
-                    Some(arg) => ExtExpr::from(arg.clone()),
-                    None => ExtExpr::from(Expr::constant(F::ZERO)),
-                };
-                for arg in coeffs {
+                // fingerprint = Σ_i args[i] · γ^i + W·γ^W: Horner over
+                // reversed args, seeded with the width W = args.len() so
+                // messages of different widths can never alias (see
+                // `message_fingerprint`).
+                let mut fingerprint =
+                    ExtExpr::from(Expr::constant(F::from_usize(lookup.args.len())));
+                for arg in lookup.args.iter().rev() {
                     fingerprint = fingerprint * gamma.clone() + arg.clone();
                 }
                 beta.clone() + fingerprint
@@ -521,6 +562,63 @@ where
     coeffs
         .rev()
         .fold(F::ZERO, |acc, coeff| acc * r.clone() + coeff.into())
+}
+
+/// The protocol's message fingerprint: Horner over the arguments with the
+/// argument count appended as the highest coefficient,
+/// `Σ_i args[i]·γ^i + W·γ^W` with `W = args.len()`.
+///
+/// Binding the width makes messages of different widths distinct as
+/// polynomials in γ (their leading coefficients sit at different powers), so
+/// a shorter tuple can never systematically alias a longer one whose high
+/// arguments happen to be zero. Zero-padding rows up to their slot's width
+/// remains transparent: the slot width, not the per-row argument count, is
+/// what is bound.
+#[inline]
+pub(crate) fn message_fingerprint<F, EF>(r: &EF, coeffs: &[F]) -> EF
+where
+    F: PrimeCharacteristicRing + Copy + Into<EF>,
+    EF: PrimeCharacteristicRing,
+{
+    fingerprint(
+        r,
+        coeffs.iter().copied().chain([F::from_usize(coeffs.len())]),
+    )
+}
+
+/// Whether the logUp multiplicity height bound `Σᵢ wᵢ·hᵢ + C < p` holds,
+/// where the sum ranges over the lookup slots of every circuit (`wᵢ` the
+/// slot's declared per-row bound [`Lookup::max_multiplicity`], `hᵢ` its
+/// circuit's trace height) and `C` is the number of public claims (each
+/// claim enters the channel with multiplicity 1).
+///
+/// LogUp cancellation is arithmetic modulo the field characteristic: if the
+/// total integer weight aimed at a single message could reach `p`, a count
+/// could wrap and a prover could forge multiplicities. Keeping the
+/// system-wide weight below `p` makes field-level accumulator balance imply
+/// exact integer multiset balance — provided each circuit actually
+/// constrains its multiplicities to the declared bounds, which is the
+/// circuit author's contract.
+///
+/// `per_circuit` yields `(Σ_slots max_multiplicity, height)` pairs. Assumes
+/// the base field is a prime field, so [`Field::order`] equals its
+/// characteristic (true of every supported configuration). A total that
+/// overflows `u128` is rejected conservatively.
+pub(crate) fn multiplicity_height_bound_holds<F: Field>(
+    per_circuit: impl IntoIterator<Item = (u128, usize)>,
+    num_claims: usize,
+) -> bool {
+    let mut total = num_claims as u128;
+    for (weight, height) in per_circuit {
+        let Some(contribution) = weight.checked_mul(height as u128) else {
+            return false;
+        };
+        let Some(sum) = total.checked_add(contribution) else {
+            return false;
+        };
+        total = sum;
+    }
+    num_bigint::BigUint::from(total) < F::order()
 }
 
 /// Concrete lookup values of one circuit, stored flat.
@@ -630,7 +728,7 @@ impl<F: Field> LookupValues<F> {
                     .map(|idx| {
                         let (row, lookup) = (idx / circuit.num_lookups, idx % circuit.num_lookups);
                         let args = circuit.args_at(row, lookup);
-                        lookup_challenge + fingerprint(fingerprint_challenge, args.iter().cloned())
+                        lookup_challenge + message_fingerprint(fingerprint_challenge, args)
                     })
                     .collect::<Vec<_>>(),
             );
@@ -931,6 +1029,7 @@ mod tests {
             Lookup {
                 multiplicity: Expr::constant(Val::ONE),
                 args: vec![],
+                max_multiplicity: 1,
             },
         ];
         // Cover the ungrouped argument, an uneven grouping (3 lookups in
@@ -989,6 +1088,7 @@ mod tests {
                 .map(|l| Lookup {
                     multiplicity: fresh(eval_expr(&l.multiplicity, &view)),
                     args: l.args.iter().map(|a| fresh(eval_expr(a, &view))).collect(),
+                    max_multiplicity: l.max_multiplicity,
                 })
                 .collect();
             // The reference spec expresses the injection as
@@ -1283,5 +1383,37 @@ mod tests {
         let split_claims: &[&[Val]] = &[&[f(0), f(4)], &[f(1)]];
         let result = system.verify_multiple_claims(split_claims, &proof);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn message_width_is_bound_into_the_fingerprint() {
+        use crate::types::ExtVal;
+        use p3_field::PrimeCharacteristicRing;
+
+        let gamma = ExtVal::from_u64(0x1234_5678_9abc_def0).exp_u64(3) + ExtVal::from_u64(7);
+        let x = Val::from_u32(42);
+        // A bare tuple and its zero-extension must not alias: the width
+        // coordinate separates them.
+        let short: ExtVal = message_fingerprint(&gamma, &[x]);
+        let extended: ExtVal = message_fingerprint(&gamma, &[x, Val::ZERO]);
+        assert_ne!(short, extended);
+        // fingerprint([x]) = x + 1·γ and fingerprint([x, 0]) = x + 2·γ².
+        assert_eq!(short, ExtVal::from(x) + gamma);
+        assert_eq!(extended, ExtVal::from(x) + gamma.square() * ExtVal::TWO);
+    }
+
+    #[test]
+    fn multiplicity_height_bound_thresholds() {
+        // Goldilocks: p = 2^64 − 2^32 + 1, so a weight·height product of
+        // (2^32 − 1)·2^32 = p − 1 sits exactly under the bound and one more
+        // unit (a claim) reaches p.
+        let w = (1u128 << 32) - 1;
+        let h = 1usize << 32;
+        assert!(multiplicity_height_bound_holds::<Val>([(w, h)], 0));
+        assert!(!multiplicity_height_bound_holds::<Val>([(w, h)], 1));
+        // Totals overflowing u128 are rejected, not wrapped.
+        assert!(!multiplicity_height_bound_holds::<Val>([(u128::MAX, 2)], 0));
+        // Weight-0 slots (empty lookups) contribute nothing.
+        assert!(multiplicity_height_bound_holds::<Val>([(0, usize::MAX)], 1));
     }
 }

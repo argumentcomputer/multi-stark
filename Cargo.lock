@@ -432,6 +432,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "criterion",
+ "num-bigint",
  "p3-air",
  "p3-baby-bear",
  "p3-blake3",

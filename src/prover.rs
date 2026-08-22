@@ -182,7 +182,7 @@ use crate::config::{
     Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsProof, StarkGenericConfig, Val,
 };
 use crate::eval::VarValues;
-use crate::lookup::{LookupValues, fingerprint};
+use crate::lookup::{LookupValues, message_fingerprint, multiplicity_height_bound_holds};
 use crate::system::{ProverKey, System, SystemWitness};
 
 use bincode::config::{Configuration, Fixint, LittleEndian, standard};
@@ -297,6 +297,25 @@ where
         let pcs = self.config.pcs();
         let mut challenger = self.config.initialise_challenger();
 
+        // Fail fast on the logUp multiplicity height bound; the verifier
+        // enforces the same bound as a soundness check
+        // (`VerificationError::MultiplicityOverflow`). Inactive circuits
+        // have empty traces and contribute nothing.
+        assert!(
+            multiplicity_height_bound_holds::<Val<SC>>(
+                self.circuits.iter().zip(&witness.traces).map(|(c, t)| (
+                    c.graph
+                        .lookups
+                        .iter()
+                        .map(|l| u128::from(l.max_multiplicity))
+                        .sum(),
+                    t.height(),
+                )),
+                claims.len(),
+            ),
+            "logUp multiplicity height bound violated: Σ max_multiplicity·height + |claims| ≥ field characteristic",
+        );
+
         // Bind the system shape into the transcript. The protocol parameters
         // are already bound via the challenger seed.
         self.observe_shape(&mut challenger);
@@ -382,8 +401,8 @@ where
         // Initial accumulator from the claims.
         let mut acc = SC::Challenge::ZERO;
         for claim in claims {
-            let message = lookup_argument_challenge
-                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
+            let message =
+                lookup_argument_challenge + message_fingerprint(&fingerprint_challenge, claim);
             acc += message.inverse();
         }
 
