@@ -16,6 +16,7 @@ use ark_bls12_381::{Bls12_381, Fr, G1Affine, G1Projective, G2Affine, G2Projectiv
 use ark_ec::{AffineRepr, CurveGroup, PrimeGroup, VariableBaseMSM, pairing::Pairing};
 use ark_ff::{Field, PrimeField, Zero};
 use ark_serialize::CanonicalSerialize;
+use p3_maybe_rayon::prelude::*;
 
 /// `[G, τG, τ²G, …]` in G1 and `[H, τH]` in G2.
 pub struct Srs {
@@ -104,12 +105,22 @@ impl Srs {
         let tau = Fr::from_le_bytes_mod_order(&wide);
 
         let g1_gen = G1Projective::generator();
-        let mut acc = Fr::ONE;
+        // τ-powers in independent chunks (each chunk seeds itself with
+        // τ^start), so the scalar multiplications parallelize under the
+        // `parallel` feature; serial otherwise.
+        let chunk = 1usize << 14;
         let powers: Vec<G1Projective> = (0..max_len)
-            .map(|_| {
-                let point = g1_gen * acc;
-                acc *= tau;
-                point
+            .step_by(chunk)
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .flat_map_iter(|start| {
+                let end = (start + chunk).min(max_len);
+                let mut acc = tau.pow([start as u64]);
+                (start..end).map(move |_| {
+                    let point = g1_gen * acc;
+                    acc *= tau;
+                    point
+                })
             })
             .collect();
         let g2_gen = G2Projective::generator();
