@@ -241,7 +241,7 @@ pub struct Proof<SC: StarkGenericConfig> {
 }
 
 impl<SC: StarkGenericConfig> Proof<SC> {
-    fn serde_config() -> Configuration<LittleEndian, Fixint> {
+    pub(crate) fn serde_config() -> Configuration<LittleEndian, Fixint> {
         standard().with_little_endian().with_fixed_int_encoding()
     }
 
