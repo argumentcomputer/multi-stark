@@ -99,10 +99,14 @@
 //! ## Lookup argument
 //!
 //! The accumulator-based lookup argument uses two random challenges (β, γ) to
-//! compress lookup messages into field elements. Each message is
+//! compress lookup messages into field elements. Under the default
+//! `WidthBinding::Fingerprint` policy each message is
 //! `m = β + Σ_i args[i]·γ^i + W·γ^W` with `W` the message width — the width is
 //! bound as the leading coefficient so that messages of different widths can
-//! never alias (see `message_fingerprint` in the lookup module). `m` has
+//! never alias (see `message_fingerprint` in the lookup module). Under
+//! `WidthBinding::ByConstruction` the width term is omitted and the circuit
+//! family's prefix-freeness contract rules out cross-width aliasing instead
+//! (see `WidthBinding`); the argument below is otherwise unchanged. `m` has
 //! degree 1 in β and degree W in γ. If the multiset of "pushed" values
 //! differs from the multiset of "pulled" values, the running accumulator
 //! `Σ multiplicity_i / m_i` is a nonzero rational function of the challenges,
@@ -366,8 +370,8 @@ impl<SC: StarkGenericConfig> System<SC> {
         // construct the accumulator from the claims
         let mut acc = SC::Challenge::ZERO;
         for claim in claims {
-            let message =
-                lookup_argument_challenge + message_fingerprint(&fingerprint_challenge, claim);
+            let message = lookup_argument_challenge
+                + message_fingerprint(&fingerprint_challenge, claim, self.config.width_binding());
             acc += message.inverse();
         }
 
@@ -556,6 +560,7 @@ impl<SC: StarkGenericConfig> System<SC> {
                 crate::system::extension_params::<SC>().w,
                 extension_d,
                 circuit.lookup_group_size,
+                self.config.width_binding(),
                 &mut constraint_values,
             );
             debug_assert_eq!(constraint_values.len(), circuit.constraint_count());

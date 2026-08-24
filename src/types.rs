@@ -6,6 +6,7 @@
 //! concrete, batteries-included instantiation.
 
 use crate::config::StarkGenericConfig;
+use crate::lookup::WidthBinding;
 use p3_blake3::Blake3;
 use p3_challenger::{HashChallenger, SerializingChallenger64};
 use p3_commit::{ExtensionMmcs, Pcs as PcsTrait};
@@ -47,6 +48,8 @@ pub struct GoldilocksBlake3Config {
     max_quotient_degree: usize,
     /// Log2 of the blowup the PCS applies when committing.
     log_blowup: usize,
+    /// The message width-binding policy (see [`WidthBinding`]).
+    width_binding: WidthBinding,
 }
 
 impl GoldilocksBlake3Config {
@@ -78,7 +81,18 @@ impl GoldilocksBlake3Config {
             max_log_degree,
             max_quotient_degree,
             log_blowup: commitment_parameters.log_blowup,
+            width_binding: WidthBinding::default(),
         }
+    }
+
+    /// Declares the message width-binding policy (see [`WidthBinding`];
+    /// the default is [`WidthBinding::Fingerprint`]). The policy is bound
+    /// into the Fiat-Shamir transcript via
+    /// [`crate::system::System::observe_shape`], not the challenger seed,
+    /// so it may be set after construction.
+    pub fn with_width_binding(mut self, width_binding: WidthBinding) -> Self {
+        self.width_binding = width_binding;
+        self
     }
 }
 
@@ -105,6 +119,10 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
 
     fn log_blowup(&self) -> usize {
         self.log_blowup
+    }
+
+    fn width_binding(&self) -> WidthBinding {
+        self.width_binding
     }
 }
 

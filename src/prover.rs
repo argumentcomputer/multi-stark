@@ -182,7 +182,9 @@ use crate::config::{
     Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsProof, StarkGenericConfig, Val,
 };
 use crate::eval::VarValues;
-use crate::lookup::{LookupValues, message_fingerprint, multiplicity_height_bound_holds};
+use crate::lookup::{
+    LookupValues, WidthBinding, message_fingerprint, multiplicity_height_bound_holds,
+};
 use crate::system::{ProverKey, System, SystemWitness};
 
 use bincode::config::{Configuration, Fixint, LittleEndian, standard};
@@ -401,8 +403,8 @@ where
         // Initial accumulator from the claims.
         let mut acc = SC::Challenge::ZERO;
         for claim in claims {
-            let message =
-                lookup_argument_challenge + message_fingerprint(&fingerprint_challenge, claim);
+            let message = lookup_argument_challenge
+                + message_fingerprint(&fingerprint_challenge, claim, self.config.width_binding());
             acc += message.inverse();
         }
 
@@ -426,6 +428,7 @@ where
             &group_sizes,
             lookup_argument_challenge,
             &fingerprint_challenge,
+            self.config.width_binding(),
             acc,
         );
         // The lookup witness can be as large as the traces themselves; free it
@@ -515,6 +518,7 @@ where
                     &stage_2_trace_on_quotient_domain,
                     constraint_challenge,
                     circuit.constraint_count(),
+                    self.config.width_binding(),
                 );
                 let quotient_flat =
                     RowMajorMatrix::new_col(quotient_values).flatten_to_base::<Val<SC>>();
@@ -788,6 +792,7 @@ fn quotient_values<SC>(
     stage_2_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
     alpha: SC::Challenge,
     constraint_count: usize,
+    width_binding: WidthBinding,
 ) -> Vec<SC::Challenge>
 where
     SC: StarkGenericConfig,
@@ -868,6 +873,7 @@ where
             i_start,
             ext_params.w,
             ext_params.degree,
+            width_binding,
         )
     };
     #[cfg(feature = "parallel")]
@@ -905,6 +911,7 @@ fn quotient_values_inner<SC>(
     i_start: usize,
     ext_w: Val<SC>,
     ext_degree: usize,
+    width_binding: WidthBinding,
 ) -> impl Iterator<Item = SC::Challenge>
 where
     SC: StarkGenericConfig,
@@ -963,6 +970,7 @@ where
         ext_w,
         ext_degree,
         circuit.lookup_group_size,
+        width_binding,
         &mut constraint_values,
     );
     debug_assert_eq!(constraint_values.len(), circuit.constraint_count());

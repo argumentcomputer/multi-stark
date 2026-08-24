@@ -131,6 +131,43 @@ impl<E> Lookup<E> {
     }
 }
 
+/// How lookup messages of different argument widths are kept from aliasing.
+///
+/// A message's fingerprint is a polynomial in the challenge γ whose
+/// coefficients are the message's arguments, so a width-`n` tuple and its
+/// zero-extension to width `m > n` evaluate identically unless something
+/// distinguishes them. This policy is the system-wide choice of what does:
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum WidthBinding {
+    /// The protocol binds each message's slot width into its fingerprint as
+    /// the leading Horner coefficient, `Σ_i args[i]·γ^i + W·γ^W` with
+    /// `W = args.len()` (see [`message_fingerprint`]). Sound for any
+    /// circuit family; this is the default. Zero-padding rows up to their
+    /// own slot's width remains transparent — the slot width, not the
+    /// per-row argument count, is what is bound — but the same logical
+    /// message sent from slots of different widths will NOT match.
+    #[default]
+    Fingerprint,
+    /// The fingerprint is the plain Horner fold `Σ_i args[i]·γ^i`, making
+    /// zero-extension fully transparent: a message equals its own
+    /// zero-padding to any width. This restores the superposition trick of
+    /// branch-shared lookup slots (mutually exclusive branches sharing one
+    /// accumulator slot at the maximum branch width), and the circuit
+    /// author takes on the width-disambiguation contract:
+    ///
+    /// **the messages must be prefix-free** — whenever one message that can
+    /// occur with nonzero multiplicity is a zero-extension of another, the
+    /// two must denote the same logical claim. In practice: every message's
+    /// natural width is a function of a constant-constrained leading prefix
+    /// (e.g. a channel tag and a per-channel discriminator), so messages
+    /// either differ within that prefix or agree on their natural width.
+    ///
+    /// This is the same epistemic standing as [`Lookup::max_multiplicity`]:
+    /// a declared property of the circuit family that the protocol builds
+    /// on rather than enforces.
+    ByConstruction,
+}
+
 /// Number of extension-valued public inputs the lookup argument uses:
 /// β, γ, current accumulator, next accumulator.
 pub const LOOKUP_PUBLIC_SIZE: usize = 4;
@@ -227,6 +264,7 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
     w: F,
     d: usize,
     group_size: usize,
+    width_binding: WidthBinding,
     out: &mut Vec<A>,
 ) {
     let group_size = group_size.max(1);
@@ -265,9 +303,14 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
             let mut msgs = [(A::ZERO, A::ZERO); MAX_LOOKUP_GROUP];
             let s_len = chunk.len();
             for (j, lookup) in chunk.iter().enumerate() {
-                // Seed the Horner fold with the argument count so the width
-                // is bound into the fingerprint (see `message_fingerprint`).
-                let mut f = (A::from(F::from_usize(lookup.args.len())), A::ZERO);
+                // Under `Fingerprint` width binding, seed the Horner fold
+                // with the argument count so the width is bound into the
+                // fingerprint (see `message_fingerprint`).
+                let seed = match width_binding {
+                    WidthBinding::Fingerprint => F::from_usize(lookup.args.len()),
+                    WidthBinding::ByConstruction => F::ZERO,
+                };
+                let mut f = (A::from(seed), A::ZERO);
                 for &arg in lookup.args.iter().rev() {
                     f = mul2(f, gamma, w);
                     f.0 += nv(arg);
@@ -355,8 +398,11 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
             .iter()
             .map(|lookup| {
                 let mut fingerprint = vec![A::ZERO; d];
-                // Width-bound Horner seed, mirroring the fast path.
-                fingerprint[0] = A::from(F::from_usize(lookup.args.len()));
+                // Width seed mirroring the fast path.
+                fingerprint[0] = A::from(match width_binding {
+                    WidthBinding::Fingerprint => F::from_usize(lookup.args.len()),
+                    WidthBinding::ByConstruction => F::ZERO,
+                });
                 for &arg in lookup.args.iter().rev() {
                     fingerprint = coord_mul(&fingerprint, gamma, w);
                     fingerprint[0] += node_vals[arg.index()];
@@ -479,6 +525,7 @@ pub fn synthesize_lookups<F: Field>(
     lookups: &[Lookup<Expr<F>>],
     d: usize,
     group_size: usize,
+    width_binding: WidthBinding,
 ) -> Vec<ExtExpr<F>> {
     let d = u32::try_from(d).expect("extension degree exceeds u32");
     let group_size = group_size.max(1);
@@ -514,12 +561,16 @@ pub fn synthesize_lookups<F: Field>(
         let messages: Vec<ExtExpr<F>> = chunk
             .iter()
             .map(|lookup| {
-                // fingerprint = Σ_i args[i] · γ^i + W·γ^W: Horner over
-                // reversed args, seeded with the width W = args.len() so
-                // messages of different widths can never alias (see
+                // fingerprint = Σ_i args[i] · γ^i, Horner over reversed args;
+                // under `Fingerprint` width binding the fold is seeded with
+                // the width W = args.len(), landing it at γ^W so messages
+                // of different widths can never alias (see
                 // `message_fingerprint`).
-                let mut fingerprint =
-                    ExtExpr::from(Expr::constant(F::from_usize(lookup.args.len())));
+                let seed = match width_binding {
+                    WidthBinding::Fingerprint => F::from_usize(lookup.args.len()),
+                    WidthBinding::ByConstruction => F::ZERO,
+                };
+                let mut fingerprint = ExtExpr::from(Expr::constant(seed));
                 for arg in lookup.args.iter().rev() {
                     fingerprint = fingerprint * gamma.clone() + arg.clone();
                 }
@@ -564,26 +615,33 @@ where
         .fold(F::ZERO, |acc, coeff| acc * r.clone() + coeff.into())
 }
 
-/// The protocol's message fingerprint: Horner over the arguments with the
-/// argument count appended as the highest coefficient,
-/// `Σ_i args[i]·γ^i + W·γ^W` with `W = args.len()`.
+/// The protocol's message fingerprint under the system's width-binding
+/// policy (see [`WidthBinding`]).
 ///
-/// Binding the width makes messages of different widths distinct as
-/// polynomials in γ (their leading coefficients sit at different powers), so
-/// a shorter tuple can never systematically alias a longer one whose high
-/// arguments happen to be zero. Zero-padding rows up to their slot's width
-/// remains transparent: the slot width, not the per-row argument count, is
-/// what is bound.
+/// Under [`WidthBinding::Fingerprint`], Horner over the arguments with the
+/// argument count appended as the highest coefficient,
+/// `Σ_i args[i]·γ^i + W·γ^W` with `W = args.len()`: messages of different
+/// widths are distinct as polynomials in γ (their leading coefficients sit
+/// at different powers), so a shorter tuple can never systematically alias
+/// a longer one whose high arguments happen to be zero. Zero-padding rows
+/// up to their slot's width remains transparent: the slot width, not the
+/// per-row argument count, is what is bound.
+///
+/// Under [`WidthBinding::ByConstruction`], the plain Horner fold: the
+/// circuit family's prefix-freeness contract stands in for the seed.
 #[inline]
-pub(crate) fn message_fingerprint<F, EF>(r: &EF, coeffs: &[F]) -> EF
+pub(crate) fn message_fingerprint<F, EF>(r: &EF, coeffs: &[F], width_binding: WidthBinding) -> EF
 where
     F: PrimeCharacteristicRing + Copy + Into<EF>,
     EF: PrimeCharacteristicRing,
 {
-    fingerprint(
-        r,
-        coeffs.iter().copied().chain([F::from_usize(coeffs.len())]),
-    )
+    match width_binding {
+        WidthBinding::Fingerprint => fingerprint(
+            r,
+            coeffs.iter().copied().chain([F::from_usize(coeffs.len())]),
+        ),
+        WidthBinding::ByConstruction => fingerprint(r, coeffs.iter().copied()),
+    }
 }
 
 /// Whether the logUp multiplicity height bound `Σᵢ wᵢ·hᵢ + C < p` holds,
@@ -712,6 +770,7 @@ impl<F: Field> LookupValues<F> {
         group_sizes: &[usize],
         lookup_challenge: EF,
         fingerprint_challenge: &EF,
+        width_binding: WidthBinding,
         mut accumulator: EF,
     ) -> (Vec<RowMajorMatrix<EF>>, Vec<EF>) {
         // Compute the message for each lookup, in flat circuit-major order.
@@ -728,7 +787,8 @@ impl<F: Field> LookupValues<F> {
                     .map(|idx| {
                         let (row, lookup) = (idx / circuit.num_lookups, idx % circuit.num_lookups);
                         let args = circuit.args_at(row, lookup);
-                        lookup_challenge + message_fingerprint(fingerprint_challenge, args)
+                        lookup_challenge
+                            + message_fingerprint(fingerprint_challenge, args, width_binding)
                     })
                     .collect::<Vec<_>>(),
             );
@@ -1035,8 +1095,10 @@ mod tests {
         // Cover the ungrouped argument, an uneven grouping (3 lookups in
         // groups of 2 → a full pair plus a singleton tail), and one full
         // group of 3.
-        for group_size in [1, 2, 3] {
-            let synthesized = synthesize_lookups(&lookups, d, group_size);
+        for (group_size, width_binding) in [1, 2, 3].into_iter().flat_map(|g| {
+            [WidthBinding::Fingerprint, WidthBinding::ByConstruction].map(|wb| (g, wb))
+        }) {
+            let synthesized = synthesize_lookups(&lookups, d, group_size, width_binding);
 
             // Deterministic pseudo-random base-field values (an equality of
             // polynomials checked at random points).
@@ -1111,6 +1173,7 @@ mod tests {
                 w,
                 d,
                 group_size,
+                width_binding,
                 &mut direct,
             );
 
@@ -1118,7 +1181,10 @@ mod tests {
                 direct.len(),
                 logup_constraint_count(lookups.len(), group_size, d)
             );
-            assert_eq!(direct, reference, "group_size={group_size}");
+            assert_eq!(
+                direct, reference,
+                "group_size={group_size} width_binding={width_binding:?}"
+            );
         }
     }
 
@@ -1394,12 +1460,23 @@ mod tests {
         let x = Val::from_u32(42);
         // A bare tuple and its zero-extension must not alias: the width
         // coordinate separates them.
-        let short: ExtVal = message_fingerprint(&gamma, &[x]);
-        let extended: ExtVal = message_fingerprint(&gamma, &[x, Val::ZERO]);
+        let wb = WidthBinding::Fingerprint;
+        let short: ExtVal = message_fingerprint(&gamma, &[x], wb);
+        let extended: ExtVal = message_fingerprint(&gamma, &[x, Val::ZERO], wb);
         assert_ne!(short, extended);
         // fingerprint([x]) = x + 1·γ and fingerprint([x, 0]) = x + 2·γ².
         assert_eq!(short, ExtVal::from(x) + gamma);
         assert_eq!(extended, ExtVal::from(x) + gamma.square() * ExtVal::TWO);
+
+        // Under ByConstruction the fold is unseeded: zero-extension is
+        // transparent (the prefix-freeness contract stands in for the
+        // seed), which is what lets branch-shared slots superpose messages
+        // of different natural widths.
+        let wb = WidthBinding::ByConstruction;
+        let short: ExtVal = message_fingerprint(&gamma, &[x], wb);
+        let extended: ExtVal = message_fingerprint(&gamma, &[x, Val::ZERO], wb);
+        assert_eq!(short, extended);
+        assert_eq!(short, ExtVal::from(x));
     }
 
     #[test]

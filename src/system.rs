@@ -230,6 +230,9 @@ impl<SC: StarkGenericConfig> System<SC> {
     /// [`StarkGenericConfig::initialise_challenger`]).
     pub fn observe_shape(&self, challenger: &mut SC::Challenger) {
         let mut observe = |x: usize| challenger.observe(Val::<SC>::from_usize(x));
+        // The width-binding policy changes every message fingerprint, so
+        // transcripts under different policies must never collide.
+        observe(self.config.width_binding() as usize);
         observe(self.circuits.len());
         for circuit in &self.circuits {
             observe(circuit.constraint_count());

@@ -122,4 +122,18 @@ pub trait StarkGenericConfig {
     /// module), and a mismatch produces commitments to the wrong
     /// evaluations.
     fn log_blowup(&self) -> usize;
+
+    /// The system-wide message width-binding policy (see
+    /// [`crate::lookup::WidthBinding`]). The default binds each message's
+    /// slot width into its fingerprint, which is sound for any circuit
+    /// family; override to [`WidthBinding::ByConstruction`] only for
+    /// circuit families that guarantee prefix-free messages by
+    /// construction. The choice changes the protocol, so
+    /// [`crate::system::System::observe_shape`] binds it into the
+    /// Fiat-Shamir transcript.
+    ///
+    /// [`WidthBinding::ByConstruction`]: crate::lookup::WidthBinding::ByConstruction
+    fn width_binding(&self) -> crate::lookup::WidthBinding {
+        crate::lookup::WidthBinding::Fingerprint
+    }
 }
