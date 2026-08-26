@@ -715,7 +715,9 @@ mod tests {
         types::{CommitmentParameters, ExtVal, FriParameters, GoldilocksBlake3Config, Val},
     };
     use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
+    use p3_blake3::Blake3;
     use p3_matrix::dense::RowMajorMatrix;
+    use p3_symmetric::CryptographicHasher;
 
     enum CS {
         Pythagorean,
@@ -801,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_stark_prove_verify_serialize() {
+    fn multi_stark_proof_bytes_contract() {
         let (system, key) = system();
         let f = Val::from_u32;
         // 2^4 = 16 rows — small enough for fast CI
@@ -811,17 +813,42 @@ mod tests {
             pythagorean_trace.extend(pythagorean_trace.clone());
             complex_trace.extend(complex_trace.clone());
         }
-        let witness = SystemWitness::from_stage_1(
-            vec![
-                RowMajorMatrix::new(pythagorean_trace, 3),
-                RowMajorMatrix::new(complex_trace, 6),
-            ],
-            &system,
-        );
+        let traces = vec![
+            RowMajorMatrix::new(pythagorean_trace, 3),
+            RowMajorMatrix::new(complex_trace, 6),
+        ];
         let no_claims = &[];
-        let proof = system.prove_multiple_claims(&key, no_claims, witness);
-        // Serialization round-trip
+        let proof = system.prove_multiple_claims(
+            &key,
+            no_claims,
+            SystemWitness::from_stage_1(traces.clone(), &system),
+        );
+        let second_proof = system.prove_multiple_claims(
+            &key,
+            no_claims,
+            SystemWitness::from_stage_1(traces, &system),
+        );
+
+        // Proving is deterministic at these zero-PoW parameters, so this
+        // serialization is a protocol-compatibility contract for alternate
+        // backends rather than merely a round-trip smoke test.
         let proof_bytes = proof.to_bytes().expect("Failed to serialize proof");
+        let second_proof_bytes = second_proof.to_bytes().expect("Failed to serialize proof");
+        assert_eq!(proof_bytes, second_proof_bytes);
+        assert_eq!(
+            proof_bytes.len(),
+            77_637,
+            "proof encoding changed; update only with an intentional protocol review"
+        );
+        assert_eq!(
+            Blake3.hash_slice(&proof_bytes),
+            [
+                132, 122, 135, 163, 73, 111, 225, 81, 221, 201, 107, 28, 30, 21, 49, 58, 253, 13,
+                161, 49, 19, 184, 213, 239, 107, 152, 43, 42, 67, 255, 151, 193,
+            ],
+            "proof bytes changed; update only with an intentional protocol review"
+        );
+
         let proof2 = Proof::from_bytes(&proof_bytes).expect("Failed to deserialize proof");
         system.verify_multiple_claims(no_claims, &proof2).unwrap();
     }

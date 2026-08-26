@@ -39,6 +39,7 @@ type Pcs = TwoAdicFriPcs<Val, Dft, ValMmcs, ChallengeMmcs>;
 
 struct BabyBearPoseidon2Config {
     pcs: Pcs,
+    dft: Dft,
     perm: Perm,
     /// Field elements observed into every fresh challenger: a domain tag
     /// plus a digest of the protocol parameters (see the transcript contract
@@ -66,7 +67,8 @@ impl BabyBearPoseidon2Config {
             query_proof_of_work_bits: fri_parameters.query_proof_of_work_bits,
             mmcs: challenge_mmcs,
         };
-        let pcs = Pcs::new(Dft::default(), val_mmcs, inner_parameters);
+        let dft = Dft::default();
+        let pcs = Pcs::new(dft.clone(), val_mmcs, inner_parameters);
         let mut challenger_seed: Vec<Val> = b"multi-stark/v0"
             .iter()
             .map(|&byte| Val::from_u8(byte))
@@ -87,6 +89,7 @@ impl BabyBearPoseidon2Config {
         let max_quotient_degree = 1 << commitment_parameters.log_blowup;
         Self {
             pcs,
+            dft,
             perm,
             challenger_seed,
             max_log_degree,
@@ -98,11 +101,16 @@ impl BabyBearPoseidon2Config {
 
 impl StarkGenericConfig for BabyBearPoseidon2Config {
     type Pcs = Pcs;
+    type Dft = Dft;
     type Challenge = Challenge;
     type Challenger = Challenger;
 
     fn pcs(&self) -> &Pcs {
         &self.pcs
+    }
+
+    fn dft(&self) -> &Dft {
+        &self.dft
     }
 
     fn initialise_challenger(&self) -> Challenger {
