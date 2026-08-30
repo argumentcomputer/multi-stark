@@ -432,6 +432,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "criterion",
+ "itertools 0.14.0",
  "p3-air",
  "p3-baby-bear",
  "p3-blake3",
@@ -441,6 +442,7 @@ dependencies = [
  "p3-field",
  "p3-fri",
  "p3-goldilocks",
+ "p3-interpolation",
  "p3-keccak",
  "p3-matrix",
  "p3-maybe-rayon",

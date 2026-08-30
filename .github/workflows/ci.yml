@@ -10,6 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   linux-test:
     # Change to warp-ubuntu-latest-x64-16x for a more powerful runner (GitHub App must be enabled for this repo)
@@ -39,10 +42,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check Rustfmt code style
         run: cargo fmt --all --check
-      - name: Check *everything* compiles
-        run: cargo check --all-targets --all-features --workspace
+      # Runtime correctness is validated on NVIDIA runners via cuda/smoke.sh. Keep the
+      # ordinary CI path independent of the CUDA toolkit.
+      - name: Check CPU targets compile
+        run: cargo check --release --all-targets --features parallel --workspace
       - name: Check clippy lints
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --release --workspace --all-targets --features parallel -- -D warnings
       - name: Doctests
         run: cargo test --doc --workspace
       - name: Get Rust version
@@ -53,3 +58,22 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           rust-version: ${{ env.RUST_VERSION }}
+
+  cuda-compile:
+    # A toolkit container is sufficient for compile coverage; no GPU runner
+    # is needed. Warp's larger x64 runner keeps the full cubin-set build fast
+    # and provides the same native-codegen compatibility domain as Ix CI.
+    runs-on: warp-ubuntu-latest-x64-8x
+    container: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust bootstrap dependencies
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends build-essential ca-certificates curl
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: -Ctarget-cpu=native -Dwarnings
+          cache-key: warp-x64
+      - name: Compile and lint CUDA targets
+        run: cargo clippy --release --locked --all-targets --features parallel,cuda -- -D warnings
