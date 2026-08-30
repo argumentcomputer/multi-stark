@@ -13,6 +13,7 @@ rust-version = "1.98"
 
 [dependencies]
 tracing = "0.1"
+itertools = { version = "0.14", optional = true }
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }
 num-bigint = "0.5"
@@ -44,6 +45,10 @@ harness = false
 
 [features]
 parallel = ["p3-maybe-rayon/parallel"]
+# Use the first-party CUDA Goldilocks DFT/LDE backend. Enabling this feature
+# requires a CUDA toolkit at build time and an NVIDIA GPU at runtime; the
+# default CPU build never invokes nvcc or links the CUDA runtime.
+cuda = ["dep:itertools"]
 
 # Similar to `release`, but preserves debug info
 [profile.dev-ci]

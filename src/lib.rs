@@ -1,5 +1,10 @@
 pub mod advice;
 pub mod config;
+#[cfg(feature = "cuda")]
+pub mod cuda;
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+pub use cuda::pcs as cuda_pcs;
 pub mod eval;
 pub mod expr;
 pub mod graph;

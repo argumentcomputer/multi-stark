@@ -860,6 +860,27 @@ impl<F: Field> LookupValues<F> {
     }
 }
 
+#[cfg(feature = "cuda")]
+impl LookupValues<p3_goldilocks::Goldilocks> {
+    pub(crate) fn cuda_parts(
+        &self,
+    ) -> (
+        usize,
+        usize,
+        &[p3_goldilocks::Goldilocks],
+        &[p3_goldilocks::Goldilocks],
+        &[usize],
+    ) {
+        (
+            self.height,
+            self.num_lookups,
+            &self.multiplicities,
+            &self.args,
+            &self.arg_offsets,
+        )
+    }
+}
+
 /// Incremental, allocation-free constructor for [`LookupValues`].
 ///
 /// Rows start zeroed — multiplicity zero and zero arguments in every slot —

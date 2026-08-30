@@ -589,6 +589,7 @@ pub fn proof_to_advice_bytes(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(feature = "cuda"))]
     use bincode::serde::decode_from_slice;
     use p3_field::PrimeCharacteristicRing;
     use p3_matrix::dense::RowMajorMatrix;
@@ -654,6 +655,7 @@ mod tests {
         system.prove_multiple_claims(key, &[], witness)
     }
 
+    #[cfg(not(feature = "cuda"))]
     #[test]
     fn advice_expands_and_paths_verify_per_query() {
         for cap_height in [0, 1] {
