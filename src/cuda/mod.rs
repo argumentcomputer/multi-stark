@@ -2489,7 +2489,7 @@ mod tests {
         use p3_field::{
             BasedVectorSpace, batch_multiplicative_inverse, extension::BinomialExtensionField,
         };
-        use p3_interpolation::interpolate_coset_with_precomputation;
+        use p3_matrix::interpolation::{Interpolate, compute_adjusted_weights};
         use p3_util::reverse_slice_index_bits;
         type Ext = BinomialExtensionField<Goldilocks, 2>;
         let height = 256;
@@ -2516,13 +2516,11 @@ mod tests {
         .unwrap();
         let inv =
             batch_multiplicative_inverse(&coset.iter().map(|&x| point - x).collect::<Vec<_>>());
-        let expected = interpolate_coset_with_precomputation(
-            &bitrev.split_rows(height).0,
-            Goldilocks::GENERATOR,
-            point,
-            &coset[..height],
-            &inv[..height],
-        );
+        let adjusted = compute_adjusted_weights(point, &inv[..height]);
+        let expected = bitrev
+            .split_rows(height)
+            .0
+            .interpolate_coset_with_precomputation(Goldilocks::GENERATOR, point, &adjusted);
         let inv2: Vec<[Goldilocks; 2]> = inv[..height]
             .iter()
             .map(|x| x.as_basis_coefficients_slice().try_into().unwrap())

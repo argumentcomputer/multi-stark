@@ -837,14 +837,14 @@ mod tests {
         assert_eq!(proof_bytes, second_proof_bytes);
         assert_eq!(
             proof_bytes.len(),
-            77_637,
+            22_017,
             "proof encoding changed; update only with an intentional protocol review"
         );
         assert_eq!(
             Blake3.hash_slice(&proof_bytes),
             [
-                132, 122, 135, 163, 73, 111, 225, 81, 221, 201, 107, 28, 30, 21, 49, 58, 253, 13,
-                161, 49, 19, 184, 213, 239, 107, 152, 43, 42, 67, 255, 151, 193,
+                17, 55, 200, 132, 9, 170, 249, 195, 35, 120, 241, 110, 48, 5, 20, 38, 250, 196, 78,
+                102, 166, 45, 101, 2, 221, 109, 185, 39, 56, 102, 245, 182,
             ],
             "proof bytes changed; update only with an intentional protocol review"
         );
@@ -894,6 +894,20 @@ mod tests {
         let no_claims: &[&[Val]] = &[];
         let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tampered_opening_proof_rejected() {
+        let (system, mut proof) = small_system_and_proof();
+        // The context-building helper deliberately does not consume the PCS
+        // proof, but the public verifier must pass it to FRI verification.
+        proof.opening_proof.final_poly[0] += ExtVal::ONE;
+        let no_claims: &[&[Val]] = &[];
+        let result = system.verify_multiple_claims(no_claims, &proof);
+        assert!(matches!(
+            result,
+            Err(VerificationError::InvalidOpeningArgument(_))
+        ));
     }
 
     #[test]

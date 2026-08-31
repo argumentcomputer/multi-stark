@@ -258,14 +258,16 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         fri.commit_pow_witnesses.iter_mut().for_each(canonical_base);
         canonical_base(&mut fri.query_pow_witness);
         fri.final_poly.iter_mut().for_each(canonical_ext);
-        for query in &mut fri.query_proofs {
-            for opening in &mut query.input_proof {
-                for row in &mut opening.opened_values {
+        for opening in &mut fri.input_openings {
+            for query in &mut opening.opened_values {
+                for row in query {
                     row.iter_mut().for_each(canonical_base);
                 }
             }
-            for step in &mut query.commit_phase_openings {
-                step.sibling_values.iter_mut().for_each(canonical_ext);
+        }
+        for step in &mut fri.commit_phase_openings {
+            for siblings in &mut step.sibling_values {
+                siblings.iter_mut().for_each(canonical_ext);
             }
         }
     }

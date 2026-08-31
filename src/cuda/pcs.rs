@@ -38,10 +38,10 @@ use p3_field::{
     BasedVectorSpace, ExtensionField, PackedFieldExtension, PrimeCharacteristicRing, PrimeField64,
     TwoAdicField, batch_multiplicative_inverse, dot_product,
 };
-use p3_interpolation::interpolate_coset_with_precomputation;
 use p3_matrix::Matrix;
 use p3_matrix::bitrev::{BitReversedMatrixView, BitReversibleMatrix};
 use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixCow};
+use p3_matrix::interpolation::{Interpolate, compute_adjusted_weights};
 use p3_maybe_rayon::prelude::*;
 use p3_util::linear_map::LinearMap;
 use p3_util::{log2_strict_usize, reverse_bits_len, reverse_slice_index_bits};
@@ -1067,6 +1067,13 @@ where
         // for that point, and precompute 1/(z - X) for the largest subgroup (in bitrev order).
         let inv_denoms = compute_inverse_denominators(&mats_and_points, &coset);
 
+        // Convert the inverse denominators into the adjusted barycentric weights expected by
+        // the matrix interpolation API. Reuse them across every matrix opened at each point.
+        let adjusted_weights: LinearMap<Challenge, Vec<Challenge>> = inv_denoms
+            .iter()
+            .map(|(point, denoms)| (*point, compute_adjusted_weights(*point, denoms)))
+            .collect();
+
         // Evaluate coset representations and write openings to the challenger
         let all_opened_values = mats_and_points
             .iter()
@@ -1086,7 +1093,6 @@ where
 
                         // `subgroup` and `mat` are both in bit-reversed order, so we can truncate.
                         let (low_coset, _) = mat.split_rows(h);
-                        let coset_h = &coset[..h];
 
                         points_for_mat
                             .iter()
@@ -1100,16 +1106,11 @@ where
                                     "compute opened values with Lagrange interpolation"
                                 )
                                 .in_scope(|| {
-                                    // Get the relevant inverse denominators for this point and use these to
-                                    // interpolate to get the evaluation of each polynomial in the matrix
-                                    // at the desired point.
-                                    let inv_denoms = &inv_denoms.get(&point).unwrap()[..h];
-                                    interpolate_coset_with_precomputation(
-                                        &low_coset,
+                                    let adjusted = &adjusted_weights.get(&point).unwrap()[..h];
+                                    low_coset.interpolate_coset_with_precomputation(
                                         Val::GENERATOR,
                                         point,
-                                        coset_h,
-                                        inv_denoms,
+                                        adjusted,
                                     )
                                 });
 
