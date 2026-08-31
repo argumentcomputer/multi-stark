@@ -48,6 +48,7 @@ cudaError_t cached_device_constants(int device,const uint64_t* host,size_t count
     else{persistent_free(entry->values);delete entry;}
     __sync_lock_release(&constant_cache_lock);return status;
 }
+
 __device__ __constant__ uint32_t BLAKE3_IV[8] = {
     0x6A09E667U, 0xBB67AE85U, 0x3C6EF372U, 0xA54FF53AU,
     0x510E527FU, 0x9B05688CU, 0x1F83D9ABU, 0x5BE0CD19U,
@@ -385,17 +386,20 @@ struct ResidentMerkleTree {
 
 struct ResidentMixedMerkleTree {
     uint8_t* digests = nullptr;
+    bool digests_managed = false;
     size_t row_count = 0;
 
     ~ResidentMixedMerkleTree() {
         if (digests != nullptr) {
-            cudaFree(digests);
+            if (digests_managed) persistent_free(digests);
+            else cudaFree(digests);
         }
     }
 };
 
 struct ResidentLde {
     uint64_t* values = nullptr;
+    bool values_managed = false;
     // Original row-major evaluations, retained for prover stages (notably
     // lookup construction) which consume the witness after its LDE has been
     // committed. Null for LDEs synthesized directly on the device.
@@ -410,7 +414,8 @@ struct ResidentLde {
 
     ~ResidentLde() {
         if (values != nullptr) {
-            cudaFree(values);
+            if (values_managed) persistent_free(values);
+            else cudaFree(values);
         }
         if (trace_values != nullptr) cudaFree(trace_values);
         if (host_trace_registered) cudaHostUnregister(
@@ -506,10 +511,11 @@ struct ResidentReducedOpening {
 
 struct ResidentFriWorkspace {
     Ext2* inv_denoms=nullptr; uint64_t* coset=nullptr; Ext2* output=nullptr;
+    bool inv_denoms_managed=false;
     Ext2* alpha=nullptr; Ext2* interpolation_partials=nullptr;
     size_t inv_count=0; size_t coset_count=0;
     size_t output_capacity=0; size_t alpha_capacity=0,partial_capacity=0;
-    ~ResidentFriWorkspace(){if(inv_denoms)cudaFree(inv_denoms);if(coset)cudaFree(coset);if(output)cudaFree(output);if(alpha)cudaFree(alpha);if(interpolation_partials)cudaFree(interpolation_partials);}
+    ~ResidentFriWorkspace(){if(inv_denoms){if(inv_denoms_managed)persistent_free(inv_denoms);else cudaFree(inv_denoms);}if(coset)cudaFree(coset);if(output)cudaFree(output);if(alpha)cudaFree(alpha);if(interpolation_partials)cudaFree(interpolation_partials);}
 };
 
 struct InterpolationTask {
@@ -1624,6 +1630,19 @@ cudaError_t launch_blake3_digest_pairs(uint8_t* digests,
     return cudaGetLastError();
 }
 
+__global__ void gather_resident_lde_group(
+    uint64_t* output, const uint64_t* const* columns, const size_t* strides,
+    size_t row_start, size_t rows, size_t width) {
+    const size_t count = rows * width;
+    const size_t grid_stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         index < count; index += grid_stride) {
+        const size_t column = index % width;
+        const size_t row = row_start + index / width;
+        output[index] = columns[column][row * strides[column]];
+    }
+}
+
 cudaError_t hash_resident_lde_group(uint8_t* digests,
                                     const void* const* handles,
                                     size_t handle_count, size_t height) {
@@ -1642,41 +1661,53 @@ cudaError_t hash_resident_lde_group(uint8_t* digests,
         return cudaErrorInvalidValue;
     }
 
-    constexpr size_t ROW_STAGING_BYTES = size_t(256) << 20;
+    constexpr size_t ROW_STAGING_BYTES = size_t(32) << 20;
     const size_t row_bytes = total_width * sizeof(uint64_t);
     const size_t rows_per_chunk =
         (ROW_STAGING_BYTES / row_bytes) > 0 ? (ROW_STAGING_BYTES / row_bytes) : 1;
+    uint64_t* host_metadata = new (std::nothrow) uint64_t[2 * total_width];
+    if (host_metadata == nullptr) return cudaErrorMemoryAllocation;
+    auto** host_columns = reinterpret_cast<const uint64_t**>(host_metadata);
+    size_t* host_strides = reinterpret_cast<size_t*>(host_metadata + total_width);
+    size_t column_offset = 0;
+    for (size_t index = 0; index < handle_count; ++index) {
+        const auto* lde = static_cast<const ResidentLde*>(handles[index]);
+        if (lde == nullptr || lde->height != height) continue;
+        for (size_t column = 0; column < lde->width; ++column) {
+            host_columns[column_offset] = lde->values + column;
+            host_strides[column_offset++] = lde->width;
+        }
+    }
+    DeviceBuffer metadata;
+    cudaError_t status = metadata.allocate(2 * total_width);
+    if (status == cudaSuccess)
+        status = cudaMemcpyAsync(metadata.get(), host_metadata,
+                                 2 * total_width * sizeof(uint64_t),
+                                 cudaMemcpyHostToDevice, cudaStreamPerThread);
+    delete[] host_metadata;
     DeviceBuffer combined_rows;
-    cudaError_t status = combined_rows.allocate(
-        (height < rows_per_chunk ? height : rows_per_chunk) * total_width);
+    if (status == cudaSuccess)
+        status = combined_rows.allocate(
+            (height < rows_per_chunk ? height : rows_per_chunk) * total_width);
+    auto** device_columns = reinterpret_cast<const uint64_t**>(metadata.get());
+    const size_t* device_strides =
+        reinterpret_cast<const size_t*>(metadata.get() + total_width);
     for (size_t row_start = 0; status == cudaSuccess && row_start < height;
          row_start += rows_per_chunk) {
         const size_t rows =
             (height - row_start < rows_per_chunk) ? height - row_start
                                                    : rows_per_chunk;
-        size_t column_offset = 0;
-        for (size_t index = 0; status == cudaSuccess && index < handle_count;
-             ++index) {
-            const ResidentLde* lde =
-                static_cast<const ResidentLde*>(handles[index]);
-            if (lde == nullptr || lde->height != height) {
-                continue;
-            }
-            status = cudaMemcpy2DAsync(
-                combined_rows.get() + column_offset,
-                total_width * sizeof(uint64_t),
-                lde->values + row_start * lde->width,
-                lde->width * sizeof(uint64_t),
-                lde->width * sizeof(uint64_t), rows, cudaMemcpyDeviceToDevice,
-                cudaStreamPerThread);
-            column_offset += lde->width;
-        }
-        if (status == cudaSuccess) {
+        const size_t count = rows * total_width;
+        gather_resident_lde_group<<<blocks_for(count), THREADS, 0,
+                                    cudaStreamPerThread>>>(
+            combined_rows.get(), device_columns, device_strides, row_start,
+            rows, total_width);
+        status = cudaGetLastError();
+        if (status == cudaSuccess)
             status = launch_blake3_rows(
                 digests + row_start * 32,
                 reinterpret_cast<const uint8_t*>(combined_rows.get()), row_bytes,
                 rows);
-        }
     }
     return status;
 }
@@ -2365,7 +2396,13 @@ extern "C" int multi_stark_cuda_fri_workspace_create(int device_id,void** handle
     }
     cudaError_t status=cudaSetDevice(device_id);auto* w=new(std::nothrow) ResidentFriWorkspace;if(!w)return static_cast<int>(cudaErrorMemoryAllocation);
     w->inv_count=inv_count;w->coset_count=coset_count;
-    if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&w->inv_denoms),inv_count*sizeof(Ext2));
+    // The denominator table is temporary and read sequentially. Under memory
+    // pressure it can page without displacing resident proof matrices.
+    const size_t inverse_bytes=inv_count*sizeof(Ext2);size_t free_bytes=0,total_bytes=0;
+    if(status==cudaSuccess)status=cudaMemGetInfo(&free_bytes,&total_bytes);
+    const bool managed=inverse_bytes>free_bytes||free_bytes-inverse_bytes<total_bytes/20;
+    if(status==cudaSuccess&&managed){status=cudaMallocManaged(reinterpret_cast<void**>(&w->inv_denoms),inverse_bytes);if(status==cudaSuccess)w->inv_denoms_managed=true;}
+    else if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&w->inv_denoms),inverse_bytes);
     if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&w->coset),coset_count*sizeof(uint64_t));
     if(status==cudaSuccess)status=cudaMemcpy(w->coset,coset,coset_count*sizeof(uint64_t),cudaMemcpyHostToDevice);
     uint64_t *norms=nullptr,*inverses=nullptr;
@@ -2453,13 +2490,13 @@ extern "C" int multi_stark_cuda_fri_workspace_destroy(int device_id,void* handle
     cudaError_t status=cudaSetDevice(device_id);if(status==cudaSuccess)delete static_cast<ResidentFriWorkspace*>(handle);return static_cast<int>(status);
 }
 
-extern "C" int multi_stark_cuda_reduced_to_lde(int device_id,void** output,const void* reduced){
+extern "C" int multi_stark_cuda_reduced_into_lde(int device_id,void** output,void* reduced){
     if(!output||!reduced)return static_cast<int>(cudaErrorInvalidValue);*output=nullptr;
-    auto* r=static_cast<const ResidentReducedOpening*>(reduced);cudaError_t status=cudaSetDevice(device_id);
+    auto* r=static_cast<ResidentReducedOpening*>(reduced);cudaError_t status=cudaSetDevice(device_id);
     ResidentLde* l=nullptr;if(status==cudaSuccess)status=create_resident_lde(&l);if(status==cudaSuccess){l->height=r->height;l->width=2;}
-    if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&l->values),r->height*sizeof(Ext2));
-    if(status==cudaSuccess)status=cudaMemcpy(l->values,r->values,r->height*sizeof(Ext2),cudaMemcpyDeviceToDevice);
-    if(status!=cudaSuccess){destroy_resident_lde(l);return static_cast<int>(status);}*output=l;return static_cast<int>(cudaSuccess);
+    if(status!=cudaSuccess){destroy_resident_lde(l);return static_cast<int>(status);}
+    l->values=reinterpret_cast<uint64_t*>(r->values);r->values=nullptr;*output=l;
+    return static_cast<int>(cudaSuccess);
 }
 
 extern "C" int multi_stark_cuda_fri_fold_resident(int device_id,void** output,const void* input,
@@ -3165,8 +3202,20 @@ extern "C" int multi_stark_cuda_mixed_merkle_create_from_ldes(
         return static_cast<int>(cudaErrorMemoryAllocation);
     }
     tree->row_count = max_height;
-    status = cudaMalloc(reinterpret_cast<void**>(&tree->digests),
-                        64 * max_height);
+    size_t free_bytes = 0, total_bytes = 0;
+    if (status == cudaSuccess) status = cudaMemGetInfo(&free_bytes, &total_bytes);
+    const size_t digest_bytes = 64 * max_height;
+    const size_t reserve = total_bytes / 20;
+    const bool capacity_constrained =
+        digest_bytes > free_bytes || free_bytes - digest_bytes < reserve;
+    if (status == cudaSuccess && capacity_constrained) {
+        status = cudaMallocManaged(reinterpret_cast<void**>(&tree->digests),
+                                   digest_bytes);
+        if (status == cudaSuccess) tree->digests_managed = true;
+    } else if (status == cudaSuccess) {
+        status = cudaMalloc(reinterpret_cast<void**>(&tree->digests),
+                            digest_bytes);
+    }
     size_t max_injected_height = 0;
     for (size_t index = 0; index < lde_count; ++index) {
         const ResidentLde* lde =

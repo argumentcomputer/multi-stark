@@ -21,8 +21,6 @@ use p3_fri::TwoAdicFriPcs;
 use p3_goldilocks::Goldilocks;
 #[cfg(feature = "cuda")]
 use p3_matrix::dense::RowMajorMatrix;
-#[cfg(feature = "cuda")]
-use p3_maybe_rayon::prelude::*;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
 
@@ -316,7 +314,7 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         }
         use crate::cuda::mmcs::CudaCommitMmcs;
         let ldes: Option<Vec<_>> = inputs
-            .par_iter()
+            .iter()
             .map(|input| {
                 let main = input.stage_1.0.resident(input.stage_1.1)?;
                 let stage2 = input.stage_2.0.resident(input.stage_2.1)?;

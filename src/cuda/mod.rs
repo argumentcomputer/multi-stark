@@ -1104,10 +1104,10 @@ impl CudaReducedOpening {
         check_cuda(status, "reduced opening copy");
         out
     }
-    pub(crate) fn to_lde(&self) -> CudaLde {
+    pub(crate) fn into_lde(self) -> CudaLde {
         let mut handle = core::ptr::null_mut();
         let status = unsafe {
-            multi_stark_cuda_reduced_to_lde(self.device_id, &mut handle, self.handle.as_ptr())
+            multi_stark_cuda_reduced_into_lde(self.device_id, &mut handle, self.handle.as_ptr())
         };
         check_cuda(status, "reduced opening to resident FRI codeword");
         CudaLde {
@@ -2167,10 +2167,10 @@ unsafe extern "C" {
         ext_w: u64,
     ) -> i32;
     fn multi_stark_cuda_fri_workspace_destroy(device_id: i32, handle: *mut c_void) -> i32;
-    fn multi_stark_cuda_reduced_to_lde(
+    fn multi_stark_cuda_reduced_into_lde(
         device_id: i32,
         output: *mut *mut c_void,
-        reduced: *const c_void,
+        reduced: *mut c_void,
     ) -> i32;
     fn multi_stark_cuda_fri_fold_resident(
         device_id: i32,

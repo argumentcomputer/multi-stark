@@ -225,7 +225,7 @@ where
         .expect("quadratic extension element")
     };
 
-    let mut codeword = inputs.remove(0).to_lde();
+    let mut codeword = inputs.remove(0).into_lde();
     let mut commits = Vec::new();
     let mut rounds = Vec::new();
     let mut log_arities = Vec::new();
