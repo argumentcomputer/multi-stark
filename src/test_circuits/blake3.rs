@@ -12,6 +12,11 @@ mod tests {
     use std::array;
     use std::ops::Range;
 
+    // Per-row bound declared for the committed count columns (unconstrained;
+    // the weight-1 pushes of the querying circuits keep actual counts within
+    // this budget).
+    const TABLE_QUERY_BUDGET: u64 = 1 << 32;
+
     struct CompressionInfo {
         cv: [u32; 8],
         block_words: [u32; 16],
@@ -117,8 +122,8 @@ mod tests {
 
         fn words_from_little_endian_bytes(bytes: &[u8], words: &mut [u32]) {
             debug_assert_eq!(bytes.len(), 4 * words.len());
-            for (four_bytes, word) in bytes.chunks_exact(4).zip(words) {
-                *word = u32::from_le_bytes(four_bytes.try_into().unwrap());
+            for (four_bytes, word) in bytes.as_chunks::<4>().0.iter().zip(words) {
+                *word = u32::from_le_bytes(*four_bytes);
             }
         }
 
@@ -822,6 +827,7 @@ mod tests {
                     multiplicity,
                     [vec![SymbExpr::from_usize(circuit_idx)], state_in, state_out].concat(),
                 )
+                .with_max_multiplicity(TABLE_QUERY_BUDGET)
             }
 
             fn push_round(
@@ -898,6 +904,7 @@ mod tests {
                 var: fn(usize) -> SymbExpr,
             ) -> Lookup<SymbExpr> {
                 lookup_u32_inner(Lookup::pull, multiplicity, circuit_idx, v_ind, var)
+                    .with_max_multiplicity(TABLE_QUERY_BUDGET)
             }
 
             fn lookup_u32_inner(
@@ -942,7 +949,8 @@ mod tests {
                                 preprocessed_var(1),
                                 preprocessed_var(2),
                             ],
-                        ),
+                        )
+                        .with_max_multiplicity(TABLE_QUERY_BUDGET),
                         Lookup::pull(
                             var(1),
                             vec![
@@ -950,7 +958,8 @@ mod tests {
                                 preprocessed_var(0),
                                 preprocessed_var(1),
                             ],
-                        ),
+                        )
+                        .with_max_multiplicity(TABLE_QUERY_BUDGET),
                     ]
                 }
 
@@ -1006,21 +1015,24 @@ mod tests {
 
                 // (2 push lookups to pair_range_check)
                 Self::U32RightRotate8 => {
-                    let mut lookups = vec![Lookup::pull(
-                        var(0),
-                        vec![
-                            SymbExpr::from_usize(u32_right_rotate_8_idx),
-                            var(1)
-                                + var(2) * SymbExpr::from_u32(256)
-                                + var(3) * SymbExpr::from_u32(256 * 256)
-                                + var(4) * SymbExpr::from_u32(256 * 256 * 256),
-                            // note var indices
-                            var(2)
-                                + var(3) * SymbExpr::from_u32(256)
-                                + var(4) * SymbExpr::from_u32(256 * 256)
-                                + var(1) * SymbExpr::from_u32(256 * 256 * 256),
-                        ],
-                    )];
+                    let mut lookups = vec![
+                        Lookup::pull(
+                            var(0),
+                            vec![
+                                SymbExpr::from_usize(u32_right_rotate_8_idx),
+                                var(1)
+                                    + var(2) * SymbExpr::from_u32(256)
+                                    + var(3) * SymbExpr::from_u32(256 * 256)
+                                    + var(4) * SymbExpr::from_u32(256 * 256 * 256),
+                                // note var indices
+                                var(2)
+                                    + var(3) * SymbExpr::from_u32(256)
+                                    + var(4) * SymbExpr::from_u32(256 * 256)
+                                    + var(1) * SymbExpr::from_u32(256 * 256 * 256),
+                            ],
+                        )
+                        .with_max_multiplicity(TABLE_QUERY_BUDGET),
+                    ];
 
                     // range check only input u32 word (since output is constructed exactly from the same bytes)
                     lookups.extend((0..2).map(|i| {
@@ -1039,21 +1051,24 @@ mod tests {
 
                 // (2 push lookups to pair_range_check)
                 Self::U32RightRotate16 => {
-                    let mut lookups = vec![Lookup::pull(
-                        var(0),
-                        vec![
-                            SymbExpr::from_usize(u32_right_rotate_16_idx),
-                            var(1)
-                                + var(2) * SymbExpr::from_u32(256)
-                                + var(3) * SymbExpr::from_u32(256 * 256)
-                                + var(4) * SymbExpr::from_u32(256 * 256 * 256),
-                            // note var indices
-                            var(3)
-                                + var(4) * SymbExpr::from_u32(256)
-                                + var(1) * SymbExpr::from_u32(256 * 256)
-                                + var(2) * SymbExpr::from_u32(256 * 256 * 256),
-                        ],
-                    )];
+                    let mut lookups = vec![
+                        Lookup::pull(
+                            var(0),
+                            vec![
+                                SymbExpr::from_usize(u32_right_rotate_16_idx),
+                                var(1)
+                                    + var(2) * SymbExpr::from_u32(256)
+                                    + var(3) * SymbExpr::from_u32(256 * 256)
+                                    + var(4) * SymbExpr::from_u32(256 * 256 * 256),
+                                // note var indices
+                                var(3)
+                                    + var(4) * SymbExpr::from_u32(256)
+                                    + var(1) * SymbExpr::from_u32(256 * 256)
+                                    + var(2) * SymbExpr::from_u32(256 * 256 * 256),
+                            ],
+                        )
+                        .with_max_multiplicity(TABLE_QUERY_BUDGET),
+                    ];
 
                     // range check only input u32 word (since output is constructed exactly from the same 4 bytes)
                     lookups.extend((0..2).map(|i| {
@@ -1071,37 +1086,43 @@ mod tests {
                 }
 
                 Self::U32RightRotate12 => {
-                    vec![Lookup::pull(
-                        var(0),
-                        vec![
-                            SymbExpr::from_usize(u32_right_rotate_12_idx),
-                            var(1)
-                                + var(2) * SymbExpr::from_u32(256)
-                                + var(3) * SymbExpr::from_u32(256 * 256)
-                                + var(4) * SymbExpr::from_u32(256 * 256 * 256),
-                            var(5)
-                                + var(6) * SymbExpr::from_u32(256)
-                                + var(7) * SymbExpr::from_u32(256 * 256)
-                                + var(8) * SymbExpr::from_u32(256 * 256 * 256),
-                        ],
-                    )]
+                    vec![
+                        Lookup::pull(
+                            var(0),
+                            vec![
+                                SymbExpr::from_usize(u32_right_rotate_12_idx),
+                                var(1)
+                                    + var(2) * SymbExpr::from_u32(256)
+                                    + var(3) * SymbExpr::from_u32(256 * 256)
+                                    + var(4) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(5)
+                                    + var(6) * SymbExpr::from_u32(256)
+                                    + var(7) * SymbExpr::from_u32(256 * 256)
+                                    + var(8) * SymbExpr::from_u32(256 * 256 * 256),
+                            ],
+                        )
+                        .with_max_multiplicity(TABLE_QUERY_BUDGET),
+                    ]
                 }
 
                 Self::U32RightRotate7 => {
-                    vec![Lookup::pull(
-                        var(0),
-                        vec![
-                            SymbExpr::from_usize(u32_right_rotate_7_idx),
-                            var(1)
-                                + var(2) * SymbExpr::from_u32(256)
-                                + var(3) * SymbExpr::from_u32(256 * 256)
-                                + var(4) * SymbExpr::from_u32(256 * 256 * 256),
-                            var(5)
-                                + var(6) * SymbExpr::from_u32(256)
-                                + var(7) * SymbExpr::from_u32(256 * 256)
-                                + var(8) * SymbExpr::from_u32(256 * 256 * 256),
-                        ],
-                    )]
+                    vec![
+                        Lookup::pull(
+                            var(0),
+                            vec![
+                                SymbExpr::from_usize(u32_right_rotate_7_idx),
+                                var(1)
+                                    + var(2) * SymbExpr::from_u32(256)
+                                    + var(3) * SymbExpr::from_u32(256 * 256)
+                                    + var(4) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(5)
+                                    + var(6) * SymbExpr::from_u32(256)
+                                    + var(7) * SymbExpr::from_u32(256 * 256)
+                                    + var(8) * SymbExpr::from_u32(256 * 256 * 256),
+                            ],
+                        )
+                        .with_max_multiplicity(TABLE_QUERY_BUDGET),
+                    ]
                 }
 
                 // Totally 81 byte columns:
@@ -1157,7 +1178,8 @@ mod tests {
                                     + var(79) * SymbExpr::from_u32(256 * 256)
                                     + var(80) * SymbExpr::from_u32(256 * 256 * 256),
                             ],
-                        ),
+                        )
+                        .with_max_multiplicity(TABLE_QUERY_BUDGET),
                         // interacting with lower-level circuits that constrain operations used in G function
 
                         // a_in + b_in = a_0_tmp

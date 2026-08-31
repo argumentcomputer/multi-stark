@@ -117,6 +117,7 @@ impl<F: Field> ConstraintGraph<F> {
             .map(|lookup| Lookup {
                 multiplicity: buf[lookup.multiplicity.index()],
                 args: lookup.args.iter().map(|a| buf[a.index()]).collect(),
+                max_multiplicity: lookup.max_multiplicity,
             })
             .collect()
     }

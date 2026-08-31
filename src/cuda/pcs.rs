@@ -28,26 +28,23 @@ use std::vec::Vec;
 
 use itertools::{Itertools, izip};
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
-use p3_commit::{
-    BatchOpening, BuildPeriodicLdeTableFast, ExtensionMmcs, Mmcs, OpenedValues, Pcs,
-    PeriodicLdeTable,
-};
+use p3_commit::{ExtensionMmcs, Mmcs, OpenedValues, Pcs, PeriodicLdeTable};
 use p3_dft::{Radix2DFTSmallBatch, TwoAdicSubgroupDft};
 use p3_field::coset::TwoAdicMultiplicativeCoset;
 use p3_field::{
     BasedVectorSpace, ExtensionField, PackedFieldExtension, PrimeCharacteristicRing, PrimeField64,
     TwoAdicField, batch_multiplicative_inverse, dot_product,
 };
-use p3_interpolation::interpolate_coset_with_precomputation;
 use p3_matrix::Matrix;
 use p3_matrix::bitrev::{BitReversedMatrixView, BitReversibleMatrix};
 use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixCow};
+use p3_matrix::interpolation::{Interpolate, compute_adjusted_weights};
 use p3_maybe_rayon::prelude::*;
 use p3_util::linear_map::LinearMap;
 use p3_util::{log2_strict_usize, reverse_bits_len, reverse_slice_index_bits};
 use tracing::{debug_span, instrument};
 
-use super::mmcs::{CudaBatchOpenMmcs, CudaCommitMmcs};
+use super::mmcs::{CudaCommitMmcs, prune_binary_paths};
 use super::{CudaFriWorkspace, CudaLde, CudaMixedMerkleTree, CudaReducedOpening};
 use p3_goldilocks::Goldilocks;
 use p3_symmetric::MerkleCap;
@@ -64,7 +61,7 @@ pub trait CudaPcsDft<T: TwoAdicField>: TwoAdicSubgroupDft<T> {
 }
 
 use p3_fri::{
-    CommitPhaseProofStep, FriFoldingStrategy, FriParameters, FriProof, QueryProof,
+    BatchMultiOpening, CommitPhaseMultiStep, FriFoldingStrategy, FriParameters, FriProof,
     build_periodic_lde_table_two_adic, compute_log_arity_for_round, prover,
     verifier::{self, FriError},
 };
@@ -81,11 +78,11 @@ trait CudaFriMmcs<Val, Challenge: Send + Sync + Clone>: Mmcs<Challenge> {
         codeword: CudaLde,
         log_arity: usize,
     ) -> (Self::Commitment, CudaFriRound);
-    fn open_cuda_fri_batch(
+    fn open_cuda_fri_multi(
         &self,
         round: &CudaFriRound,
         rows: &[usize],
-    ) -> Vec<(Vec<Challenge>, Self::Proof)>;
+    ) -> (Vec<Vec<Challenge>>, Self::MultiProof);
 }
 
 impl<Challenge> CudaFriMmcs<Goldilocks, Challenge>
@@ -111,31 +108,30 @@ where
         )
     }
 
-    fn open_cuda_fri_batch(
+    fn open_cuda_fri_multi(
         &self,
         round: &CudaFriRound,
         rows: &[usize],
-    ) -> Vec<(Vec<Challenge>, Self::Proof)> {
+    ) -> (Vec<Vec<Challenge>>, Self::MultiProof) {
         let codeword_rows = rows
             .iter()
             .flat_map(|&row| (0..round.arity).map(move |column| row * round.arity + column))
             .collect_vec();
         let opened = round.codeword.rows(&codeword_rows);
         let paths = round.tree.open_siblings_batch(rows);
-        opened
+        let opened_values = opened
             .chunks_exact(round.arity)
-            .zip(paths)
-            .map(|(query_rows, opening_proof)| {
-                let values = query_rows
+            .map(|query_rows| {
+                query_rows
                     .iter()
                     .map(|pair| {
                         Challenge::from_basis_coefficients_slice(pair)
                             .expect("quadratic extension row")
                     })
-                    .collect();
-                (values, opening_proof)
+                    .collect()
             })
-            .collect()
+            .collect();
+        (opened_values, prune_binary_paths(rows, &paths))
     }
 }
 
@@ -154,7 +150,8 @@ pub struct CudaTwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs> {
 }
 
 struct CudaFriFolding<InputProof, InputError>(PhantomData<(InputProof, InputError)>);
-type CudaFriFoldingForMmcs<F, M> = CudaFriFolding<Vec<BatchOpening<F, M>>, <M as Mmcs<F>>::Error>;
+type CudaFriFoldingForMmcs<F, M> =
+    CudaFriFolding<Vec<BatchMultiOpening<F, M>>, <M as Mmcs<F>>::Error>;
 impl<Val, Challenge, InputProof: Sync, InputError: Debug + Sync> FriFoldingStrategy<Val, Challenge>
     for CudaFriFolding<InputProof, InputError>
 where
@@ -199,11 +196,11 @@ fn prove_fri_cuda_resident<Val, Challenge, InputMmcs, FriMmcs, Challenger>(
     >],
     input_mmcs: &InputMmcs,
     ext_w: Goldilocks,
-) -> FriProof<Challenge, FriMmcs, Challenger::Witness, Vec<BatchOpening<Val, InputMmcs>>>
+) -> FriProof<Challenge, FriMmcs, Challenger::Witness, Vec<BatchMultiOpening<Val, InputMmcs>>>
 where
     Val: TwoAdicField + PrimeField64,
     Challenge: ExtensionField<Val>,
-    InputMmcs: Mmcs<Val> + CudaBatchOpenMmcs<Val>,
+    InputMmcs: Mmcs<Val>,
     FriMmcs: CudaFriMmcs<Val, Challenge>,
     Challenger: FieldChallenger<Val> + GrindingChallenger + CanObserve<FriMmcs::Commitment>,
 {
@@ -228,7 +225,7 @@ where
         .expect("quadratic extension element")
     };
 
-    let mut codeword = inputs.remove(0).to_lde();
+    let mut codeword = inputs.remove(0).into_lde();
     let mut commits = Vec::new();
     let mut rounds = Vec::new();
     let mut log_arities = Vec::new();
@@ -286,10 +283,12 @@ where
     }
     assert!(inputs.is_empty());
 
-    let mut final_values = codeword
-        .to_row_major_matrix()
+    let final_matrix = codeword.to_row_major_matrix();
+    let mut final_values = final_matrix
         .values
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .take(params.final_poly_len())
         .map(|pair| from_pair([pair[0], pair[1]]))
         .collect_vec();
@@ -314,7 +313,11 @@ where
                 .iter()
                 .map(|&index| index >> (log_global_max_height - log_height))
                 .collect_vec();
-            input_mmcs.open_batches(&indices, data)
+            let (opened_values, opening_proof) = input_mmcs.open_multi_batch(&indices, data);
+            BatchMultiOpening {
+                opened_values,
+                opening_proof,
+            }
         })
         .collect_vec();
     let mut current_indices = query_indices;
@@ -331,45 +334,33 @@ where
                 .iter()
                 .map(|&index| index >> log_arity)
                 .collect_vec();
-            let openings = params.mmcs.open_cuda_fri_batch(round, &group_indices);
+            let (opened_values, opening_proof) =
+                params.mmcs.open_cuda_fri_multi(round, &group_indices);
             current_indices = group_indices;
-            positions
+            let sibling_values = positions
                 .into_iter()
-                .zip(openings)
-                .map(|(index_in_group, (opened, opening_proof))| {
-                    let sibling_values = opened
+                .zip(opened_values)
+                .map(|(index_in_group, opened)| {
+                    opened
                         .into_iter()
                         .enumerate()
                         .filter_map(|(column, value)| (column != index_in_group).then_some(value))
-                        .collect();
-                    CommitPhaseProofStep {
-                        log_arity: u8::try_from(log_arity).expect("FRI arity exceeds u8"),
-                        sibling_values,
-                        opening_proof,
-                    }
+                        .collect()
                 })
-                .collect_vec()
+                .collect_vec();
+            CommitPhaseMultiStep {
+                log_arity: u8::try_from(log_arity).expect("FRI arity exceeds u8"),
+                sibling_values,
+                opening_proof,
+            }
         })
         .collect_vec();
-    let mut input_iters = input_batches.into_iter().map(Vec::into_iter).collect_vec();
-    let mut commit_iters = commit_batches.into_iter().map(Vec::into_iter).collect_vec();
-    let query_proofs = (0..params.num_queries)
-        .map(|_| QueryProof {
-            input_proof: input_iters
-                .iter_mut()
-                .map(|openings| openings.next().expect("complete input opening batch"))
-                .collect(),
-            commit_phase_openings: commit_iters
-                .iter_mut()
-                .map(|openings| openings.next().expect("complete FRI opening batch"))
-                .collect(),
-        })
-        .collect();
 
     FriProof {
         commit_phase_commits: commits,
         commit_pow_witnesses,
-        query_proofs,
+        input_openings: input_batches,
+        commit_phase_openings: commit_batches,
         final_poly,
         query_pow_witness,
     }
@@ -414,7 +405,7 @@ pub type CommitmentWithOpeningPoints<Challenge, Commitment, Domain> = (
 pub struct TwoAdicFriFolding<InputProof, InputError>(pub PhantomData<(InputProof, InputError)>);
 
 pub type TwoAdicFriFoldingForMmcs<F, M> =
-    TwoAdicFriFolding<Vec<BatchOpening<F, M>>, <M as Mmcs<F>>::Error>;
+    TwoAdicFriFolding<Vec<BatchMultiOpening<F, M>>, <M as Mmcs<F>>::Error>;
 
 impl<F: TwoAdicField, InputProof: Sync, InputError: Debug + Sync, EF: ExtensionField<F>>
     FriFoldingStrategy<F, EF> for TwoAdicFriFolding<InputProof, InputError>
@@ -584,7 +575,7 @@ impl<Val, Dft, InputMmcs, FriMmcs, Challenge, Challenger> Pcs<Challenge, Challen
 where
     Val: TwoAdicField + PrimeField64,
     Dft: TwoAdicSubgroupDft<Val> + CudaPcsDft<Val> + Sync,
-    InputMmcs: Mmcs<Val, Proof: Sync, Error: Sync> + CudaCommitMmcs<Val> + CudaBatchOpenMmcs<Val>,
+    InputMmcs: Mmcs<Val, MultiProof: Sync, Error: Sync> + CudaCommitMmcs<Val>,
     FriMmcs: Mmcs<Challenge> + CudaFriMmcs<Val, Challenge>,
     Challenge: ExtensionField<Val>,
     Challenger:
@@ -594,7 +585,7 @@ where
     type Commitment = InputMmcs::Commitment;
     type ProverData = InputMmcs::ProverData<RowMajorMatrix<Val>>;
     type EvaluationsOnDomain<'a> = BitReversedMatrixView<RowMajorMatrixCow<'a, Val>>;
-    type Proof = FriProof<Challenge, FriMmcs, Val, Vec<BatchOpening<Val, InputMmcs>>>;
+    type Proof = FriProof<Challenge, FriMmcs, Val, Vec<BatchMultiOpening<Val, InputMmcs>>>;
     type Error = FriError<FriMmcs::Error, InputMmcs::Error>;
     const ZK: bool = false;
 
@@ -604,6 +595,10 @@ where
     /// This function will panic if `degree` is not a power of 2 or `degree > (1 << Val::TWO_ADICITY)`.
     fn natural_domain_for_degree(&self, degree: usize) -> Self::Domain {
         TwoAdicMultiplicativeCoset::new(Val::ONE, log2_strict_usize(degree)).unwrap()
+    }
+
+    fn log_max_lde_height(&self) -> usize {
+        Val::TWO_ADICITY
     }
 
     /// Commit to a collection of evaluation matrices.
@@ -737,6 +732,14 @@ where
     }
 
     fn commit_ldes(&self, ldes: Vec<RowMajorMatrix<Val>>) -> (Self::Commitment, Self::ProverData) {
+        let min_height = 1 << self.fri.log_blowup;
+        for lde in &ldes {
+            assert!(
+                lde.height() >= min_height,
+                "committed LDE height {} is smaller than the blowup factor {min_height}",
+                lde.height()
+            );
+        }
         self.mmcs.commit_cuda_storage(ldes)
     }
 
@@ -774,6 +777,7 @@ where
         let result = self
             .dft
             .coset_dft_batch(coeffs, domain.shift())
+            .bit_reverse_rows()
             .to_row_major_matrix();
         let result_width = result.width();
 
@@ -982,8 +986,8 @@ where
             let alpha: Challenge = challenger.sample_algebra_element();
             let alpha_powers: Vec<_> = alpha.powers().take(global_max_width).collect();
             let alpha_pairs: Vec<_> = alpha_powers.iter().copied().map(to_pair).collect();
-            let mut num_reduced = [0usize; 32];
-            let mut reduced: [Option<CudaReducedOpening>; 32] = core::array::from_fn(|_| None);
+            let mut num_reduced = [0usize; 33];
+            let mut reduced: [Option<CudaReducedOpening>; 33] = core::array::from_fn(|_| None);
             let mut reduction_tasks = Vec::new();
             for ((ldes, points), openings_round) in rounds.iter().zip(all_opened_values.iter()) {
                 for ((lde, ps), openings) in
@@ -1067,6 +1071,11 @@ where
         // for that point, and precompute 1/(z - X) for the largest subgroup (in bitrev order).
         let inv_denoms = compute_inverse_denominators(&mats_and_points, &coset);
 
+        let adjusted_weights: LinearMap<Challenge, Vec<Challenge>> = inv_denoms
+            .iter()
+            .map(|(point, denoms)| (*point, compute_adjusted_weights(*point, denoms)))
+            .collect();
+
         // Evaluate coset representations and write openings to the challenger
         let all_opened_values = mats_and_points
             .iter()
@@ -1086,7 +1095,6 @@ where
 
                         // `subgroup` and `mat` are both in bit-reversed order, so we can truncate.
                         let (low_coset, _) = mat.split_rows(h);
-                        let coset_h = &coset[..h];
 
                         points_for_mat
                             .iter()
@@ -1100,16 +1108,11 @@ where
                                     "compute opened values with Lagrange interpolation"
                                 )
                                 .in_scope(|| {
-                                    // Get the relevant inverse denominators for this point and use these to
-                                    // interpolate to get the evaluation of each polynomial in the matrix
-                                    // at the desired point.
-                                    let inv_denoms = &inv_denoms.get(&point).unwrap()[..h];
-                                    interpolate_coset_with_precomputation(
-                                        &low_coset,
+                                    let adjusted = &adjusted_weights.get(&point).unwrap()[..h];
+                                    low_coset.interpolate_coset_with_precomputation(
                                         Val::GENERATOR,
                                         point,
-                                        coset_h,
-                                        inv_denoms,
+                                        adjusted,
                                     )
                                 });
 
@@ -1133,15 +1136,8 @@ where
         // In our setup, k is two times the trace width plus the number of quotient polynomials.
         let alpha: Challenge = challenger.sample_algebra_element();
 
-        // We precompute powers of alpha as we need the same powers for each matrix.
-        // We compute both a vector of unpacked powers and a vector of packed powers.
-        // TODO: It should be possible to refactor this to only use the packed powers but
-        // this is not a bottleneck so is not a priority.
         let packed_alpha_powers =
             Challenge::ExtensionPacking::packed_ext_powers_capped(alpha, global_max_width)
-                .collect_vec();
-        let alpha_powers =
-            Challenge::ExtensionPacking::to_ext_iter(packed_alpha_powers.iter().copied())
                 .collect_vec();
 
         // Now that we have sent the openings to the verifier, it remains to prove
@@ -1157,13 +1153,13 @@ where
 
         // num_reduced records the number of (function, opening point) pairs for each `log_height`.
         // TODO: This should really be `[0; Val::TWO_ADICITY]` but that runs into issues with generics.
-        let mut num_reduced = [0; 32];
+        let mut num_reduced = [0; 33];
 
         // For each `log_height` from 2^1 -> 2^32, reduced_openings will contain either `None`
         // if there are no matrices of that height, or `Some(vec)` where `vec` is equal to
         // a weighted sum of `(f(zeta) - f(x))/(zeta - x)` over all `f`'s of that height and
         // for each `f`, all opening points `zeta`. The sum is weighted by powers of the challenge alpha.
-        let mut reduced_openings: [_; 32] = core::array::from_fn(|_| None);
+        let mut reduced_openings: [_; 33] = core::array::from_fn(|_| None);
 
         for ((mats, points), openings_for_round) in
             mats_and_points.iter().zip(all_opened_values.iter())
@@ -1179,7 +1175,7 @@ where
                 // If this is our first matrix at this height, initialise reduced_openings to zero.
                 // Otherwise, get a mutable reference to it.
                 let reduced_opening_for_log_height = reduced_openings[log_height]
-                    .get_or_insert_with(|| vec![Challenge::ZERO; mat.height()]);
+                    .get_or_insert_with(|| Challenge::zero_vec(mat.height()));
                 debug_assert_eq!(reduced_opening_for_log_height.len(), mat.height());
 
                 // Treating our matrix M as the evaluations of functions f_0, f_1, ...
@@ -1200,7 +1196,7 @@ where
                     // As we have all the openings `f_i(z)`, we can combine them using `alpha`
                     // in an identical way to before to compute `Mred(z)`.
                     let reduced_openings: Challenge =
-                        dot_product(alpha_powers.iter().copied(), openings.iter().copied());
+                        dot_product(alpha.powers(), openings.iter().copied());
 
                     mat_compressed
                         .par_iter()
@@ -1275,32 +1271,14 @@ where
 
         Ok(())
     }
-}
 
-impl<Val, Dft, InputMmcs, FriMmcs> BuildPeriodicLdeTableFast
-    for CudaTwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs>
-where
-    Val: TwoAdicField,
-    Dft: TwoAdicSubgroupDft<Val> + CudaPcsDft<Val> + Default,
-{
-    type PeriodicDomain = TwoAdicMultiplicativeCoset<Val>;
-
-    fn maybe_build_periodic_lde_table_fast(
+    fn build_periodic_lde_table(
         &self,
-        periodic_cols: &[Vec<p3_commit::Val<Self::PeriodicDomain>>],
-        trace_domain: Self::PeriodicDomain,
-        quotient_domain: Self::PeriodicDomain,
-    ) -> Option<PeriodicLdeTable<p3_commit::Val<Self::PeriodicDomain>>>
-    where
-        p3_commit::Val<Self::PeriodicDomain>: Clone,
-    {
-        let periodic_cols_val: &[Vec<Val>] = unsafe { core::mem::transmute(periodic_cols) };
-        let table = build_periodic_lde_table_two_adic::<Val, Dft>(
-            periodic_cols_val,
-            &trace_domain,
-            &quotient_domain,
-        );
-        Some(table)
+        periodic_cols: &[Vec<Val>],
+        trace_domain: Self::Domain,
+        quotient_domain: Self::Domain,
+    ) -> PeriodicLdeTable<Val> {
+        build_periodic_lde_table_two_adic(&self.dft, periodic_cols, &trace_domain, &quotient_domain)
     }
 }
 

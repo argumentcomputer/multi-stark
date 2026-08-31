@@ -86,34 +86,45 @@ mod tests {
         }
     }
 
+    // Per-row bound declared for the committed count columns (unconstrained;
+    // the weight-1 pushes of the querying circuits keep actual counts within
+    // this budget).
+    const TABLE_QUERY_BUDGET: u64 = 1 << 32;
+
     impl U32CS {
         fn lookups(&self) -> Vec<Lookup<SymbExpr>> {
             let byte_index = SymbExpr::from_u8(0);
             let u32_index = SymbExpr::from_u8(1);
             match self {
                 Self::ByteTable => {
-                    vec![Lookup::pull(var(0), vec![byte_index, preprocessed_var(0)])]
+                    vec![
+                        Lookup::pull(var(0), vec![byte_index, preprocessed_var(0)])
+                            .with_max_multiplicity(TABLE_QUERY_BUDGET),
+                    ]
                 }
                 Self::U32Add => {
                     // Pull
-                    let mut lookups = vec![Lookup::pull(
-                        var(13),
-                        vec![
-                            u32_index,
-                            var(0)
-                                + var(1) * SymbExpr::from_u32(256)
-                                + var(2) * SymbExpr::from_u32(256 * 256)
-                                + var(3) * SymbExpr::from_u32(256 * 256 * 256),
-                            var(4)
-                                + var(5) * SymbExpr::from_u32(256)
-                                + var(6) * SymbExpr::from_u32(256 * 256)
-                                + var(7) * SymbExpr::from_u32(256 * 256 * 256),
-                            var(8)
-                                + var(9) * SymbExpr::from_u32(256)
-                                + var(10) * SymbExpr::from_u32(256 * 256)
-                                + var(11) * SymbExpr::from_u32(256 * 256 * 256),
-                        ],
-                    )];
+                    let mut lookups = vec![
+                        Lookup::pull(
+                            var(13),
+                            vec![
+                                u32_index,
+                                var(0)
+                                    + var(1) * SymbExpr::from_u32(256)
+                                    + var(2) * SymbExpr::from_u32(256 * 256)
+                                    + var(3) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(4)
+                                    + var(5) * SymbExpr::from_u32(256)
+                                    + var(6) * SymbExpr::from_u32(256 * 256)
+                                    + var(7) * SymbExpr::from_u32(256 * 256 * 256),
+                                var(8)
+                                    + var(9) * SymbExpr::from_u32(256)
+                                    + var(10) * SymbExpr::from_u32(256 * 256)
+                                    + var(11) * SymbExpr::from_u32(256 * 256 * 256),
+                            ],
+                        )
+                        .with_max_multiplicity(TABLE_QUERY_BUDGET),
+                    ];
                     // Push
                     lookups
                         .extend((0..12).map(|i| {

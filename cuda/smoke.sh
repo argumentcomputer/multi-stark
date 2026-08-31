@@ -27,7 +27,7 @@ cargo test --release --locked --features parallel,cuda -- --test-threads=1
 compat_dir="$(mktemp -d)"
 trap 'rm -rf "$compat_dir"' EXIT
 cargo run --release --locked --example proof_compatibility -- "$compat_dir/cpu.proof"
-echo "c3c8ff942efc36fe508d6dcea3450cf4fa4d92a84f8d16bc651430595f4d244a  $compat_dir/cpu.proof" \
+echo "25564a01d1d352b1ec2de56b019b641d24acc81083133e79274a86829b2a5dd5  $compat_dir/cpu.proof" \
   | sha256sum --check --status
 cargo run --release --locked --features parallel,cuda \
   --example proof_compatibility -- "$compat_dir/cuda.proof"

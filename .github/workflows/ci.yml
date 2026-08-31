@@ -10,6 +10,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+# Fail every cargo invocation on warnings from workspace-local packages
+# (cargo's build.warnings, stable since 1.97). CI-only: local builds
+# still just warn.
+env:
+  CARGO_BUILD_WARNINGS: deny
+
 permissions:
   contents: read
 

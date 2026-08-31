@@ -66,7 +66,7 @@ fn main() {
     let (system, key) = System::new(config, [LookupAir::new(WidePythagoreanAir, vec![])]);
     let height = 1 << LOG_HEIGHT;
     let mut values = Val::zero_vec(height * WIDTH);
-    for row in values.chunks_exact_mut(WIDTH) {
+    for row in values.as_chunks_mut::<WIDTH>().0 {
         row[0] = Val::from_u8(3);
         row[1] = Val::from_u8(4);
         row[2] = Val::from_u8(5);

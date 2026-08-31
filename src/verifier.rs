@@ -50,7 +50,9 @@
 //! - ρ = 2^(-log_blowup) — FRI rate parameter (inverse of the blowup factor)
 //! - n — number of FRI queries (`num_queries`)
 //! - k — number of constraints (after lookup expansion)
-//! - N — total number of lookup rows across all circuits
+//! - N — total number of lookup messages: lookup slots × rows, summed across
+//!   all circuits, plus the public claims
+//! - W — maximum lookup message width (number of arguments)
 //! - D — maximum degree of the quotient polynomial (trace_degree × quotient_degree)
 //!
 //! ## FRI proximity test
@@ -97,15 +99,41 @@
 //! ## Lookup argument
 //!
 //! The accumulator-based lookup argument uses two random challenges (β, γ) to
-//! compress lookup messages into field elements. For each lookup interaction, the
-//! message `m = β + fingerprint(γ, args)` is a random affine function of the
-//! challenges. If the multiset of "pushed" values differs from the multiset of
-//! "pulled" values, the running accumulator `Σ multiplicity_i / m_i` is a nonzero
-//! rational function of the challenges. By Schwartz-Zippel (applied to the
-//! numerator after clearing denominators), the accumulator evaluates to zero with
-//! probability at most **N / |F_ext|**. Crucially, the challenges are sampled
-//! *after* the prover has committed to the stage-1 traces and the claims have been
+//! compress lookup messages into field elements. Under the default
+//! `WidthBinding::Fingerprint` policy each message is
+//! `m = β + Σ_i args[i]·γ^i + W·γ^W` with `W` the message width — the width is
+//! bound as the leading coefficient so that messages of different widths can
+//! never alias (see `message_fingerprint` in the lookup module). Under
+//! `WidthBinding::ByConstruction` the width term is omitted and the circuit
+//! family's prefix-freeness contract rules out cross-width aliasing instead
+//! (see `WidthBinding`); the argument below is otherwise unchanged. `m` has
+//! degree 1 in β and degree W in γ. If the multiset of "pushed" values
+//! differs from the multiset of "pulled" values, the running accumulator
+//! `Σ multiplicity_i / m_i` is a nonzero rational function of the challenges,
+//! and a cheating prover survives only through one of two events:
+//!
+//! - **Numerator root**: clearing denominators leaves a nonzero polynomial of
+//!   degree ≤ N in β and ≤ N·W in γ; a random (β, γ) is a root with
+//!   probability at most **N·(W+1) / |F_ext|** (Schwartz-Zippel, per-variable
+//!   union bound).
+//! - **Vanishing denominator**: if some message evaluates to zero, the
+//!   multiplied-through step constraint degenerates — the
+//!   `(Π_j m_j)·(acc′ − acc)` factor is annihilated, leaving the accumulator
+//!   unconstrained on that row. Every message is monic in β, so for each γ
+//!   exactly one β kills each message: probability at most **N / |F_ext|**.
+//!
+//! Together, the lookup argument's soundness error is at most
+//! **N·(W+2) / |F_ext|**. Crucially, the challenges are sampled *after* the
+//! prover has committed to the stage-1 traces and the claims have been
 //! observed, so the prover cannot adapt them.
+//!
+//! Field-level accumulator balance implies exact integer multiset balance
+//! only if no per-message count can wrap modulo the field characteristic:
+//! the verifier enforces the height bound `Σ wᵢ·hᵢ + |claims| < p` over every
+//! lookup slot's declared per-row multiplicity bound
+//! ([`crate::lookup::Lookup::max_multiplicity`]), rejecting with
+//! [`VerificationError::MultiplicityOverflow`] otherwise; each circuit must
+//! in turn constrain its multiplicities to the declared bounds.
 //!
 //! ## Fiat-Shamir (random oracle model)
 //!
@@ -121,7 +149,7 @@
 //! By a union bound, the total soundness error is at most:
 //!
 //! ```text
-//! ε ≤ ε_FRI + (k - 1 + D + N) / |F_ext|
+//! ε ≤ ε_FRI + (k - 1 + D + N·(W+2)) / |F_ext|
 //! ```
 //!
 //! where ε_FRI is the FRI soundness error (see above for the conjectured vs proven
@@ -159,10 +187,10 @@
 //! actual low-degree-extension values of the witness. Do not use it when the
 //! witness must remain hidden from the verifier.
 
-use crate::config::{PcsError, StarkGenericConfig, Val};
+use crate::config::{Com, Domain, PcsError, StarkGenericConfig, Val};
 use crate::ensure_eq;
 use crate::eval::VarValues;
-use crate::lookup::fingerprint;
+use crate::lookup::{message_fingerprint, multiplicity_height_bound_holds};
 use crate::prover::Proof;
 use crate::system::System;
 
@@ -185,10 +213,58 @@ pub enum VerificationError<PcsErr> {
     InvalidProofShape,
     /// The system configuration is invalid (e.g. no circuits).
     InvalidSystem,
+    /// The logUp multiplicity height bound `Σ wᵢ·hᵢ + |claims| < p` is
+    /// violated at the claimed trace heights: some per-message integer
+    /// count could wrap modulo the field characteristic, so accumulator
+    /// balance would no longer imply integer multiset balance.
+    MultiplicityOverflow,
     /// The recomputed composition polynomial does not match the quotient.
     OodEvaluationMismatch,
+    /// The out-of-domain point ζ landed inside a trace domain, where the
+    /// Lagrange selectors are undefined (they divide by the vanishing
+    /// polynomial). Honest Fiat-Shamir sampling reaches this only with
+    /// probability |H|/|F_ext| per circuit; rejecting keeps the verifier
+    /// panic-free on adversarial proofs.
+    OodPointInDomain,
     /// The lookup accumulator did not balance to zero.
     UnbalancedChannel,
+}
+
+/// Everything the PCS-opening phase consumes, produced by replaying the
+/// transcript up to (but not including) `pcs.verify`: the reconstructed
+/// per-commitment opening rounds, the challenger positioned exactly
+/// where `pcs.verify` expects it, the sampled challenges, and the
+/// derived per-circuit data the post-opening checks reuse.
+///
+/// Extracted so the advice re-encoder (see [`crate::advice`]) can drive
+/// the PCS phase with instrumented components against the *same* rounds
+/// and transcript state as [`System::verify_multiple_claims`], with no
+/// second copy of the Fiat-Shamir replay.
+/// The per-commitment opening rounds handed to `pcs.verify`, in prover
+/// order: for each commitment, each matrix's domain and its opening
+/// points with claimed values.
+pub(crate) type OpeningRounds<SC> = Vec<(
+    Com<SC>,
+    Vec<(
+        Domain<SC>,
+        Vec<(
+            <SC as StarkGenericConfig>::Challenge,
+            Vec<<SC as StarkGenericConfig>::Challenge>,
+        )>,
+    )>,
+)>;
+
+pub(crate) struct PcsVerificationContext<SC: StarkGenericConfig> {
+    pub rounds: OpeningRounds<SC>,
+    pub challenger: SC::Challenger,
+    pub zeta: SC::Challenge,
+    pub lookup_argument_challenge: SC::Challenge,
+    pub fingerprint_challenge: SC::Challenge,
+    pub constraint_challenge: SC::Challenge,
+    /// The lookup accumulator seeded from the claims.
+    pub claim_accumulator: SC::Challenge,
+    pub active_indices: Vec<usize>,
+    pub quotient_degrees: Vec<usize>,
 }
 
 impl<SC: StarkGenericConfig> System<SC> {
@@ -204,12 +280,15 @@ impl<SC: StarkGenericConfig> System<SC> {
         self.verify_multiple_claims(&[claim], proof)
     }
 
-    /// Verifies a STARK proof against multiple claims.
-    pub fn verify_multiple_claims(
+    /// Replays the transcript up to the PCS-opening phase, producing the
+    /// [`PcsVerificationContext`] shared by [`System::verify_multiple_claims`]
+    /// and the advice re-encoder. Includes the shape, height-bound and
+    /// accumulator-balance checks that precede the replay.
+    pub(crate) fn pcs_verification_context(
         &self,
         claims: &[&[Val<SC>]],
         proof: &Proof<SC>,
-    ) -> Result<(), VerificationError<PcsError<SC>>>
+    ) -> Result<PcsVerificationContext<SC>, VerificationError<PcsError<SC>>>
     where
         Val<SC>: TwoAdicField,
     {
@@ -218,7 +297,7 @@ impl<SC: StarkGenericConfig> System<SC> {
             commitments,
             intermediate_accumulators,
             log_degrees,
-            opening_proof,
+            opening_proof: _,
             quotient_opened_values,
             preprocessed_opened_values,
             stage_1_opened_values,
@@ -233,6 +312,29 @@ impl<SC: StarkGenericConfig> System<SC> {
             .enumerate()
             .filter_map(|(i, &a)| a.then_some(i))
             .collect();
+
+        // Soundness: logUp height bound. With Σ wᵢ·hᵢ + |claims| < p, no
+        // per-message integer count can wrap modulo the field
+        // characteristic, so accumulator balance implies exact multiset
+        // balance (see `multiplicity_height_bound_holds`).
+        crate::ensure!(
+            multiplicity_height_bound_holds::<Val<SC>>(
+                active_indices
+                    .iter()
+                    .zip(log_degrees)
+                    .map(|(&ci, log_degree)| (
+                        self.circuits[ci]
+                            .graph
+                            .lookups
+                            .iter()
+                            .map(|l| u128::from(l.max_multiplicity))
+                            .sum(),
+                        1usize << usize::from(*log_degree),
+                    )),
+                claims.len(),
+            ),
+            VerificationError::MultiplicityOverflow
+        );
 
         // Soundness: lookup argument. The accumulator was computed by the prover
         // under challenges (β, γ) that were sampled after the traces and claims were
@@ -309,7 +411,7 @@ impl<SC: StarkGenericConfig> System<SC> {
         let mut acc = SC::Challenge::ZERO;
         for claim in claims {
             let message = lookup_argument_challenge
-                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
+                + message_fingerprint(&fingerprint_challenge, claim, self.config.width_binding());
             acc += message.inverse();
         }
 
@@ -406,11 +508,57 @@ impl<SC: StarkGenericConfig> System<SC> {
                 preprocessed_trace_evaluations,
             ));
         }
+        Ok(PcsVerificationContext {
+            rounds: coms_to_verify,
+            challenger,
+            zeta,
+            lookup_argument_challenge,
+            fingerprint_challenge,
+            constraint_challenge,
+            claim_accumulator: acc,
+            active_indices,
+            quotient_degrees,
+        })
+    }
+
+    /// Verifies a STARK proof against multiple claims.
+    pub fn verify_multiple_claims(
+        &self,
+        claims: &[&[Val<SC>]],
+        proof: &Proof<SC>,
+    ) -> Result<(), VerificationError<PcsError<SC>>>
+    where
+        Val<SC>: TwoAdicField,
+    {
+        let Proof {
+            intermediate_accumulators,
+            log_degrees,
+            opening_proof,
+            quotient_opened_values,
+            preprocessed_opened_values,
+            stage_1_opened_values,
+            stage_2_opened_values,
+            ..
+        } = proof;
+        let PcsVerificationContext {
+            rounds,
+            mut challenger,
+            zeta,
+            lookup_argument_challenge,
+            fingerprint_challenge,
+            constraint_challenge,
+            claim_accumulator,
+            active_indices,
+            quotient_degrees,
+        } = self.pcs_verification_context(claims, proof)?;
+        let mut acc = claim_accumulator;
+        let pcs = self.config.pcs();
+
         // Soundness: FRI proximity test. Verifies that the committed polynomials
         // are close to low-degree polynomials and that the claimed evaluations are
         // consistent with the commitments. Soundness error ≤ ρ^num_queries, where
         // ρ = 2^(-log_blowup). This is the dominant term in the overall bound.
-        pcs.verify(coms_to_verify, opening_proof, &mut challenger)
+        pcs.verify(rounds, opening_proof, &mut challenger)
             .map_err(VerificationError::InvalidOpeningArgument)?;
 
         // use the opened values to compute the composition polynomial for each circuit
@@ -424,6 +572,13 @@ impl<SC: StarkGenericConfig> System<SC> {
             let quotient_degree = quotient_degrees[pos];
             let next_acc = intermediate_accumulators[pos];
             let trace_domain = pcs.natural_domain_for_degree(degree);
+            // ζ inside the trace domain would make the Lagrange selectors
+            // divide by Z_H(ζ) = 0 and panic; reject it instead. Honest
+            // sampling lands here only with probability |H|/|F_ext|.
+            crate::ensure!(
+                !trace_domain.vanishing_poly_at_point(zeta).is_zero(),
+                VerificationError::OodPointInDomain
+            );
             let sels = trace_domain.selectors_at_point(zeta);
             // The logUp boundary injection absorbs the last-row selector's
             // normalization constant into Δ (mirroring the prover): p3's
@@ -491,6 +646,7 @@ impl<SC: StarkGenericConfig> System<SC> {
                 crate::system::extension_params::<SC>().w,
                 extension_d,
                 circuit.lookup_group_size,
+                self.config.width_binding(),
                 &mut constraint_values,
             );
             debug_assert_eq!(constraint_values.len(), circuit.constraint_count());
@@ -837,14 +993,14 @@ mod tests {
         assert_eq!(proof_bytes, second_proof_bytes);
         assert_eq!(
             proof_bytes.len(),
-            77_637,
+            22_081,
             "proof encoding changed; update only with an intentional protocol review"
         );
         assert_eq!(
             Blake3.hash_slice(&proof_bytes),
             [
-                132, 122, 135, 163, 73, 111, 225, 81, 221, 201, 107, 28, 30, 21, 49, 58, 253, 13,
-                161, 49, 19, 184, 213, 239, 107, 152, 43, 42, 67, 255, 151, 193,
+                164, 114, 89, 134, 26, 181, 163, 142, 85, 64, 0, 180, 229, 221, 44, 81, 121, 191,
+                106, 174, 146, 202, 134, 198, 163, 192, 204, 42, 246, 169, 45, 48,
             ],
             "proof bytes changed; update only with an intentional protocol review"
         );

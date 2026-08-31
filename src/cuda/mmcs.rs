@@ -1,7 +1,7 @@
 use p3_commit::{BatchOpening, BatchOpeningRef, Mmcs};
 use p3_goldilocks::Goldilocks;
 use p3_matrix::{Dimensions, Matrix, dense::RowMajorMatrix};
-use p3_merkle_tree::{MerkleTreeError, MerkleTreeMmcs};
+use p3_merkle_tree::{MerkleTreeError, MerkleTreeMmcs, PrunedMerklePaths};
 use p3_symmetric::MerkleCap;
 
 use super::{CudaLde, CudaMixedMerkleTree, mixed_lde_open_row, mixed_lde_open_rows};
@@ -12,6 +12,56 @@ use p3_symmetric::SerializingHasher;
 type CpuMmcs =
     MerkleTreeMmcs<Goldilocks, u8, SerializingHasher<Blake3>, Blake3CompressionFunction, 2, 32>;
 type CpuData<M> = <CpuMmcs as Mmcs<Goldilocks>>::ProverData<M>;
+
+/// Prune full binary authentication paths into P3's canonical frontier order.
+/// CUDA keeps the complete digest layers resident and opens selected paths in
+/// one batch; this small host pass performs the same deduplication as the P3
+/// Merkle MMCS without materializing committed matrices.
+pub(crate) fn prune_binary_paths(
+    indices: &[usize],
+    paths: &[Vec<[u8; 32]>],
+) -> PrunedMerklePaths<u8, 32> {
+    assert_eq!(indices.len(), paths.len());
+    if indices.is_empty() {
+        return PrunedMerklePaths {
+            sibling_hashes: Vec::new(),
+        };
+    }
+    let levels = paths[0].len();
+    assert!(paths.iter().all(|path| path.len() == levels));
+
+    let mut order: Vec<usize> = (0..indices.len()).collect();
+    order.sort_unstable_by_key(|&slot| indices[slot]);
+    order.dedup_by_key(|slot| indices[*slot]);
+
+    // (node index at this level, slot in `order` owning its full path).
+    let mut frontier: Vec<(usize, usize)> = order
+        .iter()
+        .enumerate()
+        .map(|(lead, &slot)| (indices[slot], lead))
+        .collect();
+    let mut parents = Vec::with_capacity(frontier.len());
+    let mut sibling_hashes = Vec::new();
+
+    for (level, _) in paths[0].iter().enumerate() {
+        parents.clear();
+        let mut cursor = 0;
+        while cursor < frontier.len() {
+            let (node, lead) = frontier[cursor];
+            let parent = node / 2;
+            let sibling = node ^ 1;
+            let paired = cursor + 1 < frontier.len() && frontier[cursor + 1].0 == sibling;
+            if !paired {
+                sibling_hashes.push(paths[order[lead]][level]);
+            }
+            parents.push((parent, lead));
+            cursor += if paired { 2 } else { 1 };
+        }
+        core::mem::swap(&mut frontier, &mut parents);
+    }
+
+    PrunedMerklePaths { sibling_hashes }
+}
 
 pub enum CudaMmcsData<M> {
     Cpu(CpuData<M>),
@@ -91,41 +141,6 @@ pub trait CudaCommitMmcs<T: Send + Sync + Clone>: Mmcs<T> {
         &self,
         ldes: Vec<RowMajorMatrix<T>>,
     ) -> (Self::Commitment, Self::ProverData<RowMajorMatrix<T>>);
-}
-
-pub trait CudaBatchOpenMmcs<T: Send + Sync + Clone>: Mmcs<T> {
-    fn open_batches<M: Matrix<T>>(
-        &self,
-        indices: &[usize],
-        prover_data: &Self::ProverData<M>,
-    ) -> Vec<BatchOpening<T, Self>>
-    where
-        Self: Sized;
-}
-
-impl CudaBatchOpenMmcs<Goldilocks> for CudaMmcs {
-    fn open_batches<M: Matrix<Goldilocks>>(
-        &self,
-        indices: &[usize],
-        prover_data: &Self::ProverData<M>,
-    ) -> Vec<BatchOpening<Goldilocks, Self>> {
-        match prover_data {
-            CudaMmcsData::Cpu(_) => indices
-                .iter()
-                .map(|&index| self.open_batch(index, prover_data))
-                .collect(),
-            CudaMmcsData::Cuda { resident, tree, .. } => {
-                let rows = mixed_lde_open_rows(resident, indices);
-                let paths = tree.open_siblings_batch(indices);
-                rows.into_iter()
-                    .zip(paths)
-                    .map(|(opened_values, opening_proof)| {
-                        BatchOpening::new(opened_values, opening_proof)
-                    })
-                    .collect()
-            }
-        }
-    }
 }
 
 impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
@@ -218,6 +233,7 @@ impl Mmcs<Goldilocks> for CudaMmcs {
     type ProverData<M> = CudaMmcsData<M>;
     type Commitment = MerkleCap<Goldilocks, [u8; 32]>;
     type Proof = Vec<[u8; 32]>;
+    type MultiProof = PrunedMerklePaths<u8, 32>;
     type Error = MerkleTreeError;
 
     fn commit<M: Matrix<Goldilocks>>(
@@ -331,5 +347,32 @@ impl Mmcs<Goldilocks> for CudaMmcs {
             index,
             BatchOpeningRef::new(batch_opening.opened_values, batch_opening.opening_proof),
         )
+    }
+
+    fn open_multi_batch<M: Matrix<Goldilocks>>(
+        &self,
+        indices: &[usize],
+        prover_data: &Self::ProverData<M>,
+    ) -> (Vec<Vec<Vec<Goldilocks>>>, Self::MultiProof) {
+        match prover_data {
+            CudaMmcsData::Cpu(data) => self.cpu.open_multi_batch(indices, data),
+            CudaMmcsData::Cuda { resident, tree, .. } => {
+                let opened_values = mixed_lde_open_rows(resident, indices);
+                let paths = tree.open_siblings_batch(indices);
+                (opened_values, prune_binary_paths(indices, &paths))
+            }
+        }
+    }
+
+    fn verify_multi_batch<R: AsRef<[Goldilocks]> + PartialEq>(
+        &self,
+        commit: &Self::Commitment,
+        dimensions: &[Dimensions],
+        indices: &[usize],
+        opened_values: &[Vec<R>],
+        proof: &Self::MultiProof,
+    ) -> Result<(), Self::Error> {
+        self.cpu
+            .verify_multi_batch(commit, dimensions, indices, opened_values, proof)
     }
 }

@@ -182,7 +182,9 @@ use crate::config::{
     Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsProof, StarkGenericConfig, Val,
 };
 use crate::eval::VarValues;
-use crate::lookup::{LookupValues, fingerprint};
+use crate::lookup::{
+    LookupValues, WidthBinding, message_fingerprint, multiplicity_height_bound_holds,
+};
 use crate::system::{ProverKey, System, SystemWitness};
 
 use bincode::config::{Configuration, Fixint, LittleEndian, standard};
@@ -255,7 +257,7 @@ impl<SC: StarkGenericConfig> Clone for Proof<SC> {
 }
 
 impl<SC: StarkGenericConfig> Proof<SC> {
-    fn serde_config() -> Configuration<LittleEndian, Fixint> {
+    pub(crate) fn serde_config() -> Configuration<LittleEndian, Fixint> {
         standard().with_little_endian().with_fixed_int_encoding()
     }
 
@@ -315,6 +317,25 @@ where
     ) -> Proof<SC> {
         let pcs = self.config.pcs();
         let mut challenger = self.config.initialise_challenger();
+
+        // Fail fast on the logUp multiplicity height bound; the verifier
+        // enforces the same bound as a soundness check
+        // (`VerificationError::MultiplicityOverflow`). Inactive circuits
+        // have empty traces and contribute nothing.
+        assert!(
+            multiplicity_height_bound_holds::<Val<SC>>(
+                self.circuits.iter().zip(&witness.traces).map(|(c, t)| (
+                    c.graph
+                        .lookups
+                        .iter()
+                        .map(|l| u128::from(l.max_multiplicity))
+                        .sum(),
+                    t.height(),
+                )),
+                claims.len(),
+            ),
+            "logUp multiplicity height bound violated: Σ max_multiplicity·height + |claims| ≥ field characteristic",
+        );
 
         // Bind the system shape into the transcript. The protocol parameters
         // are already bound via the challenger seed.
@@ -402,7 +423,7 @@ where
         let mut acc = SC::Challenge::ZERO;
         for claim in claims {
             let message = lookup_argument_challenge
-                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
+                + message_fingerprint(&fingerprint_challenge, claim, self.config.width_binding());
             acc += message.inverse();
         }
 
@@ -464,6 +485,7 @@ where
                             &group_sizes,
                             lookup_argument_challenge,
                             &fingerprint_challenge,
+                            self.config.width_binding(),
                             acc,
                         )
                     });
@@ -603,6 +625,7 @@ where
                                 &stage_2_trace_on_quotient_domain,
                                 constraint_challenge,
                                 input.constraint_count,
+                                self.config.width_binding(),
                             )
                         });
                     let quotient_flat =
@@ -889,6 +912,7 @@ fn quotient_values<SC>(
     stage_2_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
     alpha: SC::Challenge,
     constraint_count: usize,
+    width_binding: WidthBinding,
 ) -> Vec<SC::Challenge>
 where
     SC: StarkGenericConfig,
@@ -969,6 +993,7 @@ where
             i_start,
             ext_params.w,
             ext_params.degree,
+            width_binding,
         )
     };
     #[cfg(feature = "parallel")]
@@ -1006,6 +1031,7 @@ fn quotient_values_inner<SC>(
     i_start: usize,
     ext_w: Val<SC>,
     ext_degree: usize,
+    width_binding: WidthBinding,
 ) -> impl Iterator<Item = SC::Challenge>
 where
     SC: StarkGenericConfig,
@@ -1064,6 +1090,7 @@ where
         ext_w,
         ext_degree,
         circuit.lookup_group_size,
+        width_binding,
         &mut constraint_values,
     );
     debug_assert_eq!(constraint_values.len(), circuit.constraint_count());

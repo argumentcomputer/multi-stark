@@ -153,12 +153,14 @@ pub trait StarkGenericConfig {
     ///
     /// The prover evaluates the constraints on a domain `quotient_degree`
     /// times larger than the trace domain, obtained from the PCS via
-    /// `get_evaluations_on_domain`. For a FRI-based PCS this only works up
-    /// to the blowup factor: the committed low-degree extension has
-    /// `2^log_blowup · N` evaluations, and asking for a larger domain
-    /// produces invalid proofs. Since the quotient degree is
-    /// `next_power_of_two(max_constraint_degree - 1)`, this bounds the
-    /// constraint degree: `2^log_blowup + 1` (degree 3 at `log_blowup = 1`).
+    /// `get_evaluations_on_domain`. For a FRI-based PCS, up to the blowup
+    /// factor this is a cheap truncation of the committed low-degree
+    /// extension (`2^log_blowup · N` evaluations); beyond it the PCS falls
+    /// back to recovering coefficients and re-evaluating (an extra
+    /// iDFT + DFT per matrix). Since the quotient degree is
+    /// `next_power_of_two(max_constraint_degree - 1)`, capping it at the
+    /// blowup bounds the constraint degree: `2^log_blowup + 1` (degree 3
+    /// at `log_blowup = 1`).
     ///
     /// [`System::new`](crate::system::System::new) rejects circuits whose
     /// constraint degree requires a larger quotient degree.
@@ -174,6 +176,20 @@ pub trait StarkGenericConfig {
     /// module), and a mismatch produces commitments to the wrong
     /// evaluations.
     fn log_blowup(&self) -> usize;
+
+    /// The system-wide message width-binding policy (see
+    /// [`crate::lookup::WidthBinding`]). The default binds each message's
+    /// slot width into its fingerprint, which is sound for any circuit
+    /// family; override to [`WidthBinding::ByConstruction`] only for
+    /// circuit families that guarantee prefix-free messages by
+    /// construction. The choice changes the protocol, so
+    /// [`crate::system::System::observe_shape`] binds it into the
+    /// Fiat-Shamir transcript.
+    ///
+    /// [`WidthBinding::ByConstruction`]: crate::lookup::WidthBinding::ByConstruction
+    fn width_binding(&self) -> crate::lookup::WidthBinding {
+        crate::lookup::WidthBinding::Fingerprint
+    }
 
     /// Normalize any backend-dependent field representatives before proof
     /// serialization. Most fields have canonical in-memory representations;

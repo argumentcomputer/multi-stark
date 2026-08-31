@@ -1104,10 +1104,10 @@ impl CudaReducedOpening {
         check_cuda(status, "reduced opening copy");
         out
     }
-    pub(crate) fn to_lde(&self) -> CudaLde {
+    pub(crate) fn into_lde(self) -> CudaLde {
         let mut handle = core::ptr::null_mut();
         let status = unsafe {
-            multi_stark_cuda_reduced_to_lde(self.device_id, &mut handle, self.handle.as_ptr())
+            multi_stark_cuda_reduced_into_lde(self.device_id, &mut handle, self.handle.as_ptr())
         };
         check_cuda(status, "reduced opening to resident FRI codeword");
         CudaLde {
@@ -2167,10 +2167,10 @@ unsafe extern "C" {
         ext_w: u64,
     ) -> i32;
     fn multi_stark_cuda_fri_workspace_destroy(device_id: i32, handle: *mut c_void) -> i32;
-    fn multi_stark_cuda_reduced_to_lde(
+    fn multi_stark_cuda_reduced_into_lde(
         device_id: i32,
         output: *mut *mut c_void,
-        reduced: *const c_void,
+        reduced: *mut c_void,
     ) -> i32;
     fn multi_stark_cuda_fri_fold_resident(
         device_id: i32,
@@ -2489,7 +2489,7 @@ mod tests {
         use p3_field::{
             BasedVectorSpace, batch_multiplicative_inverse, extension::BinomialExtensionField,
         };
-        use p3_interpolation::interpolate_coset_with_precomputation;
+        use p3_matrix::interpolation::{Interpolate, compute_adjusted_weights};
         use p3_util::reverse_slice_index_bits;
         type Ext = BinomialExtensionField<Goldilocks, 2>;
         let height = 256;
@@ -2516,13 +2516,11 @@ mod tests {
         .unwrap();
         let inv =
             batch_multiplicative_inverse(&coset.iter().map(|&x| point - x).collect::<Vec<_>>());
-        let expected = interpolate_coset_with_precomputation(
-            &bitrev.split_rows(height).0,
-            Goldilocks::GENERATOR,
-            point,
-            &coset[..height],
-            &inv[..height],
-        );
+        let adjusted = compute_adjusted_weights(point, &inv[..height]);
+        let expected = bitrev
+            .split_rows(height)
+            .0
+            .interpolate_coset_with_precomputation(Goldilocks::GENERATOR, point, &adjusted);
         let inv2: Vec<[Goldilocks; 2]> = inv[..height]
             .iter()
             .map(|x| x.as_basis_coefficients_slice().try_into().unwrap())
@@ -2701,7 +2699,9 @@ mod tests {
                 .collect();
             while layer.len() > 1 {
                 layer = layer
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|children| {
                         Blake3.hash_iter(children[0].iter().chain(&children[1]).copied())
                     })
@@ -2748,13 +2748,17 @@ mod tests {
         ];
 
         let mut layer: Vec<[u8; 32]> = level_8
-            .chunks_exact(16)
+            .as_chunks::<16>()
+            .0
+            .iter()
             .map(|row| Blake3.hash_iter(row.iter().copied()))
             .collect();
         let mut digest_layers = vec![layer.clone()];
         while layer.len() > 1 {
             layer = layer
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|children| Blake3.hash_iter(children.iter().flatten().copied()))
                 .collect();
             let injected = match layer.len() {

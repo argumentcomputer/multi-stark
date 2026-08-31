@@ -6,16 +6,13 @@
 //! concrete, batteries-included instantiation.
 
 use crate::config::StarkGenericConfig;
+use crate::lookup::WidthBinding;
 use p3_blake3::Blake3;
-use p3_challenger::{
-    CanObserve, CanSample, CanSampleBits, FieldChallenger, GrindingChallenger, HashChallenger,
-    SerializingChallenger64,
-};
+use p3_challenger::{HashChallenger, SerializingChallenger64};
 use p3_commit::{ExtensionMmcs, Pcs as PcsTrait};
 use p3_dft::Radix2DitParallel;
-use p3_field::BasedVectorSpace;
 use p3_field::{
-    ExtensionField, Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField,
+    BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField,
     extension::BinomialExtensionField,
 };
 use p3_fri::FriParameters as InnerFriParameters;
@@ -24,8 +21,6 @@ use p3_fri::TwoAdicFriPcs;
 use p3_goldilocks::Goldilocks;
 #[cfg(feature = "cuda")]
 use p3_matrix::dense::RowMajorMatrix;
-#[cfg(feature = "cuda")]
-use p3_maybe_rayon::prelude::*;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
 
@@ -38,60 +33,7 @@ pub type Val = Goldilocks;
 pub type PackedVal = <Val as Field>::Packing;
 pub type ExtVal = BinomialExtensionField<Val, 2>;
 pub type PackedExtVal = <ExtVal as ExtensionField<Val>>::ExtensionPacking;
-pub type Challenger =
-    DeterministicPow<SerializingChallenger64<Val, HashChallenger<u8, Blake3, 32>>>;
-
-/// Forwarding challenger wrapper that makes zero-bit proof-of-work
-/// deterministic.
-///
-/// p3's `SerializingChallenger64::grind` races `find_any` over every
-/// candidate witness even at 0 bits — where EVERY candidate passes — so the
-/// returned witness is whichever a rayon thread reports first: a
-/// thread-race-dependent value that lands in the proof bytes and makes
-/// zero-PoW proofs nondeterministic run to run. (The duplex challenger
-/// special-cases this; the serializing one doesn't.) Zero bits mean any
-/// witness verifies, so return the canonical ZERO; positive bit counts
-/// delegate to the inner grind unchanged. Transcript semantics are
-/// untouched — `check_witness` at 0 bits observes nothing on either side.
-#[derive(Clone, Debug)]
-pub struct DeterministicPow<C>(pub C);
-
-impl Challenger {
-    pub fn from_hasher(initial_state: Vec<u8>, hasher: Blake3) -> Self {
-        Self(SerializingChallenger64::from_hasher(initial_state, hasher))
-    }
-}
-
-impl<T, C: CanObserve<T>> CanObserve<T> for DeterministicPow<C> {
-    fn observe(&mut self, value: T) {
-        self.0.observe(value);
-    }
-}
-
-impl<T, C: CanSample<T>> CanSample<T> for DeterministicPow<C> {
-    fn sample(&mut self) -> T {
-        self.0.sample()
-    }
-}
-
-impl<C: CanSampleBits<usize>> CanSampleBits<usize> for DeterministicPow<C> {
-    fn sample_bits(&mut self, bits: usize) -> usize {
-        self.0.sample_bits(bits)
-    }
-}
-
-impl<F: Field, C: FieldChallenger<F>> FieldChallenger<F> for DeterministicPow<C> {}
-
-impl<C: GrindingChallenger> GrindingChallenger for DeterministicPow<C> {
-    type Witness = C::Witness;
-
-    fn grind(&mut self, bits: usize) -> Self::Witness {
-        if bits == 0 {
-            return Self::Witness::ZERO;
-        }
-        self.0.grind(bits)
-    }
-}
+pub type Challenger = SerializingChallenger64<Val, HashChallenger<u8, Blake3, 32>>;
 type CpuMmcs = MerkleTreeMmcs<Val, u8, SerializingHasher<Blake3>, Blake3CompressionFunction, 2, 32>;
 #[cfg(not(feature = "cuda"))]
 pub type Mmcs = CpuMmcs;
@@ -144,6 +86,8 @@ pub struct GoldilocksBlake3Config {
     max_quotient_degree: usize,
     /// Log2 of the blowup the PCS applies when committing.
     log_blowup: usize,
+    /// The message width-binding policy (see [`WidthBinding`]).
+    width_binding: WidthBinding,
 }
 
 impl GoldilocksBlake3Config {
@@ -187,7 +131,18 @@ impl GoldilocksBlake3Config {
             max_log_degree,
             max_quotient_degree,
             log_blowup: commitment_parameters.log_blowup,
+            width_binding: WidthBinding::default(),
         }
+    }
+
+    /// Declares the message width-binding policy (see [`WidthBinding`];
+    /// the default is [`WidthBinding::Fingerprint`]). The policy is bound
+    /// into the Fiat-Shamir transcript via
+    /// [`crate::system::System::observe_shape`], not the challenger seed,
+    /// so it may be set after construction.
+    pub fn with_width_binding(mut self, width_binding: WidthBinding) -> Self {
+        self.width_binding = width_binding;
+        self
     }
 }
 
@@ -219,6 +174,10 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
 
     fn log_blowup(&self) -> usize {
         self.log_blowup
+    }
+
+    fn width_binding(&self) -> WidthBinding {
+        self.width_binding
     }
 
     fn canonicalize_proof(proof: &mut crate::prover::Proof<Self>) {
@@ -258,14 +217,16 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         fri.commit_pow_witnesses.iter_mut().for_each(canonical_base);
         canonical_base(&mut fri.query_pow_witness);
         fri.final_poly.iter_mut().for_each(canonical_ext);
-        for query in &mut fri.query_proofs {
-            for opening in &mut query.input_proof {
-                for row in &mut opening.opened_values {
+        for opening in &mut fri.input_openings {
+            for query in &mut opening.opened_values {
+                for row in query {
                     row.iter_mut().for_each(canonical_base);
                 }
             }
-            for step in &mut query.commit_phase_openings {
-                step.sibling_values.iter_mut().for_each(canonical_ext);
+        }
+        for step in &mut fri.commit_phase_openings {
+            for siblings in &mut step.sibling_values {
+                siblings.iter_mut().for_each(canonical_ext);
             }
         }
     }
@@ -283,6 +244,9 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         alpha: ExtVal,
         constraint_count: usize,
     ) -> Option<Vec<ExtVal>> {
+        if self.width_binding != WidthBinding::ByConstruction {
+            return None;
+        }
         let main = stage_1.0.resident(stage_1.1)?;
         let s2 = stage_2.0.resident(stage_2.1)?;
         let prep = match preprocessed {
@@ -328,7 +292,9 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         );
         Some(
             flat.values
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|coords| {
                     ExtVal::from_basis_coefficients_slice(coords)
                         .expect("CUDA quotient has two coordinates")
@@ -343,9 +309,12 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         inputs: &[crate::config::QuotientCommitInput<'_, Self>],
         alpha: ExtVal,
     ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
+        if self.width_binding != WidthBinding::ByConstruction {
+            return None;
+        }
         use crate::cuda::mmcs::CudaCommitMmcs;
         let ldes: Option<Vec<_>> = inputs
-            .par_iter()
+            .iter()
             .map(|input| {
                 let main = input.stage_1.0.resident(input.stage_1.1)?;
                 let stage2 = input.stage_2.0.resident(input.stage_2.1)?;
@@ -415,6 +384,9 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         crate::config::PcsData<Self>,
         Vec<ExtVal>,
     )> {
+        if self.width_binding != WidthBinding::ByConstruction {
+            return None;
+        }
         use crate::cuda::mmcs::CudaCommitMmcs;
         let pair = |value: ExtVal| {
             let coordinates = value.as_basis_coefficients_slice();

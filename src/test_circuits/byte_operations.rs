@@ -15,6 +15,11 @@ mod tests {
     // Main trace consists of multiplicities for each operation: `xor`, `and`, `or` and range check
     const TRACE_WIDTH: usize = 4;
     const BYTE_VALUES_NUM: usize = 256;
+    // Per-row bound declared for the committed count columns: the table
+    // supports up to 2^32 queries per entry. The columns are not
+    // range-constrained; the weight-1 pushes of the querying circuits are
+    // what keep the actual counts within this budget.
+    const TABLE_QUERY_BUDGET: u64 = 1 << 32;
 
     struct ByteCS {}
 
@@ -87,17 +92,21 @@ mod tests {
                             preprocessed_var(2 + i),
                         ],
                     )
+                    .with_max_multiplicity(TABLE_QUERY_BUDGET)
                 })
                 .collect::<Vec<_>>();
             // Range checks do not have a return value
-            lookups.push(Lookup::pull(
-                var(pair_range_check_idx),
-                vec![
-                    SymbExpr::from_usize(pair_range_check_idx),
-                    preprocessed_var(0),
-                    preprocessed_var(1),
-                ],
-            ));
+            lookups.push(
+                Lookup::pull(
+                    var(pair_range_check_idx),
+                    vec![
+                        SymbExpr::from_usize(pair_range_check_idx),
+                        preprocessed_var(0),
+                        preprocessed_var(1),
+                    ],
+                )
+                .with_max_multiplicity(TABLE_QUERY_BUDGET),
+            );
             lookups
         }
     }
