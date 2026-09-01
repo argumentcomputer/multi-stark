@@ -23,6 +23,7 @@ use p3_goldilocks::Goldilocks;
 use p3_matrix::Matrix;
 use p3_matrix::bitrev::{BitReversalPerm, BitReversedMatrixView};
 use p3_matrix::dense::RowMajorMatrix;
+use p3_merkle_tree::PrunedMerklePaths;
 use p3_util::log2_strict_usize;
 
 const _: () = assert!(size_of::<Goldilocks>() == size_of::<u64>());
@@ -1104,10 +1105,10 @@ impl CudaReducedOpening {
         check_cuda(status, "reduced opening copy");
         out
     }
-    pub(crate) fn to_lde(&self) -> CudaLde {
+    pub(crate) fn into_lde(self) -> CudaLde {
         let mut handle = core::ptr::null_mut();
         let status = unsafe {
-            multi_stark_cuda_reduced_to_lde(self.device_id, &mut handle, self.handle.as_ptr())
+            multi_stark_cuda_reduced_into_lde(self.device_id, &mut handle, self.handle.as_ptr())
         };
         check_cuda(status, "reduced opening to resident FRI codeword");
         CudaLde {
@@ -1902,6 +1903,9 @@ impl CudaMixedMerkleTree {
             "mixed Merkle opening index out of bounds"
         );
         let levels = self.row_count.trailing_zeros() as usize;
+        if levels == 0 {
+            return vec![Vec::new(); indices.len()];
+        }
         let device_indices: Vec<u64> = indices
             .iter()
             .map(|&index| u64::try_from(index).expect("Merkle index exceeds u64"))
@@ -1921,6 +1925,57 @@ impl CudaMixedMerkleTree {
             .chunks_exact(levels)
             .map(<[[u8; 32]]>::to_vec)
             .collect()
+    }
+
+    /// Opens several leaves and prunes their overlapping binary authentication paths.
+    ///
+    /// The CUDA kernel returns one full path per requested index. Plonky3's multiproof
+    /// format keeps only boundary digests, ordered by tree level and then parent index.
+    #[must_use]
+    pub(crate) fn open_pruned_siblings(&self, indices: &[usize]) -> PrunedMerklePaths<u8, 32> {
+        if indices.is_empty() {
+            return PrunedMerklePaths {
+                sibling_hashes: Vec::new(),
+            };
+        }
+
+        let paths = self.open_siblings_batch(indices);
+        // Each frontier entry is (node index at this level, source query slot).
+        // Sorting and deduplicating matches Plonky3's treatment of repeated queries.
+        let mut frontier: Vec<_> = indices
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(slot, index)| (index, slot))
+            .collect();
+        frontier.sort_unstable_by_key(|&(index, _)| index);
+        frontier.dedup_by_key(|entry| entry.0);
+
+        let mut parents = Vec::with_capacity(frontier.len());
+        let mut sibling_hashes = Vec::new();
+        for (level, _) in paths[0].iter().enumerate() {
+            parents.clear();
+            let mut at = 0;
+            while at < frontier.len() {
+                let parent = frontier[at].0 >> 1;
+                let lead_slot = frontier[at].1;
+                let group_start = at;
+                at += 1;
+                while at < frontier.len() && frontier[at].0 >> 1 == parent {
+                    at += 1;
+                }
+
+                let group_len = at - group_start;
+                debug_assert!(group_len <= 2, "binary frontier group exceeds two children");
+                if group_len == 1 {
+                    sibling_hashes.push(paths[lead_slot][level]);
+                }
+                parents.push((parent, lead_slot));
+            }
+            core::mem::swap(&mut frontier, &mut parents);
+        }
+
+        PrunedMerklePaths { sibling_hashes }
     }
 }
 
@@ -2167,10 +2222,10 @@ unsafe extern "C" {
         ext_w: u64,
     ) -> i32;
     fn multi_stark_cuda_fri_workspace_destroy(device_id: i32, handle: *mut c_void) -> i32;
-    fn multi_stark_cuda_reduced_to_lde(
+    fn multi_stark_cuda_reduced_into_lde(
         device_id: i32,
         output: *mut *mut c_void,
-        reduced: *const c_void,
+        reduced: *mut c_void,
     ) -> i32;
     fn multi_stark_cuda_fri_fold_resident(
         device_id: i32,
@@ -2699,7 +2754,9 @@ mod tests {
                 .collect();
             while layer.len() > 1 {
                 layer = layer
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|children| {
                         Blake3.hash_iter(children[0].iter().chain(&children[1]).copied())
                     })
@@ -2746,13 +2803,17 @@ mod tests {
         ];
 
         let mut layer: Vec<[u8; 32]> = level_8
-            .chunks_exact(16)
+            .as_chunks::<16>()
+            .0
+            .iter()
             .map(|row| Blake3.hash_iter(row.iter().copied()))
             .collect();
         let mut digest_layers = vec![layer.clone()];
         while layer.len() > 1 {
             layer = layer
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|children| Blake3.hash_iter(children.iter().flatten().copied()))
                 .collect();
             let injected = match layer.len() {

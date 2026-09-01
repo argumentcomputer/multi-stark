@@ -1624,6 +1624,19 @@ cudaError_t launch_blake3_digest_pairs(uint8_t* digests,
     return cudaGetLastError();
 }
 
+__global__ void gather_resident_lde_group(
+    uint64_t* output, const uint64_t* const* columns, const size_t* strides,
+    size_t row_start, size_t rows, size_t width) {
+    const size_t count = rows * width;
+    const size_t grid_stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         index < count; index += grid_stride) {
+        const size_t column = index % width;
+        const size_t row = row_start + index / width;
+        output[index] = columns[column][row * strides[column]];
+    }
+}
+
 cudaError_t hash_resident_lde_group(uint8_t* digests,
                                     const void* const* handles,
                                     size_t handle_count, size_t height) {
@@ -1642,35 +1655,65 @@ cudaError_t hash_resident_lde_group(uint8_t* digests,
         return cudaErrorInvalidValue;
     }
 
-    constexpr size_t ROW_STAGING_BYTES = size_t(256) << 20;
+    constexpr size_t ROW_STAGING_BYTES = size_t(32) << 20;
     const size_t row_bytes = total_width * sizeof(uint64_t);
     const size_t rows_per_chunk =
         (ROW_STAGING_BYTES / row_bytes) > 0 ? (ROW_STAGING_BYTES / row_bytes) : 1;
+    const uint64_t** host_columns =
+        new (std::nothrow) const uint64_t*[total_width];
+    size_t* host_strides = new (std::nothrow) size_t[total_width];
+    if (host_columns == nullptr || host_strides == nullptr) {
+        delete[] host_columns;
+        delete[] host_strides;
+        return cudaErrorMemoryAllocation;
+    }
+    size_t column_offset = 0;
+    for (size_t index = 0; index < handle_count; ++index) {
+        const ResidentLde* lde = static_cast<const ResidentLde*>(handles[index]);
+        if (lde == nullptr || lde->height != height) {
+            continue;
+        }
+        for (size_t column = 0; column < lde->width; ++column) {
+            host_columns[column_offset] = lde->values + column;
+            host_strides[column_offset++] = lde->width;
+        }
+    }
+    DeviceBuffer device_columns;
+    DeviceBuffer device_strides;
+    cudaError_t status = device_columns.allocate(total_width);
+    if (status == cudaSuccess) {
+        status = device_strides.allocate(total_width);
+    }
+    if (status == cudaSuccess) {
+        status = cudaMemcpy(device_columns.get(), host_columns,
+                            total_width * sizeof(uint64_t*),
+                            cudaMemcpyHostToDevice);
+    }
+    if (status == cudaSuccess) {
+        status = cudaMemcpy(device_strides.get(), host_strides,
+                            total_width * sizeof(size_t),
+                            cudaMemcpyHostToDevice);
+    }
+    delete[] host_columns;
+    delete[] host_strides;
     DeviceBuffer combined_rows;
-    cudaError_t status = combined_rows.allocate(
-        (height < rows_per_chunk ? height : rows_per_chunk) * total_width);
+    if (status == cudaSuccess) {
+        status = combined_rows.allocate(
+            (height < rows_per_chunk ? height : rows_per_chunk) * total_width);
+    }
     for (size_t row_start = 0; status == cudaSuccess && row_start < height;
          row_start += rows_per_chunk) {
         const size_t rows =
             (height - row_start < rows_per_chunk) ? height - row_start
                                                    : rows_per_chunk;
-        size_t column_offset = 0;
-        for (size_t index = 0; status == cudaSuccess && index < handle_count;
-             ++index) {
-            const ResidentLde* lde =
-                static_cast<const ResidentLde*>(handles[index]);
-            if (lde == nullptr || lde->height != height) {
-                continue;
-            }
-            status = cudaMemcpy2DAsync(
-                combined_rows.get() + column_offset,
-                total_width * sizeof(uint64_t),
-                lde->values + row_start * lde->width,
-                lde->width * sizeof(uint64_t),
-                lde->width * sizeof(uint64_t), rows, cudaMemcpyDeviceToDevice,
-                cudaStreamPerThread);
-            column_offset += lde->width;
-        }
+        const size_t count = rows * total_width;
+        gather_resident_lde_group<<<blocks_for(count), THREADS, 0,
+                                    cudaStreamPerThread>>>(
+            combined_rows.get(),
+            reinterpret_cast<const uint64_t* const*>(device_columns.get()),
+            reinterpret_cast<const size_t*>(device_strides.get()), row_start,
+            rows, total_width);
+        status = cudaGetLastError();
         if (status == cudaSuccess) {
             status = launch_blake3_rows(
                 digests + row_start * 32,
@@ -2453,13 +2496,13 @@ extern "C" int multi_stark_cuda_fri_workspace_destroy(int device_id,void* handle
     cudaError_t status=cudaSetDevice(device_id);if(status==cudaSuccess)delete static_cast<ResidentFriWorkspace*>(handle);return static_cast<int>(status);
 }
 
-extern "C" int multi_stark_cuda_reduced_to_lde(int device_id,void** output,const void* reduced){
+extern "C" int multi_stark_cuda_reduced_into_lde(int device_id,void** output,void* reduced){
     if(!output||!reduced)return static_cast<int>(cudaErrorInvalidValue);*output=nullptr;
-    auto* r=static_cast<const ResidentReducedOpening*>(reduced);cudaError_t status=cudaSetDevice(device_id);
+    auto* r=static_cast<ResidentReducedOpening*>(reduced);cudaError_t status=cudaSetDevice(device_id);
     ResidentLde* l=nullptr;if(status==cudaSuccess)status=create_resident_lde(&l);if(status==cudaSuccess){l->height=r->height;l->width=2;}
-    if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&l->values),r->height*sizeof(Ext2));
-    if(status==cudaSuccess)status=cudaMemcpy(l->values,r->values,r->height*sizeof(Ext2),cudaMemcpyDeviceToDevice);
-    if(status!=cudaSuccess){destroy_resident_lde(l);return static_cast<int>(status);}*output=l;return static_cast<int>(cudaSuccess);
+    if(status!=cudaSuccess){destroy_resident_lde(l);return static_cast<int>(status);}
+    l->values=reinterpret_cast<uint64_t*>(r->values);r->values=nullptr;*output=l;
+    return static_cast<int>(cudaSuccess);
 }
 
 extern "C" int multi_stark_cuda_fri_fold_resident(int device_id,void** output,const void* input,

@@ -159,7 +159,7 @@
 //! actual low-degree-extension values of the witness. Do not use it when the
 //! witness must remain hidden from the verifier.
 
-use crate::config::{PcsError, StarkGenericConfig, Val};
+use crate::config::{Com, Domain, PcsError, StarkGenericConfig, Val};
 use crate::ensure_eq;
 use crate::eval::VarValues;
 use crate::lookup::fingerprint;
@@ -191,6 +191,29 @@ pub enum VerificationError<PcsErr> {
     UnbalancedChannel,
 }
 
+pub(crate) type OpeningRounds<SC> = Vec<(
+    Com<SC>,
+    Vec<(
+        Domain<SC>,
+        Vec<(
+            <SC as StarkGenericConfig>::Challenge,
+            Vec<<SC as StarkGenericConfig>::Challenge>,
+        )>,
+    )>,
+)>;
+
+pub(crate) struct PcsVerificationContext<SC: StarkGenericConfig> {
+    pub rounds: OpeningRounds<SC>,
+    pub challenger: SC::Challenger,
+    pub zeta: SC::Challenge,
+    pub lookup_argument_challenge: SC::Challenge,
+    pub fingerprint_challenge: SC::Challenge,
+    pub constraint_challenge: SC::Challenge,
+    pub claim_accumulator: SC::Challenge,
+    pub active_indices: Vec<usize>,
+    pub quotient_degrees: Vec<usize>,
+}
+
 impl<SC: StarkGenericConfig> System<SC> {
     /// Verifies a STARK proof against a single claim.
     pub fn verify(
@@ -204,12 +227,11 @@ impl<SC: StarkGenericConfig> System<SC> {
         self.verify_multiple_claims(&[claim], proof)
     }
 
-    /// Verifies a STARK proof against multiple claims.
-    pub fn verify_multiple_claims(
+    pub(crate) fn pcs_verification_context(
         &self,
         claims: &[&[Val<SC>]],
         proof: &Proof<SC>,
-    ) -> Result<(), VerificationError<PcsError<SC>>>
+    ) -> Result<PcsVerificationContext<SC>, VerificationError<PcsError<SC>>>
     where
         Val<SC>: TwoAdicField,
     {
@@ -218,7 +240,7 @@ impl<SC: StarkGenericConfig> System<SC> {
             commitments,
             intermediate_accumulators,
             log_degrees,
-            opening_proof,
+            opening_proof: _,
             quotient_opened_values,
             preprocessed_opened_values,
             stage_1_opened_values,
@@ -406,11 +428,57 @@ impl<SC: StarkGenericConfig> System<SC> {
                 preprocessed_trace_evaluations,
             ));
         }
+        Ok(PcsVerificationContext {
+            rounds: coms_to_verify,
+            challenger,
+            zeta,
+            lookup_argument_challenge,
+            fingerprint_challenge,
+            constraint_challenge,
+            claim_accumulator: acc,
+            active_indices,
+            quotient_degrees,
+        })
+    }
+
+    /// Verifies a STARK proof against multiple claims.
+    pub fn verify_multiple_claims(
+        &self,
+        claims: &[&[Val<SC>]],
+        proof: &Proof<SC>,
+    ) -> Result<(), VerificationError<PcsError<SC>>>
+    where
+        Val<SC>: TwoAdicField,
+    {
+        let Proof {
+            intermediate_accumulators,
+            log_degrees,
+            opening_proof,
+            quotient_opened_values,
+            preprocessed_opened_values,
+            stage_1_opened_values,
+            stage_2_opened_values,
+            ..
+        } = proof;
+        let PcsVerificationContext {
+            rounds,
+            mut challenger,
+            zeta,
+            lookup_argument_challenge,
+            fingerprint_challenge,
+            constraint_challenge,
+            claim_accumulator,
+            active_indices,
+            quotient_degrees,
+        } = self.pcs_verification_context(claims, proof)?;
+        let mut acc = claim_accumulator;
+        let pcs = self.config.pcs();
+
         // Soundness: FRI proximity test. Verifies that the committed polynomials
         // are close to low-degree polynomials and that the claimed evaluations are
         // consistent with the commitments. Soundness error ≤ ρ^num_queries, where
         // ρ = 2^(-log_blowup). This is the dominant term in the overall bound.
-        pcs.verify(coms_to_verify, opening_proof, &mut challenger)
+        pcs.verify(rounds, opening_proof, &mut challenger)
             .map_err(VerificationError::InvalidOpeningArgument)?;
 
         // use the opened values to compute the composition polynomial for each circuit

@@ -93,41 +93,6 @@ pub trait CudaCommitMmcs<T: Send + Sync + Clone>: Mmcs<T> {
     ) -> (Self::Commitment, Self::ProverData<RowMajorMatrix<T>>);
 }
 
-pub trait CudaBatchOpenMmcs<T: Send + Sync + Clone>: Mmcs<T> {
-    fn open_batches<M: Matrix<T>>(
-        &self,
-        indices: &[usize],
-        prover_data: &Self::ProverData<M>,
-    ) -> Vec<BatchOpening<T, Self>>
-    where
-        Self: Sized;
-}
-
-impl CudaBatchOpenMmcs<Goldilocks> for CudaMmcs {
-    fn open_batches<M: Matrix<Goldilocks>>(
-        &self,
-        indices: &[usize],
-        prover_data: &Self::ProverData<M>,
-    ) -> Vec<BatchOpening<Goldilocks, Self>> {
-        match prover_data {
-            CudaMmcsData::Cpu(_) => indices
-                .iter()
-                .map(|&index| self.open_batch(index, prover_data))
-                .collect(),
-            CudaMmcsData::Cuda { resident, tree, .. } => {
-                let rows = mixed_lde_open_rows(resident, indices);
-                let paths = tree.open_siblings_batch(indices);
-                rows.into_iter()
-                    .zip(paths)
-                    .map(|(opened_values, opening_proof)| {
-                        BatchOpening::new(opened_values, opening_proof)
-                    })
-                    .collect()
-            }
-        }
-    }
-}
-
 impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
     fn cuda_device_id(&self) -> i32 {
         self.device_id
@@ -218,6 +183,7 @@ impl Mmcs<Goldilocks> for CudaMmcs {
     type ProverData<M> = CudaMmcsData<M>;
     type Commitment = MerkleCap<Goldilocks, [u8; 32]>;
     type Proof = Vec<[u8; 32]>;
+    type MultiProof = <CpuMmcs as Mmcs<Goldilocks>>::MultiProof;
     type Error = MerkleTreeError;
 
     fn commit<M: Matrix<Goldilocks>>(
@@ -331,5 +297,36 @@ impl Mmcs<Goldilocks> for CudaMmcs {
             index,
             BatchOpeningRef::new(batch_opening.opened_values, batch_opening.opening_proof),
         )
+    }
+
+    fn open_multi_batch<M: Matrix<Goldilocks>>(
+        &self,
+        indices: &[usize],
+        prover_data: &Self::ProverData<M>,
+    ) -> (Vec<Vec<Vec<Goldilocks>>>, Self::MultiProof) {
+        match prover_data {
+            CudaMmcsData::Cpu(data) => self.cpu.open_multi_batch(indices, data),
+            CudaMmcsData::Cuda { resident, tree, .. } => {
+                let opened_values = if indices.is_empty() {
+                    Vec::new()
+                } else {
+                    mixed_lde_open_rows(resident, indices)
+                };
+                let opening_proof = tree.open_pruned_siblings(indices);
+                (opened_values, opening_proof)
+            }
+        }
+    }
+
+    fn verify_multi_batch<R: AsRef<[Goldilocks]> + PartialEq>(
+        &self,
+        commit: &Self::Commitment,
+        dimensions: &[Dimensions],
+        indices: &[usize],
+        opened_values: &[Vec<R>],
+        proof: &Self::MultiProof,
+    ) -> Result<(), Self::Error> {
+        self.cpu
+            .verify_multi_batch(commit, dimensions, indices, opened_values, proof)
     }
 }
