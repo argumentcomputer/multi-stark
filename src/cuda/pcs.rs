@@ -434,7 +434,9 @@ where
             .sum::<usize>();
         let dft = &self.dft;
         let log_blowup = self.fri.log_blowup;
-        if source_cells >= 10_000_000 {
+        let prepare_lde_constants = std::env::var("MULTI_STARK_CUDA_PREPARE_LDE_CONSTANTS")
+            .map_or(true, |value| value != "0");
+        if source_cells >= 10_000_000 && prepare_lde_constants {
             for (domain, evals) in &evaluations {
                 dft.prepare_coset_lde_constants(
                     evals.height(),
@@ -446,9 +448,59 @@ where
         // Each Rayon worker uses its own per-thread CUDA stream. A bounded
         // admission window keeps pageable upload staging within the driver's
         // reliable concurrency range while retaining substantial overlap.
-        const CUDA_LDE_WAVE: usize = 16;
+        let cuda_lde_wave = std::env::var("MULTI_STARK_CUDA_LDE_WAVE")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&wave| wave != 0)
+            .unwrap_or(16);
+        let (_, total_bytes) = crate::cuda::device_memory_info(self.mmcs.cuda_device_id());
+        let source_bytes = source_cells.saturating_mul(size_of::<Val>());
+        let proactive_spill = source_bytes >= total_bytes / 12;
+        let large_matrix = total_bytes / 120;
+        let preemptive_spill = evaluations
+            .iter()
+            .map(|(_, matrix)| {
+                proactive_spill
+                    && matrix
+                        .height()
+                        .saturating_mul(matrix.width())
+                        .saturating_mul(size_of::<Val>())
+                        >= large_matrix
+            })
+            .collect_vec();
+        let mut spilled = preemptive_spill.iter().copied().any(|spill| spill);
+        let diagnostics = std::env::var_os("MULTI_STARK_CUDA_LDE_DIAGNOSTICS").is_some();
         let mut ldes = Vec::with_capacity(evaluations.len());
-        for wave in evaluations.chunks(CUDA_LDE_WAVE) {
+        for wave in evaluations.chunks(cuda_lde_wave) {
+            let base = ldes.len();
+            if diagnostics {
+                for (offset, (_, evals)) in wave.iter().enumerate() {
+                    let extended_height = evals
+                        .height()
+                        .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
+                        .expect("LDE height overflows usize");
+                    let source_bytes = evals
+                        .height()
+                        .saturating_mul(evals.width())
+                        .saturating_mul(size_of::<Val>());
+                    let lde_bytes = extended_height
+                        .saturating_mul(evals.width())
+                        .saturating_mul(size_of::<Val>());
+                    let (free_bytes, total_bytes) =
+                        crate::cuda::device_memory_info(self.mmcs.cuda_device_id());
+                    eprintln!(
+                        "[cuda-lde] index={} height={} width={} source_bytes={} lde_bytes={} spill={} free_bytes={} total_bytes={}",
+                        base + offset,
+                        evals.height(),
+                        evals.width(),
+                        source_bytes,
+                        lde_bytes,
+                        preemptive_spill[base + offset],
+                        free_bytes,
+                        total_bytes,
+                    );
+                }
+            }
             let transform =
                 |(domain, evals): &(TwoAdicMultiplicativeCoset<Val>, RowMajorMatrix<Val>)| {
                     assert_eq!(domain.size(), evals.height());
@@ -463,12 +515,29 @@ where
             } else {
                 wave.par_iter().map(transform).collect()
             };
+            for (offset, lde) in wave_ldes.iter().enumerate() {
+                if preemptive_spill[base + offset] {
+                    // SAFETY: this transform is complete, and retained host
+                    // matrices are attached before later trace consumers.
+                    unsafe { lde.release_trace() };
+                }
+            }
             ldes.extend(wave_ldes);
+            if diagnostics {
+                let (free_bytes, total_bytes) =
+                    crate::cuda::device_memory_info(self.mmcs.cuda_device_id());
+                eprintln!(
+                    "[cuda-lde] completed={} free_bytes={} total_bytes={}",
+                    ldes.len(),
+                    free_bytes,
+                    total_bytes,
+                );
+            }
         }
         // Preserve enough device headroom for lookup, quotient, and FRI
         // allocations. Spill the largest retained traces first, deriving the
         // policy from this device rather than a 96-GiB development machine.
-        let (free_bytes, total_bytes) = crate::cuda::device_memory_info(self.mmcs.cuda_device_id());
+        let (free_bytes, _) = crate::cuda::device_memory_info(self.mmcs.cuda_device_id());
         let minimum_free = std::env::var("MULTI_STARK_CUDA_MIN_FREE_BYTES")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -479,9 +548,6 @@ where
         // once this commitment itself is a meaningful fraction of VRAM.  The
         // ratios retain the policy that was validated on a 96-GiB device while
         // scaling it to smaller cards.
-        let source_bytes = source_cells.saturating_mul(size_of::<Val>());
-        let proactive_spill = source_bytes >= total_bytes / 12;
-        let large_matrix = total_bytes / 120;
         let mut projected_free = free_bytes;
         let mut by_size = evaluations
             .iter()
@@ -497,8 +563,10 @@ where
             })
             .collect_vec();
         by_size.sort_unstable_by_key(|&(_, bytes)| core::cmp::Reverse(bytes));
-        let mut spilled = false;
         for (index, bytes) in by_size {
+            if preemptive_spill[index] {
+                continue;
+            }
             let needs_headroom = projected_free < minimum_free;
             let crowds_later_stages = proactive_spill && bytes >= large_matrix;
             if !needs_headroom && !crowds_later_stages {

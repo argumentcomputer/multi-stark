@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <new>
 
 namespace {
@@ -396,6 +397,7 @@ struct ResidentMixedMerkleTree {
 
 struct ResidentLde {
     uint64_t* values = nullptr;
+    bool values_managed = false;
     // Original row-major evaluations, retained for prover stages (notably
     // lookup construction) which consume the witness after its LDE has been
     // committed. Null for LDEs synthesized directly on the device.
@@ -410,7 +412,8 @@ struct ResidentLde {
 
     ~ResidentLde() {
         if (values != nullptr) {
-            cudaFree(values);
+            if (values_managed) persistent_free(values);
+            else cudaFree(values);
         }
         if (trace_values != nullptr) cudaFree(trace_values);
         if (host_trace_registered) cudaHostUnregister(
@@ -1872,8 +1875,19 @@ extern "C" int multi_stark_cuda_coset_lde_create(
     const size_t output_elements = extended_height * width;
     const size_t input_bytes=input_elements*sizeof(uint64_t);
     bool input_registered=false;
-    status = cudaMalloc(reinterpret_cast<void**>(&lde->values),
-                        output_elements * sizeof(uint64_t));
+    const char* managed_lde = getenv("MULTI_STARK_CUDA_MANAGED_LDE");
+    const bool use_managed_lde = managed_lde != nullptr &&
+                                 managed_lde[0] != '\0' &&
+                                 managed_lde[0] != '0';
+    if (use_managed_lde) {
+        status = cudaMallocManaged(reinterpret_cast<void**>(&lde->values),
+                                   output_elements * sizeof(uint64_t),
+                                   cudaMemAttachGlobal);
+        if (status == cudaSuccess) lde->values_managed = true;
+    } else {
+        status = cudaMalloc(reinterpret_cast<void**>(&lde->values),
+                            output_elements * sizeof(uint64_t));
+    }
     if (status == cudaSuccess) {
         status = cudaMalloc(reinterpret_cast<void**>(&lde->trace_values),
                             input_elements * sizeof(uint64_t));
@@ -2712,8 +2726,18 @@ extern "C" int multi_stark_cuda_lde_destroy(int device_id, void* handle) {
 }
 
 extern "C" int multi_stark_cuda_lde_release_trace(int device_id,void* handle){
-    if(!handle)return static_cast<int>(cudaSuccess);cudaError_t status=cudaSetDevice(device_id);
-    auto* lde=static_cast<ResidentLde*>(handle);if(status==cudaSuccess&&lde->trace_values){status=cudaFree(lde->trace_values);lde->trace_values=nullptr;}
+    if(!handle)return static_cast<int>(cudaSuccess);
+    cudaError_t status=cudaSetDevice(device_id);
+    auto* lde=static_cast<ResidentLde*>(handle);
+    if(status==cudaSuccess&&lde->trace_values){
+        status=cudaFree(lde->trace_values);
+        if(status==cudaSuccess){
+            lde->trace_values=nullptr;
+            // Later waves may allocate on other per-thread streams. Ensure
+            // this trace has returned to the pool before admitting them.
+            status=cudaStreamSynchronize(cudaStreamPerThread);
+        }
+    }
     if(status==cudaSuccess&&lde->host_trace_registered){status=cudaHostUnregister(const_cast<uint64_t*>(lde->host_trace_values));lde->host_trace_registered=false;}
     if(status==cudaSuccess){lde->host_trace_values=nullptr;lde->trace_height=0;}
     return static_cast<int>(status);
