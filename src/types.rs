@@ -24,8 +24,6 @@ use p3_fri::TwoAdicFriPcs;
 use p3_goldilocks::Goldilocks;
 #[cfg(feature = "cuda")]
 use p3_matrix::dense::RowMajorMatrix;
-#[cfg(feature = "cuda")]
-use p3_maybe_rayon::prelude::*;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
 
@@ -258,14 +256,16 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         fri.commit_pow_witnesses.iter_mut().for_each(canonical_base);
         canonical_base(&mut fri.query_pow_witness);
         fri.final_poly.iter_mut().for_each(canonical_ext);
-        for query in &mut fri.query_proofs {
-            for opening in &mut query.input_proof {
-                for row in &mut opening.opened_values {
+        for opening in &mut fri.input_openings {
+            for query in &mut opening.opened_values {
+                for row in query {
                     row.iter_mut().for_each(canonical_base);
                 }
             }
-            for step in &mut query.commit_phase_openings {
-                step.sibling_values.iter_mut().for_each(canonical_ext);
+        }
+        for step in &mut fri.commit_phase_openings {
+            for siblings in &mut step.sibling_values {
+                siblings.iter_mut().for_each(canonical_ext);
             }
         }
     }
@@ -328,7 +328,9 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         );
         Some(
             flat.values
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|coords| {
                     ExtVal::from_basis_coefficients_slice(coords)
                         .expect("CUDA quotient has two coordinates")
@@ -345,7 +347,7 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
     ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
         use crate::cuda::mmcs::CudaCommitMmcs;
         let ldes: Option<Vec<_>> = inputs
-            .par_iter()
+            .iter()
             .map(|input| {
                 let main = input.stage_1.0.resident(input.stage_1.1)?;
                 let stage2 = input.stage_2.0.resident(input.stage_2.1)?;

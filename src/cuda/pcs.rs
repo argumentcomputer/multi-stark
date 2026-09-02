@@ -14,11 +14,10 @@
 //! If we changed our domain construction (e.g., using multiple cosets), we would need to carefully reconsider these assumptions.
 //!
 //! The CPU PCS control flow in this module is derived from Plonky3's
-//! `two_adic_pcs.rs` at revision e9d75614dd6816f9b5dbb4413c69be63536efd64
+//! `two_adic_pcs.rs` at revision 3152b14a89067c83775a8076cc262ffc48a1fd7c
 //! (MIT/Apache-2.0). CUDA-resident commitments, openings, and FRI are maintained
 //! here so their transcript order can be reviewed directly against that source.
 
-use core::fmt::Debug;
 use core::iter;
 use core::marker::PhantomData;
 use core::mem::size_of;
@@ -28,26 +27,23 @@ use std::vec::Vec;
 
 use itertools::{Itertools, izip};
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
-use p3_commit::{
-    BatchOpening, BuildPeriodicLdeTableFast, ExtensionMmcs, Mmcs, OpenedValues, Pcs,
-    PeriodicLdeTable,
-};
+use p3_commit::{ExtensionMmcs, Mmcs, OpenedValues, Pcs, PeriodicLdeTable};
 use p3_dft::{Radix2DFTSmallBatch, TwoAdicSubgroupDft};
 use p3_field::coset::TwoAdicMultiplicativeCoset;
 use p3_field::{
     BasedVectorSpace, ExtensionField, PackedFieldExtension, PrimeCharacteristicRing, PrimeField64,
     TwoAdicField, batch_multiplicative_inverse, dot_product,
 };
-use p3_interpolation::interpolate_coset_with_precomputation;
 use p3_matrix::Matrix;
 use p3_matrix::bitrev::{BitReversedMatrixView, BitReversibleMatrix};
 use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixCow};
+use p3_matrix::interpolation::{Interpolate, compute_adjusted_weights};
 use p3_maybe_rayon::prelude::*;
 use p3_util::linear_map::LinearMap;
-use p3_util::{log2_strict_usize, reverse_bits_len, reverse_slice_index_bits};
+use p3_util::{log2_strict_usize, reverse_slice_index_bits};
 use tracing::{debug_span, instrument};
 
-use super::mmcs::{CudaBatchOpenMmcs, CudaCommitMmcs};
+use super::mmcs::CudaCommitMmcs;
 use super::{CudaFriWorkspace, CudaLde, CudaMixedMerkleTree, CudaReducedOpening};
 use p3_goldilocks::Goldilocks;
 use p3_symmetric::MerkleCap;
@@ -64,8 +60,9 @@ pub trait CudaPcsDft<T: TwoAdicField>: TwoAdicSubgroupDft<T> {
 }
 
 use p3_fri::{
-    CommitPhaseProofStep, FriFoldingStrategy, FriParameters, FriProof, QueryProof,
-    build_periodic_lde_table_two_adic, compute_log_arity_for_round, prover,
+    BatchMultiOpening, CommitPhaseMultiStep, FriParameters, FriProof, TwoAdicFriFolding,
+    TwoAdicFriFoldingForMmcs, build_periodic_lde_table_two_adic, compute_log_arity_for_round,
+    prover,
     verifier::{self, FriError},
 };
 
@@ -85,7 +82,7 @@ trait CudaFriMmcs<Val, Challenge: Send + Sync + Clone>: Mmcs<Challenge> {
         &self,
         round: &CudaFriRound,
         rows: &[usize],
-    ) -> Vec<(Vec<Challenge>, Self::Proof)>;
+    ) -> (Vec<Vec<Challenge>>, Self::MultiProof);
 }
 
 impl<Challenge> CudaFriMmcs<Goldilocks, Challenge>
@@ -115,27 +112,26 @@ where
         &self,
         round: &CudaFriRound,
         rows: &[usize],
-    ) -> Vec<(Vec<Challenge>, Self::Proof)> {
+    ) -> (Vec<Vec<Challenge>>, Self::MultiProof) {
         let codeword_rows = rows
             .iter()
             .flat_map(|&row| (0..round.arity).map(move |column| row * round.arity + column))
             .collect_vec();
         let opened = round.codeword.rows(&codeword_rows);
-        let paths = round.tree.open_siblings_batch(rows);
-        opened
+        let opened_rows = opened
             .chunks_exact(round.arity)
-            .zip(paths)
-            .map(|(query_rows, opening_proof)| {
-                let values = query_rows
+            .map(|query_rows| {
+                query_rows
                     .iter()
                     .map(|pair| {
                         Challenge::from_basis_coefficients_slice(pair)
                             .expect("quadratic extension row")
                     })
-                    .collect();
-                (values, opening_proof)
+                    .collect()
             })
-            .collect()
+            .collect();
+        let opening_proof = round.tree.open_pruned_siblings(rows);
+        (opened_rows, opening_proof)
     }
 }
 
@@ -153,40 +149,6 @@ pub struct CudaTwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs> {
     _phantom: PhantomData<Val>,
 }
 
-struct CudaFriFolding<InputProof, InputError>(PhantomData<(InputProof, InputError)>);
-type CudaFriFoldingForMmcs<F, M> = CudaFriFolding<Vec<BatchOpening<F, M>>, <M as Mmcs<F>>::Error>;
-impl<Val, Challenge, InputProof: Sync, InputError: Debug + Sync> FriFoldingStrategy<Val, Challenge>
-    for CudaFriFolding<InputProof, InputError>
-where
-    Val: TwoAdicField + PrimeField64,
-    Challenge: ExtensionField<Val>,
-{
-    type InputProof = InputProof;
-    type InputError = InputError;
-    fn extra_query_index_bits(&self) -> usize {
-        0
-    }
-    fn fold_row(
-        &self,
-        index: usize,
-        log_height: usize,
-        log_arity: usize,
-        beta: Challenge,
-        evals: impl Iterator<Item = Challenge>,
-    ) -> Challenge {
-        TwoAdicFriFolding::<InputProof, InputError>(PhantomData)
-            .fold_row(index, log_height, log_arity, beta, evals)
-    }
-    fn fold_matrix<M: Matrix<Challenge>>(
-        &self,
-        beta: Challenge,
-        log_arity: usize,
-        m: M,
-    ) -> Vec<Challenge> {
-        TwoAdicFriFolding::<InputProof, InputError>(PhantomData).fold_matrix(beta, log_arity, m)
-    }
-}
-
 fn prove_fri_cuda_resident<Val, Challenge, InputMmcs, FriMmcs, Challenger>(
     params: &FriParameters<FriMmcs>,
     mut inputs: Vec<CudaReducedOpening>,
@@ -199,20 +161,38 @@ fn prove_fri_cuda_resident<Val, Challenge, InputMmcs, FriMmcs, Challenger>(
     >],
     input_mmcs: &InputMmcs,
     ext_w: Goldilocks,
-) -> FriProof<Challenge, FriMmcs, Challenger::Witness, Vec<BatchOpening<Val, InputMmcs>>>
+) -> FriProof<Challenge, FriMmcs, Challenger::Witness, Vec<BatchMultiOpening<Val, InputMmcs>>>
 where
     Val: TwoAdicField + PrimeField64,
     Challenge: ExtensionField<Val>,
-    InputMmcs: Mmcs<Val> + CudaBatchOpenMmcs<Val>,
+    InputMmcs: Mmcs<Val>,
     FriMmcs: CudaFriMmcs<Val, Challenge>,
     Challenger: FieldChallenger<Val> + GrindingChallenger + CanObserve<FriMmcs::Commitment>,
 {
     assert!(!inputs.is_empty());
     assert!(
+        params.num_queries > 0,
+        "num_queries must be at least 1 for FRI soundness"
+    );
+    assert!(
+        params.max_log_arity > 0,
+        "max_log_arity must be at least 1 to guarantee folding progress"
+    );
+    assert!(
         inputs
             .windows(2)
-            .all(|pair| pair[0].height() > pair[1].height())
+            .all(|pair| pair[0].height() > pair[1].height()),
+        "inputs are not sorted in strictly descending order of height"
     );
+    assert_eq!(
+        log_global_max_height,
+        log2_strict_usize(inputs[0].height()),
+        "log_global_max_height must match the largest input height"
+    );
+    let log_min_height = log2_strict_usize(inputs.last().unwrap().height());
+    if params.log_final_poly_len > 0 {
+        assert!(log_min_height > params.log_final_poly_len + params.log_blowup);
+    }
     let to_pair = |value: Challenge| {
         let coefficients = value.as_basis_coefficients_slice();
         [
@@ -228,7 +208,7 @@ where
         .expect("quadratic extension element")
     };
 
-    let mut codeword = inputs.remove(0).to_lde();
+    let mut codeword = inputs.remove(0).into_lde();
     let mut commits = Vec::new();
     let mut rounds = Vec::new();
     let mut log_arities = Vec::new();
@@ -286,10 +266,12 @@ where
     }
     assert!(inputs.is_empty());
 
-    let mut final_values = codeword
-        .to_row_major_matrix()
+    let final_matrix = codeword.to_row_major_matrix();
+    let mut final_values = final_matrix
         .values
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .take(params.final_poly_len())
         .map(|pair| from_pair([pair[0], pair[1]]))
         .collect_vec();
@@ -301,12 +283,10 @@ where
         challenger.observe(Val::from_usize(log_arity));
     }
     let query_pow_witness = challenger.grind(params.query_proof_of_work_bits);
-    let query_indices = iter::repeat_with(|| {
-        challenger.sample_bits(log2_strict_usize(rounds[0].codeword.height()))
-    })
-    .take(params.num_queries)
-    .collect_vec();
-    let input_batches = prover_data_with_opening_points
+    let query_indices = iter::repeat_with(|| challenger.sample_bits(log_global_max_height))
+        .take(params.num_queries)
+        .collect_vec();
+    let input_openings = prover_data_with_opening_points
         .iter()
         .map(|(data, _)| {
             let log_height = log2_strict_usize(input_mmcs.get_max_height(data));
@@ -314,11 +294,15 @@ where
                 .iter()
                 .map(|&index| index >> (log_global_max_height - log_height))
                 .collect_vec();
-            input_mmcs.open_batches(&indices, data)
+            let (opened_values, opening_proof) = input_mmcs.open_multi_batch(&indices, data);
+            BatchMultiOpening {
+                opened_values,
+                opening_proof,
+            }
         })
         .collect_vec();
     let mut current_indices = query_indices;
-    let commit_batches = rounds
+    let commit_phase_openings = rounds
         .iter()
         .zip(&log_arities)
         .map(|(round, &log_arity)| {
@@ -331,45 +315,34 @@ where
                 .iter()
                 .map(|&index| index >> log_arity)
                 .collect_vec();
-            let openings = params.mmcs.open_cuda_fri_batch(round, &group_indices);
+            let (opened_rows, opening_proof) =
+                params.mmcs.open_cuda_fri_batch(round, &group_indices);
             current_indices = group_indices;
-            positions
+            let sibling_values = positions
                 .into_iter()
-                .zip(openings)
-                .map(|(index_in_group, (opened, opening_proof))| {
-                    let sibling_values = opened
+                .zip(opened_rows)
+                .map(|(index_in_group, opened)| {
+                    assert_eq!(opened.len(), arity, "FRI opening has the wrong arity");
+                    opened
                         .into_iter()
                         .enumerate()
                         .filter_map(|(column, value)| (column != index_in_group).then_some(value))
-                        .collect();
-                    CommitPhaseProofStep {
-                        log_arity: u8::try_from(log_arity).expect("FRI arity exceeds u8"),
-                        sibling_values,
-                        opening_proof,
-                    }
+                        .collect()
                 })
-                .collect_vec()
+                .collect_vec();
+            CommitPhaseMultiStep {
+                log_arity: u8::try_from(log_arity).expect("FRI arity exceeds u8"),
+                sibling_values,
+                opening_proof,
+            }
         })
         .collect_vec();
-    let mut input_iters = input_batches.into_iter().map(Vec::into_iter).collect_vec();
-    let mut commit_iters = commit_batches.into_iter().map(Vec::into_iter).collect_vec();
-    let query_proofs = (0..params.num_queries)
-        .map(|_| QueryProof {
-            input_proof: input_iters
-                .iter_mut()
-                .map(|openings| openings.next().expect("complete input opening batch"))
-                .collect(),
-            commit_phase_openings: commit_iters
-                .iter_mut()
-                .map(|openings| openings.next().expect("complete FRI opening batch"))
-                .collect(),
-        })
-        .collect();
 
     FriProof {
         commit_phase_commits: commits,
         commit_pow_witnesses,
-        query_proofs,
+        input_openings,
+        commit_phase_openings,
         final_poly,
         query_pow_witness,
     }
@@ -411,180 +384,12 @@ pub type CommitmentWithOpeningPoints<Challenge, Commitment, Domain> = (
     )>,
 );
 
-pub struct TwoAdicFriFolding<InputProof, InputError>(pub PhantomData<(InputProof, InputError)>);
-
-pub type TwoAdicFriFoldingForMmcs<F, M> =
-    TwoAdicFriFolding<Vec<BatchOpening<F, M>>, <M as Mmcs<F>>::Error>;
-
-impl<F: TwoAdicField, InputProof: Sync, InputError: Debug + Sync, EF: ExtensionField<F>>
-    FriFoldingStrategy<F, EF> for TwoAdicFriFolding<InputProof, InputError>
-{
-    type InputProof = InputProof;
-    type InputError = InputError;
-
-    fn extra_query_index_bits(&self) -> usize {
-        0
-    }
-
-    fn fold_row(
-        &self,
-        index: usize,
-        log_height: usize,
-        log_arity: usize,
-        beta: EF,
-        evals: impl Iterator<Item = EF>,
-    ) -> EF {
-        let arity = 1 << log_arity;
-        let evals: Vec<_> = evals.collect();
-        assert_eq!(evals.len(), arity, "Expected {} evaluations", arity);
-
-        // Compute the evaluation points in the subgroup
-        let subgroup_start = F::two_adic_generator(log_height + log_arity)
-            .exp_u64(reverse_bits_len(index, log_height) as u64);
-        let mut xs: Vec<F> = F::two_adic_generator(log_arity)
-            .shifted_powers(subgroup_start)
-            .take(arity)
-            .collect();
-        reverse_slice_index_bits(&mut xs);
-
-        // Lagrange interpolation at beta
-        lagrange_interpolate_at(&xs, &evals, beta)
-    }
-
-    #[instrument(skip_all)]
-    fn fold_matrix<M: Matrix<EF>>(&self, beta: EF, log_arity: usize, m: M) -> Vec<EF> {
-        if log_arity == 1 {
-            // Optimized path for arity 2
-            // We use the fact that
-            //     p_e(x^2) = (p(x) + p(-x)) / 2
-            //     p_o(x^2) = (p(x) - p(-x)) / (2 x)
-            // that is,
-            //     p_e(g^(2i)) = (p(g^i) + p(g^(n/2 + i))) / 2
-            //     p_o(g^(2i)) = (p(g^i) - p(g^(n/2 + i))) / (2 g^i)
-            // so
-            //     result(g^(2i)) = p_e(g^(2i)) + beta p_o(g^(2i))
-            //
-            // As p_e, p_o will be in the extension field we want to find ways to avoid extension multiplications.
-            // We should only need a single one (namely multiplication by beta).
-            let g_inv = F::two_adic_generator(log2_strict_usize(m.height()) + 1).inverse();
-
-            // As beta is in the extension field, we want to avoid multiplying by it
-            // for as long as possible. Here we precompute the powers  `g_inv^i / 2` in the base field.
-            let mut halve_inv_powers = g_inv.shifted_powers(F::ONE.halve()).collect_n(m.height());
-            reverse_slice_index_bits(&mut halve_inv_powers);
-
-            m.par_rows()
-                .zip(halve_inv_powers)
-                .map(|(mut row, halve_inv_power)| {
-                    let (lo, hi) = row.next_tuple().unwrap();
-                    (lo + hi).halve() + (lo - hi) * beta * halve_inv_power
-                })
-                .collect()
-        } else {
-            // Decompose arity-2^k fold into k sequential arity-2 folds.
-            // This way, an arity-2^k fold with a single challenge beta is equivalent to
-            // k arity-2 folds with challenges beta, beta^2, beta^4, ..., beta^{2^{k-1}}.
-            //
-            // For arity 4 with evaluation points {s, -s, si, -si}:
-            //   Step 1 (beta):   fold pairs → g(s^2), g(-s^2) where g = f_e + beta*f_o
-            //   Step 2 (beta^2): fold pair  → g(beta^2) = f(beta)
-
-            let mut data = m.to_row_major_matrix().values;
-
-            let initial_height = data.len() / 2;
-            let g_inv = F::two_adic_generator(log2_strict_usize(initial_height) + 1).inverse();
-            let mut halve_inv_powers = g_inv
-                .shifted_powers(F::ONE.halve())
-                .collect_n(initial_height);
-            reverse_slice_index_bits(&mut halve_inv_powers);
-
-            let two = F::ONE + F::ONE;
-            let mut current_beta = beta;
-            let mut next_data = EF::zero_vec(initial_height);
-
-            for step in 0..log_arity {
-                let current_len = data.len();
-                let height = current_len / 2;
-                // Since j << 1 is always >= j, we never overwrite data we haven't read yet.
-                if step > 0 {
-                    for j in 0..height {
-                        halve_inv_powers[j] = two * halve_inv_powers[j << 1].square();
-                    }
-                }
-                next_data[..height]
-                    .par_iter_mut()
-                    .zip(data.par_chunks_exact(2))
-                    .zip(&halve_inv_powers[..height])
-                    .for_each(|((out, chunk), &halve_inv_power)| {
-                        // chunk is guaranteed to be size 2 by par_chunks_exact
-                        let lo = chunk[0];
-                        let hi = chunk[1];
-
-                        *out = (lo + hi).halve() + (lo - hi) * current_beta * halve_inv_power;
-                    });
-                current_beta = current_beta.square();
-
-                // Swap buffers conceptually (just truncate data and copy back, or ping-pong).
-                data.truncate(height);
-                data.copy_from_slice(&next_data[..height]);
-            }
-
-            data
-        }
-    }
-}
-
-/// Lagrange interpolation: given points (xs[i], ys[i]), evaluate at z.
-///
-/// Uses the barycentric formula for efficiency when xs are roots of unity.
-fn lagrange_interpolate_at<F: TwoAdicField, EF: ExtensionField<F>>(
-    xs: &[F],
-    ys: &[EF],
-    z: EF,
-) -> EF {
-    debug_assert_eq!(xs.len(), ys.len());
-    let n = xs.len();
-
-    if n == 0 {
-        return EF::ZERO;
-    }
-
-    // If z equals one of the interpolation points, return early.
-    for i in 0..n {
-        if (z - xs[i]).is_zero() {
-            return ys[i];
-        }
-    }
-
-    let log_n = log2_strict_usize(n);
-
-    // All xs lie in a coset of the 2^log_n roots of unity.
-    let coset_power = xs[0].exp_power_of_2(log_n);
-    let weight_scale = (F::from_usize(n) * coset_power).inverse();
-
-    // Compute (z - x_i)^{-1} as a batch inversion
-    let diffs: Vec<_> = xs.iter().map(|&x| z - x).collect();
-    let diff_invs = batch_multiplicative_inverse(&diffs);
-
-    // Compute L(z) = prod_i (z - x_i)
-    let l_z = diffs.iter().copied().product::<EF>();
-
-    // Barycentric formula: sum_i (w_i * y_i / (z - x_i))
-    // where w_i = 1 / prod_{j != i} (x_i - x_j) = x_i * weight_scale.
-    let mut result = EF::ZERO;
-    for ((&x, &y), &diff_inv) in xs.iter().zip(ys).zip(diff_invs.iter()) {
-        let weight = x * weight_scale;
-        result += y * weight * diff_inv;
-    }
-    result * l_z
-}
-
 impl<Val, Dft, InputMmcs, FriMmcs, Challenge, Challenger> Pcs<Challenge, Challenger>
     for CudaTwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs>
 where
     Val: TwoAdicField + PrimeField64,
     Dft: TwoAdicSubgroupDft<Val> + CudaPcsDft<Val> + Sync,
-    InputMmcs: Mmcs<Val, Proof: Sync, Error: Sync> + CudaCommitMmcs<Val> + CudaBatchOpenMmcs<Val>,
+    InputMmcs: Mmcs<Val, MultiProof: Sync, Error: Sync> + CudaCommitMmcs<Val>,
     FriMmcs: Mmcs<Challenge> + CudaFriMmcs<Val, Challenge>,
     Challenge: ExtensionField<Val>,
     Challenger:
@@ -594,7 +399,7 @@ where
     type Commitment = InputMmcs::Commitment;
     type ProverData = InputMmcs::ProverData<RowMajorMatrix<Val>>;
     type EvaluationsOnDomain<'a> = BitReversedMatrixView<RowMajorMatrixCow<'a, Val>>;
-    type Proof = FriProof<Challenge, FriMmcs, Val, Vec<BatchOpening<Val, InputMmcs>>>;
+    type Proof = FriProof<Challenge, FriMmcs, Val, Vec<BatchMultiOpening<Val, InputMmcs>>>;
     type Error = FriError<FriMmcs::Error, InputMmcs::Error>;
     const ZK: bool = false;
 
@@ -604,6 +409,10 @@ where
     /// This function will panic if `degree` is not a power of 2 or `degree > (1 << Val::TWO_ADICITY)`.
     fn natural_domain_for_degree(&self, degree: usize) -> Self::Domain {
         TwoAdicMultiplicativeCoset::new(Val::ONE, log2_strict_usize(degree)).unwrap()
+    }
+
+    fn log_max_lde_height(&self) -> usize {
+        Val::TWO_ADICITY
     }
 
     /// Commit to a collection of evaluation matrices.
@@ -737,6 +546,14 @@ where
     }
 
     fn commit_ldes(&self, ldes: Vec<RowMajorMatrix<Val>>) -> (Self::Commitment, Self::ProverData) {
+        let min_height = 1 << self.fri.log_blowup;
+        for lde in &ldes {
+            assert!(
+                lde.height() >= min_height,
+                "committed LDE height {} is smaller than the blowup factor {min_height}",
+                lde.height()
+            );
+        }
         self.mmcs.commit_cuda_storage(ldes)
     }
 
@@ -774,6 +591,7 @@ where
         let result = self
             .dft
             .coset_dft_batch(coeffs, domain.shift())
+            .bit_reverse_rows()
             .to_row_major_matrix();
         let result_width = result.width();
 
@@ -982,8 +800,8 @@ where
             let alpha: Challenge = challenger.sample_algebra_element();
             let alpha_powers: Vec<_> = alpha.powers().take(global_max_width).collect();
             let alpha_pairs: Vec<_> = alpha_powers.iter().copied().map(to_pair).collect();
-            let mut num_reduced = [0usize; 32];
-            let mut reduced: [Option<CudaReducedOpening>; 32] = core::array::from_fn(|_| None);
+            let mut num_reduced = [0usize; 33];
+            let mut reduced: [Option<CudaReducedOpening>; 33] = core::array::from_fn(|_| None);
             let mut reduction_tasks = Vec::new();
             for ((ldes, points), openings_round) in rounds.iter().zip(all_opened_values.iter()) {
                 for ((lde, ps), openings) in
@@ -1067,6 +885,13 @@ where
         // for that point, and precompute 1/(z - X) for the largest subgroup (in bitrev order).
         let inv_denoms = compute_inverse_denominators(&mats_and_points, &coset);
 
+        // Convert the inverse denominators into the adjusted barycentric weights expected by
+        // the matrix interpolation API. Reuse them across every matrix opened at each point.
+        let adjusted_weights: LinearMap<Challenge, Vec<Challenge>> = inv_denoms
+            .iter()
+            .map(|(point, denoms)| (*point, compute_adjusted_weights(*point, denoms)))
+            .collect();
+
         // Evaluate coset representations and write openings to the challenger
         let all_opened_values = mats_and_points
             .iter()
@@ -1086,7 +911,6 @@ where
 
                         // `subgroup` and `mat` are both in bit-reversed order, so we can truncate.
                         let (low_coset, _) = mat.split_rows(h);
-                        let coset_h = &coset[..h];
 
                         points_for_mat
                             .iter()
@@ -1100,16 +924,11 @@ where
                                     "compute opened values with Lagrange interpolation"
                                 )
                                 .in_scope(|| {
-                                    // Get the relevant inverse denominators for this point and use these to
-                                    // interpolate to get the evaluation of each polynomial in the matrix
-                                    // at the desired point.
-                                    let inv_denoms = &inv_denoms.get(&point).unwrap()[..h];
-                                    interpolate_coset_with_precomputation(
-                                        &low_coset,
+                                    let adjusted = &adjusted_weights.get(&point).unwrap()[..h];
+                                    low_coset.interpolate_coset_with_precomputation(
                                         Val::GENERATOR,
                                         point,
-                                        coset_h,
-                                        inv_denoms,
+                                        adjusted,
                                     )
                                 });
 
@@ -1157,13 +976,13 @@ where
 
         // num_reduced records the number of (function, opening point) pairs for each `log_height`.
         // TODO: This should really be `[0; Val::TWO_ADICITY]` but that runs into issues with generics.
-        let mut num_reduced = [0; 32];
+        let mut num_reduced = [0; 33];
 
         // For each `log_height` from 2^1 -> 2^32, reduced_openings will contain either `None`
         // if there are no matrices of that height, or `Some(vec)` where `vec` is equal to
         // a weighted sum of `(f(zeta) - f(x))/(zeta - x)` over all `f`'s of that height and
         // for each `f`, all opening points `zeta`. The sum is weighted by powers of the challenge alpha.
-        let mut reduced_openings: [_; 32] = core::array::from_fn(|_| None);
+        let mut reduced_openings: [_; 33] = core::array::from_fn(|_| None);
 
         for ((mats, points), openings_for_round) in
             mats_and_points.iter().zip(all_opened_values.iter())
@@ -1227,7 +1046,7 @@ where
         // low degree functions.
         let fri_input = reduced_openings.into_iter().rev().flatten().collect_vec();
 
-        let folding: CudaFriFoldingForMmcs<Val, InputMmcs> = CudaFriFolding(PhantomData);
+        let folding: TwoAdicFriFoldingForMmcs<Val, InputMmcs> = TwoAdicFriFolding(PhantomData);
 
         // Produce the FRI proof.
         let fri_proof = prover::prove_fri(
@@ -1275,32 +1094,19 @@ where
 
         Ok(())
     }
-}
 
-impl<Val, Dft, InputMmcs, FriMmcs> BuildPeriodicLdeTableFast
-    for CudaTwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs>
-where
-    Val: TwoAdicField,
-    Dft: TwoAdicSubgroupDft<Val> + CudaPcsDft<Val> + Default,
-{
-    type PeriodicDomain = TwoAdicMultiplicativeCoset<Val>;
-
-    fn maybe_build_periodic_lde_table_fast(
+    fn build_periodic_lde_table(
         &self,
-        periodic_cols: &[Vec<p3_commit::Val<Self::PeriodicDomain>>],
-        trace_domain: Self::PeriodicDomain,
-        quotient_domain: Self::PeriodicDomain,
-    ) -> Option<PeriodicLdeTable<p3_commit::Val<Self::PeriodicDomain>>>
-    where
-        p3_commit::Val<Self::PeriodicDomain>: Clone,
-    {
-        let periodic_cols_val: &[Vec<Val>] = unsafe { core::mem::transmute(periodic_cols) };
-        let table = build_periodic_lde_table_two_adic::<Val, Dft>(
-            periodic_cols_val,
+        periodic_cols: &[Vec<Val>],
+        trace_domain: Self::Domain,
+        quotient_domain: Self::Domain,
+    ) -> PeriodicLdeTable<Val> {
+        build_periodic_lde_table_two_adic::<Val, Dft>(
+            &self.dft,
+            periodic_cols,
             &trace_domain,
             &quotient_domain,
-        );
-        Some(table)
+        )
     }
 }
 
