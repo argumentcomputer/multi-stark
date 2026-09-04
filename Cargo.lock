@@ -464,6 +464,7 @@ dependencies = [
  "p3-symmetric",
  "p3-util",
  "rand",
+ "rayon",
  "serde",
  "tracing",
  "tracing-subscriber",
