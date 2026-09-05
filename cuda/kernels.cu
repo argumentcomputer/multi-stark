@@ -9,6 +9,12 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
+#include <algorithm>
+#include <cstring>
 #include <new>
 
 namespace {
@@ -367,6 +373,109 @@ class HostRegistration {
     bool registered_ = false;
 };
 
+// Mixed quotient evaluation double-buffers host rows through pinned memory.
+// Allocating and releasing those large buffers for every circuit is expensive,
+// so retain one complete double-buffer working set across sequential jobs.
+// Leases make reuse safe when multiple provers call into CUDA concurrently:
+// callers beyond the two cached slots receive an uncached temporary buffer.
+struct PinnedHostPoolEntry {
+    uint64_t* pointer = nullptr;
+    size_t capacity = 0;
+    bool in_use = false;
+};
+
+constexpr size_t PINNED_HOST_POOL_SIZE = 2;
+PinnedHostPoolEntry pinned_host_pool[PINNED_HOST_POOL_SIZE];
+pthread_mutex_t pinned_host_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+class PinnedHostBuffer {
+  public:
+    PinnedHostBuffer() = default;
+    PinnedHostBuffer(const PinnedHostBuffer&) = delete;
+    PinnedHostBuffer& operator=(const PinnedHostBuffer&) = delete;
+
+    ~PinnedHostBuffer() {
+        if (pool_index_ < PINNED_HOST_POOL_SIZE) {
+            pthread_mutex_lock(&pinned_host_pool_mutex);
+            pinned_host_pool[pool_index_].in_use = false;
+            pthread_mutex_unlock(&pinned_host_pool_mutex);
+        } else if (pointer_ != nullptr) {
+            cudaFreeHost(pointer_);
+        }
+    }
+
+    cudaError_t allocate(size_t bytes) {
+        if (bytes == 0 || pointer_ != nullptr) {
+            return cudaErrorInvalidValue;
+        }
+
+        pthread_mutex_lock(&pinned_host_pool_mutex);
+        size_t reusable = PINNED_HOST_POOL_SIZE;
+        for (size_t i = 0; i < PINNED_HOST_POOL_SIZE; ++i) {
+            const auto& entry = pinned_host_pool[i];
+            if (!entry.in_use && entry.pointer != nullptr && entry.capacity >= bytes &&
+                (reusable == PINNED_HOST_POOL_SIZE ||
+                 entry.capacity < pinned_host_pool[reusable].capacity)) {
+                reusable = i;
+            }
+        }
+        if (reusable < PINNED_HOST_POOL_SIZE) {
+            auto& entry = pinned_host_pool[reusable];
+            entry.in_use = true;
+            pointer_ = entry.pointer;
+            pool_index_ = reusable;
+            pthread_mutex_unlock(&pinned_host_pool_mutex);
+            return cudaSuccess;
+        }
+
+        size_t available = PINNED_HOST_POOL_SIZE;
+        for (size_t i = 0; i < PINNED_HOST_POOL_SIZE; ++i) {
+            if (!pinned_host_pool[i].in_use &&
+                (available == PINNED_HOST_POOL_SIZE ||
+                 pinned_host_pool[i].capacity < pinned_host_pool[available].capacity)) {
+                available = i;
+            }
+        }
+        if (available == PINNED_HOST_POOL_SIZE) {
+            pthread_mutex_unlock(&pinned_host_pool_mutex);
+            return cudaMallocHost(reinterpret_cast<void**>(&pointer_), bytes);
+        }
+
+        auto& entry = pinned_host_pool[available];
+        entry.in_use = true;
+        uint64_t* old_pointer = entry.pointer;
+        const size_t old_capacity = entry.capacity;
+        entry.pointer = nullptr;
+        entry.capacity = 0;
+        pool_index_ = available;
+        pthread_mutex_unlock(&pinned_host_pool_mutex);
+
+        cudaError_t status = old_pointer == nullptr ? cudaSuccess : cudaFreeHost(old_pointer);
+        const bool old_pointer_freed = status == cudaSuccess;
+        if (status == cudaSuccess) {
+            status = cudaMallocHost(reinterpret_cast<void**>(&pointer_), bytes);
+        }
+
+        pthread_mutex_lock(&pinned_host_pool_mutex);
+        entry.pointer = status == cudaSuccess ? pointer_
+                                             : (old_pointer_freed ? nullptr : old_pointer);
+        entry.capacity = status == cudaSuccess ? bytes
+                                              : (old_pointer_freed ? 0 : old_capacity);
+        if (status != cudaSuccess) {
+            entry.in_use = false;
+            pool_index_ = PINNED_HOST_POOL_SIZE;
+        }
+        pthread_mutex_unlock(&pinned_host_pool_mutex);
+        return status;
+    }
+
+    uint64_t* get() { return pointer_; }
+
+  private:
+    uint64_t* pointer_ = nullptr;
+    size_t pool_index_ = PINNED_HOST_POOL_SIZE;
+};
+
 struct ResidentMerkleTree {
     uint8_t* rows = nullptr;
     uint8_t* digests = nullptr;
@@ -458,6 +567,35 @@ struct ConstraintLookup {
 };
 
 struct Ext2 { uint64_t c0; uint64_t c1; };
+
+struct PendingLookupLde {
+    ResidentLde* lde = nullptr;
+    Ext2* deltas = nullptr;
+    uint64_t* multiplicities = nullptr;
+    uint64_t* args = nullptr;
+    uint64_t* norms = nullptr;
+    uint64_t* norm_inverses = nullptr;
+    size_t* arg_offsets = nullptr;
+    Ext2* conjugates = nullptr;
+    size_t height = 0;
+    size_t slots = 0;
+    size_t extended_height = 0;
+    size_t num_lookups = 0;
+    size_t args_width = 0;
+    size_t group_size = 0;
+    size_t scratch_rows = 0;
+
+    ~PendingLookupLde() {
+        if (norm_inverses != nullptr) cudaFree(norm_inverses);
+        if (norms != nullptr) cudaFree(norms);
+        if (conjugates != nullptr) cudaFree(conjugates);
+        if (arg_offsets != nullptr) cudaFree(arg_offsets);
+        if (args != nullptr) cudaFree(args);
+        if (multiplicities != nullptr) cudaFree(multiplicities);
+        if (deltas != nullptr) cudaFree(deltas);
+        if (lde != nullptr) destroy_resident_lde(lde);
+    }
+};
 
 // The resident PCS canonicalizes every committed LDE, and interpolation
 // tables are serialized with `as_canonical_u64`. Restrict the faster
@@ -1045,21 +1183,79 @@ __global__ void evaluate_constraint_graph(
     }
 }
 
+struct QuotientMatrix {
+    const uint64_t* values;
+    size_t width;
+    bool staged;
+    bool staged_next;
+};
+
+struct QuotientHostSource {
+    const uint64_t* values;
+    size_t width;
+    size_t offset;
+    bool needs_next;
+};
+
+struct QuotientPackTask {
+    uint64_t* destination;
+    const QuotientHostSource* sources;
+    size_t source_count;
+    size_t storage_start;
+    size_t begin;
+    size_t end;
+    size_t quotient_size;
+    size_t next_step;
+    unsigned int log_size;
+};
+
+static inline size_t reverse_low_bits_host(size_t value, unsigned int bits) {
+    uint64_t x=static_cast<uint64_t>(value);
+    x=((x>>1)&0x5555555555555555ULL)|((x&0x5555555555555555ULL)<<1);
+    x=((x>>2)&0x3333333333333333ULL)|((x&0x3333333333333333ULL)<<2);
+    x=((x>>4)&0x0f0f0f0f0f0f0f0fULL)|((x&0x0f0f0f0f0f0f0f0fULL)<<4);
+    x=((x>>8)&0x00ff00ff00ff00ffULL)|((x&0x00ff00ff00ff00ffULL)<<8);
+    x=((x>>16)&0x0000ffff0000ffffULL)|((x&0x0000ffff0000ffffULL)<<16);
+    x=(x>>32)|(x<<32);
+    return static_cast<size_t>(x>>(64U-bits));
+}
+
+static void* pack_quotient_rows(void* opaque) {
+    const auto& task=*static_cast<const QuotientPackTask*>(opaque);
+    for(size_t local=task.begin;local<task.end;++local){
+        const size_t storage_row=task.storage_start+local;
+        const size_t row=reverse_low_bits_host(storage_row,task.log_size);
+        const size_t next_storage=reverse_low_bits_host(
+            (row+task.next_step)&(task.quotient_size-1),task.log_size);
+        for(size_t i=0;i<task.source_count;++i){const auto& source=task.sources[i];
+            const size_t row_stride=source.width*(source.needs_next?2:1);
+            uint64_t* out=task.destination+source.offset+local*row_stride;
+            std::memcpy(out,source.values+storage_row*source.width,source.width*sizeof(uint64_t));
+            if(source.needs_next)
+                std::memcpy(out+source.width,source.values+next_storage*source.width,source.width*sizeof(uint64_t));
+        }
+    }
+    return nullptr;
+}
+
 __global__ void evaluate_quotient(
     uint64_t* output, const ConstraintNode* nodes, size_t node_count, size_t slot_count,
     const uint32_t* roots, size_t root_count, const ConstraintLookup* lookups,
     size_t lookup_count, const uint32_t* lookup_args, size_t group_size,
-    const ResidentLde* preprocessed, const ResidentLde* main,
-    const ResidentLde* stage2, const uint64_t* publics,
+    QuotientMatrix preprocessed, QuotientMatrix main, QuotientMatrix stage2,
+    const uint64_t* publics,
     const uint64_t* selectors, const uint64_t* alpha, const uint64_t* delta,
     uint64_t ext_w, size_t quotient_size, size_t next_step,
-    uint64_t* global_scratch) {
+    uint64_t* global_scratch, size_t work_start, size_t work_count,
+    bool storage_order) {
     extern __shared__ uint64_t shared_values[];
     const size_t lane = threadIdx.x, tile = blockDim.x;
     uint64_t* values=global_scratch ? global_scratch+static_cast<size_t>(blockIdx.x)*slot_count*tile : shared_values;
     const unsigned int log_size = static_cast<unsigned int>(__ffsll(quotient_size) - 1);
-    for (size_t row = static_cast<size_t>(blockIdx.x) * tile + lane;
-         row < quotient_size; row += static_cast<size_t>(gridDim.x) * tile) {
+    for (size_t work_row = static_cast<size_t>(blockIdx.x) * tile + lane;
+         work_row < work_count; work_row += static_cast<size_t>(gridDim.x) * tile) {
+        const size_t work_index = work_start + work_row;
+        const size_t row = storage_order ? reverse_low_bits(work_index, log_size) : work_index;
         const size_t sr = reverse_low_bits(row, log_size);
         const size_t nr = reverse_low_bits((row + next_step) & (quotient_size - 1), log_size);
         for (size_t i = 0; i < node_count; ++i) {
@@ -1069,8 +1265,11 @@ __global__ void evaluate_quotient(
             uint64_t v = 0;
             switch (n.op) {
                 case 0: v = n.value; break;
-                case 1: { const ResidentLde* m = n.aux < 2 ? preprocessed : n.aux < 4 ? main : stage2;
-                          const size_t r = (n.aux & 1U) ? nr : sr; v = m->values[r * m->width + n.a]; break; }
+                case 1: { const QuotientMatrix m = n.aux < 2 ? preprocessed : n.aux < 4 ? main : stage2;
+                          const bool next = (n.aux & 1U) != 0;
+                          const size_t r = m.staged ? work_row * (m.staged_next ? 2 : 1) + static_cast<size_t>(next)
+                                                   : (next ? nr : sr);
+                          v = m.values[r * m.width + n.a]; break; }
                 case 2: v = publics[n.a]; break;
                 case 3: v = selectors[row]; break;
                 case 4: v = selectors[quotient_size + row]; break;
@@ -1097,9 +1296,11 @@ __global__ void evaluate_quotient(
         for (size_t g = 0; g < groups; ++g) {
             Ext2 constraints[8]; size_t count = 0;
             if (lookup_count == 0) {
+                const size_t s2_next = stage2.staged ? 2 * work_row + 1 : nr;
+                const size_t s2_cur = stage2.staged ? 2 * work_row : sr;
                 constraints[count++] = ext2_add(ext2_sub(
-                    {stage2->values[nr * stage2->width], stage2->values[nr * stage2->width + 1]},
-                    {stage2->values[sr * stage2->width], stage2->values[sr * stage2->width + 1]}), injection);
+                    {stage2.values[s2_next * stage2.width], stage2.values[s2_next * stage2.width + 1]},
+                    {stage2.values[s2_cur * stage2.width], stage2.values[s2_cur * stage2.width + 1]}), injection);
             } else {
                 const size_t begin = g * group_size;
                 const size_t end = begin + group_size < lookup_count ? begin + group_size : lookup_count;
@@ -1107,9 +1308,11 @@ __global__ void evaluate_quotient(
                 for (size_t j=begin;j<end;++j) { Ext2 f{0,0}; const ConstraintLookup l=lookups[j];
                     for(size_t k=l.arg_count;k>0;--k) { f=ext2_mul(f,gamma,ext_w); f.c0=goldilocks_add(f.c0,values[lookup_args[l.arg_start+k-1]*tile+lane]); }
                     messages[j-begin]=ext2_add(f,beta); product=ext2_mul(product,messages[j-begin],ext_w); }
-                const Ext2 source{stage2->values[sr*stage2->width+2*g],stage2->values[sr*stage2->width+2*g+1]};
-                Ext2 target = g+1<groups ? Ext2{stage2->values[sr*stage2->width+2*g+2],stage2->values[sr*stage2->width+2*g+3]}
-                                         : ext2_add({stage2->values[nr*stage2->width],stage2->values[nr*stage2->width+1]},injection);
+                const size_t s2_cur = stage2.staged ? 2 * work_row : sr;
+                const size_t s2_next = stage2.staged ? 2 * work_row + 1 : nr;
+                const Ext2 source{stage2.values[s2_cur*stage2.width+2*g],stage2.values[s2_cur*stage2.width+2*g+1]};
+                Ext2 target = g+1<groups ? Ext2{stage2.values[s2_cur*stage2.width+2*g+2],stage2.values[s2_cur*stage2.width+2*g+3]}
+                                         : ext2_add({stage2.values[s2_next*stage2.width],stage2.values[s2_next*stage2.width+1]},injection);
                 Ext2 rhs{0,0};
                 for(size_t j=begin;j<end;++j) { Ext2 others{1,0}; for(size_t k=begin;k<end;++k) if(k!=j) others=ext2_mul(others,messages[k-begin],ext_w);
                     const uint64_t mult=values[lookups[j].multiplicity*tile+lane]; rhs.c0=goldilocks_add(rhs.c0,goldilocks_mul(others.c0,mult)); rhs.c1=goldilocks_add(rhs.c1,goldilocks_mul(others.c1,mult)); }
@@ -1638,8 +1841,8 @@ __global__ void gather_resident_lde_group(
 }
 
 cudaError_t hash_resident_lde_group(uint8_t* digests,
-                                    const void* const* handles,
-                                    size_t handle_count, size_t height) {
+                                     const void* const* handles,
+                                     size_t handle_count, size_t height) {
     size_t total_width = 0;
     for (size_t index = 0; index < handle_count; ++index) {
         const ResidentLde* lde = static_cast<const ResidentLde*>(handles[index]);
@@ -1721,6 +1924,141 @@ cudaError_t hash_resident_lde_group(uint8_t* digests,
                 rows);
         }
     }
+    return status;
+}
+
+cudaError_t hash_partitioned_lde_group(
+    uint8_t* digests, const void* const* handles,
+    const uint64_t* const* host_values, const size_t* widths,
+    const size_t* heights, size_t matrix_count, size_t height) {
+    bool has_host = false;
+    bool has_resident = false;
+    size_t total_width = 0;
+    for (size_t index = 0; index < matrix_count; ++index) {
+        if (heights[index] != height) {
+            continue;
+        }
+        if (widths[index] > SIZE_MAX - total_width) {
+            return cudaErrorInvalidValue;
+        }
+        total_width += widths[index];
+        has_host = has_host || host_values[index] != nullptr;
+        has_resident = has_resident || handles[index] != nullptr;
+    }
+    if (!has_host) {
+        return hash_resident_lde_group(digests, handles, matrix_count, height);
+    }
+    if (!has_resident || total_width == 0 ||
+        total_width > (32 * 1024) / sizeof(uint64_t) ||
+        !product_fits(height, total_width)) {
+        return cudaErrorInvalidValue;
+    }
+
+    const uint64_t** host_columns =
+        new (std::nothrow) const uint64_t*[total_width];
+    size_t* host_strides = new (std::nothrow) size_t[total_width];
+    void** registered = new (std::nothrow) void*[matrix_count]();
+    if (host_columns == nullptr || host_strides == nullptr ||
+        registered == nullptr) {
+        delete[] host_columns;
+        delete[] host_strides;
+        delete[] registered;
+        return cudaErrorMemoryAllocation;
+    }
+
+    cudaError_t status = cudaSuccess;
+    size_t column_offset = 0;
+    for (size_t index = 0; status == cudaSuccess && index < matrix_count;
+         ++index) {
+        if (heights[index] != height) {
+            continue;
+        }
+        const uint64_t* values = nullptr;
+        if (const ResidentLde* lde =
+                static_cast<const ResidentLde*>(handles[index])) {
+            values = lde->values;
+        } else {
+            const size_t elements = heights[index] * widths[index];
+            void* host = const_cast<uint64_t*>(host_values[index]);
+            status = cudaHostRegister(host, elements * sizeof(uint64_t),
+                                      cudaHostRegisterMapped |
+                                          cudaHostRegisterPortable);
+            if (status != cudaSuccess) {
+                break;
+            }
+            registered[index] = host;
+            void* mapped = nullptr;
+            status = cudaHostGetDevicePointer(&mapped, host, 0);
+            values = static_cast<const uint64_t*>(mapped);
+        }
+        for (size_t column = 0; status == cudaSuccess && column < widths[index];
+             ++column) {
+            host_columns[column_offset] = values + column;
+            host_strides[column_offset++] = widths[index];
+        }
+    }
+
+    DeviceBuffer device_columns;
+    DeviceBuffer device_strides;
+    DeviceBuffer combined_rows;
+    constexpr size_t ROW_STAGING_BYTES = size_t(32) << 20;
+    const size_t row_bytes = total_width * sizeof(uint64_t);
+    const size_t rows_per_chunk =
+        (ROW_STAGING_BYTES / row_bytes) > 0 ? (ROW_STAGING_BYTES / row_bytes) : 1;
+    if (status == cudaSuccess) {
+        status = device_columns.allocate(total_width);
+    }
+    if (status == cudaSuccess) {
+        status = device_strides.allocate(total_width);
+    }
+    if (status == cudaSuccess) {
+        status = combined_rows.allocate(
+            (height < rows_per_chunk ? height : rows_per_chunk) * total_width);
+    }
+    if (status == cudaSuccess) {
+        status = cudaMemcpy(device_columns.get(), host_columns,
+                            total_width * sizeof(uint64_t*),
+                            cudaMemcpyHostToDevice);
+    }
+    if (status == cudaSuccess) {
+        status = cudaMemcpy(device_strides.get(), host_strides,
+                            total_width * sizeof(size_t), cudaMemcpyHostToDevice);
+    }
+    for (size_t row_start = 0; status == cudaSuccess && row_start < height;
+         row_start += rows_per_chunk) {
+        const size_t rows =
+            (height - row_start < rows_per_chunk) ? height - row_start
+                                                   : rows_per_chunk;
+        const size_t count = rows * total_width;
+        gather_resident_lde_group<<<blocks_for(count), THREADS, 0,
+                                    cudaStreamPerThread>>>(
+            combined_rows.get(),
+            reinterpret_cast<const uint64_t* const*>(device_columns.get()),
+            reinterpret_cast<const size_t*>(device_strides.get()), row_start,
+            rows, total_width);
+        status = cudaGetLastError();
+        if (status == cudaSuccess) {
+            status = launch_blake3_rows(
+                digests + row_start * 32,
+                reinterpret_cast<const uint8_t*>(combined_rows.get()), row_bytes,
+                rows);
+        }
+    }
+    if (status == cudaSuccess) {
+        status = cudaStreamSynchronize(cudaStreamPerThread);
+    }
+    for (size_t index = 0; index < matrix_count; ++index) {
+        if (registered[index] != nullptr) {
+            const cudaError_t unregister_status =
+                cudaHostUnregister(registered[index]);
+            if (status == cudaSuccess) {
+                status = unregister_status;
+            }
+        }
+    }
+    delete[] host_columns;
+    delete[] host_strides;
+    delete[] registered;
     return status;
 }
 
@@ -2096,12 +2434,13 @@ extern "C" int multi_stark_cuda_lde_copy_rows(
 
 extern "C" int multi_stark_cuda_mixed_lde_open_row(
     int device_id, uint64_t* output, const void* const* handles,
-    size_t handle_count, size_t index) {
+    size_t handle_count, size_t max_height, size_t index) {
     if (output == nullptr || handles == nullptr || handle_count == 0) return static_cast<int>(cudaErrorInvalidValue);
-    cudaError_t status=cudaSetDevice(device_id); size_t max_height=0,total=0;
+    cudaError_t status=cudaSetDevice(device_id); size_t handles_max_height=0,total=0;
     for(size_t i=0;i<handle_count;++i){const ResidentLde* l=static_cast<const ResidentLde*>(handles[i]);
         if(l==nullptr || l->height==0 || (l->height&(l->height-1))!=0 || l->width>SIZE_MAX-total) return static_cast<int>(cudaErrorInvalidValue);
-        if(l->height>max_height)max_height=l->height; total+=l->width;}
+        if(l->height>handles_max_height)handles_max_height=l->height; total+=l->width;}
+    if (!is_power_of_two(max_height) || max_height < handles_max_height || index >= max_height) return static_cast<int>(cudaErrorInvalidValue);
     const uint64_t** hv=new(std::nothrow) const uint64_t*[handle_count]; size_t* hw=new(std::nothrow) size_t[3*handle_count];
     if(hv==nullptr||hw==nullptr){delete[] hv;delete[] hw;return static_cast<int>(cudaErrorMemoryAllocation);} size_t* hr=hw+handle_count;size_t* ho=hr+handle_count;
     size_t off=0;for(size_t i=0;i<handle_count;++i){const ResidentLde* l=static_cast<const ResidentLde*>(handles[i]);hv[i]=l->values;hw[i]=l->width;
@@ -2119,17 +2458,19 @@ extern "C" int multi_stark_cuda_mixed_lde_open_row(
 
 extern "C" int multi_stark_cuda_mixed_lde_open_rows(
     int device_id, uint64_t* output, const void* const* handles,
-    size_t handle_count, const uint64_t* indices, size_t query_count) {
+    size_t handle_count, size_t max_height, const uint64_t* indices,
+    size_t query_count) {
     if (output == nullptr || handles == nullptr || handle_count == 0 ||
         indices == nullptr || query_count == 0) return static_cast<int>(cudaErrorInvalidValue);
-    cudaError_t status=cudaSetDevice(device_id);size_t max_height=0,total=0;
+    cudaError_t status=cudaSetDevice(device_id);size_t handles_max_height=0,total=0;
     const uint64_t** hv=new(std::nothrow) const uint64_t*[handle_count];
     size_t* hm=new(std::nothrow) size_t[3*handle_count];
     if(hv==nullptr||hm==nullptr){delete[] hv;delete[] hm;return static_cast<int>(cudaErrorMemoryAllocation);}
     size_t* hw=hm,*hh=hm+handle_count,*ho=hh+handle_count;size_t off=0;
     for(size_t i=0;i<handle_count;++i){const ResidentLde* l=static_cast<const ResidentLde*>(handles[i]);
         if(l==nullptr||l->height==0||(l->height&(l->height-1))!=0||l->width>SIZE_MAX-total){delete[] hm;delete[] hv;return static_cast<int>(cudaErrorInvalidValue);}
-        hv[i]=l->values;hw[i]=l->width;hh[i]=l->height;ho[i]=off;off+=l->width;total+=l->width;if(l->height>max_height)max_height=l->height;}
+        hv[i]=l->values;hw[i]=l->width;hh[i]=l->height;ho[i]=off;off+=l->width;total+=l->width;if(l->height>handles_max_height)handles_max_height=l->height;}
+    if(!is_power_of_two(max_height)||max_height<handles_max_height){delete[] hm;delete[] hv;return static_cast<int>(cudaErrorInvalidValue);}
     for(size_t i=0;i<handle_count;++i)hh[i]=strict_log2(max_height)-strict_log2(hh[i]);
     for(size_t q=0;q<query_count;++q)if(indices[q]>=max_height){delete[] hm;delete[] hv;return static_cast<int>(cudaErrorInvalidValue);}
     const uint64_t** dv=nullptr;size_t* dm=nullptr;uint64_t* di=nullptr;uint64_t* dout=nullptr;
@@ -2263,10 +2604,15 @@ extern "C" int multi_stark_cuda_quotient_values(
     if(status==cudaSuccess&&dynamic_shared>48*1024)
         status=configure_quotient_shared_memory(device_id,dynamic_shared);
     if(status==cudaSuccess) {
+        const auto* prep = static_cast<const ResidentLde*>(preprocessed_handle);
+        const auto* main = static_cast<const ResidentLde*>(main_handle);
+        const auto* stage2 = static_cast<const ResidentLde*>(stage2_handle);
         evaluate_quotient<<<static_cast<unsigned int>(blocks),static_cast<unsigned int>(tile),dynamic_shared>>>(
             dout,dn,node_count,slot_count,dr,root_count,dl,lookup_count,da,group_size,
-            static_cast<const ResidentLde*>(preprocessed_handle),static_cast<const ResidentLde*>(main_handle),
-            static_cast<const ResidentLde*>(stage2_handle),dp,ds,dal,dd,ext_w,quotient_size,next_step,scratch);
+            {prep ? prep->values : nullptr, prep ? prep->width : 0, false, false},
+            {main->values, main->width, false, false},
+            {stage2->values, stage2->width, false, false},
+            dp,ds,dal,dd,ext_w,quotient_size,next_step,scratch,0,quotient_size,false);
         status=cudaGetLastError();
     }
     if(status==cudaSuccess) status=cudaMemcpy(output,dout,2*quotient_size*sizeof(uint64_t),cudaMemcpyDeviceToHost);
@@ -2348,10 +2694,15 @@ extern "C" int multi_stark_cuda_quotient_lde(
     if(status==cudaSuccess&&dynamic_shared>48*1024)
         status=configure_quotient_shared_memory(device_id,dynamic_shared);
     if(status==cudaSuccess) {
+        const auto* prep = static_cast<const ResidentLde*>(preprocessed_handle);
+        const auto* main = static_cast<const ResidentLde*>(main_handle);
+        const auto* stage2 = static_cast<const ResidentLde*>(stage2_handle);
         evaluate_quotient<<<static_cast<unsigned int>(blocks),static_cast<unsigned int>(tile),dynamic_shared>>>(
             quotient,dn,node_count,slot_count,dr,root_count,dl,lookup_count,da,group_size,
-            static_cast<const ResidentLde*>(preprocessed_handle),static_cast<const ResidentLde*>(main_handle),
-            static_cast<const ResidentLde*>(stage2_handle),dp,ds,dal,dd,ext_w,quotient_size,next_step,scratch);
+            {prep ? prep->values : nullptr, prep ? prep->width : 0, false, false},
+            {main->values, main->width, false, false},
+            {stage2->values, stage2->width, false, false},
+            dp,ds,dal,dd,ext_w,quotient_size,next_step,scratch,0,quotient_size,false);
         status=cudaGetLastError();
     }
     if(status==cudaSuccess)status=launch_dif(quotient,quotient_size,2,device_quotient_twiddles);
@@ -2379,6 +2730,229 @@ extern "C" int multi_stark_cuda_quotient_lde(
         destroy_resident_lde(lde);
     }
     cudaFree(scratch);cudaFree(allocation);
+    return static_cast<int>(status);
+}
+
+// Evaluate a quotient when one or more committed LDEs have been spilled to
+// host memory. The quotient rows are independent until the DFT, so bounded
+// pairs of current/next trace rows are staged through two buffers while the
+// previous buffer executes. Iterating in bit-reversed storage order keeps the
+// current-row read contiguous; host workers gather the corresponding next
+// rows in parallel. Resident inputs remain in place.
+extern "C" int multi_stark_cuda_quotient_lde_mixed(
+    int device_id, void** output_handle, const void* nodes, size_t node_count,
+    size_t slot_count, const uint32_t* roots, size_t root_count,
+    const void* lookups, size_t lookup_count, const uint32_t* lookup_args,
+    size_t lookup_arg_count, size_t group_size,
+    const void* preprocessed_handle, const uint64_t* preprocessed_host,
+    size_t preprocessed_height, size_t preprocessed_width,
+    const void* main_handle, const uint64_t* main_host,
+    size_t main_height, size_t main_width,
+    const void* stage2_handle, const uint64_t* stage2_host,
+    size_t stage2_height, size_t stage2_width,
+    const uint64_t* publics, size_t public_count,
+    uint64_t coset_shift, uint64_t coset_generator, uint64_t trace_last,
+    uint64_t vanishing_start, uint64_t vanishing_step, const uint64_t* alpha,
+    size_t constraint_count, const uint64_t* delta, uint64_t ext_w,
+    size_t quotient_size, size_t next_step, size_t quotient_degree,
+    size_t log_blowup, const uint64_t* quotient_twiddles,
+    const uint64_t* lde_twiddles, const uint64_t* slice_weights) {
+    const auto one_source = [](const void* handle, const uint64_t* host) {
+        return (handle != nullptr) != (host != nullptr);
+    };
+    if (output_handle == nullptr || nodes == nullptr || roots == nullptr ||
+        !one_source(main_handle, main_host) ||
+        !one_source(stage2_handle, stage2_host) || publics == nullptr ||
+        alpha == nullptr || delta == nullptr || quotient_twiddles == nullptr ||
+        lde_twiddles == nullptr || slice_weights == nullptr || node_count == 0 ||
+        slot_count == 0 || group_size == 0 || !is_power_of_two(quotient_size) ||
+        !is_power_of_two(quotient_degree) || quotient_degree > quotient_size ||
+        quotient_size % quotient_degree != 0 || !is_power_of_two(next_step) ||
+        next_step > quotient_size || log_blowup >= sizeof(size_t) * 8 ||
+        main_width == 0 || stage2_width == 0 || main_height < quotient_size ||
+        stage2_height < quotient_size ||
+        (preprocessed_handle != nullptr && preprocessed_host != nullptr) ||
+        (preprocessed_host != nullptr &&
+         (preprocessed_width == 0 || preprocessed_height < quotient_size)) ||
+        (lookup_count != 0 && (lookups == nullptr || lookup_args == nullptr))) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    *output_handle = nullptr;
+    const size_t trace_height = quotient_size / quotient_degree;
+    if (trace_height > (SIZE_MAX >> log_blowup)) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    const size_t lde_height = trace_height << log_blowup;
+    const size_t width = 2 * quotient_degree;
+    if (!product_fits(lde_height, width)) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+
+    cudaError_t status = cudaSetDevice(device_id);
+    auto align8=[](size_t n){return (n+7)&~size_t(7);}; size_t bytes=0;
+    auto reserve=[&](size_t n){size_t at=bytes;bytes+=align8(n);return at;};
+    const size_t on=reserve(node_count*sizeof(ConstraintNode)), oroot=reserve(root_count*sizeof(uint32_t));
+    const size_t ol=reserve(lookup_count*sizeof(ConstraintLookup)), oa=reserve(lookup_arg_count*sizeof(uint32_t));
+    const size_t op=reserve(public_count*sizeof(uint64_t)), os=reserve(4*quotient_size*sizeof(uint64_t));
+    const size_t oalpha=reserve(2*constraint_count*sizeof(uint64_t)), od=reserve(2*sizeof(uint64_t));
+    const size_t oo=reserve(2*quotient_size*sizeof(uint64_t)); uint8_t* allocation=nullptr;
+    if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&allocation),bytes);
+    auto cp=[&](size_t at,const void* src,size_t n){if(status==cudaSuccess&&n!=0)status=cudaMemcpy(allocation+at,src,n,cudaMemcpyHostToDevice);};
+    cp(on,nodes,node_count*sizeof(ConstraintNode));cp(oroot,roots,root_count*sizeof(uint32_t));
+    cp(ol,lookups,lookup_count*sizeof(ConstraintLookup));cp(oa,lookup_args,lookup_arg_count*sizeof(uint32_t));
+    cp(op,publics,public_count*sizeof(uint64_t));
+    cp(oalpha,alpha,2*constraint_count*sizeof(uint64_t));cp(od,delta,2*sizeof(uint64_t));
+    auto* dn=reinterpret_cast<ConstraintNode*>(allocation+on);auto* dr=reinterpret_cast<uint32_t*>(allocation+oroot);
+    auto* dl=reinterpret_cast<ConstraintLookup*>(allocation+ol);auto* da=reinterpret_cast<uint32_t*>(allocation+oa);
+    auto* dp=reinterpret_cast<uint64_t*>(allocation+op);auto* ds=reinterpret_cast<uint64_t*>(allocation+os);
+    auto* dal=reinterpret_cast<uint64_t*>(allocation+oalpha);auto* dd=reinterpret_cast<uint64_t*>(allocation+od);
+    auto* quotient=reinterpret_cast<uint64_t*>(allocation+oo);
+    if(status==cudaSuccess)status=generate_coset_selectors(ds,quotient_size,next_step,
+        coset_shift,coset_generator,trace_last,vanishing_start,vanishing_step);
+
+    const uint64_t *device_quotient_twiddles=nullptr,*device_lde_twiddles=nullptr,*device_weights=nullptr;
+    if(status==cudaSuccess)status=cached_device_constants(device_id,quotient_twiddles,quotient_size/2,2,0,0,&device_quotient_twiddles);
+    if(status==cudaSuccess)status=cached_device_constants(device_id,lde_twiddles,lde_height/2,2,0,0,&device_lde_twiddles);
+    if(status==cudaSuccess)status=cached_device_constants(device_id,slice_weights,quotient_degree,4,slice_weights[0],quotient_degree>1?slice_weights[1]:0,&device_weights);
+
+    const auto* prep_resident=static_cast<const ResidentLde*>(preprocessed_handle);
+    const auto* main_resident=static_cast<const ResidentLde*>(main_handle);
+    const auto* stage2_resident=static_cast<const ResidentLde*>(stage2_handle);
+    if (status==cudaSuccess &&
+        ((prep_resident && prep_resident->height < quotient_size) ||
+         (main_resident && main_resident->height < quotient_size) ||
+         (stage2_resident && stage2_resident->height < quotient_size))) {
+        status=cudaErrorInvalidValue;
+    }
+
+    QuotientHostSource host_sources[3];
+    size_t host_source_count=0;
+    size_t staged_row_width=0;
+    bool needs_next[3]={false,false,true};
+    const auto* host_nodes=static_cast<const ConstraintNode*>(nodes);
+    for(size_t i=0;i<node_count;++i)if(host_nodes[i].op==1&&(host_nodes[i].aux&1U))
+        needs_next[host_nodes[i].aux/2]=true;
+    const auto add_host=[&](const uint64_t* values,size_t source_width,bool source_needs_next){
+        if(values){host_sources[host_source_count++]={values,source_width,0,source_needs_next};
+            staged_row_width+=(source_needs_next?2:1)*source_width;}
+    };
+    add_host(preprocessed_host,preprocessed_width,needs_next[0]);
+    add_host(main_host,main_width,needs_next[1]);
+    add_host(stage2_host,stage2_width,needs_next[2]);
+    if(status==cudaSuccess && staged_row_width==0)status=cudaErrorInvalidValue;
+    constexpr size_t STAGING_BUFFER_BYTES=size_t(512)<<20;
+    size_t chunk_rows=0;
+    if(status==cudaSuccess){
+        const size_t row_bytes=staged_row_width*sizeof(uint64_t);
+        chunk_rows=STAGING_BUFFER_BYTES/row_bytes;
+        if(chunk_rows==0)chunk_rows=1;
+        if(chunk_rows>quotient_size)chunk_rows=quotient_size;
+        if(chunk_rows>=128)chunk_rows=(chunk_rows/128)*128;
+    }
+    const size_t staging_elements=chunk_rows*staged_row_width;
+    const size_t staging_bytes=staging_elements*sizeof(uint64_t);
+    size_t staging_offset=0;
+    for(size_t i=0;i<host_source_count;++i){auto& source=host_sources[i];
+        source.offset=staging_offset;
+        staging_offset+=chunk_rows*source.width*(source.needs_next?2:1);
+    }
+    PinnedHostBuffer host_staging[2];
+    uint64_t* device_staging[2]={nullptr,nullptr};
+    cudaStream_t streams[2]={nullptr,nullptr};
+    bool stream_busy[2]={false,false};
+    for(size_t i=0;i<2&&status==cudaSuccess;++i){
+        status=host_staging[i].allocate(staging_bytes);
+        if(status==cudaSuccess)status=persistent_malloc(reinterpret_cast<void**>(&device_staging[i]),staging_bytes);
+        if(status==cudaSuccess)status=cudaStreamCreateWithFlags(&streams[i],cudaStreamNonBlocking);
+    }
+
+    size_t budget=0;if(status==cudaSuccess)status=quotient_shared_memory_budget(device_id,&budget);
+    size_t tile=budget/(slot_count*sizeof(uint64_t));bool global=tile<28;
+    if(global)tile=128;else if(tile>32)tile=32;
+    const size_t block_cap=global?256:1024;
+    uint64_t* scratch[2]={nullptr,nullptr};
+    if(status==cudaSuccess&&global){
+        const size_t scratch_bytes=block_cap*slot_count*tile*sizeof(uint64_t);
+        status=persistent_malloc(reinterpret_cast<void**>(&scratch[0]),scratch_bytes);
+        if(status==cudaSuccess)status=persistent_malloc(reinterpret_cast<void**>(&scratch[1]),scratch_bytes);
+    }
+    const size_t dynamic_shared=global?0:slot_count*tile*sizeof(uint64_t);
+    if(status==cudaSuccess&&dynamic_shared>48*1024)
+        status=configure_quotient_shared_memory(device_id,dynamic_shared);
+
+    const unsigned int log_size=static_cast<unsigned int>(__builtin_ctzll(quotient_size));
+    const auto pack=[&](uint64_t* destination,size_t storage_start,size_t count){
+        const long online=sysconf(_SC_NPROCESSORS_ONLN);
+        size_t workers=online>0?static_cast<size_t>(online):1;
+        if(workers>64)workers=64;
+        const size_t useful=(count+4095)/4096;
+        if(workers>useful)workers=useful;
+        if(workers==0)workers=1;
+        pthread_t threads[64];
+        QuotientPackTask tasks[64];
+        bool launched[64]={};
+        for(size_t worker=0;worker<workers;++worker){
+            tasks[worker]={destination,host_sources,host_source_count,storage_start,
+                count*worker/workers,count*(worker+1)/workers,quotient_size,next_step,log_size};
+            if(pthread_create(&threads[worker],nullptr,pack_quotient_rows,&tasks[worker])==0)
+                launched[worker]=true;
+            else
+                pack_quotient_rows(&tasks[worker]);
+        }
+        for(size_t worker=0;worker<workers;++worker)if(launched[worker])pthread_join(threads[worker],nullptr);
+    };
+
+    size_t chunk=0;
+    for(size_t storage_start=0;status==cudaSuccess&&storage_start<quotient_size;storage_start+=chunk_rows,++chunk){
+        const size_t buffer=chunk&1U;
+        const size_t count=std::min(chunk_rows,quotient_size-storage_start);
+        if(stream_busy[buffer])status=cudaStreamSynchronize(streams[buffer]);
+        if(status!=cudaSuccess)break;
+        pack(host_staging[buffer].get(),storage_start,count);
+        for(size_t i=0;i<host_source_count;++i){const auto& source=host_sources[i];
+            const size_t copy_bytes=count*source.width*(source.needs_next?2:1)*sizeof(uint64_t);
+            status=cudaMemcpyAsync(device_staging[buffer]+source.offset,
+                host_staging[buffer].get()+source.offset,copy_bytes,cudaMemcpyHostToDevice,streams[buffer]);
+            if(status!=cudaSuccess)break;
+        }
+        if(status!=cudaSuccess)break;
+        const auto staged_source=[&](const uint64_t* host,size_t source_width,const ResidentLde* resident){
+            if(!host)return QuotientMatrix{resident?resident->values:nullptr,resident?resident->width:0,false,false};
+            size_t offset=0;bool source_needs_next=false;
+            for(size_t i=0;i<host_source_count;++i){const auto& source=host_sources[i];if(source.values==host){offset=source.offset;source_needs_next=source.needs_next;break;}}
+            return QuotientMatrix{device_staging[buffer]+offset,source_width,true,source_needs_next};
+        };
+        const QuotientMatrix prep=staged_source(preprocessed_host,preprocessed_width,prep_resident);
+        const QuotientMatrix main=staged_source(main_host,main_width,main_resident);
+        const QuotientMatrix stage2=staged_source(stage2_host,stage2_width,stage2_resident);
+        size_t blocks=(count+tile-1)/tile;if(blocks>block_cap)blocks=block_cap;
+        evaluate_quotient<<<static_cast<unsigned int>(blocks),static_cast<unsigned int>(tile),dynamic_shared,streams[buffer]>>>(
+            quotient,dn,node_count,slot_count,dr,root_count,dl,lookup_count,da,group_size,
+            prep,main,stage2,dp,ds,dal,dd,ext_w,quotient_size,next_step,scratch[buffer],
+            storage_start,count,true);
+        status=cudaGetLastError();stream_busy[buffer]=status==cudaSuccess;
+    }
+    for(size_t i=0;i<2;++i)if(status==cudaSuccess&&stream_busy[i])status=cudaStreamSynchronize(streams[i]);
+
+    if(status==cudaSuccess)status=launch_dif(quotient,quotient_size,2,device_quotient_twiddles);
+    ResidentLde* lde=nullptr;
+    if(status==cudaSuccess)status=create_resident_lde(&lde);
+    if(status==cudaSuccess){lde->height=lde_height;lde->width=width;status=cudaMalloc(reinterpret_cast<void**>(&lde->values),lde_height*width*sizeof(uint64_t));}
+    if(status==cudaSuccess)status=cudaMemset(lde->values,0,lde_height*width*sizeof(uint64_t));
+    if(status==cudaSuccess){
+        gather_shifted_quotient_slices<<<blocks_for(trace_height*width),THREADS>>>(
+            lde->values,quotient,device_weights,quotient_size,trace_height,quotient_degree,2);
+        status=cudaGetLastError();
+    }
+    if(status==cudaSuccess)status=launch_dif(lde->values,lde_height,width,device_lde_twiddles);
+    if(status==cudaSuccess)status=cudaStreamSynchronize(0);
+    if(status==cudaSuccess)*output_handle=lde;else if(lde)destroy_resident_lde(lde);
+    for(size_t i=0;i<2;++i){
+        if(streams[i])cudaStreamDestroy(streams[i]);
+        if(device_staging[i])persistent_free(device_staging[i]);
+        if(scratch[i])persistent_free(scratch[i]);
+    }
+    cudaFree(allocation);
     return static_cast<int>(status);
 }
 
@@ -2530,6 +3104,25 @@ extern "C" int multi_stark_cuda_reduced_create(int device_id,void** handle,size_
     if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&r->values),height*sizeof(Ext2));if(status==cudaSuccess)status=cudaMemset(r->values,0,height*sizeof(Ext2));
     if(status!=cudaSuccess){delete r;return static_cast<int>(status);}*handle=r;return static_cast<int>(cudaSuccess);
 }
+extern "C" int multi_stark_cuda_reduced_add_host(int device_id,void* handle,
+    const uint64_t* values,size_t height){
+    if(!handle||!values)return static_cast<int>(cudaErrorInvalidValue);
+    auto* r=static_cast<ResidentReducedOpening*>(handle);
+    if(height!=r->height)return static_cast<int>(cudaErrorInvalidValue);
+    cudaError_t status=cudaSetDevice(device_id);const size_t bytes=height*sizeof(Ext2);
+    if(status==cudaSuccess&&r->scratch_bytes<bytes){
+        if(r->scratch)status=cudaFree(r->scratch);r->scratch=nullptr;r->scratch_bytes=0;
+        if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&r->scratch),bytes);
+        if(status==cudaSuccess)r->scratch_bytes=bytes;
+    }
+    if(status==cudaSuccess)status=cudaMemcpy(r->scratch,values,bytes,cudaMemcpyHostToDevice);
+    if(status==cudaSuccess){
+        add_scaled_ext2<<<blocks_for(height),THREADS>>>(
+            r->values,reinterpret_cast<const Ext2*>(r->scratch),height,{1,0},7);
+        status=cudaGetLastError();
+    }
+    return static_cast<int>(status);
+}
 extern "C" int multi_stark_cuda_lookup_trace(int device_id,uint64_t* output,uint64_t* total,
     const uint64_t* multiplicities,const uint64_t* args,const size_t* arg_offsets,
     size_t height,size_t num_lookups,size_t args_width,size_t group_size,
@@ -2653,11 +3246,19 @@ extern "C" int multi_stark_cuda_lookup_lde(int device_id,void** output_handle,ui
     *output_handle=nullptr;const size_t slots=(num_lookups+group_size-1)/group_size;
     const size_t width=2*slots,count=height*slots,extended_height=height<<added_bits;
     if(!product_fits(extended_height,width))return static_cast<int>(cudaErrorInvalidValue);
-    cudaError_t status=cudaSetDevice(device_id);const size_t message_count=height*num_lookups;
+    const bool profile=getenv("MULTI_STARK_CUDA_MEMORY_LOG")!=nullptr&&
+        extended_height*width*sizeof(uint64_t)>=(size_t(1)<<30);
+    const auto now=[](){timespec ts{};clock_gettime(CLOCK_MONOTONIC,&ts);
+        return static_cast<double>(ts.tv_sec)+static_cast<double>(ts.tv_nsec)*1e-9;};
+    const double started=now();double allocated=started,rows_done=started,scan_done=started;
+    constexpr size_t LOOKUP_ROWS_PER_CHUNK=size_t(1)<<16;
+    const size_t chunk_rows=height<LOOKUP_ROWS_PER_CHUNK?height:LOOKUP_ROWS_PER_CHUNK;
+    const size_t message_count=chunk_rows*num_lookups;
     uint64_t *dm=nullptr,*da=nullptr,*norms=nullptr,*norm_inverses=nullptr;size_t* offsets=nullptr;
     Ext2 *conjugates=nullptr,*deltas=nullptr;ResidentLde* lde=nullptr;
-    if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&dm),height*num_lookups*sizeof(uint64_t));
-    if(status==cudaSuccess&&args_width)status=cudaMalloc(reinterpret_cast<void**>(&da),height*args_width*sizeof(uint64_t));
+    cudaError_t status=cudaSetDevice(device_id);
+    if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&dm),chunk_rows*num_lookups*sizeof(uint64_t));
+    if(status==cudaSuccess&&args_width)status=cudaMalloc(reinterpret_cast<void**>(&da),chunk_rows*args_width*sizeof(uint64_t));
     if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&offsets),(num_lookups+1)*sizeof(size_t));
     if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&deltas),count*sizeof(Ext2));
     if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&conjugates),message_count*sizeof(Ext2));
@@ -2666,15 +3267,23 @@ extern "C" int multi_stark_cuda_lookup_lde(int device_id,void** output_handle,ui
     if(status==cudaSuccess)status=create_resident_lde(&lde);
     if(status==cudaSuccess){lde->height=extended_height;lde->width=width;status=cudaMalloc(reinterpret_cast<void**>(&lde->values),extended_height*width*sizeof(uint64_t));}
     if(status==cudaSuccess)status=cudaMemset(lde->values,0,extended_height*width*sizeof(uint64_t));
-    if(status==cudaSuccess)status=cudaMemcpy(dm,multiplicities,height*num_lookups*sizeof(uint64_t),cudaMemcpyHostToDevice);
-    if(status==cudaSuccess&&args_width)status=cudaMemcpy(da,args,height*args_width*sizeof(uint64_t),cudaMemcpyHostToDevice);
     if(status==cudaSuccess)status=cudaMemcpy(offsets,arg_offsets,(num_lookups+1)*sizeof(size_t),cudaMemcpyHostToDevice);
-    if(status==cudaSuccess){lookup_messages<<<blocks_for(message_count),THREADS>>>(conjugates,norms,da,offsets,height,num_lookups,args_width,{beta[0],beta[1]},{gamma[0],gamma[1]},ext_w);status=cudaGetLastError();}
-    if(status==cudaSuccess)status=batch_inverse_norms(norm_inverses,norms,message_count);
-    if(status==cudaSuccess){lookup_group_deltas_batched<<<blocks_for(count),THREADS>>>(deltas,dm,conjugates,norm_inverses,height,num_lookups,group_size,ext_w);status=cudaGetLastError();}
+    allocated=now();
+    for(size_t row_start=0;status==cudaSuccess&&row_start<height;row_start+=LOOKUP_ROWS_PER_CHUNK){
+        const size_t rows=height-row_start<LOOKUP_ROWS_PER_CHUNK?height-row_start:LOOKUP_ROWS_PER_CHUNK;
+        const size_t messages=rows*num_lookups;
+        status=cudaMemcpy(dm,multiplicities+row_start*num_lookups,messages*sizeof(uint64_t),cudaMemcpyHostToDevice);
+        if(status==cudaSuccess&&args_width)status=cudaMemcpy(da,args+row_start*args_width,rows*args_width*sizeof(uint64_t),cudaMemcpyHostToDevice);
+        if(status==cudaSuccess){lookup_messages<<<blocks_for(messages),THREADS>>>(conjugates,norms,da,offsets,rows,num_lookups,args_width,{beta[0],beta[1]},{gamma[0],gamma[1]},ext_w);status=cudaGetLastError();}
+        if(status==cudaSuccess)status=batch_inverse_norms(norm_inverses,norms,messages);
+        if(status==cudaSuccess){lookup_group_deltas_batched<<<blocks_for(rows*slots),THREADS>>>(deltas+row_start*slots,dm,conjugates,norm_inverses,rows,num_lookups,group_size,ext_w);status=cudaGetLastError();}
+    }
+    if(profile&&status==cudaSuccess)status=cudaStreamSynchronize(cudaStreamPerThread);
+    rows_done=now();
     if(status==cudaSuccess)status=exclusive_scan_ext2(reinterpret_cast<Ext2*>(lde->values),deltas,count);
     if(status==cudaSuccess)status=cudaMemcpy(total,lde->values+2*(count-1),sizeof(Ext2),cudaMemcpyDeviceToHost);
     if(status==cudaSuccess)status=cudaMemcpy(total+2,deltas+count-1,sizeof(Ext2),cudaMemcpyDeviceToHost);
+    scan_done=now();
     const uint64_t *dit=nullptr,*dshift=nullptr,*dft=nullptr;
     if(status==cudaSuccess)status=cached_device_constants(device_id,inverse_twiddles,height/2,1,0,0,&dit);
     if(status==cudaSuccess)status=cached_device_constants(device_id,shift_powers,height,3,shift_powers[0],height>1?shift_powers[1]:0,&dshift);
@@ -2684,10 +3293,224 @@ extern "C" int multi_stark_cuda_lookup_lde(int device_id,void** output_handle,ui
     if(status==cudaSuccess)status=launch_dif(lde->values,extended_height,width,dft);
     if(status==cudaSuccess){canonicalize_goldilocks<<<blocks_for(extended_height*width),THREADS>>>(lde->values,extended_height*width);status=cudaGetLastError();}
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
+    if(profile){const double finished=now();fprintf(stderr,
+        "[multi-stark/cuda] lookup phases: height=%zu lookups=%zu slots=%zu args_width=%zu allocate=%.3fs rows=%.3fs scan=%.3fs dft=%.3fs\n",
+        height,num_lookups,slots,args_width,allocated-started,rows_done-allocated,
+        scan_done-rows_done,finished-scan_done);}
     if(status==cudaSuccess)*output_handle=lde;else destroy_resident_lde(lde);
     cudaFree(norm_inverses);cudaFree(norms);cudaFree(conjugates);cudaFree(deltas);
     cudaFree(offsets);cudaFree(da);cudaFree(dm);return static_cast<int>(status);
 }
+
+extern "C" int multi_stark_cuda_lookup_lde_begin_partitioned(
+    int device_id, void** pending_handle, const size_t* arg_offsets,
+    size_t height, size_t num_lookups, size_t args_width,
+    size_t group_size, size_t added_bits) {
+    if (!pending_handle || !arg_offsets || !height || !num_lookups ||
+        !group_size || group_size > 8 || !is_power_of_two(height) ||
+        num_lookups > SIZE_MAX - (group_size - 1) ||
+        added_bits >= sizeof(size_t) * 8 || height > (SIZE_MAX >> added_bits)) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    *pending_handle = nullptr;
+    const size_t slots = (num_lookups + group_size - 1) / group_size;
+    const size_t width = 2 * slots;
+    const size_t extended_height = height << added_bits;
+    constexpr size_t LOOKUP_ROWS_PER_CHUNK = size_t(1) << 16;
+    const size_t scratch_rows = std::min(height, LOOKUP_ROWS_PER_CHUNK);
+    if (!product_fits(extended_height, width) ||
+        !product_fits(height, slots) ||
+        !product_fits(scratch_rows, num_lookups) ||
+        !product_fits(scratch_rows, args_width)) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+
+    auto* pending = new (std::nothrow) PendingLookupLde;
+    if (!pending) return static_cast<int>(cudaErrorMemoryAllocation);
+    pending->height = height;
+    pending->slots = slots;
+    pending->extended_height = extended_height;
+    pending->num_lookups = num_lookups;
+    pending->args_width = args_width;
+    pending->group_size = group_size;
+    pending->scratch_rows = scratch_rows;
+
+    const size_t message_count = scratch_rows * num_lookups;
+    cudaError_t status = cudaSetDevice(device_id);
+    if (status == cudaSuccess)
+        status = cudaMalloc(reinterpret_cast<void**>(&pending->multiplicities),
+                            message_count * sizeof(uint64_t));
+    if (status == cudaSuccess && args_width)
+        status = cudaMalloc(reinterpret_cast<void**>(&pending->args),
+                            scratch_rows * args_width * sizeof(uint64_t));
+    if (status == cudaSuccess)
+        status = cudaMalloc(reinterpret_cast<void**>(&pending->arg_offsets),
+                            (num_lookups + 1) * sizeof(size_t));
+    if (status == cudaSuccess)
+        status = cudaMalloc(reinterpret_cast<void**>(&pending->deltas),
+                            height * slots * sizeof(Ext2));
+    if (status == cudaSuccess)
+        status = cudaMalloc(reinterpret_cast<void**>(&pending->conjugates),
+                            message_count * sizeof(Ext2));
+    if (status == cudaSuccess)
+        status = cudaMalloc(reinterpret_cast<void**>(&pending->norms),
+                            message_count * sizeof(uint64_t));
+    if (status == cudaSuccess)
+        status = cudaMalloc(reinterpret_cast<void**>(&pending->norm_inverses),
+                            message_count * sizeof(uint64_t));
+    if (status == cudaSuccess) status = create_resident_lde(&pending->lde);
+    if (status == cudaSuccess) {
+        pending->lde->height = extended_height;
+        pending->lde->width = width;
+        status = cudaMalloc(reinterpret_cast<void**>(&pending->lde->values),
+                            extended_height * width * sizeof(uint64_t));
+    }
+    if (status == cudaSuccess)
+        status = cudaMemset(pending->lde->values, 0,
+                            extended_height * width * sizeof(uint64_t));
+    if (status == cudaSuccess)
+        status = cudaMemcpy(pending->arg_offsets, arg_offsets,
+                            (num_lookups + 1) * sizeof(size_t),
+                            cudaMemcpyHostToDevice);
+    if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
+    if (status == cudaSuccess) {
+        *pending_handle = pending;
+    } else {
+        delete pending;
+    }
+    return static_cast<int>(status);
+}
+
+extern "C" int multi_stark_cuda_lookup_lde_gpu_rows_partitioned(
+    int device_id, void* pending_handle, const uint64_t* multiplicities,
+    const uint64_t* args, size_t row_start, size_t rows,
+    const uint64_t* beta, const uint64_t* gamma, uint64_t ext_w) {
+    auto* pending = static_cast<PendingLookupLde*>(pending_handle);
+    if (!pending || !multiplicities || !rows || !beta || !gamma ||
+        (pending->args_width && !args) || rows > pending->scratch_rows ||
+        row_start > pending->height || rows > pending->height - row_start) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    const size_t messages = rows * pending->num_lookups;
+    cudaError_t status = cudaSetDevice(device_id);
+    if (status == cudaSuccess)
+        status = cudaMemcpy(pending->multiplicities,
+                            multiplicities + row_start * pending->num_lookups,
+                            messages * sizeof(uint64_t), cudaMemcpyHostToDevice);
+    if (status == cudaSuccess && pending->args_width)
+        status = cudaMemcpy(pending->args,
+                            args + row_start * pending->args_width,
+                            rows * pending->args_width * sizeof(uint64_t),
+                            cudaMemcpyHostToDevice);
+    if (status == cudaSuccess) {
+        lookup_messages<<<blocks_for(messages), THREADS>>>(
+            pending->conjugates, pending->norms, pending->args,
+            pending->arg_offsets, rows, pending->num_lookups,
+            pending->args_width, {beta[0], beta[1]}, {gamma[0], gamma[1]},
+            ext_w);
+        status = cudaGetLastError();
+    }
+    if (status == cudaSuccess)
+        status = batch_inverse_norms(pending->norm_inverses, pending->norms,
+                                     messages);
+    if (status == cudaSuccess) {
+        lookup_group_deltas_batched<<<blocks_for(rows * pending->slots), THREADS>>>(
+            pending->deltas + row_start * pending->slots,
+            pending->multiplicities, pending->conjugates,
+            pending->norm_inverses, rows, pending->num_lookups,
+            pending->group_size, ext_w);
+        status = cudaGetLastError();
+    }
+    if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
+    return static_cast<int>(status);
+}
+
+extern "C" int multi_stark_cuda_lookup_lde_cpu_rows_partitioned(
+    int device_id, void* pending_handle, const uint64_t* deltas,
+    size_t row_start, size_t rows) {
+    auto* pending = static_cast<PendingLookupLde*>(pending_handle);
+    if (!pending || !deltas || !rows || row_start > pending->height ||
+        rows > pending->height - row_start) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    cudaError_t status = cudaSetDevice(device_id);
+    if (status == cudaSuccess)
+        status = cudaMemcpy(pending->deltas + row_start * pending->slots,
+                            deltas, rows * pending->slots * sizeof(Ext2),
+                            cudaMemcpyHostToDevice);
+    return static_cast<int>(status);
+}
+
+extern "C" int multi_stark_cuda_lookup_lde_finish_partitioned(
+    int device_id, void* pending_handle, void** output_handle, uint64_t* total,
+    const uint64_t* inverse_twiddles, const uint64_t* shift_powers,
+    const uint64_t* forward_twiddles, uint64_t height_inverse) {
+    auto* pending = static_cast<PendingLookupLde*>(pending_handle);
+    if (!pending || !output_handle || !total || !inverse_twiddles ||
+        !shift_powers || !forward_twiddles) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    *output_handle = nullptr;
+    cudaError_t status = cudaSetDevice(device_id);
+    const size_t count = pending->height * pending->slots;
+    if (status == cudaSuccess)
+        status = exclusive_scan_ext2(reinterpret_cast<Ext2*>(pending->lde->values),
+                                     pending->deltas, count);
+    if (status == cudaSuccess)
+        status = cudaMemcpy(total, pending->lde->values + 2 * (count - 1),
+                            sizeof(Ext2), cudaMemcpyDeviceToHost);
+    if (status == cudaSuccess)
+        status = cudaMemcpy(total + 2, pending->deltas + count - 1,
+                            sizeof(Ext2), cudaMemcpyDeviceToHost);
+
+    const uint64_t* inverse = nullptr;
+    const uint64_t* shifts = nullptr;
+    const uint64_t* forward = nullptr;
+    if (status == cudaSuccess)
+        status = cached_device_constants(device_id, inverse_twiddles,
+                                         pending->height / 2, 1, 0, 0, &inverse);
+    if (status == cudaSuccess)
+        status = cached_device_constants(device_id, shift_powers,
+                                         pending->height, 3, shift_powers[0],
+                                         pending->height > 1 ? shift_powers[1] : 0,
+                                         &shifts);
+    if (status == cudaSuccess)
+        status = cached_device_constants(device_id, forward_twiddles,
+                                         pending->extended_height / 2, 2, 0, 0,
+                                         &forward);
+    const size_t width = 2 * pending->slots;
+    if (status == cudaSuccess)
+        status = launch_dif(pending->lde->values, pending->height, width, inverse);
+    if (status == cudaSuccess) {
+        bit_reverse_scale_and_shift<<<blocks_for(pending->height * width), THREADS>>>(
+            pending->lde->values, pending->height, width,
+            strict_log2(pending->height), height_inverse, shifts);
+        status = cudaGetLastError();
+    }
+    if (status == cudaSuccess)
+        status = launch_dif(pending->lde->values, pending->extended_height,
+                            width, forward);
+    if (status == cudaSuccess) {
+        canonicalize_goldilocks<<<blocks_for(pending->extended_height * width), THREADS>>>(
+            pending->lde->values, pending->extended_height * width);
+        status = cudaGetLastError();
+    }
+    if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
+    if (status == cudaSuccess) {
+        *output_handle = pending->lde;
+        pending->lde = nullptr;
+    }
+    delete pending;
+    return static_cast<int>(status);
+}
+
+extern "C" int multi_stark_cuda_lookup_lde_cancel_partitioned(
+    int device_id, void* pending_handle) {
+    const cudaError_t status = cudaSetDevice(device_id);
+    if (status == cudaSuccess) delete static_cast<PendingLookupLde*>(pending_handle);
+    return static_cast<int>(status);
+}
+
 extern "C" int multi_stark_cuda_reduced_add(int device_id,void* reduced,const void* lde_handle,size_t height,
     const uint64_t* inv_denoms,const uint64_t* alpha_powers,const uint64_t* reduced_y,const uint64_t* alpha_offset,uint64_t ext_w){
     if(!reduced||!lde_handle||!inv_denoms||!alpha_powers||!reduced_y||!alpha_offset)return static_cast<int>(cudaErrorInvalidValue);
@@ -2716,6 +3539,40 @@ extern "C" int multi_stark_cuda_lde_release_trace(int device_id,void* handle){
     auto* lde=static_cast<ResidentLde*>(handle);if(status==cudaSuccess&&lde->trace_values){status=cudaFree(lde->trace_values);lde->trace_values=nullptr;}
     if(status==cudaSuccess&&lde->host_trace_registered){status=cudaHostUnregister(const_cast<uint64_t*>(lde->host_trace_values));lde->host_trace_registered=false;}
     if(status==cudaSuccess){lde->host_trace_values=nullptr;lde->trace_height=0;}
+    return static_cast<int>(status);
+}
+
+extern "C" int multi_stark_cuda_lde_release_values(int device_id, void* handle) {
+    if (!handle) return static_cast<int>(cudaSuccess);
+    cudaError_t status = cudaSetDevice(device_id);
+    auto* lde = static_cast<ResidentLde*>(handle);
+    if (status == cudaSuccess && lde->values) {
+        // This is an admission-control eviction, not a short-lived scratch
+        // release. Make the memory globally available before returning: the
+        // LDE may have been created on a Rayon worker's per-thread stream and
+        // its replacement upload may run on a different stream. An async free
+        // would make the Rust-side free-byte projection optimistic and can
+        // still produce cudaErrorMemoryAllocation on that upload.
+        status = persistent_free(lde->values);
+        lde->values = nullptr;
+    }
+    if (status == cudaSuccess && lde->interpolation_scratch) {
+        status = persistent_free(lde->interpolation_scratch);
+        lde->interpolation_scratch = nullptr;
+        lde->interpolation_scratch_bytes = 0;
+    }
+    if (status == cudaSuccess && lde->trace_values) {
+        status = persistent_free(lde->trace_values);
+        lde->trace_values = nullptr;
+    }
+    if (status == cudaSuccess && lde->host_trace_registered) {
+        status = cudaHostUnregister(const_cast<uint64_t*>(lde->host_trace_values));
+        lde->host_trace_registered = false;
+    }
+    if (status == cudaSuccess) {
+        lde->host_trace_values = nullptr;
+        lde->trace_height = 0;
+    }
     return static_cast<int>(status);
 }
 
@@ -3176,22 +4033,56 @@ extern "C" int multi_stark_cuda_mixed_merkle_destroy(int device_id,
     return static_cast<int>(cudaGetLastError());
 }
 
-extern "C" int multi_stark_cuda_mixed_merkle_create_from_ldes(
+extern "C" int multi_stark_cuda_mixed_merkle_create_hybrid(
     int device_id, void** handle, uint8_t* root,
-    const void* const* lde_handles, size_t lde_count) {
-    if (handle == nullptr || root == nullptr || lde_handles == nullptr ||
-        lde_count == 0) {
+    const void* const* lde_handles, const uint64_t* const* host_values,
+    const size_t* widths, const size_t* heights, size_t matrix_count,
+    const uint8_t* const* host_digest_groups,
+    const size_t* host_digest_heights, size_t host_digest_group_count) {
+    if (handle == nullptr || root == nullptr ||
+        matrix_count == 0 || lde_handles == nullptr || host_values == nullptr ||
+        widths == nullptr || heights == nullptr ||
+        (host_digest_group_count != 0 &&
+         (host_digest_groups == nullptr || host_digest_heights == nullptr))) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
     size_t max_height = 0;
-    for (size_t index = 0; index < lde_count; ++index) {
+    for (size_t index = 0; index < matrix_count; ++index) {
         const ResidentLde* lde =
             static_cast<const ResidentLde*>(lde_handles[index]);
-        if (lde == nullptr || !is_power_of_two(lde->height) || lde->width == 0) {
+        bool prehashed = false;
+        for (size_t group = 0; group < host_digest_group_count; ++group) {
+            prehashed = prehashed || host_digest_heights[group] == heights[index];
+        }
+        if ((lde != nullptr && host_values[index] != nullptr) ||
+            (lde == nullptr && host_values[index] == nullptr && !prehashed) ||
+            !is_power_of_two(heights[index]) || widths[index] == 0 ||
+            !product_fits(heights[index], widths[index]) ||
+            (lde != nullptr &&
+             (lde->height != heights[index] || lde->width != widths[index]))) {
             return static_cast<int>(cudaErrorInvalidValue);
         }
-        if (lde->height > max_height) {
-            max_height = lde->height;
+        if (heights[index] > max_height) {
+            max_height = heights[index];
+        }
+    }
+    for (size_t group = 0; group < host_digest_group_count; ++group) {
+        if (host_digest_groups[group] == nullptr ||
+            !is_power_of_two(host_digest_heights[group])) {
+            return static_cast<int>(cudaErrorInvalidValue);
+        }
+        for (size_t previous = 0; previous < group; ++previous) {
+            if (host_digest_heights[previous] == host_digest_heights[group]) {
+                return static_cast<int>(cudaErrorInvalidValue);
+            }
+        }
+        bool found_height = false;
+        for (size_t index = 0; index < matrix_count; ++index) {
+            found_height = found_height ||
+                           heights[index] == host_digest_heights[group];
+        }
+        if (!found_height) {
+            return static_cast<int>(cudaErrorInvalidValue);
         }
     }
     if (max_height > SIZE_MAX / 64) {
@@ -3211,20 +4102,33 @@ extern "C" int multi_stark_cuda_mixed_merkle_create_from_ldes(
     status = cudaMalloc(reinterpret_cast<void**>(&tree->digests),
                         64 * max_height);
     size_t max_injected_height = 0;
-    for (size_t index = 0; index < lde_count; ++index) {
-        const ResidentLde* lde =
-            static_cast<const ResidentLde*>(lde_handles[index]);
-        if (lde->height < max_height && lde->height > max_injected_height) {
-            max_injected_height = lde->height;
+    for (size_t index = 0; index < matrix_count; ++index) {
+        if (heights[index] < max_height && heights[index] > max_injected_height) {
+            max_injected_height = heights[index];
+        }
+    }
+    for (size_t group = 0; group < host_digest_group_count; ++group) {
+        const size_t height = host_digest_heights[group];
+        if (height < max_height && height > max_injected_height) {
+            max_injected_height = height;
         }
     }
     DeviceBuffer injected_digests;
     if (status == cudaSuccess && max_injected_height != 0) {
         status = injected_digests.allocate(4 * max_injected_height);
     }
+    const auto hash_group = [&](uint8_t* output, size_t height) {
+        for (size_t group = 0; group < host_digest_group_count; ++group) {
+            if (host_digest_heights[group] == height) {
+                return cudaMemcpy(output, host_digest_groups[group], height * 32,
+                                  cudaMemcpyHostToDevice);
+            }
+        }
+        return hash_partitioned_lde_group(output, lde_handles, host_values,
+                                          widths, heights, matrix_count, height);
+    };
     if (status == cudaSuccess) {
-        status = hash_resident_lde_group(tree->digests, lde_handles,
-                                         lde_count, max_height);
+        status = hash_group(tree->digests, max_height);
     }
 
     size_t count = max_height;
@@ -3238,15 +4142,12 @@ extern "C" int multi_stark_cuda_mixed_merkle_create_from_ldes(
                                             true);
 
         bool inject = false;
-        for (size_t index = 0; index < lde_count; ++index) {
-            const ResidentLde* lde =
-                static_cast<const ResidentLde*>(lde_handles[index]);
-            inject = inject || lde->height == count;
+        for (size_t index = 0; index < matrix_count; ++index) {
+            inject = inject || heights[index] == count;
         }
         if (status == cudaSuccess && inject) {
-            status = hash_resident_lde_group(
-                reinterpret_cast<uint8_t*>(injected_digests.get()),
-                lde_handles, lde_count, count);
+            status = hash_group(
+                reinterpret_cast<uint8_t*>(injected_digests.get()), count);
         }
         if (status == cudaSuccess && inject) {
             status = launch_blake3_digest_pairs(
@@ -3265,6 +4166,85 @@ extern "C" int multi_stark_cuda_mixed_merkle_create_from_ldes(
     }
     *handle = tree;
     return static_cast<int>(cudaSuccess);
+}
+
+extern "C" int multi_stark_cuda_hash_hybrid_height_group(
+    int device_id, uint8_t* host_digests, const void* const* lde_handles,
+    const uint64_t* const* host_values, const size_t* widths,
+    const size_t* heights, size_t matrix_count, size_t height) {
+    if (device_id < 0 || host_digests == nullptr || lde_handles == nullptr ||
+        host_values == nullptr || widths == nullptr || heights == nullptr ||
+        matrix_count == 0 || !is_power_of_two(height) || height > SIZE_MAX / 4) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    bool has_resident = false;
+    for (size_t index = 0; index < matrix_count; ++index) {
+        const ResidentLde* lde =
+            static_cast<const ResidentLde*>(lde_handles[index]);
+        if ((lde == nullptr) == (host_values[index] == nullptr) ||
+            widths[index] == 0 || heights[index] != height ||
+            (lde != nullptr &&
+             (lde->width != widths[index] || lde->height != height))) {
+            return static_cast<int>(cudaErrorInvalidValue);
+        }
+        has_resident = has_resident || lde != nullptr;
+    }
+    if (!has_resident) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+
+    cudaError_t status = cudaSetDevice(device_id);
+    DeviceBuffer device_digests;
+    if (status == cudaSuccess) {
+        status = device_digests.allocate(height * 4);
+    }
+    if (status == cudaSuccess) {
+        status = hash_partitioned_lde_group(
+            reinterpret_cast<uint8_t*>(device_digests.get()), lde_handles,
+            host_values, widths, heights, matrix_count, height);
+    }
+    if (status == cudaSuccess) {
+        status = cudaMemcpy(host_digests, device_digests.get(), height * 32,
+                            cudaMemcpyDeviceToHost);
+    }
+    return static_cast<int>(status);
+}
+
+extern "C" int multi_stark_cuda_mixed_merkle_create_from_ldes(
+    int device_id, void** handle, uint8_t* root,
+    const void* const* lde_handles, size_t lde_count) {
+    if (lde_handles == nullptr || lde_count == 0) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    const uint64_t** host_values =
+        new (std::nothrow) const uint64_t*[lde_count]();
+    size_t* widths = new (std::nothrow) size_t[lde_count];
+    size_t* heights = new (std::nothrow) size_t[lde_count];
+    if (host_values == nullptr || widths == nullptr || heights == nullptr) {
+        delete[] host_values;
+        delete[] widths;
+        delete[] heights;
+        return static_cast<int>(cudaErrorMemoryAllocation);
+    }
+    for (size_t index = 0; index < lde_count; ++index) {
+        const ResidentLde* lde =
+            static_cast<const ResidentLde*>(lde_handles[index]);
+        if (lde == nullptr) {
+            delete[] host_values;
+            delete[] widths;
+            delete[] heights;
+            return static_cast<int>(cudaErrorInvalidValue);
+        }
+        widths[index] = lde->width;
+        heights[index] = lde->height;
+    }
+    const int status = multi_stark_cuda_mixed_merkle_create_hybrid(
+        device_id, handle, root, lde_handles, host_values, widths, heights,
+        lde_count, nullptr, nullptr, 0);
+    delete[] host_values;
+    delete[] widths;
+    delete[] heights;
+    return status;
 }
 
 extern "C" int multi_stark_cuda_fri_merkle_create(
@@ -3349,5 +4329,26 @@ extern "C" int multi_stark_cuda_memory_info(int device_id, size_t* free_bytes,
     }
     cudaError_t status = cudaSetDevice(device_id);
     if (status == cudaSuccess) status = cudaMemGetInfo(free_bytes, total_bytes);
+    // cudaMemGetInfo excludes pages retained by cudaMallocAsync's default
+    // pool, even though subsequent stream allocations can reuse them. Treat
+    // the unused part of that pool as available for admission decisions; using
+    // raw driver-free bytes alone causes needless spills after a large stage.
+    if (status == cudaSuccess) {
+        cudaMemPool_t pool = nullptr;
+        uint64_t reserved = 0;
+        uint64_t used = 0;
+        const cudaError_t pool_status = cudaDeviceGetDefaultMemPool(&pool, device_id);
+        if (pool_status == cudaSuccess &&
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent,
+                                    &reserved) == cudaSuccess &&
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used) ==
+                cudaSuccess &&
+            reserved > used) {
+            const uint64_t reusable = reserved - used;
+            *free_bytes = reusable > SIZE_MAX - *free_bytes
+                              ? SIZE_MAX
+                              : *free_bytes + static_cast<size_t>(reusable);
+        }
+    }
     return static_cast<int>(status);
 }

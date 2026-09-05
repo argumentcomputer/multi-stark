@@ -45,6 +45,8 @@
 //! [`MAX_LOOKUP_GROUP`] so the evaluator's scratch space stays on the
 //! stack.
 
+#[cfg(feature = "cuda")]
+use p3_field::BasedVectorSpace;
 use p3_field::{
     Algebra, ExtensionField, Field, PrimeCharacteristicRing, batch_multiplicative_inverse,
 };
@@ -704,6 +706,57 @@ impl<F: Field> LookupValues<F> {
 
 #[cfg(feature = "cuda")]
 impl LookupValues<p3_goldilocks::Goldilocks> {
+    pub(crate) fn cuda_stage_2_deltas<EF: ExtensionField<p3_goldilocks::Goldilocks>>(
+        &self,
+        rows: core::ops::Range<usize>,
+        group_size: usize,
+        lookup_challenge: EF,
+        fingerprint_challenge: &EF,
+    ) -> Vec<[p3_goldilocks::Goldilocks; 2]> {
+        assert!(rows.start <= rows.end && rows.end <= self.height);
+        assert!(self.num_lookups != 0);
+        assert_eq!(
+            <EF as BasedVectorSpace<p3_goldilocks::Goldilocks>>::DIMENSION,
+            2
+        );
+        let group_size = group_size.max(1);
+        let slots = lookup_groups(self.num_lookups, group_size);
+        let message_start = rows.start * self.num_lookups;
+        let message_end = rows.end * self.num_lookups;
+        let messages = (message_start..message_end)
+            .into_par_iter()
+            .map(|index| {
+                let row = index / self.num_lookups;
+                let lookup = index % self.num_lookups;
+                lookup_challenge
+                    + fingerprint(
+                        fingerprint_challenge,
+                        self.args_at(row, lookup).iter().copied(),
+                    )
+            })
+            .collect::<Vec<_>>();
+        let inverses = batch_multiplicative_inverse(&messages);
+        drop(messages);
+        (0..(rows.end - rows.start) * slots)
+            .into_par_iter()
+            .map(|index| {
+                let local_row = index / slots;
+                let slot = index % slots;
+                let begin = slot * group_size;
+                let end = (begin + group_size).min(self.num_lookups);
+                let row = rows.start + local_row;
+                let inverse_row = local_row * self.num_lookups;
+                let mut delta = EF::ZERO;
+                for lookup in begin..end {
+                    let multiplicity = self.multiplicities[row * self.num_lookups + lookup];
+                    delta += EF::from(multiplicity) * inverses[inverse_row + lookup];
+                }
+                let coordinates = delta.as_basis_coefficients_slice();
+                [coordinates[0], coordinates[1]]
+            })
+            .collect()
+    }
+
     pub(crate) fn cuda_parts(
         &self,
     ) -> (

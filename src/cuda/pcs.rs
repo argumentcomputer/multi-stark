@@ -28,7 +28,7 @@ use std::vec::Vec;
 use itertools::{Itertools, izip};
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
 use p3_commit::{ExtensionMmcs, Mmcs, OpenedValues, Pcs, PeriodicLdeTable};
-use p3_dft::{Radix2DFTSmallBatch, TwoAdicSubgroupDft};
+use p3_dft::{Radix2DFTSmallBatch, Radix2DitParallel, TwoAdicSubgroupDft};
 use p3_field::coset::TwoAdicMultiplicativeCoset;
 use p3_field::{
     BasedVectorSpace, ExtensionField, PackedFieldExtension, PrimeCharacteristicRing, PrimeField64,
@@ -43,10 +43,33 @@ use p3_util::linear_map::LinearMap;
 use p3_util::{log2_strict_usize, reverse_slice_index_bits};
 use tracing::{debug_span, instrument};
 
-use super::mmcs::CudaCommitMmcs;
+use super::mmcs::{CudaCommitMmcs, hash_host_only_height_groups};
 use super::{CudaFriWorkspace, CudaLde, CudaMixedMerkleTree, CudaReducedOpening};
 use p3_goldilocks::Goldilocks;
 use p3_symmetric::MerkleCap;
+
+fn goldilocks_quadratic_inverse_denominators(
+    point: [Goldilocks; 2],
+    coset: &[Goldilocks],
+    extension_nonresidue: Goldilocks,
+) -> Vec<[Goldilocks; 2]> {
+    let [point_0, point_1] = point;
+    let point_1_norm = extension_nonresidue * point_1 * point_1;
+    let norms = coset
+        .par_iter()
+        .map(|&x| {
+            let real = point_0 - x;
+            real * real - point_1_norm
+        })
+        .collect::<Vec<_>>();
+    let inverse_norms = batch_multiplicative_inverse(&norms);
+    let inverse_point_1 = -point_1;
+    coset
+        .par_iter()
+        .zip(inverse_norms.par_iter())
+        .map(|(&x, &inverse_norm)| [(point_0 - x) * inverse_norm, inverse_point_1 * inverse_norm])
+        .collect()
+}
 
 pub trait CudaPcsDft<T: TwoAdicField>: TwoAdicSubgroupDft<T> {
     fn prepare_coset_lde_constants(&self, height: usize, added_bits: usize, shift: T);
@@ -70,6 +93,97 @@ struct CudaFriRound {
     codeword: CudaLde,
     tree: CudaMixedMerkleTree,
     arity: usize,
+}
+
+fn select_gpu_items(
+    items: &[(usize, u128)],
+    byte_budget: usize,
+    max_item_bytes: usize,
+) -> (Vec<bool>, usize, u128) {
+    const PLACEMENT_GRANULARITY: usize = 8 << 20;
+
+    #[derive(Clone, Copy)]
+    struct Node {
+        matrix: usize,
+        previous: Option<usize>,
+    }
+
+    // Round every matrix up, making the discretized capacity conservative.
+    // Eight-MiB units keep placement overhead small even on large GPUs while
+    // wasting at most one unit per selected matrix.
+    let capacity = byte_budget / PLACEMENT_GRANULARITY;
+    let mut states = vec![None::<(u128, Option<usize>)>; capacity + 1];
+    let mut nodes = Vec::<Node>::new();
+    states[0] = Some((0, None));
+    for (item, &(bytes, work)) in items.iter().enumerate() {
+        if bytes > max_item_bytes {
+            continue;
+        }
+        let units = bytes.div_ceil(PLACEMENT_GRANULARITY);
+        if units > capacity {
+            continue;
+        }
+        for used in (units..=capacity).rev() {
+            let Some((previous_work, previous_node)) = states[used - units] else {
+                continue;
+            };
+            let candidate_work = previous_work.saturating_add(work);
+            if states[used].is_some_and(|(current_work, _)| current_work >= candidate_work) {
+                continue;
+            }
+            let node = nodes.len();
+            nodes.push(Node {
+                matrix: item,
+                previous: previous_node,
+            });
+            states[used] = Some((candidate_work, Some(node)));
+        }
+    }
+
+    let (_, (gpu_work, mut node)) = states
+        .into_iter()
+        .enumerate()
+        .filter_map(|(used, state)| state.map(|state| (used, state)))
+        .max_by_key(|&(used, (work, _))| (work, core::cmp::Reverse(used)))
+        .unwrap();
+    let mut selected = vec![false; items.len()];
+    while let Some(index) = node {
+        let choice = nodes[index];
+        selected[choice.matrix] = true;
+        node = choice.previous;
+    }
+    let gpu_bytes = items
+        .iter()
+        .zip(&selected)
+        .filter_map(|(&(bytes, _), &selected)| selected.then_some(bytes))
+        .sum();
+    (selected, gpu_bytes, gpu_work)
+}
+
+type CosetLdeJob<F> = (usize, (TwoAdicMultiplicativeCoset<F>, RowMajorMatrix<F>));
+
+fn cpu_coset_lde_jobs<F>(
+    jobs: Vec<CosetLdeJob<F>>,
+    log_blowup: usize,
+) -> Vec<(usize, RowMajorMatrix<F>)>
+where
+    F: TwoAdicField + PrimeField64,
+    Radix2DitParallel<F>: TwoAdicSubgroupDft<F>,
+{
+    let cpu = Radix2DitParallel::<F>::default();
+    jobs.into_par_iter()
+        .map(|(index, (domain, evaluations))| {
+            let shift = F::GENERATOR / domain.shift();
+            let mut lde = cpu
+                .coset_lde_batch(evaluations, log_blowup, shift)
+                .bit_reverse_rows()
+                .to_row_major_matrix();
+            lde.values.par_iter_mut().for_each(|value| {
+                *value = F::from_u64(value.as_canonical_u64());
+            });
+            (index, lde)
+        })
+        .collect()
 }
 
 trait CudaFriMmcs<Val, Challenge: Send + Sync + Clone>: Mmcs<Challenge> {
@@ -163,7 +277,7 @@ fn prove_fri_cuda_resident<Val, Challenge, InputMmcs, FriMmcs, Challenger>(
     ext_w: Goldilocks,
 ) -> FriProof<Challenge, FriMmcs, Challenger::Witness, Vec<BatchMultiOpening<Val, InputMmcs>>>
 where
-    Val: TwoAdicField + PrimeField64,
+    Val: TwoAdicField + PrimeField64 + 'static,
     Challenge: ExtensionField<Val>,
     InputMmcs: Mmcs<Val>,
     FriMmcs: CudaFriMmcs<Val, Challenge>,
@@ -434,6 +548,395 @@ where
             .sum::<usize>();
         let dft = &self.dft;
         let log_blowup = self.fri.log_blowup;
+        let (initial_free, total_bytes) =
+            crate::cuda::device_memory_info(self.mmcs.cuda_device_id());
+        let minimum_free = std::env::var("MULTI_STARK_CUDA_MIN_FREE_BYTES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(total_bytes / 4);
+        let source_bytes = source_cells.saturating_mul(size_of::<Val>());
+        let lde_bytes = source_bytes
+            .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
+            .unwrap_or(usize::MAX);
+        let release_traces_during_construction = source_bytes
+            .saturating_add(lde_bytes)
+            .saturating_add(minimum_free)
+            > initial_free;
+        if lde_bytes.saturating_add(minimum_free) > initial_free {
+            let max_lde_height = evaluations
+                .iter()
+                .map(|(_, matrix)| matrix.height() << log_blowup)
+                .max()
+                .unwrap();
+            // A hybrid tree stores all binary digest layers plus one injected
+            // digest frontier. Reserve these explicitly before assigning any
+            // LDE height group to device memory.
+            let tree_workspace_bytes = max_lde_height.saturating_mul(96);
+            let gpu_lde_budget = initial_free
+                .saturating_sub(minimum_free)
+                .saturating_sub(tree_workspace_bytes);
+            let matrix_resources = evaluations
+                .iter()
+                .map(|(_, matrix)| {
+                    let lde_cells = (matrix.height() * matrix.width()) << log_blowup;
+                    let bytes = lde_cells.saturating_mul(size_of::<Val>());
+                    let work = u128::try_from(lde_cells).expect("LDE cells exceed u128")
+                        * (u128::from(matrix.height().trailing_zeros())
+                            + u128::try_from(log_blowup).expect("log blowup exceeds u128")
+                            + 1);
+                    (bytes, work)
+                })
+                .collect_vec();
+            let total_work = matrix_resources.iter().map(|(_, work)| *work).sum::<u128>();
+            let mut height_groups = std::collections::BTreeMap::<usize, (usize, u128)>::new();
+            let mut height_indices = std::collections::BTreeMap::<usize, Vec<usize>>::new();
+            for (index, ((_, matrix), &(bytes, work))) in
+                evaluations.iter().zip(&matrix_resources).enumerate()
+            {
+                let group = height_groups.entry(matrix.height()).or_default();
+                group.0 = group.0.saturating_add(bytes);
+                group.1 = group.1.saturating_add(work);
+                height_indices
+                    .entry(matrix.height())
+                    .or_default()
+                    .push(index);
+            }
+            // Split allocatable device capacity between persistent LDEs and
+            // later phase workspace. This prevents stage one from filling VRAM
+            // with values which lookup immediately has to copy back and evict.
+            let durable_budget = gpu_lde_budget / 2;
+            // A Merkle leaf combines every matrix at a given height. Keeping
+            // height groups intact avoids streaming the CPU half of a split
+            // group across PCIe merely to hash it beside resident matrices.
+            // Matrix-level hybrid hashing remains available to later stages,
+            // where the output partition is intrinsic rather than introduced
+            // by this scheduler.
+            let grouped_resources = height_groups.values().copied().collect_vec();
+            let (selected_groups, durable_bytes, durable_work) =
+                select_gpu_items(&grouped_resources, durable_budget, durable_budget);
+            let durable_heights = height_groups
+                .keys()
+                .zip(selected_groups)
+                .filter_map(|(&height, selected)| selected.then_some(height))
+                .collect::<std::collections::BTreeSet<_>>();
+            let durable_matrices = evaluations
+                .iter()
+                .map(|(_, matrix)| durable_heights.contains(&matrix.height()))
+                .collect_vec();
+            // A group too large to retain can still borrow the otherwise-idle
+            // GPU lane during commitment. Its selected matrices are transformed
+            // temporarily for hashing, then recomputed by the CPU for durable
+            // host storage while CUDA moves on to the retained groups.
+            let transient_reserve = max_lde_height.saturating_mul(32).saturating_add(64 << 20);
+            let select_transient_plan = |transient_budget| {
+                height_indices
+                    .iter()
+                    .filter(|(height, _)| !durable_heights.contains(height))
+                    .filter_map(|(&height, indices)| {
+                        let resources = indices
+                            .iter()
+                            .map(|&index| {
+                                let (lde_bytes, work) = matrix_resources[index];
+                                let trace_bytes = lde_bytes >> log_blowup;
+                                (lde_bytes.saturating_add(trace_bytes), work)
+                            })
+                            .collect_vec();
+                        let (selected, bytes, work) =
+                            select_gpu_items(&resources, transient_budget, transient_budget);
+                        let selected = indices
+                            .iter()
+                            .zip(selected)
+                            .filter_map(|(&index, selected)| selected.then_some(index))
+                            .collect_vec();
+                        (!selected.is_empty()).then_some((height, selected, bytes, work))
+                    })
+                    .max_by_key(|(_, _, _, work)| *work)
+            };
+
+            // The CUDA constant cache is persistent and populated lazily. A
+            // free-memory snapshot taken before preparing the selected DFTs
+            // therefore overstates the capacity available to their LDEs. Keep
+            // replanning until every constant required by the resulting plan
+            // is resident and reflected in the memory snapshot. This is most
+            // visible on very wide outer proofs, where a stale snapshot can
+            // otherwise leave no room for the Merkle digest frontier.
+            let mut transient_budget = initial_free.saturating_sub(transient_reserve);
+            let mut transient_plan = select_transient_plan(transient_budget);
+            let mut prepared_constants = std::collections::BTreeSet::new();
+            loop {
+                let transient_indices: std::collections::BTreeSet<usize> = transient_plan
+                    .as_ref()
+                    .map(|(_, indices, _, _)| indices.iter().copied().collect())
+                    .unwrap_or_default();
+                for (index, (domain, evals)) in evaluations.iter().enumerate() {
+                    if !durable_matrices[index] && !transient_indices.contains(&index) {
+                        continue;
+                    }
+                    let shift = Val::GENERATOR / domain.shift();
+                    if prepared_constants.insert((evals.height(), shift.as_canonical_u64())) {
+                        dft.prepare_coset_lde_constants(evals.height(), log_blowup, shift);
+                    }
+                }
+                let (prepared_free, _) =
+                    crate::cuda::device_memory_info(self.mmcs.cuda_device_id());
+                transient_budget = prepared_free.saturating_sub(transient_reserve);
+                let prepared_plan = select_transient_plan(transient_budget);
+                if prepared_plan == transient_plan {
+                    break;
+                }
+                transient_plan = prepared_plan;
+            }
+            let transient_height = transient_plan.as_ref().map(|(height, _, _, _)| *height);
+            let transient_matrices: std::collections::BTreeSet<usize> = transient_plan
+                .as_ref()
+                .map(|(_, indices, _, _)| indices.iter().copied().collect())
+                .unwrap_or_default();
+            let durable_count = durable_matrices
+                .iter()
+                .filter(|&&selected| selected)
+                .count();
+            if crate::cuda::memory_diagnostics_enabled() {
+                let gpu_percent = durable_work
+                    .saturating_mul(100)
+                    .checked_div(total_work)
+                    .unwrap_or(0);
+                eprintln!(
+                    "[multi-stark/cuda] stage1 placement: durable={durable_count}/{} heights={}/{} gpu_work={durable_work}/{total_work} ({gpu_percent}%) durable_bytes={durable_bytes}/{durable_budget} device_budget={gpu_lde_budget}",
+                    evaluations.len(),
+                    durable_heights.len(),
+                    height_groups.len(),
+                );
+                if let Some((height, indices, bytes, work)) = &transient_plan {
+                    eprintln!(
+                        "[multi-stark/cuda] stage1 transient group: height={height} matrices={indices:?} footprint={bytes}/{transient_budget} work={work}"
+                    );
+                }
+                for (index, ((_, matrix), &(bytes, work))) in
+                    evaluations.iter().zip(&matrix_resources).enumerate()
+                {
+                    if !durable_matrices[index] {
+                        eprintln!(
+                            "[multi-stark/cuda] stage1 host matrix {index}: height={} width={} lde_bytes={bytes} work={work}",
+                            matrix.height(),
+                            matrix.width(),
+                        );
+                    }
+                }
+            }
+            if durable_count != 0 {
+                let matrix_count = evaluations.len();
+                let mut durable_jobs = Vec::with_capacity(durable_count);
+                let mut transient_jobs = Vec::new();
+                let mut transient_aux_jobs = Vec::new();
+                let mut remaining_cpu_jobs = Vec::new();
+                for (index, evaluation) in evaluations.into_iter().enumerate() {
+                    if durable_matrices[index] {
+                        durable_jobs.push((index, evaluation));
+                    } else if transient_matrices.contains(&index) {
+                        transient_jobs.push((index, evaluation));
+                    } else if transient_height == Some(evaluation.1.height()) {
+                        transient_aux_jobs.push((index, evaluation));
+                    } else {
+                        remaining_cpu_jobs.push((index, evaluation));
+                    }
+                }
+                // All host LDE work shares one bounded pool. Keeping the
+                // urgent same-height matrices, deferred materialization, and
+                // remaining CPU matrices on separate Rayon pools can
+                // oversubscribe a many-core host early, then strand cores once
+                // only a large deferred matrix remains.
+                // A large durable set must be evicted in later stages, which
+                // naturally gives deferred CPU transforms more overlap. Keep
+                // those transforms narrower so they do not starve the GPU's
+                // host-memory traffic. When little remains resident, use more
+                // cores to prevent a deferred transform becoming the quotient
+                // critical path.
+                let prioritize_deferred = durable_bytes < total_bytes / 4;
+                let stage1_threads = crate::types::cuda_stage1_worker_count(prioritize_deferred);
+                let stage1_pool =
+                    std::sync::Arc::new(crate::types::cuda_host_pool("stage1-lde", stage1_threads));
+                let cpu_started = std::time::Instant::now();
+                let (aux_results, transient_results) = std::thread::scope(|scope| {
+                    let aux_pool = std::sync::Arc::clone(&stage1_pool);
+                    let cpu_task = scope.spawn(move || {
+                        aux_pool.install(|| cpu_coset_lde_jobs(transient_aux_jobs, log_blowup))
+                    });
+                    let transient_started = std::time::Instant::now();
+                    let transient_results = transient_jobs
+                        .into_iter()
+                        .map(|(index, (domain, evals))| {
+                            let shift = Val::GENERATOR / domain.shift();
+                            let lde = dft.coset_lde_batch_resident(&evals, log_blowup, shift);
+                            (index, lde, (domain, evals))
+                        })
+                        .collect_vec();
+                    if crate::cuda::memory_diagnostics_enabled() && !transient_results.is_empty() {
+                        eprintln!(
+                            "[multi-stark/cuda] stage1 transient GPU LDE: {:.3}s",
+                            transient_started.elapsed().as_secs_f64()
+                        );
+                    }
+                    (cpu_task.join().unwrap(), transient_results)
+                });
+
+                let mut host_matrices = (0..matrix_count).map(|_| None).collect_vec();
+                for (index, lde) in aux_results {
+                    host_matrices[index] = Some(lde);
+                }
+                let mut transient_ldes = (0..matrix_count).map(|_| None).collect_vec();
+                let mut deferred_matrices = (0..matrix_count).map(|_| None).collect_vec();
+                for (index, lde, (domain, evaluations)) in transient_results {
+                    let dimensions = p3_matrix::Dimensions {
+                        width: evaluations.width(),
+                        height: evaluations.height() << log_blowup,
+                    };
+                    let pool = std::sync::Arc::clone(&stage1_pool);
+                    let worker = std::thread::spawn(move || {
+                        pool.install(|| {
+                            cpu_coset_lde_jobs(vec![(index, (domain, evaluations))], log_blowup)
+                                .pop()
+                                .expect("deferred LDE worker returned no matrix")
+                                .1
+                        })
+                    });
+                    transient_ldes[index] = Some(lde);
+                    deferred_matrices[index] = Some((dimensions, worker));
+                }
+                if crate::cuda::memory_diagnostics_enabled() {
+                    let deferred_count = deferred_matrices
+                        .iter()
+                        .filter(|matrix| matrix.is_some())
+                        .count();
+                    eprintln!(
+                        "[multi-stark/cuda] stage1 deferred CPU LDE workers: {deferred_count} matrices on {stage1_threads} threads"
+                    );
+                }
+                let mut host_digest_groups = Vec::new();
+                let mut prehashed_heights = std::collections::BTreeSet::new();
+
+                let (cpu_results, durable_results) = std::thread::scope(|scope| {
+                    let remaining_pool = std::sync::Arc::clone(&stage1_pool);
+                    let cpu_task = scope.spawn(move || {
+                        remaining_pool
+                            .install(|| cpu_coset_lde_jobs(remaining_cpu_jobs, log_blowup))
+                    });
+                    if let Some(height) = transient_height {
+                        let indices = &height_indices[&height];
+                        let resident_refs = indices
+                            .iter()
+                            .map(|&index| transient_ldes[index].as_ref())
+                            .collect_vec();
+                        let host_refs = indices
+                            .iter()
+                            .map(|&index| {
+                                transient_ldes[index]
+                                    .is_none()
+                                    .then(|| host_matrices[index].as_ref().unwrap())
+                            })
+                            .collect_vec();
+                        let hash_started = std::time::Instant::now();
+                        let digests = self
+                            .mmcs
+                            .hash_cuda_hybrid_height_group(&resident_refs, &host_refs);
+                        let lde_height = height << log_blowup;
+                        prehashed_heights.insert(lde_height);
+                        host_digest_groups.push((lde_height, digests));
+                        if crate::cuda::memory_diagnostics_enabled() {
+                            eprintln!(
+                                "[multi-stark/cuda] stage1 transient group hash: {:.3}s",
+                                hash_started.elapsed().as_secs_f64()
+                            );
+                        }
+                    }
+                    // The transient LDEs have supplied their digest frontier.
+                    // Drop them before admitting the durable resident set.
+                    drop(transient_ldes);
+                    let durable_started = std::time::Instant::now();
+                    let durable_results = durable_jobs
+                        .into_iter()
+                        .map(|(index, (domain, evals))| {
+                            let shift = Val::GENERATOR / domain.shift();
+                            let lde = dft.coset_lde_batch_resident(&evals, log_blowup, shift);
+                            (index, lde, evals)
+                        })
+                        .collect_vec();
+                    if crate::cuda::memory_diagnostics_enabled() {
+                        eprintln!(
+                            "[multi-stark/cuda] stage1 durable GPU LDE: {:.3}s",
+                            durable_started.elapsed().as_secs_f64()
+                        );
+                    }
+                    (cpu_task.join().unwrap(), durable_results)
+                });
+                for (index, lde) in cpu_results {
+                    host_matrices[index] = Some(lde);
+                }
+                if crate::cuda::memory_diagnostics_enabled() {
+                    eprintln!(
+                        "[multi-stark/cuda] stage1 CPU LDE: {:.3}s",
+                        cpu_started.elapsed().as_secs_f64()
+                    );
+                }
+
+                let mut resident = (0..matrix_count).map(|_| None).collect_vec();
+                let mut retained_traces = (0..matrix_count).map(|_| None).collect_vec();
+                for (index, lde, trace) in durable_results {
+                    resident[index] = Some(lde);
+                    retained_traces[index] = Some(trace);
+                }
+                let digest_started = std::time::Instant::now();
+                let deferred_dimensions = deferred_matrices
+                    .iter()
+                    .map(|matrix| matrix.as_ref().map(|(dimensions, _)| *dimensions))
+                    .collect_vec();
+                host_digest_groups.extend(hash_host_only_height_groups(
+                    &host_matrices,
+                    &resident,
+                    &deferred_dimensions,
+                    &prehashed_heights,
+                ));
+                if crate::cuda::memory_diagnostics_enabled() {
+                    eprintln!(
+                        "[multi-stark/cuda] stage1 partitioned host digests: {:.3}s",
+                        digest_started.elapsed().as_secs_f64()
+                    );
+                }
+                let tree_started = std::time::Instant::now();
+                let committed = self.mmcs.commit_cuda_hybrid(
+                    resident,
+                    host_matrices,
+                    deferred_matrices,
+                    retained_traces,
+                    host_digest_groups,
+                );
+                if crate::cuda::memory_diagnostics_enabled() {
+                    eprintln!(
+                        "[multi-stark/cuda] stage1 hybrid tree: {:.3}s",
+                        tree_started.elapsed().as_secs_f64()
+                    );
+                }
+                return committed;
+            }
+            let cpu = Radix2DitParallel::<Val>::default();
+            let ldes = tracing::info_span!("cuda/cpu_lde_fallback").in_scope(|| {
+                evaluations
+                    .into_par_iter()
+                    .map(|(domain, evals)| {
+                        let shift = Val::GENERATOR / domain.shift();
+                        let mut lde = cpu
+                            .coset_lde_batch(evals, log_blowup, shift)
+                            .bit_reverse_rows()
+                            .to_row_major_matrix();
+                        lde.values.par_iter_mut().for_each(|value| {
+                            *value = Val::from_u64(value.as_canonical_u64());
+                        });
+                        lde
+                    })
+                    .collect()
+            });
+            return tracing::info_span!("cuda/cpu_mmcs_fallback")
+                .in_scope(|| self.mmcs.commit_cpu_storage(ldes));
+        }
         if source_cells >= 10_000_000 {
             for (domain, evals) in &evaluations {
                 dft.prepare_coset_lde_constants(
@@ -448,7 +951,12 @@ where
         // reliable concurrency range while retaining substantial overlap.
         const CUDA_LDE_WAVE: usize = 16;
         let mut ldes = Vec::with_capacity(evaluations.len());
-        for wave in evaluations.chunks(CUDA_LDE_WAVE) {
+        let wave_size = if release_traces_during_construction {
+            1
+        } else {
+            CUDA_LDE_WAVE
+        };
+        for wave in evaluations.chunks(wave_size) {
             let transform =
                 |(domain, evals): &(TwoAdicMultiplicativeCoset<Val>, RowMajorMatrix<Val>)| {
                     assert_eq!(domain.size(), evals.height());
@@ -463,23 +971,26 @@ where
             } else {
                 wave.par_iter().map(transform).collect()
             };
+            if release_traces_during_construction {
+                for lde in &wave_ldes {
+                    // SAFETY: this wave has completed synchronously. The host
+                    // matrices remain owned below and are retained for every
+                    // later consumer of the original trace.
+                    unsafe { lde.release_trace() };
+                }
+            }
             ldes.extend(wave_ldes);
         }
         // Preserve enough device headroom for lookup, quotient, and FRI
         // allocations. Spill the largest retained traces first, deriving the
         // policy from this device rather than a 96-GiB development machine.
         let (free_bytes, total_bytes) = crate::cuda::device_memory_info(self.mmcs.cuda_device_id());
-        let minimum_free = std::env::var("MULTI_STARK_CUDA_MIN_FREE_BYTES")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(total_bytes / 4);
         // A free-memory snapshot immediately after commitment construction is
         // not enough: lookup construction temporarily needs buffers
         // proportional to the original trace.  Proactively spill large traces
         // once this commitment itself is a meaningful fraction of VRAM.  The
         // ratios retain the policy that was validated on a 96-GiB device while
         // scaling it to smaller cards.
-        let source_bytes = source_cells.saturating_mul(size_of::<Val>());
         let proactive_spill = source_bytes >= total_bytes / 12;
         let large_matrix = total_bytes / 120;
         let mut projected_free = free_bytes;
@@ -497,8 +1008,11 @@ where
             })
             .collect_vec();
         by_size.sort_unstable_by_key(|&(_, bytes)| core::cmp::Reverse(bytes));
-        let mut spilled = false;
+        let mut spilled = release_traces_during_construction;
         for (index, bytes) in by_size {
+            if release_traces_during_construction {
+                continue;
+            }
             let needs_headroom = projected_free < minimum_free;
             let crowds_later_stages = proactive_spill && bytes >= large_matrix;
             if !needs_headroom && !crowds_later_stages {
@@ -510,8 +1024,15 @@ where
             projected_free = projected_free.saturating_add(bytes);
             spilled = true;
         }
-        // Commit to the bit-reversed LDEs.
-        let (commitment, mut data) = self.mmcs.commit_cuda_resident(ldes);
+        // Commit to the bit-reversed LDEs. Once host traces have been retained,
+        // keep the LDEs individually spillable as well: later quotient and FRI
+        // admission may need to trade a resident LDE for its host materialization.
+        // Small all-resident commitments retain the lower-overhead fast path.
+        let (commitment, mut data) = if spilled {
+            self.mmcs.commit_cuda_spillable(ldes)
+        } else {
+            self.mmcs.commit_cuda_resident(ldes)
+        };
         if spilled {
             self.mmcs.retain_matrices(
                 &mut data,
@@ -659,64 +1180,269 @@ where
         // Keep CUDA commitments resident through barycentric interpolation
         // and construction of the reduced FRI codewords. Only the opened
         // values and final extension codewords cross back to the host.
-        let resident_rounds = debug_span!("cuda prepare resident rounds").in_scope(|| {
-            commitment_data_with_opening_points
-                .iter()
-                .map(|(data, points)| (self.mmcs.resident_or_upload(data), points))
-                .collect_vec()
-        });
-        let resident_max_height = resident_rounds
+        if commitment_data_with_opening_points
             .iter()
-            .flat_map(|(ldes, _)| ldes.iter())
-            .map(CudaLde::height)
-            .max()
-            .unwrap_or(0);
+            .all(|(data, _)| self.mmcs.is_cuda_resident(data))
+        {
+            let resident_rounds = debug_span!("cuda prepare resident rounds").in_scope(|| {
+                commitment_data_with_opening_points
+                    .iter()
+                    .map(|(data, points)| (self.mmcs.resident_or_upload(data), points))
+                    .collect_vec()
+            });
+            let resident_max_height = resident_rounds
+                .iter()
+                .flat_map(|(ldes, _)| ldes.iter())
+                .map(CudaLde::height)
+                .max()
+                .unwrap_or(0);
+            let final_fri_height = self.fri.blowup() * self.fri.final_poly_len();
+            if resident_max_height > 1024 && resident_max_height > final_fri_height {
+                let _resident_guard = debug_span!("cuda resident fri").entered();
+                let rounds = resident_rounds;
+                let device_id = self.mmcs.cuda_device_id();
+                assert_eq!(<Challenge as BasedVectorSpace<Val>>::DIMENSION, 2);
+                let to_gold = |v: Val| Goldilocks::from_u64(v.as_canonical_u64());
+                let to_pair = |v: Challenge| {
+                    let c = <Challenge as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&v);
+                    [to_gold(c[0]), to_gold(c[1])]
+                };
+                let from_pair = |v: [Goldilocks; 2]| {
+                    Challenge::from_basis_coefficients_slice(&[
+                        Val::from_u64(v[0].as_canonical_u64()),
+                        Val::from_u64(v[1].as_canonical_u64()),
+                    ])
+                    .unwrap()
+                };
+                let global_max_height = rounds
+                    .iter()
+                    .flat_map(|(ldes, _)| ldes.iter().map(CudaLde::height))
+                    .max()
+                    .unwrap();
+                let global_max_width = rounds
+                    .iter()
+                    .flat_map(|(ldes, _)| ldes.iter().map(CudaLde::width))
+                    .max()
+                    .unwrap();
+                let log_global_max_height = log2_strict_usize(global_max_height);
+                let coset_domain =
+                    TwoAdicMultiplicativeCoset::new(Val::GENERATOR, log_global_max_height).unwrap();
+                let mut coset: Vec<Val> = coset_domain.iter().collect();
+                reverse_slice_index_bits(&mut coset);
+                let mut max_log: LinearMap<Challenge, usize> = LinearMap::new();
+                for (ldes, points) in &rounds {
+                    for (lde, ps) in ldes.iter().zip(points.iter()) {
+                        for &z in ps {
+                            if let Some(h) = max_log.get_mut(&z) {
+                                *h = (*h).max(log2_strict_usize(lde.height()))
+                            } else {
+                                max_log.insert(z, log2_strict_usize(lde.height()));
+                            }
+                        }
+                    }
+                }
+                let ext_x =
+                    Challenge::from_basis_coefficients_slice(&[Val::ZERO, Val::ONE]).unwrap();
+                let ext_w = to_pair(ext_x * ext_x)[0];
+                assert_eq!(ext_w, Goldilocks::from_u64(7));
+                let coset_gold: Vec<_> = coset.iter().copied().map(to_gold).collect();
+                let mut inv_offsets = LinearMap::new();
+                let mut inverse_points = Vec::new();
+                let mut inverse_counts = Vec::new();
+                let mut inverse_count = 0usize;
+                for (point, lh) in max_log {
+                    inv_offsets.insert(point, inverse_count);
+                    inverse_points.push(to_pair(point));
+                    let count = 1usize << lh;
+                    inverse_counts.push(count);
+                    inverse_count += count;
+                }
+                let mut workspace = CudaFriWorkspace::new(
+                    device_id,
+                    &inverse_points,
+                    &inverse_counts,
+                    &coset_gold,
+                    ext_w,
+                );
+                let mut interpolation_tasks = Vec::new();
+                let mut output_count = 0usize;
+                let layouts = rounds
+                    .iter()
+                    .map(|(ldes, points)| {
+                        ldes.iter()
+                            .zip(points.iter())
+                            .map(|(lde, ps)| {
+                                let h = lde.height() >> self.fri.log_blowup;
+                                let lh = log2_strict_usize(h);
+                                ps.iter()
+                                    .map(|&point| {
+                                        let offset = output_count;
+                                        output_count += lde.width();
+                                        let shift_pow = Val::GENERATOR.exp_power_of_2(lh);
+                                        let scale = (point.exp_power_of_2(lh) - shift_pow)
+                                            * (Val::from_usize(h) * shift_pow).inverse();
+                                        interpolation_tasks.push(lde.interpolation_task(
+                                            h,
+                                            *inv_offsets.get(&point).unwrap(),
+                                            offset,
+                                            to_pair(scale),
+                                        ));
+                                        (offset, lde.width())
+                                    })
+                                    .collect_vec()
+                            })
+                            .collect_vec()
+                    })
+                    .collect_vec();
+                let interpolated = debug_span!("cuda interpolate openings")
+                    .in_scope(|| workspace.interpolate(&interpolation_tasks, output_count, ext_w));
+                let all_opened_values = layouts
+                    .into_iter()
+                    .map(|round| {
+                        round
+                            .into_iter()
+                            .map(|matrix| {
+                                matrix
+                                    .into_iter()
+                                    .map(|(offset, width)| {
+                                        interpolated[offset..offset + width]
+                                            .iter()
+                                            .copied()
+                                            .map(from_pair)
+                                            .collect_vec()
+                                    })
+                                    .collect_vec()
+                            })
+                            .collect_vec()
+                    })
+                    .collect_vec();
+                for round in &all_opened_values {
+                    for matrix in round {
+                        for values in matrix {
+                            challenger.observe_algebra_slice(values);
+                        }
+                    }
+                }
+                let alpha: Challenge = challenger.sample_algebra_element();
+                let alpha_powers: Vec<_> = alpha.powers().take(global_max_width).collect();
+                let alpha_pairs: Vec<_> = alpha_powers.iter().copied().map(to_pair).collect();
+                let mut num_reduced = [0usize; 33];
+                let mut reduced: [Option<CudaReducedOpening>; 33] = core::array::from_fn(|_| None);
+                let mut reduction_tasks = Vec::new();
+                for ((ldes, points), openings_round) in rounds.iter().zip(all_opened_values.iter())
+                {
+                    for ((lde, ps), openings) in
+                        ldes.iter().zip(points.iter()).zip(openings_round.iter())
+                    {
+                        let lh = log2_strict_usize(lde.height());
+                        let target = reduced[lh].get_or_insert_with(|| {
+                            CudaReducedOpening::new(device_id, lde.height())
+                        });
+                        for (&point, ys) in ps.iter().zip(openings.iter()) {
+                            let reduced_y =
+                                dot_product(alpha_powers.iter().copied(), ys.iter().copied());
+                            let offset = alpha.exp_u64(num_reduced[lh] as u64);
+                            reduction_tasks.push(target.reduction_task(
+                                lde,
+                                *inv_offsets.get(&point).unwrap(),
+                                to_pair(reduced_y),
+                                to_pair(offset),
+                            ));
+                            num_reduced[lh] += lde.width();
+                        }
+                    }
+                }
+                debug_span!("cuda reduce openings")
+                    .in_scope(|| workspace.reduce(&reduction_tasks, &alpha_pairs, ext_w));
+                let fri_input = reduced.into_iter().rev().flatten().collect_vec();
+                let fri_proof = debug_span!("cuda prove fri").in_scope(|| {
+                    prove_fri_cuda_resident(
+                        &self.fri,
+                        fri_input,
+                        challenger,
+                        log_global_max_height,
+                        &commitment_data_with_opening_points,
+                        &self.mmcs,
+                        ext_w,
+                    )
+                });
+                return (all_opened_values, fri_proof);
+            }
+        }
+
+        // A commitment which did not fit in VRAM is stored by the CPU MMCS,
+        // but that does not require the entire opening to fall back to the
+        // CPU. Upload one such matrix at a time for interpolation and
+        // reduction. Resident commitments stay in place, and temporary
+        // uploads are dropped before the next matrix, bounding additional
+        // device memory by the largest CPU-backed matrix instead of the sum
+        // of all commitments.
+        let dimensions = commitment_data_with_opening_points
+            .iter()
+            .map(|(data, points)| {
+                let dimensions = self.mmcs.matrix_dimensions(data);
+                assert_eq!(
+                    dimensions.len(),
+                    points.len(),
+                    "each matrix should have a corresponding set of evaluation points"
+                );
+                dimensions
+            })
+            .collect_vec();
+        let opening_points = commitment_data_with_opening_points
+            .iter()
+            .map(|(_, points)| points)
+            .collect_vec();
+        let (cuda_max_height, cuda_max_width) = dimensions
+            .iter()
+            .flatten()
+            .map(|dims| (dims.height, dims.width))
+            .reduce(|(hmax, wmax), (height, width)| (hmax.max(height), wmax.max(width)))
+            .expect("No Matrices Supplied?");
         let final_fri_height = self.fri.blowup() * self.fri.final_poly_len();
-        if resident_max_height > 1024 && resident_max_height > final_fri_height {
-            let _resident_guard = debug_span!("cuda resident fri").entered();
-            let rounds = resident_rounds;
+        if cuda_max_height > 1024 && cuda_max_height > final_fri_height {
+            let _resident_guard = debug_span!("cuda streamed fri").entered();
+            let phase_started = std::time::Instant::now();
             let device_id = self.mmcs.cuda_device_id();
             assert_eq!(<Challenge as BasedVectorSpace<Val>>::DIMENSION, 2);
-            let to_gold = |v: Val| Goldilocks::from_u64(v.as_canonical_u64());
-            let to_pair = |v: Challenge| {
-                let c = <Challenge as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&v);
-                [to_gold(c[0]), to_gold(c[1])]
+            let to_gold = |value: Val| Goldilocks::from_u64(value.as_canonical_u64());
+            let to_pair = |value: Challenge| {
+                let coefficients =
+                    <Challenge as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&value);
+                [to_gold(coefficients[0]), to_gold(coefficients[1])]
             };
-            let from_pair = |v: [Goldilocks; 2]| {
+            let from_pair = |value: [Goldilocks; 2]| {
                 Challenge::from_basis_coefficients_slice(&[
-                    Val::from_u64(v[0].as_canonical_u64()),
-                    Val::from_u64(v[1].as_canonical_u64()),
+                    Val::from_u64(value[0].as_canonical_u64()),
+                    Val::from_u64(value[1].as_canonical_u64()),
                 ])
-                .unwrap()
+                .expect("quadratic extension element")
             };
-            let global_max_height = rounds
-                .iter()
-                .flat_map(|(ldes, _)| ldes.iter().map(CudaLde::height))
-                .max()
-                .unwrap();
-            let global_max_width = rounds
-                .iter()
-                .flat_map(|(ldes, _)| ldes.iter().map(CudaLde::width))
-                .max()
-                .unwrap();
-            let log_global_max_height = log2_strict_usize(global_max_height);
+            let log_global_max_height = log2_strict_usize(cuda_max_height);
             let coset_domain =
                 TwoAdicMultiplicativeCoset::new(Val::GENERATOR, log_global_max_height).unwrap();
             let mut coset: Vec<Val> = coset_domain.iter().collect();
             reverse_slice_index_bits(&mut coset);
+
             let mut max_log: LinearMap<Challenge, usize> = LinearMap::new();
-            for (ldes, points) in &rounds {
-                for (lde, ps) in ldes.iter().zip(points.iter()) {
-                    for &z in ps {
-                        if let Some(h) = max_log.get_mut(&z) {
-                            *h = (*h).max(log2_strict_usize(lde.height()))
+            for ((_, points), round_dimensions) in commitment_data_with_opening_points
+                .iter()
+                .zip(dimensions.iter())
+            {
+                for (points, dims) in points.iter().zip(round_dimensions) {
+                    for &point in points {
+                        let log_height = log2_strict_usize(dims.height);
+                        if let Some(maximum) = max_log.get_mut(&point) {
+                            *maximum = (*maximum).max(log_height);
                         } else {
-                            max_log.insert(z, log2_strict_usize(lde.height()));
+                            max_log.insert(point, log_height);
                         }
                     }
                 }
             }
-            let ext_x = Challenge::from_basis_coefficients_slice(&[Val::ZERO, Val::ONE]).unwrap();
+
+            let ext_x = Challenge::from_basis_coefficients_slice(&[Val::ZERO, Val::ONE])
+                .expect("quadratic extension generator");
             let ext_w = to_pair(ext_x * ext_x)[0];
             assert_eq!(ext_w, Goldilocks::from_u64(7));
             let coset_gold: Vec<_> = coset.iter().copied().map(to_gold).collect();
@@ -724,72 +1450,255 @@ where
             let mut inverse_points = Vec::new();
             let mut inverse_counts = Vec::new();
             let mut inverse_count = 0usize;
-            for (point, lh) in max_log {
+            let point_logs = max_log.into_iter().collect_vec();
+            let (_, total_device_bytes) = crate::cuda::device_memory_info(device_id);
+            let inverse_elements = point_logs
+                .iter()
+                .map(|(_, log_height)| 1usize << log_height)
+                .sum::<usize>();
+            let max_inverse_elements = point_logs
+                .iter()
+                .map(|(_, log_height)| 1usize << log_height)
+                .max()
+                .unwrap_or(0);
+            let reduced_elements = dimensions
+                .iter()
+                .flatten()
+                .map(|dims| dims.height)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .sum::<usize>();
+            let fri_workspace_bytes = inverse_elements
+                .saturating_mul(2 * size_of::<Val>())
+                .saturating_add(cuda_max_height.saturating_mul(size_of::<Val>()))
+                .saturating_add(max_inverse_elements.saturating_mul(2 * size_of::<Val>()))
+                .saturating_add(reduced_elements.saturating_mul(2 * size_of::<Val>()))
+                .saturating_add(total_device_bytes / 64);
+            let admission_started = std::time::Instant::now();
+            let admission_data = commitment_data_with_opening_points
+                .iter()
+                .map(|entry| entry.0)
+                .collect_vec();
+            self.mmcs
+                .ensure_device_headroom_batch(&admission_data, fri_workspace_bytes);
+            if crate::cuda::memory_diagnostics_enabled() {
+                eprintln!(
+                    "[multi-stark/cuda] FRI admission: {:.3}s",
+                    admission_started.elapsed().as_secs_f64()
+                );
+            }
+            for &(point, log_height) in &point_logs {
                 inv_offsets.insert(point, inverse_count);
                 inverse_points.push(to_pair(point));
-                let count = 1usize << lh;
+                let count = 1usize << log_height;
                 inverse_counts.push(count);
                 inverse_count += count;
             }
-            let mut workspace = CudaFriWorkspace::new(
-                device_id,
-                &inverse_points,
-                &inverse_counts,
-                &coset_gold,
-                ext_w,
-            );
-            let mut interpolation_tasks = Vec::new();
-            let mut output_count = 0usize;
-            let layouts = rounds
+            let cpu_round_matrices = commitment_data_with_opening_points
                 .iter()
-                .map(|(ldes, points)| {
-                    ldes.iter()
-                        .zip(points.iter())
-                        .map(|(lde, ps)| {
-                            let h = lde.height() >> self.fri.log_blowup;
-                            let lh = log2_strict_usize(h);
-                            ps.iter()
-                                .map(|&point| {
-                                    let offset = output_count;
-                                    output_count += lde.width();
-                                    let shift_pow = Val::GENERATOR.exp_power_of_2(lh);
-                                    let scale = (point.exp_power_of_2(lh) - shift_pow)
-                                        * (Val::from_usize(h) * shift_pow).inverse();
-                                    interpolation_tasks.push(lde.interpolation_task(
-                                        h,
-                                        *inv_offsets.get(&point).unwrap(),
-                                        offset,
-                                        to_pair(scale),
-                                    ));
-                                    (offset, lde.width())
+                .map(|(data, _)| self.mmcs.cpu_matrices(data))
+                .collect_vec();
+            let mut cpu_max_log: LinearMap<Challenge, usize> = LinearMap::new();
+            for ((matrices, &points), round_dimensions) in cpu_round_matrices
+                .iter()
+                .zip(opening_points.iter())
+                .zip(dimensions.iter())
+            {
+                for ((matrix, points), dims) in
+                    matrices.iter().zip(points.iter()).zip(round_dimensions)
+                {
+                    if matrix.is_none() {
+                        continue;
+                    }
+                    let log_height = log2_strict_usize(dims.height);
+                    for &point in points {
+                        if let Some(maximum) = cpu_max_log.get_mut(&point) {
+                            *maximum = (*maximum).max(log_height);
+                        } else {
+                            cpu_max_log.insert(point, log_height);
+                        }
+                    }
+                }
+            }
+            let cpu_point_logs = cpu_max_log.into_iter().collect_vec();
+            let fri_log_blowup = self.fri.log_blowup;
+            let denominators_started = std::time::Instant::now();
+            let ((inv_denoms, cpu_denominator_seconds), mut workspace, gpu_denominator_seconds) =
+                std::thread::scope(|scope| {
+                    let cpu_denominators = scope.spawn(|| {
+                        let started = std::time::Instant::now();
+                        let denominators: LinearMap<Challenge, Vec<Challenge>> = cpu_point_logs
+                            .iter()
+                            .map(|&(point, log_height)| {
+                                let count = 1 << log_height;
+                                let coset = coset_gold[..count].as_ref();
+                                let inverses = goldilocks_quadratic_inverse_denominators(
+                                    to_pair(point),
+                                    coset,
+                                    ext_w,
+                                )
+                                .into_par_iter()
+                                .map(from_pair)
+                                .collect();
+                                (point, inverses)
+                            })
+                            .collect();
+                        (denominators, started.elapsed().as_secs_f64())
+                    });
+                    let gpu_started = std::time::Instant::now();
+                    let workspace = CudaFriWorkspace::new(
+                        device_id,
+                        &inverse_points,
+                        &inverse_counts,
+                        &coset_gold,
+                        ext_w,
+                    );
+                    let gpu_seconds = gpu_started.elapsed().as_secs_f64();
+                    let cpu_denominators = cpu_denominators.join().unwrap();
+                    (cpu_denominators, workspace, gpu_seconds)
+                });
+            let adjusted_weights: LinearMap<Challenge, Vec<Challenge>> = inv_denoms
+                .iter()
+                .map(|(point, denoms)| (*point, compute_adjusted_weights(*point, denoms)))
+                .collect();
+            if crate::cuda::memory_diagnostics_enabled() {
+                eprintln!(
+                    "[multi-stark/cuda] FRI denominators: {:.3}s (CPU {:.3}s, GPU {:.3}s)",
+                    denominators_started.elapsed().as_secs_f64(),
+                    cpu_denominator_seconds,
+                    gpu_denominator_seconds
+                );
+            }
+
+            let interpolation_started = std::time::Instant::now();
+            let ((cpu_opened, cpu_interpolation_seconds), gpu_opened, gpu_interpolation_seconds) =
+                std::thread::scope(|scope| {
+                    let cpu_opened = scope.spawn(|| {
+                        let started = std::time::Instant::now();
+                        let opened = cpu_round_matrices
+                            .iter()
+                            .zip(opening_points.iter())
+                            .map(|(matrices, &points)| {
+                                matrices
+                                    .par_iter()
+                                    .copied()
+                                    .zip(points.par_iter())
+                                    .map(|(matrix, points)| {
+                                        let matrix = matrix?;
+                                        let polynomial_height = matrix.height() >> fri_log_blowup;
+                                        assert!(polynomial_height.is_power_of_two());
+                                        let (low_coset, _) = matrix.split_rows(polynomial_height);
+                                        Some(
+                                            points
+                                                .iter()
+                                                .map(|&point| {
+                                                    low_coset.interpolate_coset_with_precomputation(
+                                                        Val::GENERATOR,
+                                                        point,
+                                                        &adjusted_weights.get(&point).unwrap()
+                                                            [..polynomial_height],
+                                                    )
+                                                })
+                                                .collect_vec(),
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect_vec();
+                        (opened, started.elapsed().as_secs_f64())
+                    });
+                    let gpu_started = std::time::Instant::now();
+                    let gpu_opened = commitment_data_with_opening_points
+                        .iter()
+                        .zip(dimensions.iter())
+                        .map(|((data, points), round_dimensions)| {
+                            points
+                                .iter()
+                                .zip(round_dimensions)
+                                .enumerate()
+                                .map(|(matrix_index, (points, dims))| {
+                                    if !self.mmcs.is_matrix_cuda_resident(data, matrix_index) {
+                                        return None;
+                                    }
+                                    if points.is_empty() {
+                                        return Some(Vec::new());
+                                    }
+                                    Some(self.mmcs.with_resident_matrix(
+                                        data,
+                                        matrix_index,
+                                        |lde| {
+                                            assert_eq!(lde.height(), dims.height);
+                                            assert_eq!(lde.width(), dims.width);
+                                            let polynomial_height =
+                                                lde.height() >> self.fri.log_blowup;
+                                            assert!(polynomial_height.is_power_of_two());
+                                            let log_polynomial_height =
+                                                log2_strict_usize(polynomial_height);
+                                            let shift_power = Val::GENERATOR
+                                                .exp_power_of_2(log_polynomial_height);
+                                            let tasks = points
+                                                .iter()
+                                                .enumerate()
+                                                .map(|(point_index, &point)| {
+                                                    let scale = (point
+                                                        .exp_power_of_2(log_polynomial_height)
+                                                        - shift_power)
+                                                        * (Val::from_usize(polynomial_height)
+                                                            * shift_power)
+                                                            .inverse();
+                                                    lde.interpolation_task(
+                                                        polynomial_height,
+                                                        *inv_offsets.get(&point).unwrap(),
+                                                        point_index * lde.width(),
+                                                        to_pair(scale),
+                                                    )
+                                                })
+                                                .collect_vec();
+                                            workspace
+                                                .interpolate(
+                                                    &tasks,
+                                                    points.len() * lde.width(),
+                                                    ext_w,
+                                                )
+                                                .chunks_exact(lde.width())
+                                                .map(|values| {
+                                                    values
+                                                        .iter()
+                                                        .copied()
+                                                        .map(from_pair)
+                                                        .collect_vec()
+                                                })
+                                                .collect_vec()
+                                        },
+                                    ))
                                 })
                                 .collect_vec()
                         })
-                        .collect_vec()
-                })
-                .collect_vec();
-            let interpolated = debug_span!("cuda interpolate openings")
-                .in_scope(|| workspace.interpolate(&interpolation_tasks, output_count, ext_w));
-            let all_opened_values = layouts
+                        .collect_vec();
+                    let gpu_seconds = gpu_started.elapsed().as_secs_f64();
+                    let cpu_opened = cpu_opened.join().unwrap();
+                    (cpu_opened, gpu_opened, gpu_seconds)
+                });
+            let all_opened_values = cpu_opened
                 .into_iter()
-                .map(|round| {
-                    round
+                .zip(gpu_opened)
+                .map(|(cpu_round, gpu_round)| {
+                    cpu_round
                         .into_iter()
-                        .map(|matrix| {
-                            matrix
-                                .into_iter()
-                                .map(|(offset, width)| {
-                                    interpolated[offset..offset + width]
-                                        .iter()
-                                        .copied()
-                                        .map(from_pair)
-                                        .collect_vec()
-                                })
-                                .collect_vec()
-                        })
+                        .zip(gpu_round)
+                        .map(|(cpu, gpu)| cpu.or(gpu).expect("matrix has no opening backend"))
                         .collect_vec()
                 })
                 .collect_vec();
+            if crate::cuda::memory_diagnostics_enabled() {
+                eprintln!(
+                    "[multi-stark/cuda] FRI interpolation: {:.3}s (CPU {:.3}s, GPU {:.3}s)",
+                    interpolation_started.elapsed().as_secs_f64(),
+                    cpu_interpolation_seconds,
+                    gpu_interpolation_seconds
+                );
+            }
+
             for round in &all_opened_values {
                 for matrix in round {
                     for values in matrix {
@@ -798,36 +1707,167 @@ where
                 }
             }
             let alpha: Challenge = challenger.sample_algebra_element();
-            let alpha_powers: Vec<_> = alpha.powers().take(global_max_width).collect();
+            let alpha_powers: Vec<_> = alpha.powers().take(cuda_max_width).collect();
             let alpha_pairs: Vec<_> = alpha_powers.iter().copied().map(to_pair).collect();
+            let packed_alpha_powers =
+                Challenge::ExtensionPacking::packed_ext_powers_capped(alpha, cuda_max_width)
+                    .collect_vec();
             let mut num_reduced = [0usize; 33];
-            let mut reduced: [Option<CudaReducedOpening>; 33] = core::array::from_fn(|_| None);
-            let mut reduction_tasks = Vec::new();
-            for ((ldes, points), openings_round) in rounds.iter().zip(all_opened_values.iter()) {
-                for ((lde, ps), openings) in
-                    ldes.iter().zip(points.iter()).zip(openings_round.iter())
-                {
-                    let lh = log2_strict_usize(lde.height());
-                    let target = reduced[lh]
-                        .get_or_insert_with(|| CudaReducedOpening::new(device_id, lde.height()));
-                    for (&point, ys) in ps.iter().zip(openings.iter()) {
-                        let reduced_y =
-                            dot_product(alpha_powers.iter().copied(), ys.iter().copied());
-                        let offset = alpha.exp_u64(num_reduced[lh] as u64);
-                        reduction_tasks.push(target.reduction_task(
-                            lde,
-                            *inv_offsets.get(&point).unwrap(),
-                            to_pair(reduced_y),
-                            to_pair(offset),
-                        ));
-                        num_reduced[lh] += lde.width();
+            let reduction_offsets = commitment_data_with_opening_points
+                .iter()
+                .zip(dimensions.iter())
+                .map(|((_, points), round_dimensions)| {
+                    points
+                        .iter()
+                        .zip(round_dimensions)
+                        .map(|(points, dims)| {
+                            let log_height = log2_strict_usize(dims.height);
+                            points
+                                .iter()
+                                .map(|_| {
+                                    let offset = num_reduced[log_height];
+                                    num_reduced[log_height] += dims.width;
+                                    offset
+                                })
+                                .collect_vec()
+                        })
+                        .collect_vec()
+                })
+                .collect_vec();
+
+            let reduction_started = std::time::Instant::now();
+            let ((cpu_reduced, cpu_reduction_seconds), mut gpu_reduced, gpu_reduction_seconds) =
+                std::thread::scope(|scope| {
+                    let cpu_reduced = scope.spawn(|| {
+                        let started = std::time::Instant::now();
+                        let mut reduced: [Option<Vec<Challenge>>; 33] =
+                            core::array::from_fn(|_| None);
+                        for (
+                            (((matrices, &points), round_dimensions), openings_round),
+                            offsets_round,
+                        ) in cpu_round_matrices
+                            .iter()
+                            .zip(opening_points.iter())
+                            .zip(dimensions.iter())
+                            .zip(all_opened_values.iter())
+                            .zip(reduction_offsets.iter())
+                        {
+                            for ((((matrix, points), dims), openings), offsets) in matrices
+                                .iter()
+                                .copied()
+                                .zip(points)
+                                .zip(round_dimensions)
+                                .zip(openings_round)
+                                .zip(offsets_round)
+                            {
+                                let Some(matrix) = matrix else {
+                                    continue;
+                                };
+                                if points.is_empty() {
+                                    continue;
+                                }
+                                let log_height = log2_strict_usize(dims.height);
+                                let target = reduced[log_height]
+                                    .get_or_insert_with(|| vec![Challenge::ZERO; dims.height]);
+                                let compressed = matrix
+                                    .rowwise_packed_dot_product::<Challenge>(&packed_alpha_powers)
+                                    .collect::<Vec<_>>();
+                                for ((&point, values), &offset) in
+                                    points.iter().zip(openings).zip(offsets)
+                                {
+                                    let reduced_y: Challenge = dot_product(
+                                        alpha_powers.iter().copied(),
+                                        values.iter().copied(),
+                                    );
+                                    let alpha_offset = alpha.exp_u64(offset as u64);
+                                    compressed
+                                        .par_iter()
+                                        .zip(target.par_iter_mut())
+                                        .zip(inv_denoms.get(&point).unwrap().par_iter())
+                                        .for_each(|((&row, output), &inv_denom)| {
+                                            *output += alpha_offset * (reduced_y - row) * inv_denom;
+                                        });
+                                }
+                            }
+                        }
+                        (reduced, started.elapsed().as_secs_f64())
+                    });
+                    let gpu_started = std::time::Instant::now();
+                    let mut reduced: [Option<CudaReducedOpening>; 33] =
+                        core::array::from_fn(|_| None);
+                    let mut reduction_tasks = Vec::new();
+                    for ((((data, points), round_dimensions), openings_round), offsets_round) in
+                        commitment_data_with_opening_points
+                            .iter()
+                            .zip(dimensions.iter())
+                            .zip(all_opened_values.iter())
+                            .zip(reduction_offsets.iter())
+                    {
+                        for (matrix_index, (((points, dims), openings), offsets)) in points
+                            .iter()
+                            .zip(round_dimensions)
+                            .zip(openings_round)
+                            .zip(offsets_round)
+                            .enumerate()
+                        {
+                            if !self.mmcs.is_matrix_cuda_resident(data, matrix_index) {
+                                continue;
+                            }
+                            if points.is_empty() {
+                                continue;
+                            }
+                            let log_height = log2_strict_usize(dims.height);
+                            let target = reduced[log_height].get_or_insert_with(|| {
+                                CudaReducedOpening::new(device_id, dims.height)
+                            });
+                            self.mmcs.with_resident_matrix(data, matrix_index, |lde| {
+                                reduction_tasks.extend(
+                                    points.iter().zip(openings).zip(offsets).map(
+                                        |((&point, values), &offset)| {
+                                            let reduced_y = dot_product(
+                                                alpha_powers.iter().copied(),
+                                                values.iter().copied(),
+                                            );
+                                            target.reduction_task(
+                                                lde,
+                                                *inv_offsets.get(&point).unwrap(),
+                                                to_pair(reduced_y),
+                                                to_pair(alpha.exp_u64(offset as u64)),
+                                            )
+                                        },
+                                    ),
+                                );
+                            });
+                        }
                     }
+                    if !reduction_tasks.is_empty() {
+                        workspace.reduce(&reduction_tasks, &alpha_pairs, ext_w);
+                    }
+                    let gpu_seconds = gpu_started.elapsed().as_secs_f64();
+                    let cpu_reduced = cpu_reduced.join().unwrap();
+                    (cpu_reduced, reduced, gpu_seconds)
+                });
+            drop(workspace);
+
+            for (log_height, cpu_values) in cpu_reduced.into_iter().enumerate() {
+                if let Some(cpu_values) = cpu_values {
+                    let values = cpu_values.into_iter().map(to_pair).collect_vec();
+                    gpu_reduced[log_height]
+                        .get_or_insert_with(|| CudaReducedOpening::new(device_id, values.len()))
+                        .add_host(&values);
                 }
             }
-            debug_span!("cuda reduce openings")
-                .in_scope(|| workspace.reduce(&reduction_tasks, &alpha_pairs, ext_w));
-            let fri_input = reduced.into_iter().rev().flatten().collect_vec();
-            let fri_proof = debug_span!("cuda prove fri").in_scope(|| {
+            if crate::cuda::memory_diagnostics_enabled() {
+                eprintln!(
+                    "[multi-stark/cuda] FRI reduction: {:.3}s (CPU {:.3}s, GPU {:.3}s)",
+                    reduction_started.elapsed().as_secs_f64(),
+                    cpu_reduction_seconds,
+                    gpu_reduction_seconds
+                );
+            }
+            let fri_input = gpu_reduced.into_iter().rev().flatten().collect_vec();
+            let folding_started = std::time::Instant::now();
+            let fri_proof = debug_span!("cuda prove streamed fri").in_scope(|| {
                 prove_fri_cuda_resident(
                     &self.fri,
                     fri_input,
@@ -838,6 +1878,13 @@ where
                     ext_w,
                 )
             });
+            if crate::cuda::memory_diagnostics_enabled() {
+                eprintln!(
+                    "[multi-stark/cuda] FRI folding and queries: {:.3}s (streamed total {:.3}s)",
+                    folding_started.elapsed().as_secs_f64(),
+                    phase_started.elapsed().as_secs_f64()
+                );
+            }
             return (all_opened_values, fri_proof);
         }
 
@@ -1163,4 +2210,30 @@ fn compute_inverse_denominators<F: TwoAdicField, EF: ExtensionField<F>, M: Matri
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ExtVal;
+    use p3_field::Field;
+
+    #[test]
+    fn quadratic_norm_inverses_match_extension_inverses() {
+        let point_pair = [Goldilocks::from_u64(123), Goldilocks::from_u64(456)];
+        let point = ExtVal::from_basis_coefficients_slice(&point_pair).unwrap();
+        let coset = Goldilocks::GENERATOR.powers().take(4096).collect_vec();
+
+        for count in [1, 3, 1024, 1025, 4096] {
+            let actual = goldilocks_quadratic_inverse_denominators(
+                point_pair,
+                &coset[..count],
+                Goldilocks::from_u64(7),
+            );
+            let expected = coset[..count].iter().map(|&x| (point - x).inverse());
+            for (actual, expected) in actual.iter().zip(expected) {
+                assert_eq!(actual, expected.as_basis_coefficients_slice());
+            }
+        }
+    }
 }
