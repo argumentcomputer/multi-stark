@@ -547,6 +547,10 @@ mod tests {
     const ADD_WIDTH: usize = 14;
 
     fn config() -> GoldilocksBlake3Config {
+        config_with_pow(0)
+    }
+
+    fn config_with_pow(bits: usize) -> GoldilocksBlake3Config {
         GoldilocksBlake3Config::new(
             CommitmentParameters {
                 log_blowup: 1,
@@ -556,8 +560,8 @@ mod tests {
                 log_final_poly_len: 0,
                 max_log_arity: 1,
                 num_queries: 64,
-                commit_proof_of_work_bits: 0,
-                query_proof_of_work_bits: 0,
+                commit_proof_of_work_bits: bits,
+                query_proof_of_work_bits: bits,
             },
         )
     }
@@ -643,6 +647,27 @@ mod tests {
             retained.to_bytes().unwrap()
         );
         system.verify_batch(&regenerated).unwrap();
+    }
+
+    #[test]
+    fn positive_proof_of_work_batches_are_reproducible() {
+        // With a grind in every shard's opening, the proof bytes must still
+        // not depend on which policy built the batch or on the run.
+        let (system, key) = byte_system(config_with_pow(6));
+        let claims: Vec<_> = two_shards(&system).into_iter().map(|s| s.claims).collect();
+        let prove = |retention| {
+            system
+                .prove_batch_with(&key, &claims, vec![], retention, |shard| {
+                    two_shards(&system).swap_remove(shard).witness
+                })
+                .to_bytes()
+                .unwrap()
+        };
+        let first = prove(Retention::Regenerate);
+        assert_eq!(first, prove(Retention::Regenerate));
+        assert_eq!(first, prove(Retention::Retain));
+        let batch = BatchProof::<GoldilocksBlake3Config>::from_bytes(&first).unwrap();
+        system.verify_batch(&batch).unwrap();
     }
 
     #[test]

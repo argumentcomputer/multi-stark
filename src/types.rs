@@ -58,11 +58,13 @@ pub type Challenger =
 #[derive(Clone, Debug)]
 pub struct DeterministicPow<C>(pub C);
 
-/// Candidates checked per parallel window of the deterministic grind. A
-/// `bits`-bit grind expects `2^bits` checks, so the window is small enough
-/// that a low witness costs little extra work and large enough to spread
-/// across threads.
-const GRIND_WINDOW: u64 = 1 << 14;
+/// Candidates checked per parallel window of the deterministic grind for a
+/// `bits`-bit target: about a sixteenth of the `2^bits` checks such a grind
+/// expects, so a low witness costs little extra work, within bounds that
+/// keep a window worth splitting across threads and bounded in memory.
+fn grind_window(bits: usize) -> u64 {
+    (1u64 << bits.min(40)).div_ceil(16).clamp(64, 1 << 16)
+}
 
 impl Challenger {
     pub fn from_hasher(initial_state: Vec<u8>, hasher: Blake3) -> Self {
@@ -90,16 +92,23 @@ impl<C: CanSampleBits<usize>> CanSampleBits<usize> for DeterministicPow<C> {
 
 impl<F: Field, C: FieldChallenger<F>> FieldChallenger<F> for DeterministicPow<C> {}
 
-impl<C: GrindingChallenger> GrindingChallenger for DeterministicPow<C> {
+impl<C: GrindingChallenger> GrindingChallenger for DeterministicPow<C>
+where
+    C::Witness: PrimeField64,
+{
     type Witness = C::Witness;
 
     fn grind(&mut self, bits: usize) -> Self::Witness {
         if bits == 0 {
             return Self::Witness::ZERO;
         }
+        let order = Self::Witness::ORDER_U64;
+        let window = grind_window(bits);
         let mut base = 0u64;
         let witness = loop {
-            let found = (base..base + GRIND_WINDOW)
+            assert!(base < order, "no proof-of-work witness in the field");
+            let end = base.saturating_add(window).min(order);
+            let found = (base..end)
                 .into_par_iter()
                 .filter(|&i| {
                     self.0
@@ -110,7 +119,7 @@ impl<C: GrindingChallenger> GrindingChallenger for DeterministicPow<C> {
             if let Some(i) = found {
                 break Self::Witness::from_u64(i);
             }
-            base += GRIND_WINDOW;
+            base = end;
         };
         assert!(
             self.0.check_witness(bits, witness),
@@ -146,17 +155,31 @@ mod grind_tests {
     }
 
     #[test]
-    fn grind_crosses_windows() {
-        // Find a seed whose smallest 14-bit witness lies past the first
-        // window, so the loop's window step is exercised.
-        for seed in 0..64u8 {
-            let witness = challenger(seed).grind(14);
-            if witness.as_canonical_u64() >= GRIND_WINDOW {
-                assert!(challenger(seed).check_witness(14, witness));
-                return;
-            }
+    fn grind_leaves_the_challenger_where_the_verifier_lands() {
+        // The prover grinds; the verifier checks the witness. Both must
+        // continue from the same state, so their next samples agree.
+        let bits = 8;
+        let mut prover = challenger(7);
+        let witness = prover.grind(bits);
+        let mut verifier = challenger(7);
+        assert!(verifier.check_witness(bits, witness));
+        for _ in 0..4 {
+            let p: Val = prover.sample();
+            let v: Val = verifier.sample();
+            assert_eq!(p, v);
         }
-        panic!("no seed placed its witness past the first window");
+    }
+
+    #[test]
+    fn grind_crosses_windows() {
+        // At 16 bits the window holds 4096 candidates; seed 0's smallest
+        // witness lies well past the first window, so the step is taken.
+        let bits = 16;
+        let witness = challenger(0).grind(bits);
+        assert!(witness.as_canonical_u64() >= grind_window(bits));
+        for i in 0..witness.as_canonical_u64() {
+            assert!(!challenger(0).check_witness(bits, Val::from_u64(i)));
+        }
     }
 }
 type CpuMmcs = MerkleTreeMmcs<Val, u8, SerializingHasher<Blake3>, Blake3CompressionFunction, 2, 32>;
