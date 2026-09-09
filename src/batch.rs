@@ -480,6 +480,7 @@ where
             .iter()
             .enumerate()
             .map(|(shard, claims)| {
+                let _g = tracing::info_span!("stark/batch_round_1", shard).entered();
                 let stage_1 = self.prove_stage_1(witness(shard));
                 let header = stage_1.header(&claim_slices::<SC>(claims));
                 retained.push(match retention {
@@ -495,6 +496,7 @@ where
             .zip(claims)
             .enumerate()
             .map(|(shard, (stage_1, claims))| {
+                let _g = tracing::info_span!("stark/batch_round_2", shard).entered();
                 let claims = claim_slices::<SC>(claims);
                 let stage_1 = stage_1.unwrap_or_else(|| {
                     let stage_1 = self.prove_stage_1(witness(shard));
