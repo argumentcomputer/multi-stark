@@ -101,6 +101,34 @@ impl<SC: StarkGenericConfig> Clone for ShardHeader<SC> {
     }
 }
 
+impl<SC: StarkGenericConfig> PartialEq for ShardHeader<SC>
+where
+    Com<SC>: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.active == other.active
+            && self.stage_1_trace == other.stage_1_trace
+            && self.log_degrees == other.log_degrees
+            && self.claims == other.claims
+    }
+}
+
+/// What a batch prover keeps of each shard between round one, which commits
+/// stage 1 and publishes the header, and round two, which proves from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Retention {
+    /// Hold every shard's committed stage 1 (traces, lookup witness, LDE and
+    /// Merkle tree) across the barrier. Nothing is recomputed; the peak is
+    /// the stage-1 state of the whole batch at once.
+    Retain,
+    /// Keep only the headers. Round two rebuilds each shard's witness and
+    /// recommits its stage 1, which must reproduce the header the batch
+    /// challenges were derived from. The peak is one shard's stage-1 state
+    /// plus whatever the witness source holds, at the price of one extra
+    /// witness build and stage-1 commitment per shard.
+    Regenerate,
+}
+
 /// A public lookup message the verifier contributes to the batch's balance,
 /// with a signed multiplicity (as a field element).
 #[derive(Serialize, Deserialize)]
@@ -420,43 +448,89 @@ where
         )
     }
 
-    /// Proves a batch in one process: round one for every shard, the
-    /// preamble, then round two for every shard. Distributed provers run the
+    /// Proves a batch in one process from shards built on demand: shard `k`
+    /// carries `claims[k]` and the witness `witness(k)` builds. Round one for
+    /// every shard, the preamble, then round two for every shard, keeping
+    /// what `retention` says between the two. Distributed provers run the
     /// same three steps with the preamble exchanged between them.
+    ///
+    /// Under [`Retention::Regenerate`], `witness` is called twice per shard
+    /// and must return the same witness both times: the shard's stage-1
+    /// commitment is what the batch challenges were derived from.
+    ///
+    /// # Panics
+    /// Panics if `claims` is empty, if any shard's traces are all empty, or
+    /// if a regenerated shard does not reproduce its round-one header.
+    #[tracing::instrument(level = "info", skip_all, name = "stark/prove_batch")]
+    pub fn prove_batch_with<W>(
+        &self,
+        key: &ProverKey<SC>,
+        claims: &[Vec<Vec<Val<SC>>>],
+        messages: Vec<BatchMessage<SC>>,
+        retention: Retention,
+        mut witness: W,
+    ) -> BatchProof<SC>
+    where
+        Com<SC>: PartialEq,
+        W: FnMut(usize) -> SystemWitness<Val<SC>>,
+    {
+        assert!(!claims.is_empty(), "cannot prove an empty batch");
+        let mut retained: Vec<Option<Stage1<SC>>> = Vec::with_capacity(claims.len());
+        let headers = claims
+            .iter()
+            .enumerate()
+            .map(|(shard, claims)| {
+                let stage_1 = self.prove_stage_1(witness(shard));
+                let header = stage_1.header(&claim_slices::<SC>(claims));
+                retained.push(match retention {
+                    Retention::Retain => Some(stage_1),
+                    Retention::Regenerate => None,
+                });
+                header
+            })
+            .collect();
+        let preamble = BatchPreamble { headers, messages };
+        let proofs = retained
+            .into_iter()
+            .zip(claims)
+            .enumerate()
+            .map(|(shard, (stage_1, claims))| {
+                let claims = claim_slices::<SC>(claims);
+                let stage_1 = stage_1.unwrap_or_else(|| {
+                    let stage_1 = self.prove_stage_1(witness(shard));
+                    assert!(
+                        stage_1.header(&claims) == preamble.headers[shard],
+                        "shard {shard} did not reproduce its round-one header"
+                    );
+                    stage_1
+                });
+                self.prove_batch_shard(key, stage_1, &claims, &preamble, shard)
+            })
+            .collect();
+        BatchProof { preamble, proofs }
+    }
+
+    /// Proves a batch from shards built up front, retaining every shard's
+    /// stage 1 across the barrier ([`Retention::Retain`]).
     ///
     /// # Panics
     /// Panics if `shards` is empty or any shard's traces are all empty.
-    #[tracing::instrument(level = "info", skip_all, name = "stark/prove_batch")]
     pub fn prove_batch(
         &self,
         key: &ProverKey<SC>,
         shards: Vec<ShardInput<SC>>,
         messages: Vec<BatchMessage<SC>>,
-    ) -> BatchProof<SC> {
-        assert!(!shards.is_empty(), "cannot prove an empty batch");
-        let (claims, witnesses): (Vec<_>, Vec<_>) = shards
+    ) -> BatchProof<SC>
+    where
+        Com<SC>: PartialEq,
+    {
+        let (claims, mut witnesses): (Vec<_>, Vec<_>) = shards
             .into_iter()
-            .map(|shard| (shard.claims, shard.witness))
+            .map(|shard| (shard.claims, Some(shard.witness)))
             .unzip();
-        let stage_1s: Vec<Stage1<SC>> = witnesses
-            .into_iter()
-            .map(|witness| self.prove_stage_1(witness))
-            .collect();
-        let headers = stage_1s
-            .iter()
-            .zip(&claims)
-            .map(|(stage_1, claims)| stage_1.header(&claim_slices::<SC>(claims)))
-            .collect();
-        let preamble = BatchPreamble { headers, messages };
-        let proofs = stage_1s
-            .into_iter()
-            .zip(&claims)
-            .enumerate()
-            .map(|(shard, (stage_1, claims))| {
-                self.prove_batch_shard(key, stage_1, &claim_slices::<SC>(claims), &preamble, shard)
-            })
-            .collect();
-        BatchProof { preamble, proofs }
+        self.prove_batch_with(key, &claims, messages, Retention::Retain, |shard| {
+            witnesses[shard].take().expect("each shard is built once")
+        })
     }
 }
 
@@ -548,6 +622,43 @@ mod tests {
         let bytes = batch.to_bytes().unwrap();
         let decoded = BatchProof::<GoldilocksBlake3Config>::from_bytes(&bytes).unwrap();
         system.verify_batch(&decoded).unwrap();
+    }
+
+    #[test]
+    fn regenerated_shards_prove_the_same_batch() {
+        let (system, key) = byte_system(config());
+        let retained = system.prove_batch(&key, two_shards(&system), vec![]);
+        let claims: Vec<_> = two_shards(&system).into_iter().map(|s| s.claims).collect();
+        let mut builds = 0;
+        let regenerated =
+            system.prove_batch_with(&key, &claims, vec![], Retention::Regenerate, |shard| {
+                builds += 1;
+                two_shards(&system).swap_remove(shard).witness
+            });
+        assert_eq!(builds, 4, "each shard is built once per round");
+        assert_eq!(
+            regenerated.to_bytes().unwrap(),
+            retained.to_bytes().unwrap()
+        );
+        system.verify_batch(&regenerated).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "did not reproduce its round-one header")]
+    fn regenerated_shard_must_match_its_header() {
+        let (system, key) = byte_system(config());
+        let claims: Vec<_> = two_shards(&system).into_iter().map(|s| s.claims).collect();
+        let mut round = [0usize; 2];
+        system.prove_batch_with(&key, &claims, vec![], Retention::Regenerate, |shard| {
+            round[shard] += 1;
+            // Shard 1 comes back with different rows in round two.
+            let source = if shard == 1 && round[shard] == 2 {
+                0
+            } else {
+                shard
+            };
+            two_shards(&system).swap_remove(source).witness
+        });
     }
 
     #[test]
