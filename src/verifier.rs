@@ -162,8 +162,7 @@
 use crate::config::{PcsError, StarkGenericConfig, Val};
 use crate::ensure_eq;
 use crate::eval::VarValues;
-use crate::lookup::fingerprint;
-use crate::prover::Proof;
+use crate::prover::{Proof, claims_accumulator, observe_claims, sample_lookup_challenges};
 use crate::system::System;
 
 use p3_challenger::{CanObserve, FieldChallenger};
@@ -189,6 +188,13 @@ pub enum VerificationError<PcsErr> {
     OodEvaluationMismatch,
     /// The lookup accumulator did not balance to zero.
     UnbalancedChannel,
+    /// A batch's preamble disagrees with its proofs (header count, or a
+    /// header's activation bitmap, stage-1 commitment or heights differ from
+    /// the shard proof it describes).
+    BatchShapeMismatch,
+    /// The shards' lookup residuals and the batch's public messages did not
+    /// sum to zero.
+    UnbalancedBatch,
 }
 
 impl<SC: StarkGenericConfig> System<SC> {
@@ -213,6 +219,97 @@ impl<SC: StarkGenericConfig> System<SC> {
     where
         Val<SC>: TwoAdicField,
     {
+        // first, verify the proof shape (also validates the activation bitmap)
+        let quotient_degrees = self.verify_shape(proof)?;
+
+        // Soundness: lookup argument. The accumulator was computed by the prover
+        // under challenges (β, γ) that were sampled after the traces and claims were
+        // committed. If the pushed and pulled multisets differ, the accumulator is a
+        // nonzero rational function of (β, γ) and evaluates to zero with probability
+        // ≤ N / |F_ext| (Schwartz-Zippel on the numerator polynomial).
+        ensure_eq!(
+            proof.intermediate_accumulators.last(),
+            Some(&SC::Challenge::ZERO),
+            VerificationError::UnbalancedChannel
+        );
+
+        // Soundness: Fiat-Shamir. All challenges below are derived deterministically
+        // from the transcript via the configuration's challenger, whose hash is
+        // modeled as a random oracle. The verifier replays exactly the same
+        // observations as the prover, so any divergence (e.g. different
+        // commitments) produces different challenges, making it infeasible for a
+        // cheating prover to predict them.
+        let mut challenger = self.config.initialise_challenger();
+
+        // Bind the system shape into the transcript. The protocol parameters
+        // are already bound via the challenger seed.
+        self.observe_shape(&mut challenger);
+
+        // Bind the activation bitmap — before any commitment or challenge, so
+        // every sample depends on which circuits this proof covers.
+        for &is_active in &proof.active {
+            challenger.observe(Val::<SC>::from_bool(is_active));
+        }
+
+        // observe preprocessed and stage_1 commitment
+        if let Some(commit) = &self.preprocessed_commit {
+            challenger.observe(commit.clone());
+        }
+        challenger.observe(proof.commitments.stage_1_trace.clone());
+
+        // Observe trace heights to bind the proof to specific domain sizes.
+        for log_degree in &proof.log_degrees {
+            challenger.observe(Val::<SC>::from_u8(*log_degree));
+        }
+
+        // Soundness: claims must be observed BEFORE lookup challenges are sampled.
+        // Otherwise, the prover could choose claims adaptively after seeing the
+        // challenges, breaking the lookup argument's binding property. The claims
+        // are length-prefixed so that distinct claim structures (e.g. [[a, b]]
+        // vs [[a], [b]]) yield distinct transcripts.
+        observe_claims::<SC>(&mut challenger, claims);
+
+        // Soundness: lookup argument. The challenges are random elements of F_ext.
+        // The message m_i = lookup_challenge + fingerprint(fingerprint_challenge, args_i)
+        // is an affine function of the challenges, ensuring that distinct argument
+        // tuples produce distinct messages with probability ≥ 1 - 1/|F_ext|.
+        let (lookup_argument_challenge, fingerprint_challenge) =
+            sample_lookup_challenges::<SC>(&mut challenger);
+
+        // construct the accumulator from the claims
+        let acc =
+            claims_accumulator::<SC>(lookup_argument_challenge, &fingerprint_challenge, claims);
+
+        self.verify_after_challenges(
+            proof,
+            &quotient_degrees,
+            challenger,
+            lookup_argument_challenge,
+            fingerprint_challenge,
+            acc,
+        )
+    }
+
+    /// Steps 3 (from the stage-2 commitment on), 4 and 5 of verification,
+    /// given a transcript that has just sampled the lookup challenges and the
+    /// initial accumulator derived from the proof's public messages. Shared by
+    /// the single-proof protocol and the batch protocol, which differ only in
+    /// how the transcript reached this point and in what the final accumulator
+    /// must equal (zero, or a batch residual — see [`crate::batch`]).
+    ///
+    /// `quotient_degrees` is the output of [`Self::verify_shape`] for `proof`.
+    pub fn verify_after_challenges(
+        &self,
+        proof: &Proof<SC>,
+        quotient_degrees: &[usize],
+        mut challenger: SC::Challenger,
+        lookup_argument_challenge: SC::Challenge,
+        fingerprint_challenge: SC::Challenge,
+        mut acc: SC::Challenge,
+    ) -> Result<(), VerificationError<PcsError<SC>>>
+    where
+        Val<SC>: TwoAdicField,
+    {
         let Proof {
             active,
             commitments,
@@ -224,8 +321,7 @@ impl<SC: StarkGenericConfig> System<SC> {
             stage_1_opened_values,
             stage_2_opened_values,
         } = proof;
-        // first, verify the proof shape (also validates the activation bitmap)
-        let quotient_degrees = self.verify_shape(proof)?;
+        let pcs = self.config.pcs();
         // Canonical index of each active circuit; every per-circuit sequence
         // in the proof is indexed by position in this list.
         let active_indices: Vec<usize> = active
@@ -233,67 +329,6 @@ impl<SC: StarkGenericConfig> System<SC> {
             .enumerate()
             .filter_map(|(i, &a)| a.then_some(i))
             .collect();
-
-        // Soundness: lookup argument. The accumulator was computed by the prover
-        // under challenges (β, γ) that were sampled after the traces and claims were
-        // committed. If the pushed and pulled multisets differ, the accumulator is a
-        // nonzero rational function of (β, γ) and evaluates to zero with probability
-        // ≤ N / |F_ext| (Schwartz-Zippel on the numerator polynomial).
-        ensure_eq!(
-            intermediate_accumulators.last(),
-            Some(&SC::Challenge::ZERO),
-            VerificationError::UnbalancedChannel
-        );
-
-        // Soundness: Fiat-Shamir. All challenges below are derived deterministically
-        // from the transcript via the configuration's challenger, whose hash is
-        // modeled as a random oracle. The verifier replays exactly the same
-        // observations as the prover, so any divergence (e.g. different
-        // commitments) produces different challenges, making it infeasible for a
-        // cheating prover to predict them.
-        let pcs = self.config.pcs();
-        let mut challenger = self.config.initialise_challenger();
-
-        // Bind the system shape into the transcript. The protocol parameters
-        // are already bound via the challenger seed.
-        self.observe_shape(&mut challenger);
-
-        // Bind the activation bitmap — before any commitment or challenge, so
-        // every sample depends on which circuits this proof covers.
-        for &is_active in active {
-            challenger.observe(Val::<SC>::from_bool(is_active));
-        }
-
-        // observe preprocessed and stage_1 commitment
-        if let Some(commit) = &self.preprocessed_commit {
-            challenger.observe(commit.clone());
-        }
-        challenger.observe(commitments.stage_1_trace.clone());
-
-        // Observe trace heights to bind the proof to specific domain sizes.
-        for log_degree in log_degrees {
-            challenger.observe(Val::<SC>::from_u8(*log_degree));
-        }
-
-        // Soundness: claims must be observed BEFORE lookup challenges are sampled.
-        // Otherwise, the prover could choose claims adaptively after seeing the
-        // challenges, breaking the lookup argument's binding property. The claims
-        // are length-prefixed so that distinct claim structures (e.g. [[a, b]]
-        // vs [[a], [b]]) yield distinct transcripts.
-        challenger.observe(Val::<SC>::from_usize(claims.len()));
-        for claim in claims {
-            challenger.observe(Val::<SC>::from_usize(claim.len()));
-            challenger.observe_slice(claim);
-        }
-
-        // Soundness: lookup argument. The challenges are random elements of F_ext.
-        // The message m_i = lookup_challenge + fingerprint(fingerprint_challenge, args_i)
-        // is an affine function of the challenges, ensuring that distinct argument
-        // tuples produce distinct messages with probability ≥ 1 - 1/|F_ext|.
-        let lookup_argument_challenge: SC::Challenge = challenger.sample_algebra_element();
-        challenger.observe_algebra_element(lookup_argument_challenge);
-        let fingerprint_challenge: SC::Challenge = challenger.sample_algebra_element();
-        challenger.observe_algebra_element(fingerprint_challenge);
 
         // observe stage_2 commitment
         challenger.observe(commitments.stage_2_trace.clone());
@@ -303,14 +338,6 @@ impl<SC: StarkGenericConfig> System<SC> {
         // directly rather than only through the quotient commitment.
         for acc in intermediate_accumulators {
             challenger.observe_algebra_element(*acc);
-        }
-
-        // construct the accumulator from the claims
-        let mut acc = SC::Challenge::ZERO;
-        for claim in claims {
-            let message = lookup_argument_challenge
-                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
-            acc += message.inverse();
         }
 
         // Soundness: constraint folding. All k constraints are combined via powers
@@ -384,9 +411,17 @@ impl<SC: StarkGenericConfig> System<SC> {
                             ));
                         }
                         None => {
+                            // Opened at ζ alone so the PCS can pin the matrix
+                            // width (see the prover's round construction);
+                            // the value itself feeds no constraint.
                             let domain = pcs
                                 .natural_domain_for_degree(self.circuits[ci].preprocessed_height);
-                            preprocessed_trace_evaluations.push((domain, vec![]));
+                            let preprocessed_opened_values =
+                                preprocessed_opened_values.as_ref().unwrap();
+                            preprocessed_trace_evaluations.push((
+                                domain,
+                                vec![(zeta, preprocessed_opened_values[slot][0].clone())],
+                            ));
                         }
                     }
                 }
@@ -580,7 +615,8 @@ impl<SC: StarkGenericConfig> System<SC> {
         // Stage 0 round: the preprocessed commitment is built once over ALL
         // preprocessed traces at system construction, so its round carries one
         // entry per preprocessed matrix regardless of activation; an inactive
-        // circuit's matrix must be opened at no points.
+        // circuit's matrix is opened at exactly one point, with the full
+        // preprocessed width (the width pin the PCS relies on).
         ensure_eq!(
             preprocessed_opened_values
                 .as_ref()
@@ -588,13 +624,17 @@ impl<SC: StarkGenericConfig> System<SC> {
             num_preprocessed,
             VerificationError::InvalidProofShape
         );
-        for (&prep_index, &is_active) in self.preprocessed_indices.iter().zip(active) {
+        for (ci, (&prep_index, &is_active)) in
+            self.preprocessed_indices.iter().zip(active).enumerate()
+        {
             if let Some(slot) = prep_index
                 && !is_active
             {
+                let opened = &preprocessed_opened_values.as_ref().unwrap()[slot];
+                ensure_eq!(opened.len(), 1, VerificationError::InvalidProofShape);
                 ensure_eq!(
-                    preprocessed_opened_values.as_ref().unwrap()[slot].len(),
-                    0,
+                    opened[0].len(),
+                    self.circuits[ci].preprocessed_width,
                     VerificationError::InvalidProofShape
                 );
             }

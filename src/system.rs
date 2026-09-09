@@ -261,9 +261,11 @@ impl<F: Field> SystemWitness<F> {
     ///
     /// # Panics
     /// Panics if the number of traces differs from the number of circuits, or
-    /// if a circuit with a preprocessed trace receives a main trace of a
-    /// different height (both traces are opened on the same domain, so their
-    /// heights must match; the rows would otherwise be silently truncated).
+    /// if a circuit with a preprocessed trace receives a non-empty main trace
+    /// of a different height (both traces are opened on the same domain, so
+    /// their heights must match; the rows would otherwise be silently
+    /// truncated). An empty main trace deactivates the circuit for this
+    /// witness, preprocessed or not.
     pub fn from_stage_1<SC>(traces: Vec<RowMajorMatrix<F>>, system: &System<SC>) -> Self
     where
         SC: StarkGenericConfig,
@@ -279,7 +281,9 @@ impl<F: Field> SystemWitness<F> {
             .zip(&system.circuits)
             .enumerate()
             .map(|(i, (trace, circuit))| {
-                if let Some(preprocessed) = &circuit.preprocessed {
+                if let Some(preprocessed) = &circuit.preprocessed
+                    && trace.height() != 0
+                {
                     assert_eq!(
                         trace.height(),
                         preprocessed.height(),
