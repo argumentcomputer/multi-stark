@@ -24,6 +24,7 @@ use p3_fri::TwoAdicFriPcs;
 use p3_goldilocks::Goldilocks;
 #[cfg(feature = "cuda")]
 use p3_matrix::dense::RowMajorMatrix;
+use p3_maybe_rayon::prelude::*;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
 
@@ -39,20 +40,29 @@ pub type PackedExtVal = <ExtVal as ExtensionField<Val>>::ExtensionPacking;
 pub type Challenger =
     DeterministicPow<SerializingChallenger64<Val, HashChallenger<u8, Blake3, 32>>>;
 
-/// Forwarding challenger wrapper that makes zero-bit proof-of-work
+/// Forwarding challenger wrapper that makes proof-of-work grinding
 /// deterministic.
 ///
 /// p3's `SerializingChallenger64::grind` races `find_any` over every
-/// candidate witness even at 0 bits — where EVERY candidate passes — so the
-/// returned witness is whichever a rayon thread reports first: a
-/// thread-race-dependent value that lands in the proof bytes and makes
-/// zero-PoW proofs nondeterministic run to run. (The duplex challenger
-/// special-cases this; the serializing one doesn't.) Zero bits mean any
-/// witness verifies, so return the canonical ZERO; positive bit counts
-/// delegate to the inner grind unchanged. Transcript semantics are
-/// untouched — `check_witness` at 0 bits observes nothing on either side.
+/// candidate witness, so the returned witness is whichever a rayon thread
+/// reports first: a thread-race-dependent value that lands in the proof
+/// bytes — and, since it is observed before the FRI query indices are
+/// sampled, changes everything after it — making proofs nondeterministic
+/// run to run. At 0 bits EVERY candidate passes, and the canonical ZERO is
+/// returned without a search. At positive bit counts the search returns the
+/// SMALLEST passing witness: candidates are checked in parallel one window
+/// at a time, and a window's minimum is taken only once the whole window
+/// has been checked, so no thread can resolve a candidate ahead of a lower
+/// one. Transcript semantics are untouched — the witness is checked on the
+/// wrapped challenger exactly as the inner grind would.
 #[derive(Clone, Debug)]
 pub struct DeterministicPow<C>(pub C);
+
+/// Candidates checked per parallel window of the deterministic grind. A
+/// `bits`-bit grind expects `2^bits` checks, so the window is small enough
+/// that a low witness costs little extra work and large enough to spread
+/// across threads.
+const GRIND_WINDOW: u64 = 1 << 14;
 
 impl Challenger {
     pub fn from_hasher(initial_state: Vec<u8>, hasher: Blake3) -> Self {
@@ -87,7 +97,66 @@ impl<C: GrindingChallenger> GrindingChallenger for DeterministicPow<C> {
         if bits == 0 {
             return Self::Witness::ZERO;
         }
-        self.0.grind(bits)
+        let mut base = 0u64;
+        let witness = loop {
+            let found = (base..base + GRIND_WINDOW)
+                .into_par_iter()
+                .filter(|&i| {
+                    self.0
+                        .clone()
+                        .check_witness(bits, Self::Witness::from_u64(i))
+                })
+                .min();
+            if let Some(i) = found {
+                break Self::Witness::from_u64(i);
+            }
+            base += GRIND_WINDOW;
+        };
+        assert!(
+            self.0.check_witness(bits, witness),
+            "grind witness fails its own check"
+        );
+        witness
+    }
+}
+
+#[cfg(test)]
+mod grind_tests {
+    use super::*;
+    use p3_challenger::GrindingChallenger;
+
+    fn challenger(seed: u8) -> Challenger {
+        Challenger::from_hasher(vec![seed; 4], Blake3)
+    }
+
+    #[test]
+    fn grind_returns_the_smallest_witness() {
+        for seed in 0..4u8 {
+            let bits = 10;
+            let witness = challenger(seed).grind(bits);
+            // No smaller candidate passes, and the chosen one does, on a
+            // fresh challenger in the same state.
+            let w = witness.as_canonical_u64();
+            for i in 0..w {
+                assert!(!challenger(seed).check_witness(bits, Val::from_u64(i)));
+            }
+            assert!(challenger(seed).check_witness(bits, witness));
+            assert_eq!(challenger(seed).grind(bits), witness, "repeatable");
+        }
+    }
+
+    #[test]
+    fn grind_crosses_windows() {
+        // Find a seed whose smallest 14-bit witness lies past the first
+        // window, so the loop's window step is exercised.
+        for seed in 0..64u8 {
+            let witness = challenger(seed).grind(14);
+            if witness.as_canonical_u64() >= GRIND_WINDOW {
+                assert!(challenger(seed).check_witness(14, witness));
+                return;
+            }
+        }
+        panic!("no seed placed its witness past the first window");
     }
 }
 type CpuMmcs = MerkleTreeMmcs<Val, u8, SerializingHasher<Blake3>, Blake3CompressionFunction, 2, 32>;
