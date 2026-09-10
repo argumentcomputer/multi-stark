@@ -191,6 +191,23 @@ pub struct ShardInput<SC: StarkGenericConfig> {
     pub witness: SystemWitness<Val<SC>>,
 }
 
+/// What round one leaves at the batch barrier for round two: every shard's
+/// claims and header, and its stage one where round one retained it. This
+/// is one prover's local state; what distributed provers exchange at the
+/// barrier is the preamble — the headers and the messages — only.
+pub struct BatchBarrier<SC: StarkGenericConfig> {
+    claims: Vec<Vec<Vec<Val<SC>>>>,
+    headers: Vec<ShardHeader<SC>>,
+    retained: Vec<Option<Stage1<SC>>>,
+}
+
+impl<SC: StarkGenericConfig> BatchBarrier<SC> {
+    /// The shards committed so far.
+    pub fn shards(&self) -> usize {
+        self.headers.len()
+    }
+}
+
 /// A vector of shard proofs under one preamble.
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -461,7 +478,6 @@ where
     /// # Panics
     /// Panics if `claims` is empty, if any shard's traces are all empty, or
     /// if a regenerated shard does not reproduce its round-one header.
-    #[tracing::instrument(level = "info", skip_all, name = "stark/prove_batch")]
     pub fn prove_batch_with<W>(
         &self,
         key: &ProverKey<SC>,
@@ -475,25 +491,74 @@ where
         W: FnMut(usize) -> SystemWitness<Val<SC>>,
     {
         assert!(!claims.is_empty(), "cannot prove an empty batch");
-        let mut retained: Vec<Option<Stage1<SC>>> = Vec::with_capacity(claims.len());
-        let headers = claims
+        let round_one = claims
             .iter()
             .enumerate()
-            .map(|(shard, claims)| {
-                let _g = tracing::info_span!("stark/batch_round_1", shard).entered();
-                let stage_1 = self.prove_stage_1(witness(shard));
-                let header = stage_1.header(&claim_slices::<SC>(claims));
-                retained.push(match retention {
-                    Retention::Retain => Some(stage_1),
-                    Retention::Regenerate => None,
-                });
-                header
-            })
-            .collect();
+            .map(|(shard, claims)| (claims.clone(), witness(shard)));
+        let barrier = self.batch_round_one(round_one, retention);
+        self.batch_round_two(key, barrier, messages, witness)
+    }
+
+    /// Round one of a batch over a stream of shards — each item a shard's
+    /// claims and witness — so a shard's witness can be produced only when
+    /// its turn comes and released once committed, and the shard count need
+    /// not be known up front. Returns the barrier: what round two needs.
+    ///
+    /// # Panics
+    /// Panics if any shard's traces are all empty.
+    #[tracing::instrument(level = "info", skip_all, name = "stark/batch_round_one")]
+    pub fn batch_round_one<I>(&self, round_one: I, retention: Retention) -> BatchBarrier<SC>
+    where
+        I: IntoIterator<Item = (Vec<Vec<Val<SC>>>, SystemWitness<Val<SC>>)>,
+    {
+        let mut barrier = BatchBarrier {
+            claims: Vec::new(),
+            headers: Vec::new(),
+            retained: Vec::new(),
+        };
+        for (shard, (claims, witness)) in round_one.into_iter().enumerate() {
+            let _g = tracing::info_span!("stark/batch_round_1", shard).entered();
+            let stage_1 = self.prove_stage_1(witness);
+            barrier.headers.push(stage_1.header(&claim_slices::<SC>(&claims)));
+            barrier.retained.push(match retention {
+                Retention::Retain => Some(stage_1),
+                Retention::Regenerate => None,
+            });
+            barrier.claims.push(claims);
+        }
+        barrier
+    }
+
+    /// Round two: the preamble from the barrier's headers and `messages`,
+    /// then every shard's proof, rebuilding shard `k`'s stage one from
+    /// `witness(k)` where round one retained none; a rebuilt shard must
+    /// reproduce its round-one header.
+    ///
+    /// # Panics
+    /// Panics if the barrier holds no shard or a regenerated shard does
+    /// not reproduce its round-one header.
+    #[tracing::instrument(level = "info", skip_all, name = "stark/batch_round_two")]
+    pub fn batch_round_two<W>(
+        &self,
+        key: &ProverKey<SC>,
+        barrier: BatchBarrier<SC>,
+        messages: Vec<BatchMessage<SC>>,
+        mut witness: W,
+    ) -> BatchProof<SC>
+    where
+        Com<SC>: PartialEq,
+        W: FnMut(usize) -> SystemWitness<Val<SC>>,
+    {
+        let BatchBarrier {
+            claims,
+            headers,
+            retained,
+        } = barrier;
+        assert!(!claims.is_empty(), "cannot prove an empty batch");
         let preamble = BatchPreamble { headers, messages };
         let proofs = retained
             .into_iter()
-            .zip(claims)
+            .zip(&claims)
             .enumerate()
             .map(|(shard, (stage_1, claims))| {
                 let _g = tracing::info_span!("stark/batch_round_2", shard).entered();
