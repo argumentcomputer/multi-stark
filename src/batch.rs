@@ -489,6 +489,13 @@ where
     where
         Com<SC>: PartialEq,
         W: FnMut(usize) -> SystemWitness<Val<SC>>,
+        Self: Sync,
+        ProverKey<SC>: Sync,
+        BatchPreamble<SC>: Sync,
+        SystemWitness<Val<SC>>: Send,
+        Stage1<SC>: Send,
+        Com<SC>: Send,
+        Proof<SC>: Send,
     {
         assert!(!claims.is_empty(), "cannot prove an empty batch");
         let round_one = claims
@@ -506,26 +513,36 @@ where
     ///
     /// # Panics
     /// Panics if any shard's traces are all empty.
+    ///
+    /// Shards are committed on a separate thread while the stream produces
+    /// the next shard's witness on the calling thread; at most one witness
+    /// is held ahead of the prover.
     #[tracing::instrument(level = "info", skip_all, name = "stark/batch_round_one")]
     pub fn batch_round_one<I>(&self, round_one: I, retention: Retention) -> BatchBarrier<SC>
     where
         I: IntoIterator<Item = (Vec<Vec<Val<SC>>>, SystemWitness<Val<SC>>)>,
+        Self: Sync,
+        SystemWitness<Val<SC>>: Send,
+        Stage1<SC>: Send,
+        Com<SC>: Send,
     {
         let mut barrier = BatchBarrier {
             claims: Vec::new(),
             headers: Vec::new(),
             retained: Vec::new(),
         };
-        for (shard, (claims, witness)) in round_one.into_iter().enumerate() {
+        consume_ahead(round_one.into_iter(), |shard, (claims, witness)| {
             let _g = tracing::info_span!("stark/batch_round_1", shard).entered();
             let stage_1 = self.prove_stage_1(witness);
-            barrier.headers.push(stage_1.header(&claim_slices::<SC>(&claims)));
+            barrier
+                .headers
+                .push(stage_1.header(&claim_slices::<SC>(&claims)));
             barrier.retained.push(match retention {
                 Retention::Retain => Some(stage_1),
                 Retention::Regenerate => None,
             });
             barrier.claims.push(claims);
-        }
+        });
         barrier
     }
 
@@ -537,6 +554,10 @@ where
     /// # Panics
     /// Panics if the barrier holds no shard or a regenerated shard does
     /// not reproduce its round-one header.
+    ///
+    /// Shards are proven on a separate thread while `witness(k + 1)` runs
+    /// on the calling thread for every shard round one did not retain; at
+    /// most one witness is held ahead of the prover.
     #[tracing::instrument(level = "info", skip_all, name = "stark/batch_round_two")]
     pub fn batch_round_two<W>(
         &self,
@@ -548,6 +569,13 @@ where
     where
         Com<SC>: PartialEq,
         W: FnMut(usize) -> SystemWitness<Val<SC>>,
+        Self: Sync,
+        ProverKey<SC>: Sync,
+        BatchPreamble<SC>: Sync,
+        SystemWitness<Val<SC>>: Send,
+        Stage1<SC>: Send,
+        Com<SC>: Send,
+        Proof<SC>: Send,
     {
         let BatchBarrier {
             claims,
@@ -556,24 +584,28 @@ where
         } = barrier;
         assert!(!claims.is_empty(), "cannot prove an empty batch");
         let preamble = BatchPreamble { headers, messages };
-        let proofs = retained
-            .into_iter()
-            .zip(&claims)
-            .enumerate()
-            .map(|(shard, (stage_1, claims))| {
-                let _g = tracing::info_span!("stark/batch_round_2", shard).entered();
-                let claims = claim_slices::<SC>(claims);
-                let stage_1 = stage_1.unwrap_or_else(|| {
-                    let stage_1 = self.prove_stage_1(witness(shard));
+        let mut proofs = Vec::with_capacity(claims.len());
+        let rebuilt: Vec<bool> = retained.iter().map(Option::is_none).collect();
+        let mut retained = retained.into_iter();
+        let items = (0..claims.len()).map(|shard| rebuilt[shard].then(|| witness(shard)));
+        consume_ahead(items, |shard, witness| {
+            let _g = tracing::info_span!("stark/batch_round_2", shard).entered();
+            let retained = retained.next().expect("one retained slot per shard");
+            let claims = claim_slices::<SC>(&claims[shard]);
+            let stage_1 = match (witness, retained) {
+                (None, Some(stage_1)) => stage_1,
+                (Some(witness), None) => {
+                    let stage_1 = self.prove_stage_1(witness);
                     assert!(
                         stage_1.header(&claims) == preamble.headers[shard],
                         "shard {shard} did not reproduce its round-one header"
                     );
                     stage_1
-                });
-                self.prove_batch_shard(key, stage_1, &claims, &preamble, shard)
-            })
-            .collect();
+                }
+                _ => unreachable!("a shard is either retained or rebuilt"),
+            };
+            proofs.push(self.prove_batch_shard(key, stage_1, &claims, &preamble, shard));
+        });
         BatchProof { preamble, proofs }
     }
 
@@ -590,6 +622,13 @@ where
     ) -> BatchProof<SC>
     where
         Com<SC>: PartialEq,
+        Self: Sync,
+        ProverKey<SC>: Sync,
+        BatchPreamble<SC>: Sync,
+        SystemWitness<Val<SC>>: Send,
+        Stage1<SC>: Send,
+        Com<SC>: Send,
+        Proof<SC>: Send,
     {
         let (claims, mut witnesses): (Vec<_>, Vec<_>) = shards
             .into_iter()
@@ -599,6 +638,38 @@ where
             witnesses[shard].take().expect("each shard is built once")
         })
     }
+}
+
+/// Calls `consume(i, item)` for each item of `items` in order, on a
+/// separate thread, while `items` yields the next item on the calling
+/// thread; a rendezvous channel keeps at most one item ahead of the
+/// consumer. The consumer enters the caller's current tracing span, so its
+/// spans nest where a sequential loop's would.
+fn consume_ahead<T, I, F>(items: I, mut consume: F)
+where
+    T: Send,
+    I: Iterator<Item = T>,
+    F: FnMut(usize, T) + Send,
+{
+    let span = tracing::Span::current();
+    std::thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<T>(0);
+        let consumer = scope.spawn(move || {
+            let _g = span.entered();
+            for (i, item) in receiver.into_iter().enumerate() {
+                consume(i, item);
+            }
+        });
+        for item in items {
+            if sender.send(item).is_err() {
+                break;
+            }
+        }
+        drop(sender);
+        if let Err(payload) = consumer.join() {
+            std::panic::resume_unwind(payload);
+        }
+    });
 }
 
 #[cfg(test)]

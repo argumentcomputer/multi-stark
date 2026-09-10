@@ -503,6 +503,63 @@ struct ResidentMixedMerkleTree {
     }
 };
 
+// Large pageable traces are uploaded through a few persistent pinned staging
+// buffers rather than pinned in place: registering a multi-gigabyte host
+// buffer walks every page and unregistering walks it again, while a staged
+// copy costs one host memcpy per chunk. Slots are leased under a mutex and
+// callers wait for a free one, which bounds concurrent uploads to the slot
+// count (the PCIe link is shared anyway).
+constexpr size_t UPLOAD_STAGING_SLOTS = 4;
+constexpr size_t UPLOAD_STAGING_BYTES = size_t(64) << 20;
+uint64_t* upload_staging[UPLOAD_STAGING_SLOTS] = {nullptr};
+bool upload_staging_in_use[UPLOAD_STAGING_SLOTS] = {false};
+pthread_mutex_t upload_staging_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t upload_staging_cond = PTHREAD_COND_INITIALIZER;
+
+// Copies `bytes` of pageable host memory to the device on the per-thread
+// stream through a leased staging slot; returns with the copy complete.
+cudaError_t staged_upload(void* device, const void* host, size_t bytes) {
+    pthread_mutex_lock(&upload_staging_mutex);
+    size_t slot = UPLOAD_STAGING_SLOTS;
+    while (slot == UPLOAD_STAGING_SLOTS) {
+        for (size_t i = 0; i < UPLOAD_STAGING_SLOTS; ++i) {
+            if (!upload_staging_in_use[i]) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot == UPLOAD_STAGING_SLOTS) {
+            pthread_cond_wait(&upload_staging_cond, &upload_staging_mutex);
+        }
+    }
+    upload_staging_in_use[slot] = true;
+    cudaError_t status = cudaSuccess;
+    if (upload_staging[slot] == nullptr) {
+        status = cudaMallocHost(reinterpret_cast<void**>(&upload_staging[slot]),
+                                UPLOAD_STAGING_BYTES);
+        if (status != cudaSuccess) upload_staging[slot] = nullptr;
+    }
+    pthread_mutex_unlock(&upload_staging_mutex);
+    uint64_t* staging = upload_staging[slot];
+    if (status == cudaSuccess) {
+        const auto* source = static_cast<const unsigned char*>(host);
+        auto* target = static_cast<unsigned char*>(device);
+        for (size_t offset = 0; offset < bytes && status == cudaSuccess;
+             offset += UPLOAD_STAGING_BYTES) {
+            const size_t chunk = std::min(UPLOAD_STAGING_BYTES, bytes - offset);
+            memcpy(staging, source + offset, chunk);
+            status = cudaMemcpyAsync(target + offset, staging, chunk,
+                                     cudaMemcpyHostToDevice, cudaStreamPerThread);
+            if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
+        }
+    }
+    pthread_mutex_lock(&upload_staging_mutex);
+    upload_staging_in_use[slot] = false;
+    pthread_cond_signal(&upload_staging_cond);
+    pthread_mutex_unlock(&upload_staging_mutex);
+    return status;
+}
+
 struct ResidentLde {
     uint64_t* values = nullptr;
     // Original row-major evaluations, retained for prover stages (notably
@@ -530,21 +587,47 @@ struct ResidentLde {
 
 // Kernels read ResidentLde metadata directly. Keep that small control block in
 // CUDA managed memory so device access does not depend on Linux HMM support for
-// arbitrary pageable host allocations.
+// arbitrary pageable host allocations. A managed allocation synchronizes the
+// whole device, so control blocks come from slabs allocated once per process
+// and are recycled through a free list rather than allocated per LDE.
+constexpr size_t RESIDENT_LDE_SLAB = 256;
+void* resident_lde_free = nullptr;
+volatile int resident_lde_lock = 0;
+
 cudaError_t create_resident_lde(ResidentLde** output) {
     if (output == nullptr) return cudaErrorInvalidValue;
     *output = nullptr;
-    void* storage = nullptr;
-    const cudaError_t status = cudaMallocManaged(&storage, sizeof(ResidentLde));
-    if (status != cudaSuccess) return status;
-    *output = new (storage) ResidentLde;
+    while (__sync_lock_test_and_set(&resident_lde_lock, 1)) {}
+    if (resident_lde_free == nullptr) {
+        void* slab = nullptr;
+        const cudaError_t status =
+            cudaMallocManaged(&slab, RESIDENT_LDE_SLAB * sizeof(ResidentLde));
+        if (status != cudaSuccess) {
+            __sync_lock_release(&resident_lde_lock);
+            return status;
+        }
+        auto* bytes = static_cast<unsigned char*>(slab);
+        for (size_t i = 0; i < RESIDENT_LDE_SLAB; ++i) {
+            void* slot = bytes + i * sizeof(ResidentLde);
+            *static_cast<void**>(slot) = resident_lde_free;
+            resident_lde_free = slot;
+        }
+    }
+    void* slot = resident_lde_free;
+    resident_lde_free = *static_cast<void**>(slot);
+    __sync_lock_release(&resident_lde_lock);
+    *output = new (slot) ResidentLde;
     return cudaSuccess;
 }
 
 cudaError_t destroy_resident_lde(ResidentLde* lde) {
     if (lde == nullptr) return cudaSuccess;
     lde->~ResidentLde();
-    return cudaFree(lde);
+    while (__sync_lock_test_and_set(&resident_lde_lock, 1)) {}
+    *reinterpret_cast<void**>(lde) = resident_lde_free;
+    resident_lde_free = lde;
+    __sync_lock_release(&resident_lde_lock);
+    return cudaSuccess;
 }
 
 // Stable C ABI instruction used by Rust's compiled constraint DAG. All
@@ -2209,7 +2292,6 @@ extern "C" int multi_stark_cuda_coset_lde_create(
     const size_t input_elements = height * width;
     const size_t output_elements = extended_height * width;
     const size_t input_bytes=input_elements*sizeof(uint64_t);
-    bool input_registered=false;
     status = cudaMalloc(reinterpret_cast<void**>(&lde->values),
                         output_elements * sizeof(uint64_t));
     if (status == cudaSuccess) {
@@ -2219,15 +2301,8 @@ extern "C" int multi_stark_cuda_coset_lde_create(
     if (status == cudaSuccess) lde->trace_height = height;
 
     // Large pageable uploads otherwise serialize through the driver's hidden
-    // staging pool. Registration is best-effort: constrained hosts retain the
-    // fully independent pageable path, while recursive proofs can DMA their
-    // largest trace matrices directly.
-    if(status==cudaSuccess&&input_bytes>=(size_t(8)<<20)){
-        const cudaError_t registration=cudaHostRegister(
-            const_cast<uint64_t*>(input),input_bytes,cudaHostRegisterDefault);
-        if(registration==cudaSuccess)input_registered=true;else cudaGetLastError();
-    }
-
+    // staging pool; they go through the persistent staging slots instead.
+    // Small ones take the direct pageable path.
     const uint64_t *device_inverse_twiddles=nullptr,*device_shift_powers=nullptr,*device_forward_twiddles=nullptr;
     if (status == cudaSuccess) {
         status = cudaMemsetAsync(lde->values, 0,
@@ -2235,10 +2310,14 @@ extern "C" int multi_stark_cuda_coset_lde_create(
                                  cudaStreamPerThread);
     }
     if (status == cudaSuccess) {
-        status = cudaMemcpyAsync(lde->trace_values, input,
-                                 input_bytes,
-                                 cudaMemcpyHostToDevice,
-                                 cudaStreamPerThread);
+        if (input_bytes >= (size_t(8) << 20)) {
+            status = staged_upload(lde->trace_values, input, input_bytes);
+        } else {
+            status = cudaMemcpyAsync(lde->trace_values, input,
+                                     input_bytes,
+                                     cudaMemcpyHostToDevice,
+                                     cudaStreamPerThread);
+        }
     }
     if (status == cudaSuccess) {
         status = cudaMemcpyAsync(lde->values, lde->trace_values,
@@ -2273,8 +2352,6 @@ extern "C" int multi_stark_cuda_coset_lde_create(
         status = cudaGetLastError();
     }
     if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
-    if(input_registered){const cudaError_t unregister_status=cudaHostUnregister(const_cast<uint64_t*>(input));
-        if(status==cudaSuccess)status=unregister_status;}
     if (status != cudaSuccess) {
         destroy_resident_lde(lde);
         return static_cast<int>(status);
@@ -4322,12 +4399,28 @@ extern "C" const char* multi_stark_cuda_error_string(int status) {
     return cudaGetErrorString(static_cast<cudaError_t>(status));
 }
 
+// The stream-ordered pool releases unused memory to the driver at every
+// synchronization unless told otherwise, so each stage's buffers would be
+// mapped afresh; keep everything the pool has ever held.
+void retain_default_pool(int device_id) {
+    constexpr int MAX_DEVICES = 64;
+    static volatile int configured[MAX_DEVICES] = {0};
+    if (device_id < 0 || device_id >= MAX_DEVICES || configured[device_id]) return;
+    cudaMemPool_t pool = nullptr;
+    if (cudaDeviceGetDefaultMemPool(&pool, device_id) == cudaSuccess) {
+        uint64_t threshold = UINT64_MAX;
+        cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &threshold);
+    }
+    configured[device_id] = 1;
+}
+
 extern "C" int multi_stark_cuda_memory_info(int device_id, size_t* free_bytes,
                                               size_t* total_bytes) {
     if (free_bytes == nullptr || total_bytes == nullptr) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
     cudaError_t status = cudaSetDevice(device_id);
+    if (status == cudaSuccess) retain_default_pool(device_id);
     if (status == cudaSuccess) status = cudaMemGetInfo(free_bytes, total_bytes);
     // cudaMemGetInfo excludes pages retained by cudaMallocAsync's default
     // pool, even though subsequent stream allocations can reuse them. Treat
