@@ -39,3 +39,9 @@ cargo run --release --locked --features parallel,cuda --example cuda_blake3_benc
 The CSV DFT benchmark labels shapes below the production CUDA thresholds as
 `cpu-fallback`, warms both implementations, uses the same iteration count, and
 checks each output against the CPU reference outside the timing window.
+
+## 2026-09-11: BLAKE3 and LDE kernel experiments
+
+See [short-row BLAKE3 dispatch](cuda-blake3-short-rows.md) and
+[resident LDE/wide NTT optimization](cuda-lde-pass-reduction.md) for isolated
+before/after measurements, exact proof compatibility, and reproduction steps.

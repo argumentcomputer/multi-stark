@@ -3726,6 +3726,55 @@ mod tests {
     }
 
     #[test]
+    fn resident_coset_lde_padding_and_raw_representatives() {
+        let cpu = Radix2DitParallel::<Goldilocks>::default();
+        let gpu = CudaDft::default();
+        let p = Goldilocks::ORDER_U64;
+        let representatives = [0, 1, p - 1, p, p + 1, u64::MAX];
+        // Exercise absent padding, one padded half, multiple padded halves,
+        // and height-one transforms with lazy input field representatives.
+        for log_height in [0usize, 1, 2, 5, 8] {
+            for width in [1usize, 2, 3, 8, 17] {
+                let height = 1 << log_height;
+                let matrix = RowMajorMatrix::new(
+                    (0..height * width)
+                        .map(|i| Goldilocks::new(representatives[i % representatives.len()]))
+                        .collect(),
+                    width,
+                );
+                for added_bits in [0usize, 1, 2, 3] {
+                    for shift in [
+                        Goldilocks::ONE,
+                        Goldilocks::GENERATOR,
+                        Goldilocks::from_u64(11),
+                    ] {
+                        let expected = cpu
+                            .coset_lde_batch(matrix.clone(), added_bits, shift)
+                            .bit_reverse_rows()
+                            .to_row_major_matrix();
+                        let actual = gpu
+                            .coset_lde_batch_resident(&matrix, added_bits, shift)
+                            .to_row_major_matrix();
+                        assert_eq!(
+                            actual, expected,
+                            "height=2^{log_height}, width={width}, added_bits={added_bits}, shift={shift}"
+                        );
+                        assert!(
+                            actual.values.iter().all(|&value| {
+                                // SAFETY: Goldilocks is repr(transparent) over u64.
+                                // Inspect storage without canonicalizing via a field accessor.
+                                let raw = unsafe { core::mem::transmute::<Goldilocks, u64>(value) };
+                                raw < p
+                            }),
+                            "LDE digest input must contain canonical field bytes"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn resident_coset_lde_matches_cpu_storage() {
         let mut rng = SmallRng::seed_from_u64(0x51de);
         let cpu = Radix2DitParallel::<Goldilocks>::default();
@@ -3736,6 +3785,12 @@ mod tests {
             (12, 2, 1),
             (14, 2, 2),
             (16, 1, 1),
+            // Fused radix-8 dispatch and all stage-count residues mod 3.
+            (17, 8, 1),
+            (18, 8, 1),
+            (18, 8, 2),
+            (19, 8, 1),
+            (18, 3, 1),
         ] {
             let height = 1 << log_height;
             let matrix =
