@@ -544,6 +544,11 @@ pub struct LookupValues<F> {
     /// Concatenated argument values, row-major; `height * arg_offsets.last()`
     /// values.
     args: Vec<F>,
+    /// Whether `multiplicities` and `args` hold the witness. A shape-only
+    /// witness ([`Self::shape_only`]) carries the dimensions for a prover
+    /// that evaluates the lookups from the committed trace instead, and
+    /// any path that would read its payload must refuse.
+    materialized: bool,
 }
 
 impl<F: Field> LookupValues<F> {
@@ -593,10 +598,39 @@ impl<F: Field> LookupValues<F> {
             multiplicities,
             arg_offsets,
             args,
+            materialized: true,
         }
     }
 
     /// Returns an allocation-free builder; see [`LookupValuesBuilder`].
+    /// A witness of the right shape with no payload, for a prover that
+    /// derives every lookup message from the committed trace (the CUDA
+    /// graph path). Reading its multiplicities or arguments panics.
+    pub fn shape_only(height: usize, slot_arg_widths: &[usize]) -> Self {
+        let num_lookups = slot_arg_widths.len();
+        let mut arg_offsets = Vec::with_capacity(num_lookups + 1);
+        arg_offsets.push(0);
+        for width in slot_arg_widths {
+            arg_offsets.push(arg_offsets.last().unwrap() + width);
+        }
+        Self {
+            height,
+            num_lookups,
+            multiplicities: Vec::new(),
+            arg_offsets,
+            args: Vec::new(),
+            materialized: false,
+        }
+    }
+
+    /// Panics unless the witness payload is present.
+    fn require_payload(&self) {
+        assert!(
+            self.materialized,
+            "lookup witness omitted (shape-only): this circuit's lookups must be evaluated from the committed trace"
+        );
+    }
+
     pub fn builder(height: usize, slot_arg_widths: &[usize]) -> LookupValuesBuilder<F> {
         LookupValuesBuilder::new(height, slot_arg_widths)
     }
@@ -618,6 +652,9 @@ impl<F: Field> LookupValues<F> {
         fingerprint_challenge: &EF,
         mut accumulator: EF,
     ) -> (Vec<RowMajorMatrix<EF>>, Vec<EF>) {
+        for circuit in circuits {
+            circuit.require_payload();
+        }
         // Compute the message for each lookup, in flat circuit-major order.
         let _g = tracing::info_span!("stark/lookup_messages").entered();
         let num_messages = circuits
@@ -713,6 +750,7 @@ impl LookupValues<p3_goldilocks::Goldilocks> {
         lookup_challenge: EF,
         fingerprint_challenge: &EF,
     ) -> Vec<[p3_goldilocks::Goldilocks; 2]> {
+        self.require_payload();
         assert!(rows.start <= rows.end && rows.end <= self.height);
         assert!(self.num_lookups != 0);
         assert_eq!(
@@ -857,6 +895,7 @@ impl<F: Field> LookupValuesBuilder<F> {
             multiplicities: self.multiplicities,
             arg_offsets: self.arg_offsets,
             args: self.args,
+            materialized: true,
         }
     }
 }
