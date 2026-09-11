@@ -3527,36 +3527,41 @@ mod tests {
     }
 
     #[test]
-    fn blake3_rows_match_cpu_across_chunk_boundaries() {
+    fn blake3_rows_match_cpu_across_chunk_and_launch_boundaries() {
         use p3_blake3::Blake3;
 
-        for message_bytes in [1usize, 63, 64, 65, 1023, 1024, 1025, 4264, 7400] {
-            let message_count = 17;
-            let messages: Vec<u8> = (0..message_bytes * message_count)
-                .map(|index| (index as u64).wrapping_mul(0x9e37_79b9).to_le_bytes()[0])
-                .collect();
-            let mut digests = vec![0u8; 32 * message_count];
-            // SAFETY: the input contains `message_count` fixed-size messages,
-            // the output has one 32-byte digest per message, and the call is
-            // synchronous.
-            let status = unsafe {
-                multi_stark_cuda_blake3_hash_rows(
-                    0,
-                    digests.as_mut_ptr(),
-                    messages.as_ptr(),
-                    message_bytes,
-                    message_count,
-                )
-            };
-            check_cuda(status, "BLAKE3 row hashing contract");
+        let mut rng = SmallRng::seed_from_u64(0xb1a3e3);
+        for message_bytes in [
+            1usize, 3, 4, 7, 8, 16, 31, 32, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024,
+            1025, 2048, 3072, 4264, 7400, 32768,
+        ] {
+            for message_count in [1, 31, 32, 33, 255, 256, 257, 513] {
+                let messages: Vec<u8> = (0..message_bytes * message_count)
+                    .map(|_| rng.random())
+                    .collect();
+                let mut digests = vec![0u8; 32 * message_count];
+                // SAFETY: the input contains `message_count` fixed-size messages,
+                // the output has one 32-byte digest per message, and the call is
+                // synchronous.
+                let status = unsafe {
+                    multi_stark_cuda_blake3_hash_rows(
+                        0,
+                        digests.as_mut_ptr(),
+                        messages.as_ptr(),
+                        message_bytes,
+                        message_count,
+                    )
+                };
+                check_cuda(status, "BLAKE3 row hashing contract");
 
-            for (index, message) in messages.chunks_exact(message_bytes).enumerate() {
-                let expected: [u8; 32] = Blake3.hash_iter(message.iter().copied());
-                assert_eq!(
-                    &digests[index * 32..(index + 1) * 32],
-                    &expected,
-                    "message_bytes={message_bytes}, index={index}"
-                );
+                for (index, message) in messages.chunks_exact(message_bytes).enumerate() {
+                    let expected: [u8; 32] = Blake3.hash_iter(message.iter().copied());
+                    assert_eq!(
+                        &digests[index * 32..(index + 1) * 32],
+                        &expected,
+                        "message_bytes={message_bytes}, count={message_count}, index={index}"
+                    );
+                }
             }
         }
     }
@@ -3565,7 +3570,14 @@ mod tests {
     fn blake3_merkle_root_matches_cpu() {
         use p3_blake3::Blake3;
 
-        for (row_bytes, row_count) in [(16usize, 1usize), (64, 8), (4264, 1024)] {
+        for (row_bytes, row_count) in [
+            (16usize, 1usize),
+            (64, 8),
+            (1023, 512),
+            (1024, 512),
+            (1025, 512),
+            (4264, 1024),
+        ] {
             let rows: Vec<u8> = (0..row_bytes * row_count)
                 .map(|index| (index as u64).wrapping_mul(0x517c_c1b7).to_le_bytes()[0])
                 .collect();
