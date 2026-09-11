@@ -1692,9 +1692,10 @@ cudaError_t launch_dif(uint64_t* values, size_t height, size_t width,
     }
     const size_t total = (height >> 1) * width;
     const unsigned int blocks = blocks_for(total);
-    // Tall, wide row-major batches amortize the heavier fused kernel. Width-2
-    // FRI codewords retain the shared-memory tail specialized below.
-    if (width >= 8 && height >= (size_t(1) << 18)) {
+    // Wide row-major batches use fused stages regardless of height: short,
+    // wide traces can contain as many cells as tall traces. Width-2 FRI
+    // codewords retain the shared-memory tail specialized below.
+    if (width >= 8) {
         size_t half = height >> 1;
         while (half >= 4) {
             radix8_dif_stage<<<blocks_for((height >> 3) * width), THREADS>>>(
@@ -2337,9 +2338,11 @@ extern "C" int multi_stark_cuda_coset_lde_create(
     // staging pool; they go through the persistent staging slots instead.
     // Small ones take the direct pageable path.
     const uint64_t *device_inverse_twiddles=nullptr,*device_shift_powers=nullptr,*device_forward_twiddles=nullptr;
-    if (status == cudaSuccess) {
-        status = cudaMemsetAsync(lde->values, 0,
-                                 output_elements * sizeof(uint64_t),
+    // The source prefix is overwritten by the trace copy. Only the padded
+    // tail needs zeroing before the forward transform.
+    if (status == cudaSuccess && output_elements > input_elements) {
+        status = cudaMemsetAsync(lde->values + input_elements, 0,
+                                 (output_elements - input_elements) * sizeof(uint64_t),
                                  cudaStreamPerThread);
     }
     if (status == cudaSuccess) {
@@ -2379,11 +2382,9 @@ extern "C" int multi_stark_cuda_coset_lde_create(
     if (status == cudaSuccess) {
         status = launch_dif(lde->values, extended_height, width,device_forward_twiddles);
     }
-    if (status == cudaSuccess) {
-        canonicalize_goldilocks<<<blocks_for(output_elements), THREADS>>>(
-            lde->values, output_elements);
-        status = cudaGetLastError();
-    }
+    // Normalization and every DIF butterfly produce canonical field values,
+    // including the height-one case. A final reduction pass is redundant;
+    // raw-representation tests protect the Merkle byte contract.
     if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
     if (status != cudaSuccess) {
         destroy_resident_lde(lde);
