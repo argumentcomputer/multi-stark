@@ -23,6 +23,7 @@ constexpr uint64_t GOLDILOCKS_P = 0xffffffff00000001ULL;
 constexpr uint64_t GOLDILOCKS_EPSILON = 0x00000000ffffffffULL;
 constexpr unsigned int THREADS = 256;
 constexpr unsigned int MAX_BLOCKS = 65535;
+constexpr size_t BLAKE3_CHUNK_BYTES = 1024;
 constexpr uint32_t BLAKE3_CHUNK_START = 1U << 0;
 constexpr uint32_t BLAKE3_CHUNK_END = 1U << 1;
 constexpr uint32_t BLAKE3_PARENT = 1U << 2;
@@ -1793,6 +1794,32 @@ __global__ void goldilocks_ops_kernel(uint64_t* sums, uint64_t* differences,
     }
 }
 
+// A single-chunk message has no chunk tree to reduce. Assigning one thread
+// per row keeps every lane doing useful compression instead of leaving 31
+// lanes idle in the warp-per-row kernel. Reuse the same chunk primitive and
+// little-endian digest encoding; commitments and BLAKE3 flags are unchanged.
+__global__ void blake3_hash_short_rows_kernel(uint8_t* digests,
+                                              const uint8_t* messages,
+                                              size_t message_bytes,
+                                              size_t message_count) {
+    const size_t grid_stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         index < message_count; index += grid_stride) {
+        uint32_t output[8];
+        blake3_chunk(messages + index * message_bytes, message_bytes, 0, true,
+                     output);
+        uint8_t* digest = digests + index * 32;
+#pragma unroll
+        for (unsigned int word = 0; word < 8; ++word) {
+            const uint32_t value = output[word];
+            digest[word * 4] = static_cast<uint8_t>(value);
+            digest[word * 4 + 1] = static_cast<uint8_t>(value >> 8);
+            digest[word * 4 + 2] = static_cast<uint8_t>(value >> 16);
+            digest[word * 4 + 3] = static_cast<uint8_t>(value >> 24);
+        }
+    }
+}
+
 // One warp owns one message. Chunk compression is distributed across lanes;
 // lane zero then reduces the (at most 32) chunk chaining values into the root.
 // This matches the BLAKE3 tree shape while exposing parallelism within wide
@@ -1890,6 +1917,12 @@ __global__ void blake3_hash_digest_pairs_kernel(
 
 cudaError_t launch_blake3_rows(uint8_t* digests, const uint8_t* messages,
                                size_t message_bytes, size_t message_count) {
+    if (message_bytes <= BLAKE3_CHUNK_BYTES) {
+        blake3_hash_short_rows_kernel<<<blocks_for(message_count), THREADS, 0,
+                                       cudaStreamPerThread>>>(
+            digests, messages, message_bytes, message_count);
+        return cudaGetLastError();
+    }
     constexpr unsigned int WARPS_PER_BLOCK = THREADS / 32;
     const size_t required =
         (message_count + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
