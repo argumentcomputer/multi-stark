@@ -126,6 +126,10 @@ fn evict_hybrid_resident<M>(data: &CudaMmcsData<M>, index: usize) {
     // SAFETY: admission transitions run between proving stages, when no CUDA
     // operation can access this LDE or its trace.
     unsafe { lde.release_values() };
+    super::witness::record_lde_spill(
+        lde.device_id,
+        lde.height() * lde.width() * size_of::<Goldilocks>(),
+    );
     resident_active[index].store(false, std::sync::atomic::Ordering::Release);
 }
 
@@ -434,6 +438,7 @@ pub trait CudaCommitMmcs<T: Send + Sync + Clone>: Mmcs<T> {
         data: &Self::ProverData<M>,
         target_free_bytes: usize,
         protected_index: Option<usize>,
+        phase: &'static str,
     ) -> usize;
 
     /// Selects spill candidates across all supplied commitments instead of
@@ -442,6 +447,7 @@ pub trait CudaCommitMmcs<T: Send + Sync + Clone>: Mmcs<T> {
         &self,
         data: &[&Self::ProverData<RowMajorMatrix<T>>],
         target_free_bytes: usize,
+        phase: &'static str,
     ) -> usize;
 
     fn matrix_dimensions(&self, data: &Self::ProverData<RowMajorMatrix<T>>) -> Vec<Dimensions>;
@@ -591,11 +597,12 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
         data: &Self::ProverData<M>,
         target_free_bytes: usize,
         protected_index: Option<usize>,
+        phase: &'static str,
     ) -> usize {
         let (mut free_bytes, _) = super::device_memory_info(self.device_id);
         if super::memory_diagnostics_enabled() {
             eprintln!(
-                "[multi-stark/cuda] admission start: target={} free={}",
+                "[multi-stark/cuda] {phase} admission start: target={} free={}",
                 target_free_bytes, free_bytes
             );
         }
@@ -640,11 +647,12 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
         &self,
         data: &[&Self::ProverData<RowMajorMatrix<Goldilocks>>],
         target_free_bytes: usize,
+        phase: &'static str,
     ) -> usize {
         let (mut measured_free_bytes, _) = super::device_memory_info(self.device_id);
         if super::memory_diagnostics_enabled() {
             eprintln!(
-                "[multi-stark/cuda] batch admission start: target={} free={}",
+                "[multi-stark/cuda] {phase} batch admission start: target={} free={}",
                 target_free_bytes, measured_free_bytes
             );
         }
@@ -1332,7 +1340,7 @@ mod tests {
         let (expected_commitment, expected_data) = cpu.commit(matrices.clone());
         let expected_opening = cpu.open_batch(5, &expected_data);
 
-        let mmcs = CudaMmcs::new(cpu);
+        let mmcs = CudaMmcs::with_device(cpu, 0);
         let resident = vec![
             Some(CudaLde::from_row_major_matrix(mmcs.device_id, &matrices[0])),
             None,
@@ -1366,7 +1374,7 @@ mod tests {
             expected_opening.opening_proof
         );
 
-        mmcs.ensure_device_headroom(&data, usize::MAX, None);
+        mmcs.ensure_device_headroom(&data, usize::MAX, None, "test");
         assert!(!(0..matrices.len()).any(|index| mmcs.is_matrix_cuda_resident(&data, index)));
         let spilled_opening = mmcs.open_batch(5, &data);
         assert_eq!(

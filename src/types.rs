@@ -382,23 +382,8 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
             crate::config::Domain<Self>,
             crate::witness::TraceSource<Val>,
         )>,
-        checkpoint: Option<crate::witness::TreeCheckpoint>,
     ) -> (crate::config::Com<Self>, crate::config::PcsData<Self>) {
-        crate::cuda::witness::commit(&self.pcs, evaluations, checkpoint)
-    }
-
-    #[cfg(feature = "cuda")]
-    fn checkpoint_main(
-        &self,
-        data: crate::config::PcsData<Self>,
-        max_bytes: usize,
-    ) -> Option<crate::witness::TreeCheckpoint> {
-        crate::cuda::witness::checkpoint(data, max_bytes)
-    }
-
-    #[cfg(feature = "cuda")]
-    fn tree_cache_headroom(&self, witness: &crate::witness::PreparedWitness<Val>) -> usize {
-        crate::cuda::witness::cache_headroom(&self.pcs, witness)
+        crate::cuda::witness::commit(&self.pcs, evaluations)
     }
 
     fn canonicalize_proof(proof: &mut crate::prover::Proof<Self>) {
@@ -637,18 +622,24 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                     .saturating_add(total_device_bytes / 64)
             };
             let mut target = required();
-            self.pcs
-                .mmcs
-                .ensure_device_headroom(input.stage_1.0, target, Some(input.stage_1.1));
+            self.pcs.mmcs.ensure_device_headroom(
+                input.stage_1.0,
+                target,
+                Some(input.stage_1.1),
+                "quotient",
+            );
             target = required();
-            self.pcs
-                .mmcs
-                .ensure_device_headroom(input.stage_2.0, target, Some(input.stage_2.1));
+            self.pcs.mmcs.ensure_device_headroom(
+                input.stage_2.0,
+                target,
+                Some(input.stage_2.1),
+                "quotient",
+            );
             if let Some((data, matrix)) = input.preprocessed {
                 target = required();
                 self.pcs
                     .mmcs
-                    .ensure_device_headroom(data, target, Some(matrix));
+                    .ensure_device_headroom(data, target, Some(matrix), "quotient");
             }
             target = required();
             let free_bytes = crate::cuda::device_memory_info(self.pcs.mmcs.cuda_device_id()).0;
@@ -743,17 +734,23 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
             .saturating_mul(96)
             .saturating_add(total_device_bytes / 64);
         if let Some(input) = inputs.first() {
-            self.pcs
-                .mmcs
-                .ensure_device_headroom(input.stage_1.0, tree_headroom, None);
-            self.pcs
-                .mmcs
-                .ensure_device_headroom(input.stage_2.0, tree_headroom, None);
+            self.pcs.mmcs.ensure_device_headroom(
+                input.stage_1.0,
+                tree_headroom,
+                None,
+                "quotient_tree",
+            );
+            self.pcs.mmcs.ensure_device_headroom(
+                input.stage_2.0,
+                tree_headroom,
+                None,
+                "quotient_tree",
+            );
         }
         if let Some((data, _)) = inputs.iter().find_map(|input| input.preprocessed) {
             self.pcs
                 .mmcs
-                .ensure_device_headroom(data, tree_headroom, None);
+                .ensure_device_headroom(data, tree_headroom, None, "quotient_tree");
         }
         if crate::cuda::device_memory_info(self.pcs.mmcs.cuda_device_id()).0 < tree_headroom {
             return None;
@@ -993,15 +990,16 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                 input.stage_1.0,
                 target,
                 Some(input.stage_1.1),
+                "lookup",
             );
             if free_bytes < target {
                 // This circuit alone does not fit beside its resident trace.
                 // Spill it as a last resort and use the direct lookup-values
                 // path, which remains protocol-identical.
-                free_bytes = self
-                    .pcs
-                    .mmcs
-                    .ensure_device_headroom(input.stage_1.0, target, None);
+                free_bytes =
+                    self.pcs
+                        .mmcs
+                        .ensure_device_headroom(input.stage_1.0, target, None, "lookup");
             }
             if free_bytes < target {
                 return None;
@@ -1028,10 +1026,12 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
             .saturating_mul(96)
             .saturating_add(total_device_bytes / 64);
         if let Some(input) = inputs.first() {
-            let free_bytes =
-                self.pcs
-                    .mmcs
-                    .ensure_device_headroom(input.stage_1.0, tree_headroom, None);
+            let free_bytes = self.pcs.mmcs.ensure_device_headroom(
+                input.stage_1.0,
+                tree_headroom,
+                None,
+                "lookup_tree",
+            );
             if free_bytes < tree_headroom {
                 return None;
             }
@@ -1332,7 +1332,11 @@ mod pcs_ref_gen {
         m1[8] = f(109); // row 2 = [107, 108, 109]
         let mut m2 = vec![f(0); 2];
         m2[1] = f(202); // row 1 = [202]
-        let mmcs = new_mmcs(0);
+        let mmcs = new_mmcs(
+            0,
+            #[cfg(feature = "cuda")]
+            0,
+        );
         let (commit, pd) = mmcs.commit(vec![
             RowMajorMatrix::new(m0.clone(), 2),
             RowMajorMatrix::new(m1.clone(), 3),
@@ -1382,7 +1386,11 @@ mod pcs_ref_gen {
             ]]
         );
 
-        let mmcs = new_mmcs(2);
+        let mmcs = new_mmcs(
+            2,
+            #[cfg(feature = "cuda")]
+            0,
+        );
         let (commit, pd) = mmcs.commit(vec![
             RowMajorMatrix::new(m0, 2),
             RowMajorMatrix::new(m1, 3),
