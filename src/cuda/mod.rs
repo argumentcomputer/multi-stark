@@ -2542,7 +2542,14 @@ impl CudaMixedMerkleTree {
                 handles.len(),
             )
         };
-        check_cuda(status, "resident LDE Merkle tree creation");
+        if status != 0 {
+            let dimensions: Vec<(usize, usize)> =
+                ldes.iter().map(|lde| (lde.height(), lde.width())).collect();
+            check_cuda(
+                status,
+                &format!("resident LDE Merkle tree creation over (height, width) {dimensions:?}"),
+            );
+        }
         Self {
             device_id,
             handle: NonNull::new(handle).expect("CUDA returned a null mixed Merkle handle"),
@@ -2658,7 +2665,22 @@ impl CudaMixedMerkleTree {
                 host_digest_groups.len(),
             )
         };
-        check_cuda(status, "hybrid CPU/CUDA mixed-height Merkle tree creation");
+        if status != 0 {
+            let dims: Vec<Option<(usize, usize)>> = ldes
+                .iter()
+                .zip(host_matrices)
+                .zip(deferred_dimensions)
+                .map(|((lde, host), deferred)| {
+                    lde.map(|l| (l.height(), l.width()))
+                        .or_else(|| host.map(|m| (m.height(), m.width())))
+                        .or_else(|| deferred.map(|d| (d.height, d.width)))
+                })
+                .collect();
+            check_cuda(
+                status,
+                &format!("hybrid Merkle tree creation over (height, width) {dims:?}, host digest groups at heights {:?}", host_digest_groups.iter().map(|(h, _)| *h).collect::<Vec<_>>()),
+            );
+        }
         let row_count = heights.into_iter().max().unwrap();
         Self {
             device_id,
