@@ -45,6 +45,14 @@ fn main() {
         .arg("-O3")
         .arg("-lineinfo")
         .arg("--compiler-options=-fPIC")
+        // Host code is linked by whatever toolchain links the final binary,
+        // and Lean's bundled clang links against a sysroot older than
+        // glibc 2.38. g++ predefines _GNU_SOURCE, under which glibc 2.38+
+        // renames strtol and friends to their C23 variants (__isoc23_*),
+        // which that sysroot lacks. The POSIX and default feature sets keep
+        // everything the kernels' host code uses (clock_gettime, pthreads)
+        // under the plain names.
+        .arg("--compiler-options=-U_GNU_SOURCE,-D_DEFAULT_SOURCE,-D_POSIX_C_SOURCE=200809L")
         .arg("-o")
         .arg(&library)
         .arg("cuda/kernels.cu");

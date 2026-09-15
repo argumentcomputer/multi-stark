@@ -277,6 +277,18 @@ pub struct GoldilocksBlake3Config {
 
 impl GoldilocksBlake3Config {
     pub fn new(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Self {
+        Self::with_device(commitment_parameters, fri_parameters, None)
+    }
+
+    /// A configuration whose prover lives on the given CUDA device (`None`:
+    /// the device `MULTI_STARK_CUDA_DEVICE` names, or 0). Without the
+    /// `cuda` feature only device 0 exists. Configurations on distinct
+    /// devices prove concurrently in one process.
+    pub fn with_device(
+        commitment_parameters: CommitmentParameters,
+        fri_parameters: FriParameters,
+        device_id: Option<i32>,
+    ) -> Self {
         #[cfg(feature = "cuda")]
         {
             assert_eq!(
@@ -288,7 +300,20 @@ impl GoldilocksBlake3Config {
                 "the CUDA backend currently supports only binary FRI folds"
             );
         }
-        let (pcs, dft) = new_pcs(commitment_parameters, fri_parameters);
+        #[cfg(feature = "cuda")]
+        let (pcs, dft) = new_pcs(
+            commitment_parameters,
+            fri_parameters,
+            device_id.unwrap_or_else(crate::cuda::configured_device),
+        );
+        #[cfg(not(feature = "cuda"))]
+        let (pcs, dft) = {
+            assert!(
+                device_id.is_none_or(|device| device == 0),
+                "no CUDA backend to place a prover on device {device_id:?}"
+            );
+            new_pcs(commitment_parameters, fri_parameters)
+        };
         // Seed the challenger with a protocol tag for domain separation,
         // followed by every protocol parameter. Binding the parameters into
         // the seed means transcripts produced under different parameters
@@ -348,6 +373,32 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
 
     fn log_blowup(&self) -> usize {
         self.log_blowup
+    }
+
+    #[cfg(feature = "cuda")]
+    fn commit_main(
+        &self,
+        evaluations: Vec<(
+            crate::config::Domain<Self>,
+            crate::witness::TraceSource<Val>,
+        )>,
+        checkpoint: Option<crate::witness::TreeCheckpoint>,
+    ) -> (crate::config::Com<Self>, crate::config::PcsData<Self>) {
+        crate::cuda::witness::commit(&self.pcs, evaluations, checkpoint)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn checkpoint_main(
+        &self,
+        data: crate::config::PcsData<Self>,
+        max_bytes: usize,
+    ) -> Option<crate::witness::TreeCheckpoint> {
+        crate::cuda::witness::checkpoint(data, max_bytes)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn tree_cache_headroom(&self, witness: &crate::witness::PreparedWitness<Val>) -> usize {
+        crate::cuda::witness::cache_headroom(&self.pcs, witness)
     }
 
     fn canonicalize_proof(proof: &mut crate::prover::Proof<Self>) {
@@ -1052,7 +1103,7 @@ type PcsDft = Dft;
 #[cfg(feature = "cuda")]
 type PcsDft = CudaDft;
 
-fn new_mmcs(cap_height: usize) -> Mmcs {
+fn new_mmcs(cap_height: usize, #[cfg(feature = "cuda")] device_id: i32) -> Mmcs {
     let byte_hash = Blake3;
     let field_hash = SerializingHasher::new(byte_hash);
     let compress = Blake3CompressionFunction::new(byte_hash);
@@ -1060,13 +1111,17 @@ fn new_mmcs(cap_height: usize) -> Mmcs {
     #[cfg(not(feature = "cuda"))]
     return cpu;
     #[cfg(feature = "cuda")]
-    crate::cuda::mmcs::CudaMmcs::new(cpu)
+    crate::cuda::mmcs::CudaMmcs::with_device(cpu, device_id)
 }
 
 fn new_pcs(
     commitment_parameters: CommitmentParameters,
     fri_parameters: FriParameters,
+    #[cfg(feature = "cuda")] device_id: i32,
 ) -> (Pcs, Dft) {
+    #[cfg(feature = "cuda")]
+    let val_mmcs = new_mmcs(commitment_parameters.cap_height, device_id);
+    #[cfg(not(feature = "cuda"))]
     let val_mmcs = new_mmcs(commitment_parameters.cap_height);
     let mmcs = ExtensionMmcs::new(val_mmcs.clone());
     let inner_parameters = InnerFriParameters {
@@ -1079,7 +1134,11 @@ fn new_pcs(
         mmcs,
     };
     let dft = Dft::default();
-    let pcs = Pcs::new(PcsDft::default(), val_mmcs, inner_parameters);
+    #[cfg(feature = "cuda")]
+    let pcs_dft = CudaDft::new(device_id);
+    #[cfg(not(feature = "cuda"))]
+    let pcs_dft = PcsDft::default();
+    let pcs = Pcs::new(pcs_dft, val_mmcs, inner_parameters);
     (pcs, dft)
 }
 

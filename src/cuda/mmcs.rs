@@ -175,13 +175,15 @@ impl CudaMmcsData<RowMajorMatrix<Goldilocks>> {
                 retained_traces,
                 ..
             } => {
+                let lde = resident.get(index)?.as_ref()?;
                 if !resident_active
                     .get(index)?
                     .load(std::sync::atomic::Ordering::Acquire)
+                    && !lde.has_generator()
+                    && retained_traces.get(index)?.is_none()
                 {
                     return None;
                 }
-                let lde = resident.get(index)?.as_ref()?;
                 if let Some(trace) = retained_traces.get(index)?.as_ref() {
                     // SAFETY: the trace is owned by this prover data and drops
                     // after the resident LDE which holds the registered pointer.
@@ -219,7 +221,7 @@ pub(crate) fn hash_cpu_height_groups<F: p3_field::Field>(
 
 pub(crate) fn hash_host_only_height_groups<F: PrimeField64>(
     matrices: &[Option<RowMajorMatrix<F>>],
-    resident: &[Option<CudaLde>],
+    resident: &[Option<&CudaLde>],
     deferred_dimensions: &[Option<Dimensions>],
     prehashed_heights: &std::collections::BTreeSet<usize>,
 ) -> Vec<(usize, Vec<[u8; 32]>)> {
@@ -242,7 +244,7 @@ pub(crate) fn hash_host_only_height_groups<F: PrimeField64>(
         let height = matrix.as_ref().map_or_else(
             || {
                 lde.as_ref()
-                    .map_or_else(|| deferred.unwrap().height, CudaLde::height)
+                    .map_or_else(|| deferred.unwrap().height, |lde| lde.height())
             },
             Matrix::height,
         );
@@ -389,11 +391,13 @@ pub struct CudaMmcs {
 }
 
 impl CudaMmcs {
-    pub(crate) fn new(cpu: CpuMmcs) -> Self {
-        Self {
-            cpu,
-            device_id: super::configured_device(),
-        }
+    /// A commitment scheme resident on the given CUDA device. Every kernel
+    /// it launches, allocation it makes and buffer it stages through belongs
+    /// to that device, so several of these in one process can each own a
+    /// device of their own.
+    pub(crate) fn with_device(cpu: CpuMmcs, device_id: i32) -> Self {
+        assert!(device_id >= 0, "CUDA device id must be non-negative");
+        Self { cpu, device_id }
     }
 }
 
@@ -1337,7 +1341,7 @@ mod tests {
         let host_matrices = vec![None, Some(matrices[1].clone()), Some(matrices[2].clone())];
         let host_digest_groups = hash_host_only_height_groups(
             &host_matrices,
-            &resident,
+            &resident.iter().map(Option::as_ref).collect::<Vec<_>>(),
             &[None, None, None],
             &std::collections::BTreeSet::new(),
         );

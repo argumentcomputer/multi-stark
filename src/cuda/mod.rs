@@ -8,6 +8,7 @@
 pub(crate) mod mmcs;
 #[doc(hidden)]
 pub mod pcs;
+pub(crate) mod witness;
 
 use core::ffi::{CStr, c_char, c_void};
 use core::mem::{align_of, size_of};
@@ -242,6 +243,173 @@ impl CudaDft {
 
 /// Bit-reversed coset-LDE storage owned by a CUDA device allocation.
 #[doc(hidden)]
+/// A borrowed output tile on the selected CUDA device. The writer must finish
+/// using it before returning; rows wrap at the source's padded height.
+pub struct DeviceTraceView<'a> {
+    device_id: i32,
+    output: *mut u64,
+    first: usize,
+    rows: usize,
+    width: usize,
+    _borrow: core::marker::PhantomData<&'a mut [u64]>,
+}
+
+impl DeviceTraceView<'_> {
+    pub fn device_id(&self) -> i32 {
+        self.device_id
+    }
+    pub fn as_mut_ptr(&self) -> *mut u64 {
+        self.output
+    }
+    pub fn first_row(&self) -> usize {
+        self.first
+    }
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+    pub fn width(&self) -> usize {
+        self.width
+    }
+}
+
+type Generator = Arc<dyn crate::witness::TraceGenerator<Goldilocks>>;
+
+unsafe extern "C" fn write_generated_trace(
+    context: *mut c_void,
+    device_id: i32,
+    output: *mut u64,
+    first: usize,
+    rows: usize,
+) -> i32 {
+    let generator = unsafe { &*context.cast::<Generator>() };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        generator.write_device_rows(DeviceTraceView {
+            device_id,
+            output,
+            first,
+            rows,
+            width: generator.width(),
+            _borrow: core::marker::PhantomData,
+        })
+    }));
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(error)) => {
+            eprintln!("[multi-stark/cuda] trace generation failed: {error}");
+            999
+        }
+        Err(_) => 999,
+    }
+}
+
+unsafe extern "C" fn destroy_generated_trace(context: *mut c_void) {
+    drop(unsafe { Box::from_raw(context.cast::<Generator>()) });
+}
+
+impl CudaDft {
+    /// Materialize a bounded generated tile for diagnostics and reference checks.
+    pub fn generated_trace_rows(
+        &self,
+        source: Generator,
+        first: usize,
+        rows: usize,
+    ) -> RowMajorMatrix<Goldilocks> {
+        assert!(
+            rows > 0 && rows <= (1 << 16) + 1,
+            "generated tile exceeds the row limit"
+        );
+        let width = source.width();
+        let mut output =
+            vec![Goldilocks::ZERO; rows.checked_mul(width).expect("trace tile overflow")];
+        let mut source = source;
+        let status = unsafe {
+            multi_stark_cuda_generate_trace_rows(
+                self.device_id,
+                (&mut source as *mut Generator).cast(),
+                write_generated_trace,
+                first,
+                rows,
+                width,
+                output.as_mut_ptr().cast(),
+            )
+        };
+        check_cuda(status, "generated trace tile download");
+        RowMajorMatrix::new(output, width)
+    }
+
+    pub fn generate_coset_lde(
+        &self,
+        generator: Generator,
+        added_bits: usize,
+        shift: Goldilocks,
+    ) -> CudaLde {
+        let height = generator.height();
+        let width = generator.width();
+        Self::validate_dimensions(height, width);
+        let extended_height = height
+            .checked_shl(added_bits.try_into().unwrap())
+            .expect("LDE height overflow");
+        Self::validate_dimensions(extended_height, width);
+        let log_height = log2_strict_usize(height);
+        let inverse_twiddles = self.twiddles(log_height, true);
+        let forward_twiddles = self.twiddles(log2_strict_usize(extended_height), false);
+        let shift_powers = self.shift_powers(height, shift);
+        let mut context = Box::new(generator);
+        let mut handle = core::ptr::null_mut();
+        let status = unsafe {
+            multi_stark_cuda_coset_lde_generate(
+                self.device_id,
+                &mut handle,
+                height,
+                width,
+                added_bits,
+                inverse_twiddles.as_ptr().cast(),
+                shift_powers.as_ptr().cast(),
+                forward_twiddles.as_ptr().cast(),
+                raw_u64(Goldilocks::ONE.div_2exp_u64(log_height as u64)),
+                (&mut *context as *mut Generator).cast(),
+                write_generated_trace,
+                destroy_generated_trace,
+            )
+        };
+        check_cuda(status, "generated trace LDE");
+        let _ = Box::into_raw(context);
+        CudaLde {
+            device_id: self.device_id,
+            handle: NonNull::new(handle).expect("null generated LDE"),
+            height: extended_height,
+            width,
+        }
+    }
+}
+
+unsafe extern "C" {
+    fn multi_stark_cuda_generate_trace_rows(
+        device: i32,
+        context: *mut c_void,
+        writer: unsafe extern "C" fn(*mut c_void, i32, *mut u64, usize, usize) -> i32,
+        first: usize,
+        rows: usize,
+        width: usize,
+        output: *mut u64,
+    ) -> i32;
+    fn multi_stark_cuda_coset_lde_generate(
+        device: i32,
+        output: *mut *mut c_void,
+        height: usize,
+        width: usize,
+        added_bits: usize,
+        inverse: *const u64,
+        shifts: *const u64,
+        forward: *const u64,
+        height_inverse: u64,
+        context: *mut c_void,
+        writer: unsafe extern "C" fn(*mut c_void, i32, *mut u64, usize, usize) -> i32,
+        destroy: unsafe extern "C" fn(*mut c_void),
+    ) -> i32;
+    fn multi_stark_cuda_lde_has_generator(handle: *const c_void) -> bool;
+}
+
 pub struct CudaLde {
     device_id: i32,
     handle: NonNull<c_void>,
@@ -253,6 +421,10 @@ unsafe impl Send for CudaLde {}
 unsafe impl Sync for CudaLde {}
 
 impl CudaLde {
+    pub(crate) fn has_generator(&self) -> bool {
+        unsafe { multi_stark_cuda_lde_has_generator(self.raw_handle()) }
+    }
+
     pub(crate) const fn raw_handle(&self) -> *const c_void {
         self.handle.as_ptr()
     }

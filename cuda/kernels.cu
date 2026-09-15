@@ -37,6 +37,18 @@ inline cudaError_t stream_malloc(void** pointer,size_t bytes){return cudaMallocA
 inline cudaError_t stream_free(void* pointer){return pointer?cudaFreeAsync(pointer,cudaStreamPerThread):cudaSuccess;}
 #define cudaMalloc stream_malloc
 #define cudaFree stream_free
+// Host-side pools are kept per device, so provers on different devices in
+// one process never lease each other's buffers or control blocks. Every
+// entry point selects its device first, so the pools index by the calling
+// thread's current device.
+constexpr int MAX_CUDA_DEVICES = 64;
+inline int current_device_index() {
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess || device < 0 || device >= MAX_CUDA_DEVICES) {
+        return 0;
+    }
+    return device;
+}
 
 struct ConstantCacheEntry{int device=-1;size_t count=0;uint64_t kind=0,key0=0,key1=0;uint64_t* values=nullptr;ConstantCacheEntry* next=nullptr;};
 ConstantCacheEntry* constant_cache=nullptr;volatile int constant_cache_lock=0;
@@ -386,7 +398,7 @@ struct PinnedHostPoolEntry {
 };
 
 constexpr size_t PINNED_HOST_POOL_SIZE = 2;
-PinnedHostPoolEntry pinned_host_pool[PINNED_HOST_POOL_SIZE];
+PinnedHostPoolEntry pinned_host_pool[MAX_CUDA_DEVICES][PINNED_HOST_POOL_SIZE];
 pthread_mutex_t pinned_host_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 class PinnedHostBuffer {
@@ -398,7 +410,7 @@ class PinnedHostBuffer {
     ~PinnedHostBuffer() {
         if (pool_index_ < PINNED_HOST_POOL_SIZE) {
             pthread_mutex_lock(&pinned_host_pool_mutex);
-            pinned_host_pool[pool_index_].in_use = false;
+            pinned_host_pool[device_][pool_index_].in_use = false;
             pthread_mutex_unlock(&pinned_host_pool_mutex);
         } else if (pointer_ != nullptr) {
             cudaFreeHost(pointer_);
@@ -409,19 +421,21 @@ class PinnedHostBuffer {
         if (bytes == 0 || pointer_ != nullptr) {
             return cudaErrorInvalidValue;
         }
+        device_ = current_device_index();
+        PinnedHostPoolEntry* pool = pinned_host_pool[device_];
 
         pthread_mutex_lock(&pinned_host_pool_mutex);
         size_t reusable = PINNED_HOST_POOL_SIZE;
         for (size_t i = 0; i < PINNED_HOST_POOL_SIZE; ++i) {
-            const auto& entry = pinned_host_pool[i];
+            const auto& entry = pool[i];
             if (!entry.in_use && entry.pointer != nullptr && entry.capacity >= bytes &&
                 (reusable == PINNED_HOST_POOL_SIZE ||
-                 entry.capacity < pinned_host_pool[reusable].capacity)) {
+                 entry.capacity < pool[reusable].capacity)) {
                 reusable = i;
             }
         }
         if (reusable < PINNED_HOST_POOL_SIZE) {
-            auto& entry = pinned_host_pool[reusable];
+            auto& entry = pool[reusable];
             entry.in_use = true;
             pointer_ = entry.pointer;
             pool_index_ = reusable;
@@ -431,9 +445,9 @@ class PinnedHostBuffer {
 
         size_t available = PINNED_HOST_POOL_SIZE;
         for (size_t i = 0; i < PINNED_HOST_POOL_SIZE; ++i) {
-            if (!pinned_host_pool[i].in_use &&
+            if (!pool[i].in_use &&
                 (available == PINNED_HOST_POOL_SIZE ||
-                 pinned_host_pool[i].capacity < pinned_host_pool[available].capacity)) {
+                 pool[i].capacity < pool[available].capacity)) {
                 available = i;
             }
         }
@@ -442,7 +456,7 @@ class PinnedHostBuffer {
             return cudaMallocHost(reinterpret_cast<void**>(&pointer_), bytes);
         }
 
-        auto& entry = pinned_host_pool[available];
+        auto& entry = pool[available];
         entry.in_use = true;
         uint64_t* old_pointer = entry.pointer;
         const size_t old_capacity = entry.capacity;
@@ -475,6 +489,7 @@ class PinnedHostBuffer {
   private:
     uint64_t* pointer_ = nullptr;
     size_t pool_index_ = PINNED_HOST_POOL_SIZE;
+    int device_ = 0;
 };
 
 struct ResidentMerkleTree {
@@ -512,19 +527,22 @@ struct ResidentMixedMerkleTree {
 // count (the PCIe link is shared anyway).
 constexpr size_t UPLOAD_STAGING_SLOTS = 4;
 constexpr size_t UPLOAD_STAGING_BYTES = size_t(64) << 20;
-uint64_t* upload_staging[UPLOAD_STAGING_SLOTS] = {nullptr};
-bool upload_staging_in_use[UPLOAD_STAGING_SLOTS] = {false};
+uint64_t* upload_staging[MAX_CUDA_DEVICES][UPLOAD_STAGING_SLOTS] = {{nullptr}};
+bool upload_staging_in_use[MAX_CUDA_DEVICES][UPLOAD_STAGING_SLOTS] = {{false}};
 pthread_mutex_t upload_staging_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t upload_staging_cond = PTHREAD_COND_INITIALIZER;
 
 // Copies `bytes` of pageable host memory to the device on the per-thread
 // stream through a leased staging slot; returns with the copy complete.
 cudaError_t staged_upload(void* device, const void* host, size_t bytes) {
+    const int device_index = current_device_index();
+    uint64_t** slots = upload_staging[device_index];
+    bool* in_use = upload_staging_in_use[device_index];
     pthread_mutex_lock(&upload_staging_mutex);
     size_t slot = UPLOAD_STAGING_SLOTS;
     while (slot == UPLOAD_STAGING_SLOTS) {
         for (size_t i = 0; i < UPLOAD_STAGING_SLOTS; ++i) {
-            if (!upload_staging_in_use[i]) {
+            if (!in_use[i]) {
                 slot = i;
                 break;
             }
@@ -533,15 +551,15 @@ cudaError_t staged_upload(void* device, const void* host, size_t bytes) {
             pthread_cond_wait(&upload_staging_cond, &upload_staging_mutex);
         }
     }
-    upload_staging_in_use[slot] = true;
+    in_use[slot] = true;
     cudaError_t status = cudaSuccess;
-    if (upload_staging[slot] == nullptr) {
-        status = cudaMallocHost(reinterpret_cast<void**>(&upload_staging[slot]),
+    if (slots[slot] == nullptr) {
+        status = cudaMallocHost(reinterpret_cast<void**>(&slots[slot]),
                                 UPLOAD_STAGING_BYTES);
-        if (status != cudaSuccess) upload_staging[slot] = nullptr;
+        if (status != cudaSuccess) slots[slot] = nullptr;
     }
     pthread_mutex_unlock(&upload_staging_mutex);
-    uint64_t* staging = upload_staging[slot];
+    uint64_t* staging = slots[slot];
     if (status == cudaSuccess) {
         const auto* source = static_cast<const unsigned char*>(host);
         auto* target = static_cast<unsigned char*>(device);
@@ -555,11 +573,14 @@ cudaError_t staged_upload(void* device, const void* host, size_t bytes) {
         }
     }
     pthread_mutex_lock(&upload_staging_mutex);
-    upload_staging_in_use[slot] = false;
-    pthread_cond_signal(&upload_staging_cond);
+    in_use[slot] = false;
+    pthread_cond_broadcast(&upload_staging_cond);
     pthread_mutex_unlock(&upload_staging_mutex);
     return status;
 }
+
+using TraceWriter = int (*)(void*, int, uint64_t*, size_t, size_t);
+using TraceDestroy = void (*)(void*);
 
 struct ResidentLde {
     uint64_t* values = nullptr;
@@ -570,12 +591,19 @@ struct ResidentLde {
     const uint64_t* host_trace_values = nullptr;
     bool host_trace_registered = false;
     size_t trace_height = 0;
+    void* trace_context = nullptr;
+    TraceWriter trace_writer = nullptr;
+    TraceDestroy trace_destroy = nullptr;
     size_t height = 0;
     size_t width = 0;
     uint8_t* interpolation_scratch = nullptr;
     size_t interpolation_scratch_bytes = 0;
+    // The device whose slab this control block came from, so it returns
+    // there when destroyed from a thread on another device.
+    int device = 0;
 
     ~ResidentLde() {
+        if (trace_destroy) trace_destroy(trace_context);
         if (values != nullptr) {
             cudaFree(values);
         }
@@ -592,14 +620,17 @@ struct ResidentLde {
 // whole device, so control blocks come from slabs allocated once per process
 // and are recycled through a free list rather than allocated per LDE.
 constexpr size_t RESIDENT_LDE_SLAB = 256;
-void* resident_lde_free = nullptr;
+// One free list per device: a slab is allocated with its device current, so
+// its pages prefer that device and are never read by kernels on another.
+void* resident_lde_free[MAX_CUDA_DEVICES] = {nullptr};
 volatile int resident_lde_lock = 0;
 
 cudaError_t create_resident_lde(ResidentLde** output) {
     if (output == nullptr) return cudaErrorInvalidValue;
     *output = nullptr;
+    const int device = current_device_index();
     while (__sync_lock_test_and_set(&resident_lde_lock, 1)) {}
-    if (resident_lde_free == nullptr) {
+    if (resident_lde_free[device] == nullptr) {
         void* slab = nullptr;
         const cudaError_t status =
             cudaMallocManaged(&slab, RESIDENT_LDE_SLAB * sizeof(ResidentLde));
@@ -610,23 +641,25 @@ cudaError_t create_resident_lde(ResidentLde** output) {
         auto* bytes = static_cast<unsigned char*>(slab);
         for (size_t i = 0; i < RESIDENT_LDE_SLAB; ++i) {
             void* slot = bytes + i * sizeof(ResidentLde);
-            *static_cast<void**>(slot) = resident_lde_free;
-            resident_lde_free = slot;
+            *static_cast<void**>(slot) = resident_lde_free[device];
+            resident_lde_free[device] = slot;
         }
     }
-    void* slot = resident_lde_free;
-    resident_lde_free = *static_cast<void**>(slot);
+    void* slot = resident_lde_free[device];
+    resident_lde_free[device] = *static_cast<void**>(slot);
     __sync_lock_release(&resident_lde_lock);
     *output = new (slot) ResidentLde;
+    (*output)->device = device;
     return cudaSuccess;
 }
 
 cudaError_t destroy_resident_lde(ResidentLde* lde) {
     if (lde == nullptr) return cudaSuccess;
+    const int device = lde->device;
     lde->~ResidentLde();
     while (__sync_lock_test_and_set(&resident_lde_lock, 1)) {}
-    *reinterpret_cast<void**>(lde) = resident_lde_free;
-    resident_lde_free = lde;
+    *reinterpret_cast<void**>(lde) = resident_lde_free[device];
+    resident_lde_free[device] = lde;
     __sync_lock_release(&resident_lde_lock);
     return cudaSuccess;
 }
@@ -2297,12 +2330,12 @@ extern "C" int multi_stark_cuda_coset_lde_batch(
     return static_cast<int>(status);
 }
 
-extern "C" int multi_stark_cuda_coset_lde_create(
+static int coset_lde_create(
     int device_id, void** handle, const uint64_t* input, size_t height,
     size_t width, size_t added_bits, const uint64_t* inverse_twiddles,
     const uint64_t* shift_powers, const uint64_t* forward_twiddles,
-    uint64_t height_inverse) {
-    if (handle == nullptr || input == nullptr || (height > 1 && inverse_twiddles == nullptr) ||
+    uint64_t height_inverse, void* context, TraceWriter writer) {
+    if (handle == nullptr || (input == nullptr && writer == nullptr) || (height > 1 && inverse_twiddles == nullptr) ||
         shift_powers == nullptr || forward_twiddles == nullptr ||
         !is_power_of_two(height) || width == 0 ||
         added_bits >= sizeof(size_t) * 8 || height > (SIZE_MAX >> added_bits)) {
@@ -2321,6 +2354,8 @@ extern "C" int multi_stark_cuda_coset_lde_create(
     ResidentLde* lde = nullptr;
     status = create_resident_lde(&lde);
     if (status != cudaSuccess) return static_cast<int>(status);
+    lde->trace_context = context;
+    lde->trace_writer = writer;
     lde->height = extended_height;
     lde->width = width;
     const size_t input_elements = height * width;
@@ -2346,7 +2381,14 @@ extern "C" int multi_stark_cuda_coset_lde_create(
                                  cudaStreamPerThread);
     }
     if (status == cudaSuccess) {
-        if (input_bytes >= (size_t(8) << 20)) {
+        if (writer) {
+            constexpr size_t TILE_ROWS = size_t(1) << 16;
+            for (size_t first = 0; status == cudaSuccess && first < height; first += TILE_ROWS) {
+                const size_t rows = height - first < TILE_ROWS ? height - first : TILE_ROWS;
+                status = static_cast<cudaError_t>(writer(context, device_id,
+                    lde->trace_values + first * width, first, rows));
+            }
+        } else if (input_bytes >= (size_t(8) << 20)) {
             status = staged_upload(lde->trace_values, input, input_bytes);
         } else {
             status = cudaMemcpyAsync(lde->trace_values, input,
@@ -2392,6 +2434,33 @@ extern "C" int multi_stark_cuda_coset_lde_create(
     }
     *handle = lde;
     return static_cast<int>(cudaSuccess);
+}
+
+extern "C" int multi_stark_cuda_coset_lde_create(
+    int device_id, void** handle, const uint64_t* input, size_t height,
+    size_t width, size_t added_bits, const uint64_t* inverse_twiddles,
+    const uint64_t* shift_powers, const uint64_t* forward_twiddles,
+    uint64_t height_inverse) {
+    return coset_lde_create(device_id, handle, input, height, width, added_bits,
+        inverse_twiddles, shift_powers, forward_twiddles, height_inverse, nullptr, nullptr);
+}
+
+// Context ownership transfers only on success. Its lifetime covers trace
+// release and LDE eviction because lookup recovery still needs original rows.
+extern "C" int multi_stark_cuda_coset_lde_generate(
+    int device_id, void** handle, size_t height, size_t width, size_t added_bits,
+    const uint64_t* inverse_twiddles, const uint64_t* shift_powers,
+    const uint64_t* forward_twiddles, uint64_t height_inverse,
+    void* context, TraceWriter writer, TraceDestroy destroy) {
+    if (!context || !writer || !destroy) return static_cast<int>(cudaErrorInvalidValue);
+    const int status = coset_lde_create(device_id, handle, nullptr, height, width, added_bits,
+        inverse_twiddles, shift_powers, forward_twiddles, height_inverse, context, writer);
+    if (status == 0) static_cast<ResidentLde*>(*handle)->trace_destroy = destroy;
+    return status;
+}
+
+extern "C" bool multi_stark_cuda_lde_has_generator(const void* handle) {
+    return handle && static_cast<const ResidentLde*>(handle)->trace_writer;
 }
 
 extern "C" int multi_stark_cuda_prepare_lde_constants(
@@ -3271,7 +3340,7 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
     auto* prep=static_cast<const ResidentLde*>(preprocessed_handle);
     if(!output_handle||!total||!nodes||!node_count||!slot_count||!lookups||!lookup_count||
        (lookup_arg_count&&!lookup_args)||!main||
-       (!main->trace_values&&!main->host_trace_values)||!main->trace_height||
+       (!main->trace_values&&!main->host_trace_values&&!main->trace_writer)||!main->trace_height||
        !group_size||!beta||!gamma||!inverse_twiddles||!shift_powers||!forward_twiddles||
        !is_power_of_two(main->trace_height)||added_bits>=sizeof(size_t)*8||
        main->trace_height>(SIZE_MAX>>added_bits)||(prep&&!prep->trace_values)) {
@@ -3280,7 +3349,13 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
     *output_handle=nullptr;const size_t height=main->trace_height;
     const size_t groups=(lookup_count+group_size-1)/group_size,width=2*groups;
     const size_t count=height*groups,extended_height=height<<added_bits;
-    constexpr size_t LOOKUP_ROWS_PER_CHUNK=size_t(1)<<16;
+    size_t LOOKUP_ROWS_PER_CHUNK=size_t(1)<<16;
+    if (const char* configured=main->trace_writer ? getenv("MULTI_STARK_CUDA_LOOKUP_TRACE_TILE_ROWS") : nullptr) {
+        char* end=nullptr;
+        const unsigned long rows=strtoul(configured,&end,10);
+        if (end!=configured && *end=='\0' && rows>0 && rows<=LOOKUP_ROWS_PER_CHUNK)
+            LOOKUP_ROWS_PER_CHUNK=rows;
+    }
     const size_t chunk_rows=height<LOOKUP_ROWS_PER_CHUNK?height:LOOKUP_ROWS_PER_CHUNK;
     const size_t message_count=chunk_rows*lookup_count;
     if(!product_fits(extended_height,width)||!product_fits(height,lookup_count))return static_cast<int>(cudaErrorInvalidValue);
@@ -3306,14 +3381,19 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
     const size_t budget=48*1024;size_t tile=budget/(slot_count*sizeof(uint64_t));const bool global=tile<32;
     if(global)tile=128;else if(tile>32)tile=32;size_t blocks=(chunk_rows+tile-1)/tile;const size_t cap=global?256:1024;if(blocks>cap)blocks=cap;
     if(status==cudaSuccess&&global)status=cudaMalloc(reinterpret_cast<void**>(&scratch),blocks*slot_count*tile*sizeof(uint64_t));
-    if(status==cudaSuccess&&main->host_trace_values)status=cudaMalloc(reinterpret_cast<void**>(&trace_chunk),(chunk_rows+1)*main->width*sizeof(uint64_t));
+    const bool generated = !main->trace_values && main->trace_writer;
+    const bool tiled = main->host_trace_values || generated;
+    if(status==cudaSuccess&&tiled)status=cudaMalloc(reinterpret_cast<void**>(&trace_chunk),(chunk_rows+1)*main->width*sizeof(uint64_t));
     for(size_t row_start=0;status==cudaSuccess&&row_start<height;row_start+=LOOKUP_ROWS_PER_CHUNK){
         const size_t rows=height-row_start<LOOKUP_ROWS_PER_CHUNK?height-row_start:LOOKUP_ROWS_PER_CHUNK;
         const size_t messages=rows*lookup_count;
         const size_t chunk_blocks_raw=(rows+tile-1)/tile;
         const size_t chunk_blocks=chunk_blocks_raw<cap?chunk_blocks_raw:cap;
         const uint64_t* active_trace=main->trace_values;
-        if(main->host_trace_values){
+        if(generated){
+            status=static_cast<cudaError_t>(main->trace_writer(main->trace_context,device_id,trace_chunk,row_start,rows+1));
+            active_trace=trace_chunk;
+        } else if(main->host_trace_values){
             status=cudaMemcpy(trace_chunk,main->host_trace_values+row_start*main->width,rows*main->width*sizeof(uint64_t),cudaMemcpyHostToDevice);
             const size_t next_row=(row_start+rows)&(height-1);
             if(status==cudaSuccess)status=cudaMemcpy(trace_chunk+rows*main->width,main->host_trace_values+next_row*main->width,main->width*sizeof(uint64_t),cudaMemcpyHostToDevice);
@@ -3321,7 +3401,7 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
         }
         if(status==cudaSuccess){lookup_messages_graph<<<static_cast<unsigned int>(chunk_blocks),static_cast<unsigned int>(tile),global?0:slot_count*tile*sizeof(uint64_t)>>>(
             conjugates,norms,multiplicities,dn,node_count,slot_count,dl,lookup_count,da,prep,active_trace,main->width,
-            main->host_trace_values!=nullptr,{beta[0],beta[1]},{gamma[0],gamma[1]},ext_w,height,row_start,rows,scratch);status=cudaGetLastError();}
+            tiled,{beta[0],beta[1]},{gamma[0],gamma[1]},ext_w,height,row_start,rows,scratch);status=cudaGetLastError();}
         if(status==cudaSuccess)status=batch_inverse_norms(norm_inverses,norms,messages);
         if(status==cudaSuccess){lookup_group_deltas_batched<<<blocks_for(rows*groups),THREADS>>>(
             deltas+row_start*groups,multiplicities,conjugates,norm_inverses,rows,lookup_count,group_size,ext_w);status=cudaGetLastError();}
@@ -3649,7 +3729,7 @@ extern "C" int multi_stark_cuda_lde_release_trace(int device_id,void* handle){
     if(!handle)return static_cast<int>(cudaSuccess);cudaError_t status=cudaSetDevice(device_id);
     auto* lde=static_cast<ResidentLde*>(handle);if(status==cudaSuccess&&lde->trace_values){status=cudaFree(lde->trace_values);lde->trace_values=nullptr;}
     if(status==cudaSuccess&&lde->host_trace_registered){status=cudaHostUnregister(const_cast<uint64_t*>(lde->host_trace_values));lde->host_trace_registered=false;}
-    if(status==cudaSuccess){lde->host_trace_values=nullptr;lde->trace_height=0;}
+    if(status==cudaSuccess){lde->host_trace_values=nullptr;if(!lde->trace_writer)lde->trace_height=0;}
     return static_cast<int>(status);
 }
 
@@ -3682,7 +3762,7 @@ extern "C" int multi_stark_cuda_lde_release_values(int device_id, void* handle) 
     }
     if (status == cudaSuccess) {
         lde->host_trace_values = nullptr;
-        lde->trace_height = 0;
+        if (!lde->trace_writer) lde->trace_height = 0;
     }
     return static_cast<int>(status);
 }
@@ -4477,5 +4557,18 @@ extern "C" int multi_stark_cuda_memory_info(int device_id, size_t* free_bytes,
                               : *free_bytes + static_cast<size_t>(reusable);
         }
     }
+    return static_cast<int>(status);
+}
+
+extern "C" int multi_stark_cuda_generate_trace_rows(int device, void* context,
+    TraceWriter writer, size_t first, size_t rows, size_t width, uint64_t* output) {
+    if (!context || !writer || !output || !rows || !width || !product_fits(rows,width))
+        return static_cast<int>(cudaErrorInvalidValue);
+    cudaError_t status = cudaSetDevice(device);
+    uint64_t* tile = nullptr;
+    if (status == cudaSuccess) status = cudaMalloc(reinterpret_cast<void**>(&tile), rows * width * sizeof(uint64_t));
+    if (status == cudaSuccess) status = static_cast<cudaError_t>(writer(context, device, tile, first, rows));
+    if (status == cudaSuccess) status = cudaMemcpy(output, tile, rows * width * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    if (tile) cudaFree(tile);
     return static_cast<int>(status);
 }
