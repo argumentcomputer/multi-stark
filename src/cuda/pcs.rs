@@ -604,6 +604,18 @@ where
             // Split allocatable device capacity between persistent LDEs and
             // later phase workspace. This prevents stage one from filling VRAM
             // with values which lookup immediately has to copy back and evict.
+            // Height groups wider than the device leaf kernel can hash are
+            // neither durable nor transient: their LDEs and digests come
+            // from the host, whatever the memory budget says.
+            let wide_heights = super::mmcs::host_hashed_heights(
+                evaluations.iter().map(|(_, matrix)| p3_matrix::Dimensions {
+                    width: matrix.width(),
+                    height: matrix.height(),
+                }),
+            );
+            for height in &wide_heights {
+                height_groups.remove(height);
+            }
             let durable_budget = gpu_lde_budget / 2;
             // A Merkle leaf combines every matrix at a given height. Keeping
             // height groups intact avoids streaming the CPU half of a split
@@ -631,7 +643,9 @@ where
             let select_transient_plan = |transient_budget| {
                 height_indices
                     .iter()
-                    .filter(|(height, _)| !durable_heights.contains(height))
+                    .filter(|(height, _)| {
+                        !durable_heights.contains(height) && !wide_heights.contains(height)
+                    })
                     .filter_map(|(&height, indices)| {
                         let resources = indices
                             .iter()

@@ -134,11 +134,14 @@ pub(crate) fn commit(
         device_memory_info(device).0 >= needed,
         "main Merkle tree exceeds device admission; reduce the shard cell budget"
     );
-    let spilled_heights: std::collections::BTreeSet<_> = host
+    let mut spilled_heights: std::collections::BTreeSet<_> = host
         .iter()
         .enumerate()
         .filter_map(|(index, h)| h.is_some().then_some(dimensions[index].height))
         .collect();
+    // A height group wider than the device leaf kernel hashes is spilled
+    // whole and hashed on the host, like a group spilled for memory.
+    spilled_heights.extend(super::mmcs::host_hashed_heights(dimensions.iter().copied()));
     for index in 0..host.len() {
         if host[index].is_none() && spilled_heights.contains(&dimensions[index].height) {
             let lde = resident[index].as_ref().unwrap();
