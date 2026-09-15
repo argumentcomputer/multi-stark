@@ -70,16 +70,3 @@ impl<F: Field> From<crate::system::SystemWitness<F>> for PreparedWitness<F> {
         }
     }
 }
-
-/// Backend-owned tree nodes and metadata only; never a trace or LDE owner.
-pub struct TreeCheckpoint {
-    pub(crate) bytes: usize,
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
-    pub(crate) data: Box<dyn std::any::Any + Send + Sync>,
-}
-
-impl TreeCheckpoint {
-    pub fn bytes(&self) -> usize {
-        self.bytes
-    }
-}

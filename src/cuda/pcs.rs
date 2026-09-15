@@ -1480,7 +1480,7 @@ where
                 .map(|entry| entry.0)
                 .collect_vec();
             self.mmcs
-                .ensure_device_headroom_batch(&admission_data, fri_workspace_bytes);
+                .ensure_device_headroom_batch(&admission_data, fri_workspace_bytes, "fri");
             if crate::cuda::memory_diagnostics_enabled() {
                 eprintln!(
                     "[multi-stark/cuda] FRI admission: {:.3}s",

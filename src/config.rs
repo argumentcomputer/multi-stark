@@ -175,11 +175,10 @@ pub trait StarkGenericConfig {
     /// evaluations.
     fn log_blowup(&self) -> usize;
 
-    /// Commit deterministic main-trace sources, optionally restoring tree nodes.
+    /// Commit deterministic main-trace sources.
     fn commit_main(
         &self,
         evaluations: Vec<(Domain<Self>, crate::witness::TraceSource<Val<Self>>)>,
-        _checkpoint: Option<crate::witness::TreeCheckpoint>,
     ) -> (Com<Self>, PcsData<Self>)
     where
         Self: Sized,
@@ -189,26 +188,6 @@ pub trait StarkGenericConfig {
                 .into_iter()
                 .map(|(domain, trace)| (domain, trace.materialize())),
         )
-    }
-
-    /// Consume all PCS data, keeping at most a bounded tree-only checkpoint.
-    fn checkpoint_main(
-        &self,
-        _data: PcsData<Self>,
-        _max_bytes: usize,
-    ) -> Option<crate::witness::TreeCheckpoint>
-    where
-        Self: Sized,
-    {
-        None
-    }
-
-    /// Available cache allowance after reserving the incoming proof's workspace.
-    fn tree_cache_headroom(&self, _witness: &crate::witness::PreparedWitness<Val<Self>>) -> usize
-    where
-        Self: Sized,
-    {
-        0
     }
 
     /// Normalize any backend-dependent field representatives before proof
