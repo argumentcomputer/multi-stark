@@ -434,7 +434,18 @@ where
     /// # Panics
     /// Panics if every circuit's trace is empty (nothing to prove).
     #[tracing::instrument(level = "info", skip_all, name = "stark/stage1_commit")]
-    pub fn prove_stage_1(&self, witness: SystemWitness<Val<SC>>) -> Stage1<SC> {
+    pub fn prove_stage_1(
+        &self,
+        witness: impl Into<crate::witness::PreparedWitness<Val<SC>>>,
+    ) -> Stage1<SC> {
+        self.prove_stage_1_restored(witness.into(), None)
+    }
+
+    pub(crate) fn prove_stage_1_restored(
+        &self,
+        witness: crate::witness::PreparedWitness<Val<SC>>,
+        checkpoint: Option<crate::witness::TreeCheckpoint>,
+    ) -> Stage1<SC> {
         let pcs = self.config.pcs();
 
         // Sparse activation: a circuit whose stage-1 trace is empty is
@@ -474,7 +485,8 @@ where
                 log_degrees.push(log_degree);
                 (trace_domain, trace)
             });
-        let (stage_1_trace_commit, stage_1_trace_data) = pcs.commit(evaluations);
+        let (stage_1_trace_commit, stage_1_trace_data) =
+            self.config.commit_main(evaluations.collect(), checkpoint);
 
         // Only active circuits enter the accumulator chain; the chain (and
         // `intermediate_accumulators`) is indexed by active position.

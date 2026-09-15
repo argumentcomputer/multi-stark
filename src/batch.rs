@@ -127,6 +127,9 @@ pub enum Retention {
     /// plus whatever the witness source holds, at the price of one extra
     /// witness build and stage-1 commitment per shard.
     Regenerate,
+    /// Retain only tree nodes within this per-batch device budget. Every
+    /// witness and LDE is regenerated; pressure evicts trees before proving.
+    MerkleTrees { max_bytes: usize },
 }
 
 /// A public lookup message the verifier contributes to the batch's balance,
@@ -199,12 +202,23 @@ pub struct BatchBarrier<SC: StarkGenericConfig> {
     claims: Vec<Vec<Vec<Val<SC>>>>,
     headers: Vec<ShardHeader<SC>>,
     retained: Vec<Option<Stage1<SC>>>,
+    trees: Vec<Option<crate::witness::TreeCheckpoint>>,
 }
 
 impl<SC: StarkGenericConfig> BatchBarrier<SC> {
     /// The shards committed so far.
     pub fn shards(&self) -> usize {
         self.headers.len()
+    }
+
+    /// Evict optional trees when a resident session needs their memory.
+    pub fn trim_tree_cache(&mut self, max_bytes: usize) {
+        evict_trees(&mut self.trees, max_bytes);
+    }
+
+    /// Tree nodes and declared metadata retained across this batch's barrier.
+    pub fn tree_cache_bytes(&self) -> usize {
+        self.trees.iter().flatten().map(|tree| tree.bytes()).sum()
     }
 }
 
@@ -478,7 +492,7 @@ where
     /// # Panics
     /// Panics if `claims` is empty, if any shard's traces are all empty, or
     /// if a regenerated shard does not reproduce its round-one header.
-    pub fn prove_batch_with<W>(
+    pub fn prove_batch_with<W, T>(
         &self,
         key: &ProverKey<SC>,
         claims: &[Vec<Vec<Val<SC>>>],
@@ -488,7 +502,8 @@ where
     ) -> BatchProof<SC>
     where
         Com<SC>: PartialEq,
-        W: FnMut(usize) -> SystemWitness<Val<SC>>,
+        W: FnMut(usize) -> T,
+        T: Into<crate::witness::PreparedWitness<Val<SC>>> + Send,
         Self: Sync,
         ProverKey<SC>: Sync,
         BatchPreamble<SC>: Sync,
@@ -518,9 +533,10 @@ where
     /// the next shard's witness on the calling thread; at most one witness
     /// is held ahead of the prover.
     #[tracing::instrument(level = "info", skip_all, name = "stark/batch_round_one")]
-    pub fn batch_round_one<I>(&self, round_one: I, retention: Retention) -> BatchBarrier<SC>
+    pub fn batch_round_one<I, T>(&self, round_one: I, retention: Retention) -> BatchBarrier<SC>
     where
-        I: IntoIterator<Item = (Vec<Vec<Val<SC>>>, SystemWitness<Val<SC>>)>,
+        I: IntoIterator<Item = (Vec<Vec<Val<SC>>>, T)>,
+        T: Into<crate::witness::PreparedWitness<Val<SC>>> + Send,
         Self: Sync,
         SystemWitness<Val<SC>>: Send,
         Stage1<SC>: Send,
@@ -530,17 +546,40 @@ where
             claims: Vec::new(),
             headers: Vec::new(),
             retained: Vec::new(),
+            trees: Vec::new(),
         };
         consume_ahead(round_one.into_iter(), |shard, (claims, witness)| {
             let _g = tracing::info_span!("stark/batch_round_1", shard).entered();
+            let witness = witness.into();
+            evict_trees(
+                &mut barrier.trees,
+                self.config.tree_cache_headroom(&witness),
+            );
             let stage_1 = self.prove_stage_1(witness);
             barrier
                 .headers
                 .push(stage_1.header(&claim_slices::<SC>(&claims)));
+            let mut tree = None;
             barrier.retained.push(match retention {
                 Retention::Retain => Some(stage_1),
                 Retention::Regenerate => None,
+                Retention::MerkleTrees { max_bytes } => {
+                    let used = barrier
+                        .trees
+                        .iter()
+                        .flatten()
+                        .map(|t| t.bytes())
+                        .sum::<usize>();
+                    let remaining = max_bytes.saturating_sub(used);
+                    if remaining != 0 {
+                        tree = self
+                            .config
+                            .checkpoint_main(stage_1.stage_1_trace_data, remaining);
+                    }
+                    None
+                }
             });
+            barrier.trees.push(tree);
             barrier.claims.push(claims);
         });
         barrier
@@ -559,7 +598,7 @@ where
     /// on the calling thread for every shard round one did not retain; at
     /// most one witness is held ahead of the prover.
     #[tracing::instrument(level = "info", skip_all, name = "stark/batch_round_two")]
-    pub fn batch_round_two<W>(
+    pub fn batch_round_two<W, T>(
         &self,
         key: &ProverKey<SC>,
         barrier: BatchBarrier<SC>,
@@ -568,7 +607,8 @@ where
     ) -> BatchProof<SC>
     where
         Com<SC>: PartialEq,
-        W: FnMut(usize) -> SystemWitness<Val<SC>>,
+        W: FnMut(usize) -> T,
+        T: Into<crate::witness::PreparedWitness<Val<SC>>> + Send,
         Self: Sync,
         ProverKey<SC>: Sync,
         BatchPreamble<SC>: Sync,
@@ -581,6 +621,7 @@ where
             claims,
             headers,
             retained,
+            mut trees,
         } = barrier;
         assert!(!claims.is_empty(), "cannot prove an empty batch");
         let preamble = BatchPreamble { headers, messages };
@@ -595,7 +636,9 @@ where
             let stage_1 = match (witness, retained) {
                 (None, Some(stage_1)) => stage_1,
                 (Some(witness), None) => {
-                    let stage_1 = self.prove_stage_1(witness);
+                    let witness = witness.into();
+                    evict_trees(&mut trees, self.config.tree_cache_headroom(&witness));
+                    let stage_1 = self.prove_stage_1_restored(witness, trees[shard].take());
                     assert!(
                         stage_1.header(&claims) == preamble.headers[shard],
                         "shard {shard} did not reproduce its round-one header"
@@ -969,4 +1012,21 @@ mod tests {
     }
 
     type ExtVal = <GoldilocksBlake3Config as StarkGenericConfig>::Challenge;
+}
+
+fn evict_trees(trees: &mut [Option<crate::witness::TreeCheckpoint>], headroom: usize) {
+    let mut used = trees
+        .iter()
+        .flatten()
+        .map(|tree| tree.bytes())
+        .sum::<usize>();
+    for entry in trees.iter_mut().rev() {
+        if used <= headroom {
+            break;
+        }
+        if let Some(tree) = entry.take() {
+            used -= tree.bytes();
+            tracing::debug!(bytes = tree.bytes(), "evicted stage-one tree checkpoint");
+        }
+    }
 }

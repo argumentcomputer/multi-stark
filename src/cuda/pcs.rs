@@ -891,7 +891,7 @@ where
                     .collect_vec();
                 host_digest_groups.extend(hash_host_only_height_groups(
                     &host_matrices,
-                    &resident,
+                    &resident.iter().map(Option::as_ref).collect::<Vec<_>>(),
                     &deferred_dimensions,
                     &prehashed_heights,
                 ));
