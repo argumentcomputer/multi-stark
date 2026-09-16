@@ -11,6 +11,7 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=cuda/kernels.cu");
+    println!("cargo:rerun-if-changed=cuda/goldilocks.cuh");
     println!("cargo:rerun-if-env-changed=NVCC");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
@@ -19,6 +20,9 @@ fn main() {
     if env::var_os("CARGO_FEATURE_CUDA").is_none() {
         return;
     }
+
+    let include = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("cuda");
+    println!("cargo:include={}", include.display());
 
     assert_eq!(
         env::var("CARGO_CFG_TARGET_OS").as_deref(),
