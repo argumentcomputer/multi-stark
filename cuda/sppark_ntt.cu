@@ -188,16 +188,26 @@ unsigned log2_exact(size_t value) {
     return log;
 }
 
+// A decimal setting, or `fallback` when unset or not a plain number. This
+// unit is compiled by nvcc's host compiler without the C standard pin the
+// crate's C units get, where glibc redirects strtoul to a C23 symbol the
+// Lean toolchain's libc does not carry.
+unsigned long long decimal_setting(const char* name, unsigned long long fallback) {
+    const char* configured = getenv(name);
+    if (!configured || !*configured) return fallback;
+    unsigned long long value = 0;
+    for (const char* c = configured; *c; ++c) {
+        if (*c < '0' || *c > '9' || value > (~0ull - 9) / 10) return fallback;
+        value = value * 10 + unsigned(*c - '0');
+    }
+    return value;
+}
+
 // Read per construction: one getenv against a transform of gigabytes, and
 // tests vary it within a process.
 size_t panel_budget_bytes() {
-    size_t budget = size_t(4) << 30;
-    if (const char* configured = getenv("MULTI_STARK_SPPARK_PANEL_BYTES")) {
-        char* end = nullptr;
-        const unsigned long long parsed = strtoull(configured, &end, 10);
-        if (end != configured && *end == '\0' && parsed > 0) budget = parsed;
-    }
-    return budget;
+    const unsigned long long budget = decimal_setting("MULTI_STARK_SPPARK_PANEL_BYTES", 0);
+    return budget ? size_t(budget) : size_t(4) << 30;
 }
 
 // -1 unread, 0 first-party, 1 sppark above the height threshold, 2 sppark
@@ -205,13 +215,7 @@ size_t panel_budget_bytes() {
 int backend_flag = -1;
 
 unsigned min_log_height() {
-    unsigned log = 20;
-    if (const char* configured = getenv("MULTI_STARK_SPPARK_MIN_LOG_HEIGHT")) {
-        char* end = nullptr;
-        const unsigned long parsed = strtoul(configured, &end, 10);
-        if (end != configured && *end == '\0') log = static_cast<unsigned>(parsed);
-    }
-    return log;
+    return unsigned(decimal_setting("MULTI_STARK_SPPARK_MIN_LOG_HEIGHT", 20));
 }
 
 size_t panel_columns(size_t width, size_t extended_height) {
