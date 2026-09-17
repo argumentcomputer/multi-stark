@@ -546,9 +546,10 @@ mod tests {
         // A forward transform's panel is one column set at the height.
         assert_eq!(forward_panel_bytes(1 << 22, 2), 2 * (1 << 22) * 8);
         // 2^20 rows, 533 columns, blowup 4: (2^20 + 2^22) x 8 bytes per
-        // column is 40 MiB, so a 4 GiB budget admits 102 columns.
+        // column is 40 MiB, so a 4 GiB budget admits 102 columns, plus the
+        // reversed coset powers.
         let column_bytes = ((1 << 20) + (1 << 22)) * 8;
-        assert_eq!(panel_bytes(1 << 20, 533, 2), 102 * column_bytes);
+        assert_eq!(panel_bytes(1 << 20, 533, 2), 102 * column_bytes + (1 << 20) * 8);
         select_backend(Backend::SpparkAllHeights);
         assert!(takes(2));
         select_backend(Backend::Legacy);

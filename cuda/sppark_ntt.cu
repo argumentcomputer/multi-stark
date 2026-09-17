@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -128,23 +129,28 @@ extern "C" int multi_stark_sppark_ntt_host(int device, uint64_t* inout, uint32_t
 // --- Resident coset LDE through sppark ---------------------------------
 //
 // The prover's matrices are row-major with the transform along the column,
-// while upstream transforms one contiguous vector. A panel of columns is
-// gathered into column-major scratch, transformed column by column, and
-// scattered back in the bit-reversed row order the commitment expects:
+// while upstream transforms contiguous vectors. A panel of columns is
+// gathered into column-major scratch, transformed, and scattered back in
+// the bit-reversed row order the commitment expects:
 //
-//   A[c][r]  = canonical(trace[r][f + c])              r < N
-//   inverse NR on A[c], normalized upstream            (bit-reversed coeffs)
-//   B[c][i]  = A[c][rev(i)] * shift^i                  i < N, zero beyond
-//   forward NR on B[c] over M = N << added_bits         (bit-reversed evals)
-//   values[r][f + c] = B[c][r]                          r < M
+//   A[c][r]  = canonical(trace[r][f + c])                     r < N
+//   inverse NR on A[c], normalized upstream                   (bit-reversed coeffs)
+//   B[c][i << added_bits] = A[c][i] * shift^rev(i)            i < N, zero elsewhere
+//   forward RN on B[c] over M = N << added_bits               (natural-order evals)
+//   values[rev(r)][f + c] = B[c][r]                           r < M
 //
-// The gather reduces representatives at or above the modulus, which upstream
-// does not accept. The compact panel A and the extended panel B cost
-// 8 * (N + M) * C bytes for C columns; C is sized from
-// MULTI_STARK_SPPARK_PANEL_BYTES (default 4 GiB) and the width. The columns
-// of a panel go through batched launch sequences (the fork's grid
-// dimension) in groups sized to the L2 cache; MULTI_STARK_SPPARK_BATCH_BYTES
-// sets the group, 0 launches every column on its own.
+// That is the fused expansion: it feeds the forward transform in
+// bit-reversed order, no pass restores the coefficient order, and the row
+// permutation folds into the scatter. The default restores the order
+// instead (B[c][i] = A[c][rev(i)] * shift^i), transforms in NR order and
+// scatters naturally; `fused_expansion` decides and records why. The gather reduces representatives at or
+// above the modulus, which upstream does not accept. The compact panel A
+// and the extended panel B cost 8 * (N + M) * C bytes for C columns; C is
+// sized from MULTI_STARK_SPPARK_PANEL_BYTES (default 4 GiB) and the width.
+// The columns of a panel go through batched launch sequences (the fork's
+// grid dimension) in groups sized to the L2 cache;
+// MULTI_STARK_SPPARK_BATCH_BYTES sets the group, 0 launches every column
+// on its own.
 
 #include "goldilocks.cuh"
 
@@ -152,57 +158,163 @@ namespace {
 
 constexpr unsigned PANEL_THREADS = 256;
 constexpr size_t MAX_BLOCKS = 65535;
+constexpr unsigned TILE = 32;
+constexpr unsigned TILE_ROWS = 8;
+// Matrices narrower than this take the row-per-thread gather and scatter,
+// whose per-thread row segments are then a few contiguous words; from here
+// up the tiled transposes win.
+constexpr size_t NARROW_MATRIX = 8;
 
 unsigned blocks_for_total(size_t total) {
     const size_t blocks = (total + PANEL_THREADS - 1) / PANEL_THREADS;
     return static_cast<unsigned>(blocks < MAX_BLOCKS ? blocks : MAX_BLOCKS);
 }
 
+// Tiles over rows on the grid's first dimension, which is wide enough for
+// 2^26 rows, and over columns on the second.
+dim3 tile_grid(size_t rows, size_t columns) {
+    return dim3(static_cast<unsigned>((rows + TILE - 1) / TILE), static_cast<unsigned>((columns + TILE - 1) / TILE));
+}
+
 __device__ __forceinline__ size_t reverse_bits(size_t index, unsigned log) {
     return log == 0 ? 0 : static_cast<size_t>(__brev(static_cast<unsigned>(index)) >> (32 - log));
 }
 
-__global__ void gather_columns(const uint64_t* __restrict__ trace, size_t height, size_t width,
-                               size_t first, size_t columns, size_t extended_height,
-                               uint64_t* __restrict__ panel) {
-    const size_t total = height * columns;
-    const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
-    for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < total;
-         index += stride) {
-        const size_t row = index / columns;
-        const size_t column = index - row * columns;
-        panel[column * extended_height + row] = multi_stark_cuda::canonicalize(trace[row * width + first + column]);
+// Row-major rows [0, height) of columns [first, first + count) into the
+// column-major panel (columns `column_stride` apart), canonical, through
+// a shared-memory tile so both sides are coalesced.
+__global__ void gather_tiles(const uint64_t* __restrict__ source, size_t height, size_t width, size_t first,
+                             size_t count, size_t column_stride, uint64_t* __restrict__ panel) {
+    __shared__ uint64_t tile[TILE][TILE + 1];
+    const size_t row0 = static_cast<size_t>(blockIdx.x) * TILE;
+    const size_t col0 = static_cast<size_t>(blockIdx.y) * TILE;
+    for (unsigned r = threadIdx.y; r < TILE; r += TILE_ROWS) {
+        const size_t row = row0 + r, col = col0 + threadIdx.x;
+        if (row < height && col < count)
+            tile[r][threadIdx.x] = multi_stark_cuda::canonicalize(source[row * width + first + col]);
+    }
+    __syncthreads();
+    for (unsigned c = threadIdx.y; c < TILE; c += TILE_ROWS) {
+        const size_t col = col0 + c, row = row0 + threadIdx.x;
+        if (row < height && col < count) panel[col * column_stride + row] = tile[threadIdx.x][c];
     }
 }
 
-// `coefficients` holds `height` bit-reversed coefficients per column.
-__global__ void shift_columns(const uint64_t* __restrict__ coefficients, uint64_t* __restrict__ panel,
-                              size_t height, unsigned log_height, size_t extended_height,
-                              size_t columns, const uint64_t* __restrict__ shift_powers) {
-    const size_t total = extended_height * columns;
-    const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
-    for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < total;
-         index += stride) {
-        const size_t column = index / extended_height;
-        const size_t row = index - column * extended_height;
-        uint64_t value = 0;
-        if (row < height) {
-            const uint64_t coefficient = coefficients[column * height + reverse_bits(row, log_height)];
-            value = multi_stark_cuda::goldilocks_mul(coefficient, shift_powers[row]);
+// The panel back into row-major rows of columns [first, first + count);
+// with `reverse_rows`, panel row r lands in output row rev(r) over
+// 2^log_rows rows, so a natural-order transform result is stored in the
+// bit-reversed row order the commitment expects.
+__global__ void scatter_tiles(const uint64_t* __restrict__ panel, size_t rows, size_t column_stride, size_t width,
+                              size_t first, size_t count, unsigned log_rows, bool reverse_rows,
+                              uint64_t* __restrict__ values) {
+    __shared__ uint64_t tile[TILE][TILE + 1];
+    const size_t row0 = static_cast<size_t>(blockIdx.x) * TILE;
+    const size_t col0 = static_cast<size_t>(blockIdx.y) * TILE;
+    for (unsigned c = threadIdx.y; c < TILE; c += TILE_ROWS) {
+        const size_t col = col0 + c, row = row0 + threadIdx.x;
+        if (row < rows && col < count) tile[c][threadIdx.x] = panel[col * column_stride + row];
+    }
+    __syncthreads();
+    for (unsigned r = threadIdx.y; r < TILE; r += TILE_ROWS) {
+        const size_t row = row0 + r, col = col0 + threadIdx.x;
+        if (row < rows && col < count) {
+            const size_t out = reverse_rows ? reverse_bits(row, log_rows) : row;
+            values[out * width + first + col] = tile[threadIdx.x][r];
         }
-        panel[index] = value;
     }
 }
 
-__global__ void scatter_columns(const uint64_t* __restrict__ panel, size_t extended_height, size_t width,
-                                size_t first, size_t columns, uint64_t* __restrict__ values) {
-    const size_t total = extended_height * columns;
+// The expansion with the coefficient order restored: B[c][i] =
+// A[c][rev(i)] * shift^i for i < N, zero beyond, so the forward transform
+// runs in NR order and the scatter stays natural. The permuted reads are
+// cheap while the compact panel fits the L2 cache. One column per grid row.
+__global__ void shift_columns(const uint64_t* __restrict__ coefficients, const uint64_t* __restrict__ shift_powers,
+                              size_t height, unsigned log_height, size_t extended_height,
+                              uint64_t* __restrict__ panel) {
+    const size_t column = blockIdx.y;
     const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
-    for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < total;
-         index += stride) {
-        const size_t row = index / columns;
-        const size_t column = index - row * columns;
-        values[row * width + first + column] = panel[column * extended_height + row];
+    for (size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < extended_height; i += stride) {
+        uint64_t value = 0;
+        if (i < height)
+            value = multi_stark_cuda::goldilocks_mul(coefficients[column * height + reverse_bits(i, log_height)],
+                                                     shift_powers[i]);
+        panel[column * extended_height + i] = value;
+    }
+}
+
+// The gather and scatter for a narrow panel: one thread per row moves its
+// few words, the panel side coalesced across the block; the tiled
+// transpose would leave most of its block idle on such panels.
+__global__ void gather_rows(const uint64_t* __restrict__ source, size_t height, size_t width, size_t first,
+                            unsigned count, size_t column_stride, uint64_t* __restrict__ panel) {
+    const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t row = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; row < height; row += stride) {
+        const uint64_t* in = source + row * width + first;
+        for (unsigned c = 0; c < count; ++c) panel[c * column_stride + row] = multi_stark_cuda::canonicalize(in[c]);
+    }
+}
+
+__global__ void scatter_rows(const uint64_t* __restrict__ panel, size_t rows, size_t column_stride, size_t width,
+                             size_t first, unsigned count, unsigned log_rows, bool reverse_rows,
+                             uint64_t* __restrict__ values) {
+    const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t row = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; row < rows; row += stride) {
+        const size_t out_row = reverse_rows ? reverse_bits(row, log_rows) : row;
+        uint64_t* out = values + out_row * width + first;
+        for (unsigned c = 0; c < count; ++c) out[c] = panel[c * column_stride + row];
+    }
+}
+
+// The panel's gather and scatter by the matrix width.
+cudaError_t gather_panel(const uint64_t* source, size_t height, size_t width, size_t first, size_t count,
+                         size_t column_stride, uint64_t* panel) {
+    if (width < NARROW_MATRIX)
+        gather_rows<<<blocks_for_total(height), PANEL_THREADS, 0, cudaStreamPerThread>>>(
+            source, height, width, first, static_cast<unsigned>(count), column_stride, panel);
+    else
+        gather_tiles<<<tile_grid(height, count), dim3(TILE, TILE_ROWS), 0, cudaStreamPerThread>>>(
+            source, height, width, first, count, column_stride, panel);
+    return cudaGetLastError();
+}
+
+cudaError_t scatter_panel(const uint64_t* panel, size_t rows, size_t column_stride, size_t width, size_t first,
+                          size_t count, unsigned log_rows, bool reverse_rows, uint64_t* values) {
+    if (width < NARROW_MATRIX)
+        scatter_rows<<<blocks_for_total(rows), PANEL_THREADS, 0, cudaStreamPerThread>>>(
+            panel, rows, column_stride, width, first, static_cast<unsigned>(count), log_rows, reverse_rows, values);
+    else
+        scatter_tiles<<<tile_grid(rows, count), dim3(TILE, TILE_ROWS), 0, cudaStreamPerThread>>>(
+            panel, rows, column_stride, width, first, count, log_rows, reverse_rows, values);
+    return cudaGetLastError();
+}
+
+// powers[rev(i)] for i < 2^log: the coset powers in the order the
+// bit-reversed coefficients meet them.
+__global__ void reverse_powers(const uint64_t* __restrict__ powers, size_t count, unsigned log,
+                               uint64_t* __restrict__ reversed) {
+    const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < count; i += stride)
+        reversed[i] = powers[reverse_bits(i, log)];
+}
+
+// The expansion: bit-reversed coefficients A[c][i] (height per column)
+// become the bit-reversed input of the forward transform over the extended
+// height, B[c][i << added_bits] = A[c][i] * shift^rev(i), zero elsewhere,
+// so a forward RN transform yields natural-order evaluations of the coset.
+// One column per grid row, rows coalesced along the block.
+__global__ void spread_columns(const uint64_t* __restrict__ coefficients, const uint64_t* __restrict__ reversed_powers,
+                               size_t height, size_t extended_height, unsigned added_bits,
+                               uint64_t* __restrict__ panel) {
+    const size_t column = blockIdx.y;
+    const size_t mask = (size_t(1) << added_bits) - 1;
+    const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t j = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; j < extended_height; j += stride) {
+        uint64_t value = 0;
+        if ((j & mask) == 0) {
+            const size_t i = j >> added_bits;
+            value = multi_stark_cuda::goldilocks_mul(coefficients[column * height + i], reversed_powers[i]);
+        }
+        panel[column * extended_height + j] = value;
     }
 }
 
@@ -265,18 +377,68 @@ bool within_domain(size_t height, size_t added_bits) {
 // keeps the reuse between stages that one column at a time had, while
 // short columns still share launches. MULTI_STARK_SPPARK_BATCH_BYTES
 // overrides the device's L2 size; 0 launches every column on its own.
-size_t batch_group_bytes(int device) {
-    const unsigned long long setting = decimal_setting("MULTI_STARK_SPPARK_BATCH_BYTES", ~0ull);
-    if (setting != ~0ull) return static_cast<size_t>(setting);
+size_t l2_bytes(int device) {
     int l2 = 0;
     if (cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, device) != cudaSuccess || l2 <= 0)
         l2 = 64 << 20;
     return static_cast<size_t>(l2);
 }
 
+size_t batch_group_bytes(int device) {
+    const unsigned long long setting = decimal_setting("MULTI_STARK_SPPARK_BATCH_BYTES", ~0ull);
+    return setting != ~0ull ? static_cast<size_t>(setting) : l2_bytes(device);
+}
+
+// Whether a panel's expansion feeds the forward transform in bit-reversed
+// order with the row permutation in the scatter (fused), or restores the
+// coefficient order first and scatters naturally. Measured on the RTX PRO
+// 6000, the fused expansion saves the restoring pass but its reversing
+// scatter costs as much on wide panels and more on tall narrow ones, so
+// restoring is the default. MULTI_STARK_SPPARK_FUSED: 1 always, 2 for
+// compact panels beyond the L2 cache, otherwise never.
+bool fused_expansion(int device, size_t compact_panel_bytes) {
+    switch (decimal_setting("MULTI_STARK_SPPARK_FUSED", 0)) {
+        case 1: return true;
+        case 2: return compact_panel_bytes > l2_bytes(device);
+        default: return false;
+    }
+}
+
+// MULTI_STARK_SPPARK_STAGE_TIMING=1 prints the stage times of every coset
+// LDE to stderr: events on the caller's stream around each stage, which
+// the transforms are fenced to, and one synchronization per LDE.
+struct StageTimer {
+    static constexpr int STAGES = 5;
+    bool enabled = decimal_setting("MULTI_STARK_SPPARK_STAGE_TIMING", 0) != 0;
+    cudaEvent_t marks[STAGES + 1] = {};
+    StageTimer() {
+        if (!enabled) return;
+        for (auto& mark : marks)
+            if (cudaEventCreate(&mark) != cudaSuccess) enabled = false;
+    }
+    ~StageTimer() {
+        for (auto mark : marks)
+            if (mark) cudaEventDestroy(mark);
+    }
+    void mark(int stage) {
+        if (enabled) cudaEventRecord(marks[stage], cudaStreamPerThread);
+    }
+    void report(size_t height, size_t width, size_t added_bits) {
+        if (!enabled || cudaEventSynchronize(marks[STAGES]) != cudaSuccess) return;
+        static const char* const names[STAGES] = {"gather", "inverse", "spread", "forward", "scatter"};
+        fprintf(stderr, "sppark lde height=%zu width=%zu added_bits=%zu", height, width, added_bits);
+        for (int stage = 0; stage < STAGES; ++stage) {
+            float ms = 0;
+            cudaEventElapsedTime(&ms, marks[stage], marks[stage + 1]);
+            fprintf(stderr, " %s=%.3f", names[stage], ms);
+        }
+        fprintf(stderr, "\n");
+    }
+};
+
 // The `count` columns of a panel, `stride` elements apart, through batched
 // launch sequences of as many columns as the group budget holds.
-int transform_columns(int device, uint64_t* panel, uint32_t lg, int direction, size_t count,
+int transform_columns(int device, uint64_t* panel, uint32_t lg, int order, int direction, size_t count,
                       size_t stride) {
     if (lg == 0) return 0;
     const size_t column_bytes = (size_t(1) << lg) * sizeof(uint64_t);
@@ -285,7 +447,7 @@ int transform_columns(int device, uint64_t* panel, uint32_t lg, int direction, s
     int result = 0;
     for (size_t first = 0; result == 0 && first < count; first += group) {
         const size_t batch = count - first < group ? count - first : group;
-        result = multi_stark_sppark_ntt_batch_device(device, panel + first * stride, lg, 1, direction, 0,
+        result = multi_stark_sppark_ntt_batch_device(device, panel + first * stride, lg, order, direction, 0,
                                                      static_cast<uint32_t>(batch), stride);
     }
     return result;
@@ -339,12 +501,12 @@ extern "C" int multi_stark_sppark_takes_forward(size_t height, size_t width) {
 }
 
 // The scratch the sppark path allocates for one LDE: the compact and the
-// extended panel of the columns the budget admits. Zero when the shape
-// does not take the path.
+// extended panel of the columns the budget admits, and the reversed coset
+// powers. Zero when the shape does not take the path.
 extern "C" size_t multi_stark_sppark_panel_bytes(size_t height, size_t width, size_t added_bits) {
     if (!multi_stark_sppark_takes_lde(height, width, added_bits)) return 0;
     const size_t column_bytes = (height + (height << added_bits)) * sizeof(uint64_t);
-    return panel_columns(width, column_bytes) * column_bytes;
+    return panel_columns(width, column_bytes) * column_bytes + height * sizeof(uint64_t);
 }
 
 // The scratch the sppark path allocates for one forward transform.
@@ -381,28 +543,42 @@ extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, u
     const size_t columns = panel_columns(width, column_bytes);
     if (columns == 0) return static_cast<int>(cudaErrorInvalidValue);
     uint64_t* scratch = nullptr;
-    status = cudaMalloc(reinterpret_cast<void**>(&scratch), columns * column_bytes);
+    status = cudaMalloc(reinterpret_cast<void**>(&scratch), columns * column_bytes + height * sizeof(uint64_t));
     if (status != cudaSuccess) return static_cast<int>(status);
     uint64_t* a = scratch;
     uint64_t* b = scratch + columns * height;
+    uint64_t* powers = b + columns * extended_height;
     int result = 0;
+    reverse_powers<<<blocks_for_total(height), PANEL_THREADS, 0, cudaStreamPerThread>>>(
+        shift_powers, height, log_height, powers);
+    result = static_cast<int>(cudaGetLastError());
+    StageTimer timer;
     for (size_t first = 0; result == 0 && first < width; first += columns) {
         const size_t count = width - first < columns ? width - first : columns;
-        gather_columns<<<blocks_for_total(height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
-            trace, height, width, first, count, height, a);
-        result = static_cast<int>(cudaGetLastError());
-        if (result == 0) result = transform_columns(device, a, log_height, 1, count, height);
+        timer.mark(0);
+        result = static_cast<int>(gather_panel(trace, height, width, first, count, height, a));
+        timer.mark(1);
+        if (result == 0) result = transform_columns(device, a, log_height, 1, 1, count, height);
+        timer.mark(2);
+        const bool fused = fused_expansion(device, height * count * sizeof(uint64_t));
+        const dim3 column_grid(blocks_for_total(extended_height), static_cast<unsigned>(count));
         if (result == 0) {
-            shift_columns<<<blocks_for_total(extended_height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
-                a, b, height, log_height, extended_height, count, shift_powers);
+            if (fused)
+                spread_columns<<<column_grid, PANEL_THREADS, 0, cudaStreamPerThread>>>(
+                    a, powers, height, extended_height, static_cast<unsigned>(added_bits), b);
+            else
+                shift_columns<<<column_grid, PANEL_THREADS, 0, cudaStreamPerThread>>>(
+                    a, shift_powers, height, log_height, extended_height, b);
             result = static_cast<int>(cudaGetLastError());
         }
-        if (result == 0) result = transform_columns(device, b, log_extended, 0, count, extended_height);
-        if (result == 0) {
-            scatter_columns<<<blocks_for_total(extended_height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
-                b, extended_height, width, first, count, values);
-            result = static_cast<int>(cudaGetLastError());
-        }
+        timer.mark(3);
+        if (result == 0) result = transform_columns(device, b, log_extended, fused ? 2 : 1, 0, count, extended_height);
+        timer.mark(4);
+        if (result == 0)
+            result = static_cast<int>(
+                scatter_panel(b, extended_height, extended_height, width, first, count, log_extended, fused, values));
+        timer.mark(5);
+        if (result == 0) timer.report(height, count, added_bits);
     }
     // The scratch outlives every kernel that reads it: the free is ordered
     // behind them on the same stream.
@@ -430,15 +606,10 @@ extern "C" int multi_stark_sppark_forward(int device, uint64_t* values, size_t h
     int result = 0;
     for (size_t first = 0; result == 0 && first < width; first += columns) {
         const size_t count = width - first < columns ? width - first : columns;
-        gather_columns<<<blocks_for_total(height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
-            values, height, width, first, count, height, panel);
-        result = static_cast<int>(cudaGetLastError());
-        if (result == 0) result = transform_columns(device, panel, log_height, 0, count, height);
-        if (result == 0) {
-            scatter_columns<<<blocks_for_total(height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
-                panel, height, width, first, count, values);
-            result = static_cast<int>(cudaGetLastError());
-        }
+        result = static_cast<int>(gather_panel(values, height, width, first, count, height, panel));
+        if (result == 0) result = transform_columns(device, panel, log_height, 1, 0, count, height);
+        if (result == 0)
+            result = static_cast<int>(scatter_panel(panel, height, height, width, first, count, log_height, false, values));
     }
     const cudaError_t freed = cudaFreeAsync(panel, cudaStreamPerThread);
     if (result == 0) result = static_cast<int>(freed);
