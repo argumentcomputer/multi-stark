@@ -20,6 +20,9 @@ fn main() {
         .map_or(7, |s| s.parse().expect("invalid iteration count"));
     let gpu = CudaDft::default();
     println!("log_height,width,added_bits,iteration,seconds");
+    // The last five are the shapes the profiled Init proofs commit most:
+    // BLAKE3 pieces, wide and narrow IxVM circuits at the height cap, and
+    // the width-2 codewords of the quotient and narrow lookups.
     for (log_height, width, added_bits) in [
         (20, 1, 1),
         (20, 2, 1),
@@ -29,6 +32,11 @@ fn main() {
         (18, 129, 1),
         (16, 925, 1),
         (18, 40, 2),
+        (20, 533, 2),
+        (24, 6, 2),
+        (24, 17, 2),
+        (22, 2, 2),
+        (20, 2, 2),
     ] {
         let height = 1 << log_height;
         let values = (0..height * width)
