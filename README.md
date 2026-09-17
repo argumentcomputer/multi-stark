@@ -120,7 +120,7 @@ is selected at run time:
 | `MULTI_STARK_SPPARK_BATCH_BYTES=<bytes>` | Columns per batched launch sequence, by bytes; defaults to the device's L2 size, 0 launches every column alone |
 | `MULTI_STARK_SPPARK_FUSED=0\|1\|2` | The measured alternative expansion: never (default), always, or for coefficient panels beyond the L2 |
 | `MULTI_STARK_SPPARK_STAGE_TIMING=1` | Print each LDE's gather, inverse, expansion, forward and scatter times to stderr |
-| `AIUR_METRICS=1` with `RUST_LOG=prover_metrics=info` | The snapshot reports dispatches taken and declined per backend and transform shapes per backend |
+| `AIUR_METRICS=<path>` with `RUST_LOG=prover_metrics=info` | Any value enables the counters (Ix writes its lightweight metrics to the path); the snapshot reports dispatches taken and declined per backend and transform shapes per backend |
 
 ```sh
 cargo test --release --features parallel,cuda,cuda-sppark
