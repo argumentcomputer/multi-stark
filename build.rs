@@ -13,6 +13,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=cuda/kernels.cu");
     println!("cargo:rerun-if-changed=cuda/goldilocks.cuh");
+    println!("cargo:rerun-if-changed=cuda/sppark_ntt.cu");
     println!("cargo:rerun-if-env-changed=NVCC");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
@@ -41,6 +42,51 @@ fn main() {
     let library = out_dir.join("libmulti_stark_cuda.a");
     let architectures = cuda_architectures(&nvcc);
 
+    // sppark's units are compiled first, on their own, without the
+    // `_GNU_SOURCE` undefinition below: its runtime includes libstdc++'s
+    // `<mutex>`, whose GNU-only pthread functions that flag would hide. Their
+    // objects then join the archive.
+    let mut sppark_objects = Vec::new();
+    if env::var_os("CARGO_FEATURE_CUDA_SPPARK").is_some() {
+        let root = PathBuf::from(
+            env::var_os("DEP_SPPARK_ROOT").expect("sppark's build script exports DEP_SPPARK_ROOT"),
+        );
+        for (source, object) in [
+            (PathBuf::from("cuda/sppark_ntt.cu"), "sppark_ntt.o"),
+            (root.join("util/all_gpus.cpp"), "sppark_all_gpus.o"),
+        ] {
+            let object = out_dir.join(object);
+            let mut compile = Command::new(&nvcc);
+            compile
+                .arg("-c")
+                .arg("--std=c++17")
+                .arg("--cudart=static")
+                .arg("--default-stream=per-thread")
+                .arg("-O3")
+                .arg("-lineinfo")
+                .arg("--compiler-options=-fPIC")
+                .arg(format!("-I{}", root.display()))
+                .arg("-DFEATURE_GOLDILOCKS")
+                .arg("-o")
+                .arg(&object)
+                .arg(&source);
+            for architecture in &architectures {
+                compile.arg(format!(
+                    "-gencode=arch=compute_{architecture},code=sm_{architecture}"
+                ));
+            }
+            let status = compile
+                .status()
+                .unwrap_or_else(|error| panic!("failed to execute {:?}: {error}", nvcc));
+            assert!(
+                status.success(),
+                "nvcc failed on {} with status {status}",
+                source.display()
+            );
+            sppark_objects.push(object);
+        }
+    }
+
     let mut command = Command::new(&nvcc);
     command
         .arg("--lib")
@@ -61,6 +107,7 @@ fn main() {
         .arg("-o")
         .arg(&library)
         .arg("cuda/kernels.cu");
+    command.args(&sppark_objects);
 
     for architecture in &architectures {
         command.arg(format!(

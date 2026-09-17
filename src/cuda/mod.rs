@@ -7,6 +7,8 @@
 
 pub(crate) mod metrics;
 pub(crate) mod mmcs;
+#[cfg(feature = "cuda-sppark")]
+pub mod sppark;
 #[doc(hidden)]
 pub mod pcs;
 pub(crate) mod witness;
