@@ -1,5 +1,8 @@
 # Resident LDE and wide NTT experiment: 2026-09-11
 
+Historical measurements of the first-party NTT removed in September 2026.
+Current GPU transforms use sppark; see [CUDA acceleration](../README.md#cuda-acceleration).
+
 Base: `ff3237c` (the short-row BLAKE3 change). Same RTX PRO 6000 Blackwell
 Server Edition, CUDA 13.3 / native `sm_120`, and eight Rayon threads as the
 [BLAKE3 experiment](cuda-blake3-short-rows.md). Timings below measure the

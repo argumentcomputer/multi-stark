@@ -296,7 +296,7 @@ struct StageTimer {
     }
     void report(size_t height, size_t width, size_t added_bits) {
         if (!enabled || cudaEventSynchronize(marks[STAGES]) != cudaSuccess) return;
-        static const char* const names[STAGES] = {"gather", "inverse", "spread", "forward", "scatter"};
+        static const char* const names[STAGES] = {"gather", "inverse", "restore", "forward", "scatter"};
         fprintf(stderr, "sppark lde height=%zu width=%zu added_bits=%zu", height, width, added_bits);
         for (int stage = 0; stage < STAGES; ++stage) {
             float ms = 0;

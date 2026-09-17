@@ -171,7 +171,7 @@ impl CudaDft {
                 height,
                 width,
                 added_bits,
-                &plan.raw,
+                plan.raw(),
             )
         };
         check_cuda(status, "resident coset LDE");
@@ -196,7 +196,7 @@ impl CudaDft {
         Self::validate_dimensions(height, 1);
         Self::validate_dimensions(extended_height, 1);
         let plan = self.lde_plan(height, 1, added_bits, shift);
-        let status = unsafe { multi_stark_cuda_prepare_lde_constants(self.device_id, &plan.raw) };
+        let status = unsafe { multi_stark_cuda_prepare_lde_constants(self.device_id, plan.raw()) };
         check_cuda(status, "prepare resident LDE constants");
     }
 }
@@ -330,7 +330,7 @@ impl CudaDft {
                 height,
                 width,
                 added_bits,
-                &plan.raw,
+                plan.raw(),
                 (&mut *context as *mut Generator).cast(),
                 write_generated_trace,
                 destroy_generated_trace,
@@ -1311,8 +1311,8 @@ fn quotient_lde_sources(
                 next_step,
                 quotient_degree,
                 log_blowup,
-                &quotient_plan.raw,
-                &lde_plan.raw,
+                quotient_plan.raw(),
+                lde_plan.raw(),
                 weights.as_ptr().cast(),
             )
         }
@@ -1351,8 +1351,8 @@ fn quotient_lde_sources(
                 next_step,
                 quotient_degree,
                 log_blowup,
-                &quotient_plan.raw,
-                &lde_plan.raw,
+                quotient_plan.raw(),
+                lde_plan.raw(),
                 weights.as_ptr().cast(),
             )
         }
@@ -1767,7 +1767,7 @@ pub(crate) fn lookup_lde_resident(
             gamma.as_ptr().cast(),
             raw_u64(ext_w),
             log_blowup,
-            &plan.raw,
+            plan.raw(),
         )
     };
     check_cuda(status, "resident CUDA lookup LDE");
@@ -1953,7 +1953,7 @@ pub(crate) fn lookup_lde_resident_partitioned(
             pending_handle.as_ptr(),
             &mut handle,
             tail.as_mut_ptr().cast(),
-            &plan.raw,
+            plan.raw(),
         )
     };
     pending.handle = None;
@@ -2036,7 +2036,7 @@ pub(crate) fn lookup_graph_lde_resident(
             gamma.as_ptr().cast(),
             raw_u64(ext_w),
             log_blowup,
-            &plan.raw,
+            plan.raw(),
         )
     };
     check_cuda(status, "resident CUDA graph lookup LDE");
@@ -2138,7 +2138,7 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
                 matrix.values.as_mut_ptr().cast(),
                 height,
                 width,
-                &plan.raw,
+                plan.raw(),
             )
         };
         check_cuda(status, "batched DFT");
@@ -2205,7 +2205,7 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
                 height,
                 width,
                 added_bits,
-                &plan.raw,
+                plan.raw(),
             )
         };
         check_cuda(status, "coset LDE");
