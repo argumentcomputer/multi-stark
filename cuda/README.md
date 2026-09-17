@@ -1,9 +1,9 @@
 # CUDA backend
 
-This directory contains multi-stark's first-party CUDA implementation of
-Goldilocks arithmetic, DFTs, coset low-degree extensions, BLAKE3 Merkle
-commitments, lookup construction, quotient evaluation, and FRI proving. It
-does not use ICICLE or copy code from it.
+This directory contains multi-stark's CUDA prover: Goldilocks arithmetic,
+BLAKE3 Merkle commitments, lookup construction, quotient evaluation, and FRI
+proving. All GPU DFTs and coset low-degree extensions use the pinned sppark
+fork through `sppark_ntt.cu`.
 
 The `cuda` Cargo feature selects `CudaDft` for the production
 `GoldilocksBlake3Config`. BabyBear tests remain on their CPU DFT. Without the
@@ -15,9 +15,10 @@ independent of CUDA.
 The backend preserves Plonky3's public PCS interfaces while keeping the hot
 prover pipeline device-resident:
 
-1. Rust validates dimensions and builds exact P3-compatible twiddle tables.
-2. Trace matrices are uploaded and transformed with fused radix-4/radix-8
-   DIF kernels into resident coset LDEs.
+1. Rust validates dimensions and caches immutable transform plans, including
+   panel scratch, batch groups and coset powers. Admission uses the same plan.
+2. Trace matrices are uploaded and transformed through sppark on the caller's
+   stream into resident coset LDEs.
 3. First-party BLAKE3 kernels commit mixed-height matrices without copying
    LDEs back to the host.
 4. Lookup traces and quotient LDEs are constructed from resident commitments.
@@ -97,8 +98,8 @@ Ix measurements are documented in [`docs/cuda-benchmarks.md`](../docs/cuda-bench
 - CUDA outputs are canonical field representatives.
 - Rust checks power-of-two sizes, two-adicity, integer overflow, and buffer
   lengths before each synchronous FFI call.
-- The CUDA source is licensed under the repository's MIT/Apache-2.0 terms and
-  depends only on the CUDA runtime/toolkit when enabled.
+- First-party CUDA sources use the repository's MIT/Apache-2.0 terms. The
+  sppark dependency retains its own license; see the pinned fork's `LICENSE`.
 - CUDA affects prover execution only. Fields, BLAKE3 hashing, transcripts,
   proof format, and the CPU verifier are unchanged. Canonical representation
   changed newly generated proof bytes relative to pre-CUDA revisions as

@@ -14,6 +14,7 @@ fn main() {
     println!("cargo:rerun-if-changed=cuda/kernels.cu");
     println!("cargo:rerun-if-changed=cuda/goldilocks.cuh");
     println!("cargo:rerun-if-changed=cuda/sppark_ntt.cu");
+    println!("cargo:rerun-if-changed=cuda/ntt.cuh");
     if let Some(root) = env::var_os("DEP_SPPARK_ROOT") {
         let root = PathBuf::from(root);
         println!("cargo:rerun-if-changed={}", root.join("ntt").display());
@@ -52,7 +53,7 @@ fn main() {
     // `<mutex>`, whose GNU-only pthread functions that flag would hide. Their
     // objects then join the archive.
     let mut sppark_objects = Vec::new();
-    if env::var_os("CARGO_FEATURE_CUDA_SPPARK").is_some() {
+    {
         let root = PathBuf::from(
             env::var_os("DEP_SPPARK_ROOT").expect("sppark's build script exports DEP_SPPARK_ROOT"),
         );
@@ -118,9 +119,6 @@ fn main() {
         .arg("-o")
         .arg(&library)
         .arg("cuda/kernels.cu");
-    if !sppark_objects.is_empty() {
-        command.arg("-DMULTI_STARK_SPPARK");
-    }
     command.args(&sppark_objects);
 
     for architecture in &architectures {

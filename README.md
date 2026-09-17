@@ -106,25 +106,31 @@ correctness harness, platform limitations, and benchmark commands.
 
 ### sppark transforms
 
-The `cuda-sppark` feature adds [sppark](https://github.com/argumentcomputer/sppark)'s
-Goldilocks NTT as a second transform backend, pinned to the fork's `dev`
-branch and built in its `SPPARK_NO_CXX_RUNTIME` mode, so the archive links
-without libstdc++. Proofs are byte-identical on either backend. The backend
-is selected at run time:
+Every CUDA build uses [sppark](https://github.com/argumentcomputer/sppark)'s
+Goldilocks NTT, pinned to the fork's `dev` branch. Its borrowed streams keep
+panel allocation, transforms and freeing on the caller's stream. Tiny generic
+host matrices retain the CPU DFT. CPU builds do not depend on sppark or CUDA.
+
+An immutable per-device plan fixes each transform's panel size, launch groups
+and coset powers. Admission and execution share the plan. Dimensions must fit
+the compiled domain (currently 2^28 rows), checked byte arithmetic and at least
+one column within the panel budget; invalid shapes fail before allocation.
 
 | Setting | Effect |
 | --- | --- |
-| `MULTI_STARK_CUDA_NTT=sppark` | Route transforms of at least the threshold height through sppark; unset, the first-party kernels run |
-| `MULTI_STARK_SPPARK_MIN_LOG_HEIGHT=18` | Height threshold; below it the first-party kernels are faster |
-| `MULTI_STARK_SPPARK_PANEL_BYTES=4294967296` | Scratch budget per LDE; a shape whose single column exceeds it stays on the first-party kernels |
-| `MULTI_STARK_SPPARK_BATCH_BYTES=<bytes>` | Columns per batched launch sequence, by bytes; defaults to the device's L2 size, 0 launches every column alone |
-| `MULTI_STARK_SPPARK_FUSED=1` | The measured alternative expansion, feeding the forward transform in bit-reversed order; off by default |
-| `MULTI_STARK_SPPARK_STAGE_TIMING=1` | Print each LDE's gather, inverse, expansion, forward and scatter times to stderr |
-| `AIUR_METRICS=<path>` with `RUST_LOG=prover_metrics=info` | Any value enables the counters (Ix writes its lightweight metrics to the path); the snapshot reports dispatches taken and declined per backend and transform shapes per backend |
+| `MULTI_STARK_SPPARK_PANEL_BYTES=4294967296` | Maximum transform scratch; zero selects the default. A budget smaller than one column is a configuration error |
+| `MULTI_STARK_SPPARK_BATCH_BYTES=<bytes>` | Bytes per batched launch group; defaults to the device's L2 size, zero launches one column at a time |
+| `MULTI_STARK_SPPARK_STAGE_TIMING=1` | Print each panel's gather, inverse, expansion, forward and scatter times; synchronizes each measured panel |
+| `AIUR_METRICS=<path>` with `RUST_LOG=prover_metrics=info` | Enables lightweight per-device transform-shape counters; Ix writes them to the selected metrics file |
+
+Panel and batching settings are captured when the device DFT is constructed.
+There is no backend selector, height threshold or alternative expansion mode.
+The fork's `SPPARK_NO_CXX_RUNTIME` mode aborts on CUDA errors with diagnostics;
+normal ix builds also abort on Rust panics.
 
 ```sh
-cargo test --release --features parallel,cuda,cuda-sppark
-MULTI_STARK_CUDA_NTT=sppark cargo run --release --features parallel,cuda,cuda-sppark --example cuda_resident_lde_bench
+cargo test --release --features parallel,cuda --lib cuda::sppark::tests::
+MULTI_STARK_CUDA_BENCH_SHAPES="20,533,2" cargo run --release --features parallel,cuda --example cuda_resident_lde_bench
 ```
 
 ## License

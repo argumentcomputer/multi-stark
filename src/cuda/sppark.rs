@@ -1,5 +1,5 @@
 //! sppark's Goldilocks NTT through the device-pointer adapter in
-//! `cuda/sppark_ntt.cu`: the comparison backend behind `cuda-sppark`.
+//! `cuda/sppark_ntt.cu`, with shared immutable transform plans.
 //!
 //! The contracts the prover relies on, checked by the tests below against
 //! the CPU reference: a forward transform in natural order equals the DFT,
@@ -14,6 +14,170 @@ use core::ffi::c_int;
 use p3_goldilocks::Goldilocks;
 
 use super::check_cuda;
+
+/// The allocation and launch shape shared by admission and CUDA execution.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct RawPlan {
+    pub height: usize,
+    pub width: usize,
+    pub extended_height: usize,
+    pub columns: usize,
+    pub inverse_group: usize,
+    pub forward_group: usize,
+    pub scratch_bytes: usize,
+    pub shift_powers: *const u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct TransformPlan {
+    pub raw: RawPlan,
+    powers: Option<std::sync::Arc<[Goldilocks]>>,
+}
+
+// SAFETY: the pointer references immutable host powers owned by this plan.
+// CUDA entry points borrow it only for their synchronous host-side upload.
+unsafe impl Send for TransformPlan {}
+unsafe impl Sync for TransformPlan {}
+
+impl TransformPlan {
+    pub(crate) fn scratch_bytes(&self) -> usize {
+        self.raw.scratch_bytes
+    }
+
+    pub(crate) fn constant_bytes(&self) -> usize {
+        self.powers.as_ref().map_or(0, |powers| powers.len() * 8)
+    }
+}
+
+type PlanKey = (usize, usize, usize, Option<u64>);
+type PowerCache = std::collections::BTreeMap<(usize, u64), std::sync::Arc<[Goldilocks]>>;
+
+#[derive(Default, Debug)]
+struct Plans {
+    shapes: std::collections::BTreeMap<PlanKey, std::sync::Arc<TransformPlan>>,
+    powers: PowerCache,
+}
+
+/// Immutable per-device settings and shared plans; environment changes cannot
+/// change the workspace between admission and execution of a transform.
+#[derive(Clone, Debug)]
+pub(crate) struct Planner {
+    panel_bytes: usize,
+    batch_bytes: usize,
+    plans: std::sync::Arc<std::sync::RwLock<Plans>>,
+}
+
+impl Planner {
+    pub(crate) fn new(device: i32) -> Self {
+        fn setting(name: &str) -> Option<usize> {
+            std::env::var(name).ok().map(|value| {
+                value
+                    .parse()
+                    .unwrap_or_else(|_| panic!("{name} must be a non-negative byte count"))
+            })
+        }
+        let mut l2_bytes = 0;
+        check_cuda(
+            unsafe { multi_stark_sppark_l2_bytes(device, &mut l2_bytes) },
+            "NTT device properties",
+        );
+        Self::with_budgets(
+            setting("MULTI_STARK_SPPARK_PANEL_BYTES")
+                .filter(|&n| n != 0)
+                .unwrap_or(4usize << 30),
+            setting("MULTI_STARK_SPPARK_BATCH_BYTES").unwrap_or(l2_bytes),
+        )
+    }
+
+    pub(crate) fn with_budgets(panel_bytes: usize, batch_bytes: usize) -> Self {
+        Self {
+            panel_bytes,
+            batch_bytes,
+            plans: Default::default(),
+        }
+    }
+
+    pub(crate) fn plan(
+        &self,
+        height: usize,
+        width: usize,
+        added_bits: usize,
+        shift: Option<Goldilocks>,
+    ) -> std::sync::Arc<TransformPlan> {
+        use p3_field::{PrimeCharacteristicRing, PrimeField64};
+        use std::sync::Arc;
+        assert!(
+            height.is_power_of_two(),
+            "NTT height must be a power of two"
+        );
+        assert!(width > 0, "NTT width must be positive");
+        let log = height.trailing_zeros() as usize;
+        assert!(
+            added_bits <= max_log_domain() && log + added_bits <= max_log_domain(),
+            "NTT exceeds sppark's compiled domain"
+        );
+        assert!(shift.is_some() || added_bits == 0);
+        let extended_height = height << added_bits;
+        extended_height
+            .checked_mul(width)
+            .and_then(|n| n.checked_mul(8))
+            .expect("NTT matrix byte count overflows usize");
+        let column_bytes = extended_height
+            .checked_add(if shift.is_some() { height } else { 0 })
+            .and_then(|n| n.checked_mul(8))
+            .expect("NTT column byte count overflows usize");
+        assert!(
+            column_bytes <= self.panel_bytes,
+            "MULTI_STARK_SPPARK_PANEL_BYTES cannot hold one NTT column: need {column_bytes} bytes, budget {}",
+            self.panel_bytes
+        );
+        let key = (
+            height,
+            width,
+            added_bits,
+            shift.map(|s| s.as_canonical_u64()),
+        );
+        if let Some(plan) = self
+            .plans
+            .read()
+            .expect("NTT plan cache poisoned")
+            .shapes
+            .get(&key)
+        {
+            return Arc::clone(plan);
+        }
+        let mut cache = self.plans.write().expect("NTT plan cache poisoned");
+        if let Some(plan) = cache.shapes.get(&key) {
+            return Arc::clone(plan);
+        }
+        let powers = shift.map(|shift| {
+            Arc::clone(
+                cache
+                    .powers
+                    .entry((height, shift.as_canonical_u64()))
+                    .or_insert_with(|| shift.powers().take(height).collect().into()),
+            )
+        });
+        let columns = (self.panel_bytes / column_bytes).min(width).min(65535);
+        let group = |rows: usize| (self.batch_bytes / (rows * 8)).max(1).min(columns);
+        let raw = RawPlan {
+            height,
+            width,
+            extended_height,
+            columns,
+            inverse_group: group(height),
+            forward_group: group(extended_height),
+            scratch_bytes: columns * column_bytes,
+            shift_powers: powers
+                .as_ref()
+                .map_or(core::ptr::null(), |p| p.as_ptr().cast()),
+        };
+        let plan = Arc::new(TransformPlan { raw, powers });
+        cache.shapes.insert(key, Arc::clone(&plan));
+        plan
+    }
+}
 
 /// `NTT::InputOutputOrder`: whether the input and the output are in natural
 /// (`N`) or bit-reversed (`R`) order.
@@ -35,14 +199,10 @@ pub enum Direction {
 
 unsafe extern "C" {
     fn multi_stark_sppark_max_lg_domain() -> c_int;
-    fn multi_stark_sppark_backend_selected() -> c_int;
-    fn multi_stark_sppark_select_backend(selected: c_int);
-    fn multi_stark_sppark_takes(height: usize) -> c_int;
+    fn multi_stark_sppark_l2_bytes(device: c_int, bytes: *mut usize) -> c_int;
+    #[cfg(test)]
+    fn multi_stark_sppark_borrowed_round_trip(device: c_int, values: *mut u64, lg: u32) -> c_int;
     fn multi_stark_sppark_transforms_run() -> u64;
-    fn multi_stark_sppark_takes_lde(height: usize, width: usize, added_bits: usize) -> c_int;
-    fn multi_stark_sppark_takes_forward(height: usize, width: usize) -> c_int;
-    fn multi_stark_sppark_panel_bytes(height: usize, width: usize, added_bits: usize) -> usize;
-    fn multi_stark_sppark_forward_panel_bytes(height: usize, width: usize) -> usize;
     fn multi_stark_sppark_ntt_device(
         device: c_int,
         d_inout: *mut u64,
@@ -71,78 +231,9 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
-/// Whether the prover's resident LDEs take the sppark path: selected by
-/// `MULTI_STARK_CUDA_NTT=sppark` or by [`select_backend`].
-pub fn backend_selected() -> bool {
-    unsafe { multi_stark_sppark_backend_selected() != 0 }
-}
-
-/// Which transforms take the sppark path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Backend {
-    /// The first-party kernels only.
-    Legacy,
-    /// sppark for LDEs at or above the height threshold
-    /// (`MULTI_STARK_SPPARK_MIN_LOG_HEIGHT`, 18), where the panel path
-    /// wins; the first-party kernels below it.
-    Sppark,
-    /// sppark at every height: for comparing the paths on small shapes.
-    SpparkAllHeights,
-}
-
-/// Selects the backend for the rest of the process. Comparisons in one
-/// process switch between constructions; concurrent constructions all see
-/// the latest value.
-pub fn select_backend(backend: Backend) {
-    let flag = match backend {
-        Backend::Legacy => 0,
-        Backend::Sppark => 1,
-        Backend::SpparkAllHeights => 2,
-    };
-    unsafe { multi_stark_sppark_select_backend(flag) }
-}
-
-/// How many transforms the adapter has run in this process.
+/// Number of transform operations launched, including identity shapes.
 pub fn transforms_run() -> u64 {
     unsafe { multi_stark_sppark_transforms_run() }
-}
-
-/// Whether a transform of `height` input rows is tall enough for the sppark
-/// path; the shape rules below decide a dispatch.
-pub fn takes(height: usize) -> bool {
-    unsafe { multi_stark_sppark_takes(height) != 0 }
-}
-
-/// Whether a resident coset LDE of the shape takes the sppark path: tall
-/// enough, within upstream's compiled domain after expansion, and one
-/// column's scratch within the panel budget.
-pub fn takes_lde(height: usize, width: usize, added_bits: usize) -> bool {
-    unsafe { multi_stark_sppark_takes_lde(height, width, added_bits) != 0 }
-}
-
-/// Whether a forward transform of the shape takes the sppark path.
-pub fn takes_forward(height: usize, width: usize) -> bool {
-    unsafe { multi_stark_sppark_takes_forward(height, width) != 0 }
-}
-
-/// The scratch one forward transform of the shape allocates on the sppark
-/// path; zero when the shape stays on the first-party kernels.
-pub fn forward_panel_bytes(height: usize, width: usize) -> usize {
-    unsafe { multi_stark_sppark_forward_panel_bytes(height, width) }
-}
-
-/// Serializes tests that switch the process-wide backend, so a comparison
-/// sees the backend it selected on both of its constructions.
-#[cfg(test)]
-pub(crate) fn backend_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// The scratch the sppark path allocates for that LDE, to admit alongside
-/// the trace and the LDE; zero when the first-party kernels take it.
-pub fn panel_bytes(height: usize, width: usize, added_bits: usize) -> usize {
-    unsafe { multi_stark_sppark_panel_bytes(height, width, added_bits) }
 }
 
 /// The largest log domain size the compiled upstream parameters support.
@@ -279,6 +370,7 @@ mod tests {
     use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
     use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
     use p3_matrix::Matrix;
+    use p3_matrix::bitrev::BitReversibleMatrix;
     use p3_matrix::dense::RowMajorMatrix;
     use p3_util::reverse_slice_index_bits;
     use rand::{RngExt, SeedableRng, rngs::SmallRng};
@@ -333,51 +425,25 @@ mod tests {
         assert_eq!(values, input);
     }
 
-    /// One resident LDE both ways, comparing stored words and the Merkle root
-    /// of a commitment over the matrix.
-    fn resident_lde_both_ways(
+    fn resident_matches_cpu(
+        dft: &super::super::CudaDft,
         matrix: &RowMajorMatrix<Goldilocks>,
         added_bits: usize,
         shift: Goldilocks,
     ) {
-        let dft = super::super::CudaDft::new(0);
-        select_backend(Backend::Legacy);
-        let legacy = dft.coset_lde_batch_resident(matrix, added_bits, shift);
-        let legacy_rows = legacy.to_row_major_matrix();
-        select_backend(Backend::SpparkAllHeights);
-        let candidate = dft.coset_lde_batch_resident(matrix, added_bits, shift);
-        let candidate_rows = candidate.to_row_major_matrix();
-        select_backend(Backend::Legacy);
-        assert_eq!(
-            raw_words(&candidate_rows.values),
-            raw_words(&legacy_rows.values),
-            "height {} width {} blowup {added_bits}",
-            matrix.height(),
-            matrix.width()
-        );
+        let expected = Radix2DitParallel::<Goldilocks>::default()
+            .coset_lde_batch(matrix.clone(), added_bits, shift)
+            .bit_reverse_rows()
+            .to_row_major_matrix();
+        let actual = dft
+            .coset_lde_batch_resident(matrix, added_bits, shift)
+            .to_row_major_matrix();
+        assert_eq!(actual, expected);
+        assert_canonical(&actual.values, "resident LDE");
     }
 
     #[test]
-    fn resident_lde_matches_the_first_party_kernels_bit_for_bit() {
-        let _guard = backend_lock();
-        let mut rng = SmallRng::seed_from_u64(0x1de5);
-        for log_height in [0usize, 1, 2, 5, 8, 12, 14] {
-            for added_bits in [0usize, 1, 2, 3] {
-                for width in [1usize, 2, 3, 7, 8, 33] {
-                    let height = 1 << log_height;
-                    let matrix = RowMajorMatrix::new(
-                        (0..height * width).map(|_| rng.random()).collect(),
-                        width,
-                    );
-                    resident_lde_both_ways(&matrix, added_bits, Goldilocks::GENERATOR);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn resident_lde_reduces_raw_representatives_like_the_first_party_kernels() {
-        let _guard = backend_lock();
+    fn resident_lde_reduces_raw_representatives() {
         let p = Goldilocks::ORDER_U64;
         let words = [0u64, 1, p - 1, p, p + 1, u64::MAX, 7, p + 7];
         let height = 1usize << 10;
@@ -391,86 +457,25 @@ mod tests {
             Goldilocks::ONE,
             Goldilocks::from_u64(11),
         ] {
-            resident_lde_both_ways(&RowMajorMatrix::new(values.clone(), width), 2, shift);
+            resident_matches_cpu(
+                &super::super::CudaDft::new(0),
+                &RowMajorMatrix::new(values.clone(), width),
+                2,
+                shift,
+            );
         }
     }
 
     #[test]
-    fn resident_lde_panels_narrower_than_the_matrix_cover_every_column() {
-        let _guard = backend_lock();
-        // A 2^12 x 33 matrix at blowup 2 needs 16 KiB x 2 per column, so a
-        // 256 KiB budget forces panels of a few columns.
+    fn panel_and_batch_boundaries_match_cpu_without_global_settings() {
         let mut rng = SmallRng::seed_from_u64(0x9a7e);
-        let previous = std::env::var("MULTI_STARK_SPPARK_PANEL_BYTES").ok();
-        unsafe { std::env::set_var("MULTI_STARK_SPPARK_PANEL_BYTES", "262144") };
         let matrix = RowMajorMatrix::new((0..(1 << 12) * 33).map(|_| rng.random()).collect(), 33);
-        resident_lde_both_ways(&matrix, 2, Goldilocks::GENERATOR);
-        match previous {
-            Some(value) => unsafe { std::env::set_var("MULTI_STARK_SPPARK_PANEL_BYTES", value) },
-            None => unsafe { std::env::remove_var("MULTI_STARK_SPPARK_PANEL_BYTES") },
-        }
-    }
-
-    #[test]
-    fn general_dft_matches_the_first_party_kernels_bit_for_bit() {
-        let _guard = backend_lock();
-        // Shapes above the CUDA DFT threshold of 2^15 cells.
-        let mut rng = SmallRng::seed_from_u64(0xdf7);
-        let dft = super::super::CudaDft::new(0);
-        for (log_height, width) in [(15usize, 1usize), (12, 8), (10, 33), (16, 2), (11, 129)] {
-            let matrix = RowMajorMatrix::new(
-                (0..(1 << log_height) * width)
-                    .map(|_| rng.random())
-                    .collect(),
-                width,
-            );
-            select_backend(Backend::Legacy);
-            let legacy = dft.dft_batch(matrix.clone()).to_row_major_matrix();
-            select_backend(Backend::SpparkAllHeights);
-            let candidate = dft.dft_batch(matrix).to_row_major_matrix();
-            select_backend(Backend::Legacy);
-            assert_eq!(
-                raw_words(&candidate.values),
-                raw_words(&legacy.values),
-                "2^{log_height} x {width}"
-            );
-        }
-    }
-
-    #[test]
-    fn host_coset_lde_matches_the_first_party_kernels_bit_for_bit() {
-        let _guard = backend_lock();
-        // The host entry takes matrices of width at most two whose extended
-        // height reaches 2^15.
-        let mut rng = SmallRng::seed_from_u64(0x1e5);
-        let dft = super::super::CudaDft::new(0);
-        let generator = Goldilocks::GENERATOR;
-        for (log_height, width, added_bits) in [
-            (14usize, 1usize, 1usize),
-            (14, 2, 2),
-            (15, 2, 3),
-            (16, 1, 1),
-        ] {
-            let matrix = RowMajorMatrix::new(
-                (0..(1 << log_height) * width)
-                    .map(|_| rng.random())
-                    .collect(),
-                width,
-            );
-            select_backend(Backend::Legacy);
-            let legacy = dft
-                .coset_lde_batch(matrix.clone(), added_bits, generator)
-                .to_row_major_matrix();
-            select_backend(Backend::SpparkAllHeights);
-            let candidate = dft
-                .coset_lde_batch(matrix, added_bits, generator)
-                .to_row_major_matrix();
-            select_backend(Backend::Legacy);
-            assert_eq!(
-                raw_words(&candidate.values),
-                raw_words(&legacy.values),
-                "2^{log_height} x {width} blowup {added_bits}"
-            );
+        for batch_bytes in [0, 64 << 10, 64 << 20] {
+            let mut dft = super::super::CudaDft::new(0);
+            dft.planner = Planner::with_budgets(256 << 10, batch_bytes);
+            let plan = dft.lde_plan(matrix.height(), matrix.width(), 2, Goldilocks::GENERATOR);
+            assert!(plan.raw.columns < matrix.width());
+            resident_matches_cpu(&dft, &matrix, 2, Goldilocks::GENERATOR);
         }
     }
 
@@ -507,67 +512,45 @@ mod tests {
         }
     }
 
-    /// With column batching switched off the panel path launches its
-    /// columns one by one and still matches the first-party kernels.
     #[test]
-    fn unbatched_columns_match_the_first_party_kernels() {
-        let _guard = backend_lock();
-        let previous = std::env::var("MULTI_STARK_SPPARK_BATCH_BYTES").ok();
-        unsafe { std::env::set_var("MULTI_STARK_SPPARK_BATCH_BYTES", "0") };
-        let mut rng = SmallRng::seed_from_u64(0x0ff);
-        for (log_height, width, added_bits) in [(10usize, 5usize, 2usize), (12, 33, 1), (8, 3, 3)] {
-            let matrix = RowMajorMatrix::new(
-                (0..(1 << log_height) * width)
-                    .map(|_| rng.random())
-                    .collect(),
-                width,
+    fn plan_reuses_constants_and_rejects_unrepresentable_shapes() {
+        use std::sync::Arc;
+        let planner = Planner::with_budgets(256 << 10, 64 << 10);
+        let plan = planner.plan(1 << 12, 33, 2, Some(Goldilocks::GENERATOR));
+        assert!(Arc::ptr_eq(
+            &plan,
+            &planner.plan(1 << 12, 33, 2, Some(Goldilocks::GENERATOR))
+        ));
+        assert!(plan.scratch_bytes() <= 256 << 10);
+        let narrow = planner.plan(1 << 12, 1, 2, Some(Goldilocks::GENERATOR));
+        assert_eq!(plan.raw.shift_powers, narrow.raw.shift_powers);
+        for (height, width, bits) in [
+            (1 << 29, 1, 0),
+            (1 << 24, 1, 5),
+            (1 << 20, 1, 2),
+            (2, usize::MAX, 0),
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| planner.plan(
+                    height,
+                    width,
+                    bits,
+                    Some(Goldilocks::ONE)
+                ))
+                .is_err()
             );
-            resident_lde_both_ways(&matrix, added_bits, Goldilocks::GENERATOR);
-        }
-        match previous {
-            Some(value) => unsafe { std::env::set_var("MULTI_STARK_SPPARK_BATCH_BYTES", value) },
-            None => unsafe { std::env::remove_var("MULTI_STARK_SPPARK_BATCH_BYTES") },
         }
     }
 
     #[test]
-    fn the_height_threshold_and_the_panel_budget_decide_dispatch_and_scratch() {
-        let _guard = backend_lock();
-        select_backend(Backend::Sppark);
-        assert!(
-            !takes(1 << 12),
-            "short transforms stay on the first-party kernels"
+    fn borrowed_stream_preserves_order_and_caller_ownership() {
+        let mut values = random(12, 0xb0770);
+        let expected = values.clone();
+        check_cuda(
+            unsafe { multi_stark_sppark_borrowed_round_trip(0, values.as_mut_ptr().cast(), 12) },
+            "borrowed stream round trip",
         );
-        assert!(!takes(1 << 17));
-        assert!(takes(1 << 18));
-        assert!(takes(1 << 20));
-        assert!(takes_lde(1 << 20, 533, 2));
-        assert!(takes_forward(1 << 20, 2));
-        assert!(
-            !takes_lde(1 << 24, 6, 5),
-            "2^29 output rows are beyond the compiled domain"
-        );
-        assert!(!takes_forward(1 << 29, 2));
-        assert_eq!(panel_bytes(1 << 12, 533, 2), 0);
-        assert_eq!(panel_bytes(1 << 24, 6, 5), 0);
-        // A forward transform's panel is one column set at the height.
-        assert_eq!(forward_panel_bytes(1 << 22, 2), 2 * (1 << 22) * 8);
-        // 2^20 rows, 533 columns, blowup 4: (2^20 + 2^22) x 8 bytes per
-        // column is 40 MiB, so a 4 GiB budget admits 102 columns, and the
-        // bit-reversed feed's reversed powers when that expansion is on.
-        let column_bytes = ((1 << 20) + (1 << 22)) * 8;
-        let extra = if std::env::var("MULTI_STARK_SPPARK_FUSED").as_deref() == Ok("1") {
-            (1 << 20) * 8
-        } else {
-            0
-        };
-        assert_eq!(panel_bytes(1 << 20, 533, 2), 102 * column_bytes + extra);
-        assert!(panel_bytes(1 << 20, 533, 2) <= 4 << 30);
-        select_backend(Backend::SpparkAllHeights);
-        assert!(takes(2));
-        select_backend(Backend::Legacy);
-        assert!(!takes(1 << 24));
-        assert_eq!(panel_bytes(1 << 24, 6, 2), 0);
+        assert_eq!(values, expected);
     }
 
     #[test]

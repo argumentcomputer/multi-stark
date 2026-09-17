@@ -54,8 +54,7 @@ fn main() {
         (24, 17, 2),
         (22, 2, 2),
         (20, 2, 2),
-        // Short shapes below the sppark height threshold: the aggregation
-        // circuits' tables and narrow lookup and quotient codewords.
+        // Short aggregation tables and narrow lookup and quotient codewords.
         (8, 20, 2),
         (10, 33, 2),
         (12, 8, 2),
