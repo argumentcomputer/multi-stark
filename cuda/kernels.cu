@@ -475,12 +475,60 @@ struct ResidentMixedMerkleTree {
 // copy costs one host memcpy per chunk. Slots are leased under a mutex and
 // callers wait for a free one, which bounds concurrent uploads to the slot
 // count (the PCIe link is shared anyway).
+// A slot is a ring of chunks, each with the event of its last transfer, so
+// the host copy of one chunk overlaps the DMA of the chunks before it.
 constexpr size_t UPLOAD_STAGING_SLOTS = 4;
 constexpr size_t UPLOAD_STAGING_BYTES = size_t(64) << 20;
+constexpr size_t UPLOAD_STAGING_RING = 4;
+constexpr size_t UPLOAD_STAGING_CHUNK = UPLOAD_STAGING_BYTES / UPLOAD_STAGING_RING;
 uint64_t* upload_staging[MAX_CUDA_DEVICES][UPLOAD_STAGING_SLOTS] = {{nullptr}};
+cudaEvent_t upload_staging_events[MAX_CUDA_DEVICES][UPLOAD_STAGING_SLOTS][UPLOAD_STAGING_RING] = {{{nullptr}}};
 bool upload_staging_in_use[MAX_CUDA_DEVICES][UPLOAD_STAGING_SLOTS] = {{false}};
 pthread_mutex_t upload_staging_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t upload_staging_cond = PTHREAD_COND_INITIALIZER;
+
+// One thread copies into pinned memory at a fraction of the PCIe rate, so a
+// serial copy, not the DMA, would bound a staged upload; large chunks are
+// copied by a few threads.
+struct MemcpyPart {
+    unsigned char* destination;
+    const unsigned char* source;
+    size_t bytes;
+};
+
+void* memcpy_part(void* argument) {
+    const auto* part = static_cast<const MemcpyPart*>(argument);
+    memcpy(part->destination, part->source, part->bytes);
+    return nullptr;
+}
+
+// pthreads rather than std::thread: the executable is linked by the Lean
+// toolchain without the C++ runtime library.
+void parallel_memcpy(void* destination, const void* source, size_t bytes) {
+    constexpr size_t THREADS = 4;
+    constexpr size_t MIN_PARALLEL = size_t(8) << 20;
+    if (bytes < MIN_PARALLEL) {
+        memcpy(destination, source, bytes);
+        return;
+    }
+    const size_t part = (bytes + THREADS - 1) / THREADS;
+    auto* dst = static_cast<unsigned char*>(destination);
+    const auto* src = static_cast<const unsigned char*>(source);
+    MemcpyPart parts[THREADS];
+    pthread_t workers[THREADS];
+    bool started[THREADS] = {false};
+    for (size_t t = 1; t < THREADS; ++t) {
+        const size_t offset = t * part;
+        if (offset >= bytes) break;
+        parts[t] = {dst + offset, src + offset, std::min(part, bytes - offset)};
+        started[t] = pthread_create(&workers[t], nullptr, memcpy_part, &parts[t]) == 0;
+        if (!started[t]) memcpy_part(&parts[t]);
+    }
+    memcpy(dst, src, std::min(part, bytes));
+    for (size_t t = 1; t < THREADS; ++t) {
+        if (started[t]) pthread_join(workers[t], nullptr);
+    }
+}
 
 // Copies `bytes` of pageable host memory to the device on the per-thread
 // stream through a leased staging slot; returns with the copy complete.
@@ -503,24 +551,38 @@ cudaError_t staged_upload(void* device, const void* host, size_t bytes) {
     }
     in_use[slot] = true;
     cudaError_t status = cudaSuccess;
+    cudaEvent_t* events = upload_staging_events[device_index][slot];
     if (slots[slot] == nullptr) {
         status = cudaMallocHost(reinterpret_cast<void**>(&slots[slot]),
                                 UPLOAD_STAGING_BYTES);
         if (status != cudaSuccess) slots[slot] = nullptr;
+        for (size_t i = 0; status == cudaSuccess && i < UPLOAD_STAGING_RING; ++i) {
+            status = cudaEventCreateWithFlags(&events[i], cudaEventDisableTiming);
+        }
     }
     pthread_mutex_unlock(&upload_staging_mutex);
-    uint64_t* staging = slots[slot];
+    auto* staging = reinterpret_cast<unsigned char*>(slots[slot]);
     if (status == cudaSuccess) {
         const auto* source = static_cast<const unsigned char*>(host);
         auto* target = static_cast<unsigned char*>(device);
+        size_t index = 0;
         for (size_t offset = 0; offset < bytes && status == cudaSuccess;
-             offset += UPLOAD_STAGING_BYTES) {
-            const size_t chunk = std::min(UPLOAD_STAGING_BYTES, bytes - offset);
-            memcpy(staging, source + offset, chunk);
-            status = cudaMemcpyAsync(target + offset, staging, chunk,
-                                     cudaMemcpyHostToDevice, cudaStreamPerThread);
-            if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
+             offset += UPLOAD_STAGING_CHUNK, ++index) {
+            const size_t ring = index % UPLOAD_STAGING_RING;
+            unsigned char* buffer = staging + ring * UPLOAD_STAGING_CHUNK;
+            // The buffer is free once its previous transfer has landed.
+            if (index >= UPLOAD_STAGING_RING) status = cudaEventSynchronize(events[ring]);
+            const size_t chunk = std::min(UPLOAD_STAGING_CHUNK, bytes - offset);
+            if (status == cudaSuccess) {
+                parallel_memcpy(buffer, source + offset, chunk);
+                status = cudaMemcpyAsync(target + offset, buffer, chunk,
+                                         cudaMemcpyHostToDevice, cudaStreamPerThread);
+            }
+            if (status == cudaSuccess) status = cudaEventRecord(events[ring], cudaStreamPerThread);
         }
+        // The slot is handed to the next caller on release.
+        const cudaError_t synced = cudaStreamSynchronize(cudaStreamPerThread);
+        if (status == cudaSuccess) status = synced;
     }
     pthread_mutex_lock(&upload_staging_mutex);
     in_use[slot] = false;
@@ -693,11 +755,13 @@ struct ResidentReducedOpening {
 };
 
 struct ResidentFriWorkspace {
-    Ext2* inv_denoms=nullptr; uint64_t* coset=nullptr; Ext2* output=nullptr;
+    // The coset is a process-wide device constant shared by every workspace
+    // of its size; the workspace does not own it.
+    Ext2* inv_denoms=nullptr; const uint64_t* coset=nullptr; Ext2* output=nullptr;
     Ext2* alpha=nullptr; Ext2* interpolation_partials=nullptr;
     size_t inv_count=0; size_t coset_count=0;
     size_t output_capacity=0; size_t alpha_capacity=0,partial_capacity=0;
-    ~ResidentFriWorkspace(){if(inv_denoms)cudaFree(inv_denoms);if(coset)cudaFree(coset);if(output)cudaFree(output);if(alpha)cudaFree(alpha);if(interpolation_partials)cudaFree(interpolation_partials);}
+    ~ResidentFriWorkspace(){if(inv_denoms)cudaFree(inv_denoms);if(output)cudaFree(output);if(alpha)cudaFree(alpha);if(interpolation_partials)cudaFree(interpolation_partials);}
 };
 
 struct InterpolationTask {
@@ -3102,8 +3166,9 @@ extern "C" int multi_stark_cuda_fri_workspace_create(int device_id,void** handle
     cudaError_t status=cudaSetDevice(device_id);auto* w=new(std::nothrow) ResidentFriWorkspace;if(!w)return static_cast<int>(cudaErrorMemoryAllocation);
     w->inv_count=inv_count;w->coset_count=coset_count;
     if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&w->inv_denoms),inv_count*sizeof(Ext2));
-    if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&w->coset),coset_count*sizeof(uint64_t));
-    if(status==cudaSuccess)status=cudaMemcpy(w->coset,coset,coset_count*sizeof(uint64_t),cudaMemcpyHostToDevice);
+    // One upload per device and size: every shard's opening indexes the same
+    // bit-reversed coset, 512 MiB at 2^26 rows.
+    if(status==cudaSuccess)status=cached_device_constants(device_id,coset,coset_count,5,coset[0],coset_count>1?coset[1]:0,&w->coset);
     uint64_t *norms=nullptr,*inverses=nullptr;
     if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&norms),max_count*sizeof(uint64_t));
     if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&inverses),max_count*sizeof(uint64_t));

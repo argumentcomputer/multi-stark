@@ -263,6 +263,60 @@ pub struct CudaTwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs> {
     _phantom: PhantomData<Val>,
 }
 
+/// The coset `GENERATOR * <g>` in bit-reversed order, as the opening's
+/// denominators and interpolation index it, with at least `2^log_height`
+/// elements. Element `i` of the bit-reversed coset of size `2^k` is the
+/// shift times `g_k^{rev_k(i)}`, and `rev_{k+1}(i) = 2 rev_k(i)` for
+/// `i < 2^k`, so every smaller coset is a prefix of a larger one: one vector
+/// per process serves every height, and grows only when a larger height is
+/// opened. Every shard of a proof opens on the same coset; before caching,
+/// building it cost 0.32 s per shard at 2^26 rows.
+fn bit_reversed_coset<Val: TwoAdicField + PrimeField64>(
+    log_height: usize,
+) -> std::sync::Arc<Vec<Goldilocks>> {
+    static CACHE: std::sync::Mutex<Option<std::sync::Arc<Vec<Goldilocks>>>> =
+        std::sync::Mutex::new(None);
+    if let Some(coset) = cache_at_least(&CACHE, 1 << log_height) {
+        return coset;
+    }
+    let to_gold = |v: Val| Goldilocks::from_u64(v.as_canonical_u64());
+    let generator: Goldilocks = TwoAdicField::two_adic_generator(log_height);
+    let shift = <Goldilocks as p3_field::Field>::GENERATOR;
+    assert_eq!(to_gold(Val::two_adic_generator(log_height)), generator);
+    assert_eq!(to_gold(Val::GENERATOR), shift);
+    let size = 1usize << log_height;
+    let mut coset = vec![Goldilocks::ZERO; size];
+    const CHUNK: usize = 1 << 14;
+    coset
+        .par_chunks_mut(CHUNK)
+        .enumerate()
+        .for_each(|(index, chunk)| {
+            let mut x: Goldilocks = shift * generator.exp_u64((index * CHUNK) as u64);
+            for value in chunk {
+                *value = x;
+                x *= generator;
+            }
+        });
+    reverse_slice_index_bits(&mut coset);
+    let mut slot = CACHE.lock().unwrap();
+    match &*slot {
+        Some(cached) if cached.len() >= size => std::sync::Arc::clone(cached),
+        _ => std::sync::Arc::clone(slot.insert(std::sync::Arc::new(coset))),
+    }
+}
+
+fn cache_at_least(
+    cache: &std::sync::Mutex<Option<std::sync::Arc<Vec<Goldilocks>>>>,
+    size: usize,
+) -> Option<std::sync::Arc<Vec<Goldilocks>>> {
+    cache
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|coset| coset.len() >= size)
+        .map(std::sync::Arc::clone)
+}
+
 fn prove_fri_cuda_resident<Val, Challenge, InputMmcs, FriMmcs, Challenger>(
     params: &FriParameters<FriMmcs>,
     mut inputs: Vec<CudaReducedOpening>,
@@ -1247,10 +1301,7 @@ where
                     .max()
                     .unwrap();
                 let log_global_max_height = log2_strict_usize(global_max_height);
-                let coset_domain =
-                    TwoAdicMultiplicativeCoset::new(Val::GENERATOR, log_global_max_height).unwrap();
-                let mut coset: Vec<Val> = coset_domain.iter().collect();
-                reverse_slice_index_bits(&mut coset);
+                let coset_gold = bit_reversed_coset::<Val>(log_global_max_height);
                 let mut max_log: LinearMap<Challenge, usize> = LinearMap::new();
                 for (ldes, points) in &rounds {
                     for (lde, ps) in ldes.iter().zip(points.iter()) {
@@ -1267,7 +1318,6 @@ where
                     Challenge::from_basis_coefficients_slice(&[Val::ZERO, Val::ONE]).unwrap();
                 let ext_w = to_pair(ext_x * ext_x)[0];
                 assert_eq!(ext_w, Goldilocks::from_u64(7));
-                let coset_gold: Vec<_> = coset.iter().copied().map(to_gold).collect();
                 let mut inv_offsets = LinearMap::new();
                 let mut inverse_points = Vec::new();
                 let mut inverse_counts = Vec::new();
@@ -1442,10 +1492,7 @@ where
                 .expect("quadratic extension element")
             };
             let log_global_max_height = log2_strict_usize(cuda_max_height);
-            let coset_domain =
-                TwoAdicMultiplicativeCoset::new(Val::GENERATOR, log_global_max_height).unwrap();
-            let mut coset: Vec<Val> = coset_domain.iter().collect();
-            reverse_slice_index_bits(&mut coset);
+            let coset_gold = bit_reversed_coset::<Val>(log_global_max_height);
 
             let mut max_log: LinearMap<Challenge, usize> = LinearMap::new();
             for ((_, points), round_dimensions) in commitment_data_with_opening_points
@@ -1468,7 +1515,6 @@ where
                 .expect("quadratic extension generator");
             let ext_w = to_pair(ext_x * ext_x)[0];
             assert_eq!(ext_w, Goldilocks::from_u64(7));
-            let coset_gold: Vec<_> = coset.iter().copied().map(to_gold).collect();
             let mut inv_offsets = LinearMap::new();
             let mut inverse_points = Vec::new();
             let mut inverse_counts = Vec::new();
