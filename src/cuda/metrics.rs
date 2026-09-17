@@ -10,7 +10,7 @@ pub(crate) fn emit_snapshot() {
     unsafe {
         multi_stark_cuda_metrics_snapshot(values.as_mut_ptr(), values.len());
     }
-    for (device, c) in values.chunks_exact(WORDS).enumerate() {
+    for (device, c) in values.as_chunks::<WORDS>().0.iter().enumerate() {
         if c.iter().all(|&v| v == 0) {
             continue;
         }

@@ -91,11 +91,11 @@ pub(crate) fn commit(
             .saturating_add(reserve);
         // Generator caches go before any LDE spills: they are rebuilt from
         // host seeds on demand, a spilled LDE is uploaded again.
-        for index in 0..resident.len() {
+        for slot in resident.iter() {
             if device_memory_info(device).0 >= needed {
                 break;
             }
-            resident[index].as_ref().unwrap().release_generator_device();
+            slot.as_ref().unwrap().release_generator_device();
         }
         for index in 0..resident.len() {
             if device_memory_info(device).0 >= needed {

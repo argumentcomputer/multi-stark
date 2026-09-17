@@ -11,7 +11,6 @@
 
 use core::ffi::c_int;
 
-use p3_field::PrimeField64;
 use p3_goldilocks::Goldilocks;
 
 use super::check_cuda;
@@ -39,6 +38,7 @@ unsafe extern "C" {
     fn multi_stark_sppark_backend_selected() -> c_int;
     fn multi_stark_sppark_select_backend(selected: c_int);
     fn multi_stark_sppark_takes(height: usize) -> c_int;
+    fn multi_stark_sppark_transforms_run() -> u64;
     fn multi_stark_sppark_panel_bytes(height: usize, width: usize, added_bits: usize) -> usize;
     fn multi_stark_sppark_ntt_device(
         device: c_int,
@@ -87,6 +87,11 @@ pub fn select_backend(backend: Backend) {
         Backend::SpparkAllHeights => 2,
     };
     unsafe { multi_stark_sppark_select_backend(flag) }
+}
+
+/// How many transforms the adapter has run in this process.
+pub fn transforms_run() -> u64 {
+    unsafe { multi_stark_sppark_transforms_run() }
 }
 
 /// Whether a resident LDE of `height` input rows takes the sppark path.
@@ -190,7 +195,7 @@ pub fn raw_words(values: &[Goldilocks]) -> &[u64] {
 mod tests {
     use super::*;
     use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
-    use p3_field::{Field, PrimeCharacteristicRing};
+    use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
     use p3_matrix::Matrix;
     use p3_matrix::dense::RowMajorMatrix;
     use p3_util::reverse_slice_index_bits;
@@ -249,16 +254,16 @@ mod tests {
     /// One resident LDE both ways, comparing stored words and the Merkle root
     /// of a commitment over the matrix.
     fn resident_lde_both_ways(
-        matrix: RowMajorMatrix<Goldilocks>,
+        matrix: &RowMajorMatrix<Goldilocks>,
         added_bits: usize,
         shift: Goldilocks,
     ) {
         let dft = super::super::CudaDft::new(0);
         select_backend(Backend::Legacy);
-        let legacy = dft.coset_lde_batch_resident(&matrix, added_bits, shift);
+        let legacy = dft.coset_lde_batch_resident(matrix, added_bits, shift);
         let legacy_rows = legacy.to_row_major_matrix();
         select_backend(Backend::SpparkAllHeights);
-        let candidate = dft.coset_lde_batch_resident(&matrix, added_bits, shift);
+        let candidate = dft.coset_lde_batch_resident(matrix, added_bits, shift);
         let candidate_rows = candidate.to_row_major_matrix();
         select_backend(Backend::Legacy);
         assert_eq!(
@@ -281,7 +286,7 @@ mod tests {
                         (0..height * width).map(|_| rng.random()).collect(),
                         width,
                     );
-                    resident_lde_both_ways(matrix, added_bits, Goldilocks::GENERATOR);
+                    resident_lde_both_ways(&matrix, added_bits, Goldilocks::GENERATOR);
                 }
             }
         }
@@ -302,7 +307,7 @@ mod tests {
             Goldilocks::ONE,
             Goldilocks::from_u64(11),
         ] {
-            resident_lde_both_ways(RowMajorMatrix::new(values.clone(), width), 2, shift);
+            resident_lde_both_ways(&RowMajorMatrix::new(values.clone(), width), 2, shift);
         }
     }
 
@@ -314,10 +319,71 @@ mod tests {
         let previous = std::env::var("MULTI_STARK_SPPARK_PANEL_BYTES").ok();
         unsafe { std::env::set_var("MULTI_STARK_SPPARK_PANEL_BYTES", "262144") };
         let matrix = RowMajorMatrix::new((0..(1 << 12) * 33).map(|_| rng.random()).collect(), 33);
-        resident_lde_both_ways(matrix, 2, Goldilocks::GENERATOR);
+        resident_lde_both_ways(&matrix, 2, Goldilocks::GENERATOR);
         match previous {
             Some(value) => unsafe { std::env::set_var("MULTI_STARK_SPPARK_PANEL_BYTES", value) },
             None => unsafe { std::env::remove_var("MULTI_STARK_SPPARK_PANEL_BYTES") },
+        }
+    }
+
+    #[test]
+    fn general_dft_matches_the_first_party_kernels_bit_for_bit() {
+        // Shapes above the CUDA DFT threshold of 2^15 cells.
+        let mut rng = SmallRng::seed_from_u64(0xdf7);
+        let dft = super::super::CudaDft::new(0);
+        for (log_height, width) in [(15usize, 1usize), (12, 8), (10, 33), (16, 2), (11, 129)] {
+            let matrix = RowMajorMatrix::new(
+                (0..(1 << log_height) * width)
+                    .map(|_| rng.random())
+                    .collect(),
+                width,
+            );
+            select_backend(Backend::Legacy);
+            let legacy = dft.dft_batch(matrix.clone()).to_row_major_matrix();
+            select_backend(Backend::SpparkAllHeights);
+            let candidate = dft.dft_batch(matrix).to_row_major_matrix();
+            select_backend(Backend::Legacy);
+            assert_eq!(
+                raw_words(&candidate.values),
+                raw_words(&legacy.values),
+                "2^{log_height} x {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_coset_lde_matches_the_first_party_kernels_bit_for_bit() {
+        // The host entry takes matrices of width at most two whose extended
+        // height reaches 2^15.
+        let mut rng = SmallRng::seed_from_u64(0x1e5);
+        let dft = super::super::CudaDft::new(0);
+        let generator = Goldilocks::GENERATOR;
+        for (log_height, width, added_bits) in [
+            (14usize, 1usize, 1usize),
+            (14, 2, 2),
+            (15, 2, 3),
+            (16, 1, 1),
+        ] {
+            let matrix = RowMajorMatrix::new(
+                (0..(1 << log_height) * width)
+                    .map(|_| rng.random())
+                    .collect(),
+                width,
+            );
+            select_backend(Backend::Legacy);
+            let legacy = dft
+                .coset_lde_batch(matrix.clone(), added_bits, generator)
+                .to_row_major_matrix();
+            select_backend(Backend::SpparkAllHeights);
+            let candidate = dft
+                .coset_lde_batch(matrix, added_bits, generator)
+                .to_row_major_matrix();
+            select_backend(Backend::Legacy);
+            assert_eq!(
+                raw_words(&candidate.values),
+                raw_words(&legacy.values),
+                "2^{log_height} x {width} blowup {added_bits}"
+            );
         }
     }
 

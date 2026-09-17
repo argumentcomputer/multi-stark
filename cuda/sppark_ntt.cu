@@ -12,6 +12,7 @@
 #include <ff/goldilocks.hpp>
 #include <ntt/ntt.cuh>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -257,9 +258,18 @@ extern "C" size_t multi_stark_sppark_panel_bytes(size_t height, size_t width, si
 // into `values` (extended_height x width, bit-reversed rows), with the coset
 // shift powers `shift_powers[i] = shift^i` for i < height. Scratch is
 // allocated per call within the panel budget.
+// Transforms the adapter has run so far, whatever the metrics setting, so a
+// test can tell a proof that went through sppark from one that did not.
+static std::atomic<uint64_t> transforms_run{0};
+
+extern "C" uint64_t multi_stark_sppark_transforms_run() {
+    return transforms_run.load(std::memory_order_relaxed);
+}
+
 extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, uint64_t* values,
                                             size_t height, size_t width, size_t added_bits,
                                             const uint64_t* shift_powers) {
+    transforms_run.fetch_add(1, std::memory_order_relaxed);
     if (!trace || !values || !shift_powers || height == 0 || width == 0 || (height & (height - 1)))
         return static_cast<int>(cudaErrorInvalidValue);
     const size_t extended_height = height << added_bits;
@@ -298,6 +308,40 @@ extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, u
     // The scratch outlives every kernel that reads it: the free is ordered
     // behind them on the same stream.
     const cudaError_t freed = cudaFreeAsync(scratch, cudaStreamPerThread);
+    if (result == 0) result = static_cast<int>(freed);
+    return result;
+}
+
+// A forward transform in place on `values` (height x width, natural row
+// order) leaving bit-reversed rows: gather, upstream forward per column,
+// scatter. The quotient's transforms and the general DFT take this path.
+extern "C" int multi_stark_sppark_forward(int device, uint64_t* values, size_t height, size_t width) {
+    transforms_run.fetch_add(1, std::memory_order_relaxed);
+    if (!values || height == 0 || width == 0 || (height & (height - 1)))
+        return static_cast<int>(cudaErrorInvalidValue);
+    const unsigned log_height = log2_exact(height);
+    if (log_height == 0) return 0;
+    cudaError_t status = cudaSetDevice(device);
+    if (status != cudaSuccess) return static_cast<int>(status);
+    const size_t columns = panel_columns(width, height);
+    uint64_t* panel = nullptr;
+    status = cudaMalloc(reinterpret_cast<void**>(&panel), columns * height * sizeof(uint64_t));
+    if (status != cudaSuccess) return static_cast<int>(status);
+    int result = 0;
+    for (size_t first = 0; result == 0 && first < width; first += columns) {
+        const size_t count = width - first < columns ? width - first : columns;
+        gather_columns<<<blocks_for_total(height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
+            values, height, width, first, count, height, panel);
+        result = static_cast<int>(cudaGetLastError());
+        for (size_t column = 0; result == 0 && column < count; ++column)
+            result = multi_stark_sppark_ntt_device(device, panel + column * height, log_height, 1, 0, 0);
+        if (result == 0) {
+            scatter_columns<<<blocks_for_total(height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
+                panel, height, width, first, count, values);
+            result = static_cast<int>(cudaGetLastError());
+        }
+    }
+    const cudaError_t freed = cudaFreeAsync(panel, cudaStreamPerThread);
     if (result == 0) result = static_cast<int>(freed);
     return result;
 }
