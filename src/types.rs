@@ -15,8 +15,8 @@ use p3_commit::{ExtensionMmcs, Pcs as PcsTrait};
 use p3_dft::Radix2DitParallel;
 use p3_field::BasedVectorSpace;
 use p3_field::{
-    ExtensionField, Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField,
-    extension::BinomialExtensionField,
+    extension::BinomialExtensionField, ExtensionField, Field, PrimeCharacteristicRing,
+    PrimeField64, TwoAdicField,
 };
 use p3_fri::FriParameters as InnerFriParameters;
 #[cfg(not(feature = "cuda"))]
@@ -29,9 +29,9 @@ use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
 
 #[cfg(feature = "cuda")]
-use crate::cuda::CudaDft;
-#[cfg(feature = "cuda")]
 use crate::cuda::pcs::CudaPcsDft;
+#[cfg(feature = "cuda")]
+use crate::cuda::CudaDft;
 
 pub type Val = Goldilocks;
 pub type PackedVal = <Val as Field>::Packing;
@@ -854,10 +854,10 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         // resident, then allow that trace to become an eviction candidate for
         // later jobs.
         lookup_jobs.sort_unstable_by_key(|&(index, output, direct, graph, _)| {
-            let temporary = if self
-                .pcs
-                .mmcs
-                .is_matrix_cuda_resident(inputs[index].stage_1.0, inputs[index].stage_1.1)
+            let temporary = if inputs[index]
+                .stage_1
+                .0
+                .has_resident_with_trace(inputs[index].stage_1.1)
             {
                 graph.unwrap_or(direct)
             } else {
@@ -894,16 +894,27 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         let ext_w = pair(extension_generator * extension_generator)[0];
         let lookup_pool =
             std::sync::Arc::new(cuda_host_pool("lookup-rows", cuda_lookup_worker_count()));
-        let evaluate = |input: &crate::config::LookupCommitInput<'_, Self>, cooperative: bool| {
+        // `graph_path` is decided by admission below, which budgets the graph
+        // kernel from the same residency predicate; the kernel must not be
+        // re-chosen here or it can run under the other path's budget.
+        let evaluate = |input: &crate::config::LookupCommitInput<'_, Self>,
+                        graph_path: bool,
+                        cooperative: bool| {
             let (height, num_lookups, multiplicities, args, arg_offsets) =
                 input.lookup_values.cuda_parts();
             let group_size = input.circuit.lookup_group_size.max(1);
-            let main = input.stage_1.0.resident_with_trace(input.stage_1.1);
-            let result = if let Some(main) = main.filter(|_| num_lookups != 0) {
-                let preprocessed = match input.preprocessed {
-                    Some((data, index)) => Some(data.resident(index)?),
-                    None => None,
-                };
+            let main = graph_path.then(|| {
+                input
+                    .stage_1
+                    .0
+                    .resident_with_trace(input.stage_1.1)
+                    .expect("lookup graph admission requires a trace-backed resident LDE")
+            });
+            let result = if let Some(main) = main {
+                let preprocessed = input.preprocessed.map(|(data, index)| {
+                    data.resident(index)
+                        .expect("lookup graph admission requires a resident preprocessed LDE")
+                });
                 crate::cuda::lookup_graph_lde_resident(
                     &self.pcs.dft,
                     &input.circuit.graph,
@@ -967,22 +978,32 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         for (index, output_bytes, direct_temporary_bytes, graph_temporary_bytes, _) in lookup_jobs {
             let job_started = std::time::Instant::now();
             let input = &inputs[index];
-            let graph_path = self
-                .pcs
-                .mmcs
-                .is_matrix_cuda_resident(input.stage_1.0, input.stage_1.1)
-                && graph_temporary_bytes.is_some()
-                && input.preprocessed.is_none_or(|(data, matrix)| {
-                    self.pcs.mmcs.is_matrix_cuda_resident(data, matrix)
-                });
-            let temporary_bytes = if graph_path {
-                graph_temporary_bytes.unwrap()
-            } else {
-                direct_temporary_bytes
+            // The graph kernel reads the trace through `resident_with_trace`,
+            // which also serves spilled LDEs that regenerate from a generator
+            // or a retained host trace. Admit it under the same predicate so
+            // the budget matches the kernel that runs.
+            let admits_graph = || {
+                graph_temporary_bytes.is_some()
+                    && input.stage_1.0.has_resident_with_trace(input.stage_1.1)
+                    && input
+                        .preprocessed
+                        .is_none_or(|(data, matrix)| data.resident(matrix).is_some())
             };
-            let target = output_bytes
-                .saturating_add(temporary_bytes)
-                .saturating_add(total_device_bytes / 64);
+            let target_for = |graph_path: bool| {
+                let temporary_bytes = if graph_path {
+                    graph_temporary_bytes.unwrap()
+                } else {
+                    direct_temporary_bytes
+                };
+                (
+                    temporary_bytes,
+                    output_bytes
+                        .saturating_add(temporary_bytes)
+                        .saturating_add(total_device_bytes / 64),
+                )
+            };
+            let mut graph_path = admits_graph();
+            let (mut temporary_bytes, mut target) = target_for(graph_path);
             if target > total_device_bytes {
                 return None;
             }
@@ -994,12 +1015,24 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
             );
             if free_bytes < target {
                 // This circuit alone does not fit beside its resident trace.
-                // Spill it as a last resort and use the direct lookup-values
-                // path, which remains protocol-identical.
+                // Spill it as a last resort. If the spilled LDE can still
+                // regenerate its trace it stays on the graph path; otherwise
+                // re-budget for the direct lookup-values path, which remains
+                // protocol-identical.
                 free_bytes =
                     self.pcs
                         .mmcs
                         .ensure_device_headroom(input.stage_1.0, target, None, "lookup");
+                graph_path = admits_graph();
+                (temporary_bytes, target) = target_for(graph_path);
+                if free_bytes < target {
+                    free_bytes = self.pcs.mmcs.ensure_device_headroom(
+                        input.stage_1.0,
+                        target,
+                        None,
+                        "lookup",
+                    );
+                }
             }
             if free_bytes < target {
                 return None;
@@ -1014,7 +1047,7 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                 && output_bytes >= (8usize << 30)
                 && num_lookups >= 64
                 && arg_offsets.last().copied().unwrap_or(0) >= 256;
-            results[index] = Some(evaluate(&inputs[index], cooperative)?);
+            results[index] = Some(evaluate(&inputs[index], graph_path, cooperative)?);
             if crate::cuda::memory_diagnostics_enabled() {
                 eprintln!(
                     "[multi-stark/cuda] lookup job {index} complete: {:.3}s",
@@ -1147,7 +1180,7 @@ mod pcs_ref_gen {
     use super::*;
     use p3_commit::Mmcs as _;
     use p3_field::{
-        BasedVectorSpace, PrimeCharacteristicRing, PrimeField64, batch_multiplicative_inverse,
+        batch_multiplicative_inverse, BasedVectorSpace, PrimeCharacteristicRing, PrimeField64,
     };
     use p3_matrix::dense::RowMajorMatrix;
     use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
