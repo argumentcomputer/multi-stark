@@ -15,6 +15,7 @@ use crate::witness::TraceSource;
 
 pub(crate) fn record_lde_spill(device: i32, bytes: usize) {
     tracing::debug!(device, bytes, "spilled active LDE");
+    tracing::info!(target: "prover_metrics", metric = "lde_spill", device, bytes);
 }
 
 fn spill_lde(lde: &CudaLde) -> RowMajorMatrix<Val> {

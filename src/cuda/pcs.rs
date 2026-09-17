@@ -277,8 +277,11 @@ fn bit_reversed_coset<Val: TwoAdicField + PrimeField64>(
     static CACHE: std::sync::Mutex<Option<std::sync::Arc<Vec<Goldilocks>>>> =
         std::sync::Mutex::new(None);
     if let Some(coset) = cache_at_least(&CACHE, 1 << log_height) {
+        tracing::info!(target: "prover_metrics", metric = "host_coset", action = "hit",
+            log_height, cached_bytes = coset.len() * 8);
         return coset;
     }
+    tracing::info!(target: "prover_metrics", metric = "host_coset", action = "build", log_height);
     let to_gold = |v: Val| Goldilocks::from_u64(v.as_canonical_u64());
     let generator: Goldilocks = TwoAdicField::two_adic_generator(log_height);
     let shift = <Goldilocks as p3_field::Field>::GENERATOR;
@@ -491,8 +494,9 @@ where
                 .iter()
                 .map(|&index| index >> log_arity)
                 .collect_vec();
-            let (opened_rows, opening_proof) = tracing::info_span!("stark/fri_commit_phase_opening")
-                .in_scope(|| params.mmcs.open_cuda_fri_batch(round, &group_indices));
+            let (opened_rows, opening_proof) =
+                tracing::info_span!("stark/fri_commit_phase_opening")
+                    .in_scope(|| params.mmcs.open_cuda_fri_batch(round, &group_indices));
             current_indices = group_indices;
             let sibling_values = positions
                 .into_iter()
@@ -669,12 +673,13 @@ where
             // Height groups wider than the device leaf kernel can hash are
             // neither durable nor transient: their LDEs and digests come
             // from the host, whatever the memory budget says.
-            let wide_heights = super::mmcs::host_hashed_heights(
-                evaluations.iter().map(|(_, matrix)| p3_matrix::Dimensions {
-                    width: matrix.width(),
-                    height: matrix.height(),
-                }),
-            );
+            let wide_heights =
+                super::mmcs::host_hashed_heights(evaluations.iter().map(|(_, matrix)| {
+                    p3_matrix::Dimensions {
+                        width: matrix.width(),
+                        height: matrix.height(),
+                    }
+                }));
             for height in &wide_heights {
                 height_groups.remove(height);
             }

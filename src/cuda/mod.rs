@@ -5,6 +5,7 @@
 //! lookup traces, quotient evaluations, and FRI codewords on the selected GPU.
 //! All public protocol types and serialized proofs remain unchanged.
 
+pub(crate) mod metrics;
 pub(crate) mod mmcs;
 #[doc(hidden)]
 pub mod pcs;
@@ -174,8 +175,16 @@ impl CudaDft {
     ) -> CudaLde {
         let height = matrix.height();
         let width = matrix.width();
-        let _span =
-            tracing::info_span!("cuda/lde", kind = "host", height, width, added_bits).entered();
+        let _span = tracing::info_span!(
+            "cuda/lde",
+            kind = "host",
+            backend = "legacy",
+            device = self.device_id,
+            height,
+            width,
+            added_bits
+        )
+        .entered();
         Self::validate_dimensions(height, width);
         assert!(width > 0, "resident CUDA LDE requires at least one column");
         let extended_height = height
@@ -347,8 +356,16 @@ impl CudaDft {
     ) -> CudaLde {
         let height = generator.height();
         let width = generator.width();
-        let _span =
-            tracing::info_span!("cuda/lde", kind = "generated", height, width, added_bits).entered();
+        let _span = tracing::info_span!(
+            "cuda/lde",
+            kind = "generated",
+            backend = "legacy",
+            device = self.device_id,
+            height,
+            width,
+            added_bits
+        )
+        .entered();
         Self::validate_dimensions(height, width);
         let extended_height = height
             .checked_shl(added_bits.try_into().unwrap())
@@ -1212,7 +1229,15 @@ pub(crate) fn quotient_lde_mixed(
     quotient_degree: usize,
     log_blowup: usize,
 ) -> CudaLde {
-    let _span = tracing::info_span!("cuda/quotient_lde").entered();
+    let _span = tracing::info_span!(
+        "cuda/quotient_lde",
+        backend = "legacy",
+        device = dft.device_id,
+        quotient_size,
+        quotient_degree,
+        added_bits = log_blowup
+    )
+    .entered();
     quotient_lde_sources(
         dft,
         graph,
@@ -1756,7 +1781,17 @@ pub(crate) fn lookup_lde_resident(
     ext_w: Goldilocks,
     log_blowup: usize,
 ) -> (CudaLde, [Goldilocks; 2]) {
-    let _span = tracing::info_span!("cuda/lookup_lde", path = "direct", height, num_lookups, group_size).entered();
+    let _span = tracing::info_span!(
+        "cuda/lookup_lde",
+        path = "direct",
+        backend = "legacy",
+        device = dft.device_id,
+        height,
+        num_lookups,
+        group_size,
+        added_bits = log_blowup
+    )
+    .entered();
     assert!((1..=8).contains(&group_size));
     assert_eq!(arg_offsets.len(), num_lookups + 1);
     assert_eq!(arg_offsets.first(), Some(&0));
@@ -1838,7 +1873,17 @@ pub(crate) fn lookup_lde_resident_partitioned(
     log_blowup: usize,
     cpu_deltas: impl Fn(core::ops::Range<usize>) -> Vec<[Goldilocks; 2]> + Sync,
 ) -> (CudaLde, [Goldilocks; 2]) {
-    let _span = tracing::info_span!("cuda/lookup_lde", path = "partitioned", height, num_lookups, group_size).entered();
+    let _span = tracing::info_span!(
+        "cuda/lookup_lde",
+        path = "partitioned",
+        backend = "legacy",
+        device = dft.device_id,
+        height,
+        num_lookups,
+        group_size,
+        added_bits = log_blowup
+    )
+    .entered();
     assert!((1..=8).contains(&group_size));
     assert_eq!(arg_offsets.len(), num_lookups + 1);
     assert_eq!(arg_offsets.first(), Some(&0));
@@ -2026,8 +2071,17 @@ pub(crate) fn lookup_graph_lde_resident(
     log_blowup: usize,
 ) -> Option<(CudaLde, [Goldilocks; 2])> {
     assert!((1..=8).contains(&group_size));
-    let _span =
-        tracing::info_span!("cuda/lookup_lde", path = "graph", height, group_size).entered();
+    let _span = tracing::info_span!(
+        "cuda/lookup_lde",
+        path = "graph",
+        backend = "legacy",
+        device = dft.device_id,
+        height,
+        num_lookups = graph.lookups.len(),
+        group_size,
+        added_bits = log_blowup
+    )
+    .entered();
     let (nodes, slot_count, lookups, args) = encode_lookup_nodes(graph)?;
     let num_lookups = lookups.len();
     let groups = num_lookups.div_ceil(group_size.max(1));
@@ -2130,6 +2184,20 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
         let height = matrix.height();
         let width = matrix.width();
         Self::validate_dimensions(height, width);
+        let _span = tracing::info_span!(
+            "cuda/dft_batch",
+            device = self.device_id,
+            height,
+            width,
+            backend = if height == 1 || width == 0 {
+                "noop"
+            } else if Self::use_cuda_dft(height, width) {
+                "legacy"
+            } else {
+                "cpu"
+            }
+        )
+        .entered();
         if height == 1 || width == 0 {
             return BitReversalPerm::new_view(matrix);
         }
@@ -2171,6 +2239,21 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
             .checked_shl(u32::try_from(added_bits).expect("LDE blowup exceeds u32"))
             .expect("LDE height overflows usize");
         Self::validate_dimensions(extended_height, width);
+        let _span = tracing::info_span!(
+            "cuda/coset_lde_batch",
+            device = self.device_id,
+            height,
+            width,
+            added_bits,
+            backend = if width == 0 {
+                "noop"
+            } else if height > 1 && Self::use_cuda_coset_lde(extended_height, width) {
+                "legacy"
+            } else {
+                "cpu"
+            }
+        )
+        .entered();
 
         if width == 0 {
             return BitReversalPerm::new_view(RowMajorMatrix::new(Vec::new(), width));
@@ -2702,7 +2785,13 @@ impl CudaMixedMerkleTree {
                 .collect();
             check_cuda(
                 status,
-                &format!("hybrid Merkle tree creation over (height, width) {dims:?}, host digest groups at heights {:?}", host_digest_groups.iter().map(|(h, _)| *h).collect::<Vec<_>>()),
+                &format!(
+                    "hybrid Merkle tree creation over (height, width) {dims:?}, host digest groups at heights {:?}",
+                    host_digest_groups
+                        .iter()
+                        .map(|(h, _)| *h)
+                        .collect::<Vec<_>>()
+                ),
             );
         }
         let row_count = heights.into_iter().max().unwrap();
