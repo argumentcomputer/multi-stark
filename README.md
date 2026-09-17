@@ -104,6 +104,29 @@ hardware and downstream Ix measurements live in
 See [cuda/README.md](cuda/README.md) for architecture, build settings, the NVIDIA
 correctness harness, platform limitations, and benchmark commands.
 
+### sppark transforms
+
+The `cuda-sppark` feature adds [sppark](https://github.com/argumentcomputer/sppark)'s
+Goldilocks NTT as a second transform backend, pinned to the fork's `dev`
+branch and built in its `SPPARK_NO_CXX_RUNTIME` mode, so the archive links
+without libstdc++. Proofs are byte-identical on either backend. The backend
+is selected at run time:
+
+| Setting | Effect |
+| --- | --- |
+| `MULTI_STARK_CUDA_NTT=sppark` | Route transforms of at least the threshold height through sppark; unset, the first-party kernels run |
+| `MULTI_STARK_SPPARK_MIN_LOG_HEIGHT=18` | Height threshold; below it the first-party kernels are faster |
+| `MULTI_STARK_SPPARK_PANEL_BYTES=4294967296` | Scratch budget per LDE; a shape whose single column exceeds it stays on the first-party kernels |
+| `MULTI_STARK_SPPARK_BATCH_BYTES=<bytes>` | Columns per batched launch sequence, by bytes; defaults to the device's L2 size, 0 launches every column alone |
+| `MULTI_STARK_SPPARK_FUSED=0\|1\|2` | The measured alternative expansion: never (default), always, or for coefficient panels beyond the L2 |
+| `MULTI_STARK_SPPARK_STAGE_TIMING=1` | Print each LDE's gather, inverse, expansion, forward and scatter times to stderr |
+| `AIUR_METRICS=1` with `RUST_LOG=prover_metrics=info` | The snapshot reports dispatches taken and declined per backend and transform shapes per backend |
+
+```sh
+cargo test --release --features parallel,cuda,cuda-sppark
+MULTI_STARK_CUDA_NTT=sppark cargo run --release --features parallel,cuda,cuda-sppark --example cuda_resident_lde_bench
+```
+
 ## License
 
 MIT or Apache-2.0
