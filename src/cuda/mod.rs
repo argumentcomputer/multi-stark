@@ -9,15 +9,14 @@ pub(crate) mod metrics;
 pub(crate) mod mmcs;
 #[doc(hidden)]
 pub mod pcs;
-#[cfg(feature = "cuda-sppark")]
 pub mod sppark;
 pub(crate) mod witness;
 
 use core::ffi::{CStr, c_char, c_void};
 use core::mem::{align_of, size_of};
 use core::ptr::NonNull;
-use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use sppark::{RawPlan, TransformPlan};
+use std::sync::Arc;
 
 use crate::expr::{RowOffset, Source};
 use crate::graph::{ConstraintGraph, Node};
@@ -33,20 +32,14 @@ use p3_util::log2_strict_usize;
 const _: () = assert!(size_of::<Goldilocks>() == size_of::<u64>());
 const _: () = assert!(align_of::<Goldilocks>() == align_of::<u64>());
 
-type CachedPowers = Arc<[Goldilocks]>;
-type SharedPowerCache<Key> = Arc<RwLock<BTreeMap<Key, CachedPowers>>>;
-
 /// CUDA-backed batched DFT for the Goldilocks field.
 ///
-/// Clones share the host twiddle cache. This is important because the
-/// production configuration gives one clone to the PCS and retains another
-/// for quotient transforms.
+/// Clones share immutable transform plans and their host coset powers.
 #[derive(Clone, Debug)]
 pub struct CudaDft {
     device_id: i32,
     cpu: Radix2DitParallel<Goldilocks>,
-    twiddles: SharedPowerCache<(usize, bool)>,
-    shift_powers: SharedPowerCache<(usize, u64)>,
+    planner: sppark::Planner,
 }
 
 impl Default for CudaDft {
@@ -72,8 +65,7 @@ impl CudaDft {
         Self {
             device_id,
             cpu: Radix2DitParallel::default(),
-            twiddles: Arc::default(),
-            shift_powers: Arc::default(),
+            planner: sppark::Planner::new(device_id),
         }
     }
 
@@ -83,57 +75,18 @@ impl CudaDft {
         self.device_id
     }
 
-    /// The first-party twiddle table for a transform, or none when the
-    /// transform runs through sppark, which needs no table; the kernels
-    /// reject a missing table on the first-party path.
-    fn legacy_twiddles(
+    pub(crate) fn forward_plan(&self, height: usize, width: usize) -> Arc<TransformPlan> {
+        self.planner.plan(height, width, 0, None)
+    }
+
+    pub(crate) fn lde_plan(
         &self,
-        legacy: bool,
-        log_height: usize,
-        inverse: bool,
-    ) -> Option<Arc<[Goldilocks]>> {
-        legacy.then(|| self.twiddles(log_height, inverse))
-    }
-
-    fn twiddles(&self, log_height: usize, inverse: bool) -> Arc<[Goldilocks]> {
-        let key = (log_height, inverse);
-        if let Some(twiddles) = self
-            .twiddles
-            .read()
-            .expect("twiddle cache poisoned")
-            .get(&key)
-        {
-            return Arc::clone(twiddles);
-        }
-
-        let mut cache = self.twiddles.write().expect("twiddle cache poisoned");
-        Arc::clone(cache.entry(key).or_insert_with(|| {
-            let root = Goldilocks::two_adic_generator(log_height);
-            let root = if inverse { root.inverse() } else { root };
-            root.powers().take((1 << log_height) / 2).collect().into()
-        }))
-    }
-
-    fn shift_powers(&self, height: usize, shift: Goldilocks) -> Arc<[Goldilocks]> {
-        let key = (height, shift.as_canonical_u64());
-        if let Some(powers) = self
-            .shift_powers
-            .read()
-            .expect("shift-power cache poisoned")
-            .get(&key)
-        {
-            return Arc::clone(powers);
-        }
-
-        let mut cache = self
-            .shift_powers
-            .write()
-            .expect("shift-power cache poisoned");
-        Arc::clone(
-            cache
-                .entry(key)
-                .or_insert_with(|| shift.powers().take(height).collect().into()),
-        )
+        height: usize,
+        width: usize,
+        added_bits: usize,
+        shift: Goldilocks,
+    ) -> Arc<TransformPlan> {
+        self.planner.plan(height, width, added_bits, Some(shift))
     }
 
     fn validate_dimensions(height: usize, width: usize) {
@@ -192,7 +145,7 @@ impl CudaDft {
         let _span = tracing::info_span!(
             "cuda/lde",
             kind = "host",
-            backend = lde_backend(height, width, added_bits),
+            backend = "sppark",
             device = self.device_id,
             height,
             width,
@@ -206,13 +159,7 @@ impl CudaDft {
             .expect("LDE height overflows usize");
         Self::validate_dimensions(extended_height, width);
 
-        let log_height = log2_strict_usize(height);
-        let legacy = lde_backend(height, width, added_bits) == "legacy";
-        let inverse_twiddles = self.legacy_twiddles(legacy, log_height, true);
-        let forward_twiddles =
-            self.legacy_twiddles(legacy, log2_strict_usize(extended_height), false);
-        let shift_powers = self.shift_powers(height, shift);
-        let height_inverse = Goldilocks::ONE.div_2exp_u64(log_height as u64);
+        let plan = self.lde_plan(height, width, added_bits, shift);
         let mut handle = core::ptr::null_mut();
         // SAFETY: every host buffer has the exact dimensions validated above;
         // successful creation transfers the device allocation to `CudaLde`.
@@ -224,10 +171,7 @@ impl CudaDft {
                 height,
                 width,
                 added_bits,
-                table_ptr(&inverse_twiddles),
-                shift_powers.as_ptr().cast(),
-                table_ptr(&forward_twiddles),
-                raw_u64(height_inverse),
+                &plan.raw,
             )
         };
         check_cuda(status, "resident coset LDE");
@@ -239,9 +183,7 @@ impl CudaDft {
         }
     }
 
-    /// Uploads the constants a resident LDE of the shape will need: the
-    /// coset powers always, the first-party twiddle tables only when the
-    /// shape stays on the first-party kernels.
+    /// Uploads the coset powers before taking a device-memory snapshot.
     pub(crate) fn prepare_coset_lde_constants(
         &self,
         height: usize,
@@ -253,22 +195,8 @@ impl CudaDft {
             .expect("LDE height overflows usize");
         Self::validate_dimensions(height, 1);
         Self::validate_dimensions(extended_height, 1);
-        let legacy = lde_backend(height, 1, added_bits) == "legacy";
-        let inverse_twiddles = self.legacy_twiddles(legacy, log2_strict_usize(height), true);
-        let shift_powers = self.shift_powers(height, shift);
-        let forward_twiddles =
-            self.legacy_twiddles(legacy, log2_strict_usize(extended_height), false);
-        let status = unsafe {
-            multi_stark_cuda_prepare_lde_constants(
-                self.device_id,
-                table_ptr(&inverse_twiddles),
-                inverse_twiddles.as_ref().map_or(0, |table| table.len()),
-                shift_powers.as_ptr().cast(),
-                height,
-                table_ptr(&forward_twiddles),
-                forward_twiddles.as_ref().map_or(0, |table| table.len()),
-            )
-        };
+        let plan = self.lde_plan(height, 1, added_bits, shift);
+        let status = unsafe { multi_stark_cuda_prepare_lde_constants(self.device_id, &plan.raw) };
         check_cuda(status, "prepare resident LDE constants");
     }
 }
@@ -380,7 +308,7 @@ impl CudaDft {
         let _span = tracing::info_span!(
             "cuda/lde",
             kind = "generated",
-            backend = lde_backend(height, width, added_bits),
+            backend = "sppark",
             device = self.device_id,
             height,
             width,
@@ -392,12 +320,7 @@ impl CudaDft {
             .checked_shl(added_bits.try_into().unwrap())
             .expect("LDE height overflow");
         Self::validate_dimensions(extended_height, width);
-        let log_height = log2_strict_usize(height);
-        let legacy = lde_backend(height, width, added_bits) == "legacy";
-        let inverse_twiddles = self.legacy_twiddles(legacy, log_height, true);
-        let forward_twiddles =
-            self.legacy_twiddles(legacy, log2_strict_usize(extended_height), false);
-        let shift_powers = self.shift_powers(height, shift);
+        let plan = self.lde_plan(height, width, added_bits, shift);
         let mut context = Box::new(generator);
         let mut handle = core::ptr::null_mut();
         let status = unsafe {
@@ -407,10 +330,7 @@ impl CudaDft {
                 height,
                 width,
                 added_bits,
-                table_ptr(&inverse_twiddles),
-                shift_powers.as_ptr().cast(),
-                table_ptr(&forward_twiddles),
-                raw_u64(Goldilocks::ONE.div_2exp_u64(log_height as u64)),
+                &plan.raw,
                 (&mut *context as *mut Generator).cast(),
                 write_generated_trace,
                 destroy_generated_trace,
@@ -443,10 +363,7 @@ unsafe extern "C" {
         height: usize,
         width: usize,
         added_bits: usize,
-        inverse: *const u64,
-        shifts: *const u64,
-        forward: *const u64,
-        height_inverse: u64,
+        plan: *const RawPlan,
         context: *mut c_void,
         writer: unsafe extern "C" fn(*mut c_void, i32, *mut u64, usize, usize) -> i32,
         destroy: unsafe extern "C" fn(*mut c_void),
@@ -829,77 +746,6 @@ fn encode_quotient_nodes(
     (nodes, slots, count as usize)
 }
 
-/// Conservative device-memory requirement for one fused quotient job.
-///
-/// The graph evaluator reuses slots as soon as their final consumer has run,
-/// so `graph.nodes.len()` can be orders of magnitude larger than the live
-/// device scratch. Keep this estimate beside the encoder so admission and the
-/// kernel use the same liveness calculation. The scratch term assumes the
-/// global-memory path; devices able to fit the slots in shared memory need
-/// less than this bound.
-/// A host table's pointer for the kernels: null when the transform runs
-/// through sppark and no table was built.
-fn table_ptr(table: &Option<Arc<[Goldilocks]>>) -> *const u64 {
-    table
-        .as_ref()
-        .map_or(core::ptr::null(), |table| table.as_ptr().cast())
-}
-
-/// The backend a forward transform of the shape runs on.
-pub(crate) fn forward_backend(height: usize, width: usize) -> &'static str {
-    #[cfg(feature = "cuda-sppark")]
-    if sppark::takes_forward(height, width) {
-        return "sppark";
-    }
-    #[cfg(not(feature = "cuda-sppark"))]
-    let _ = (height, width);
-    "legacy"
-}
-
-/// The backend a resident coset LDE of the shape runs on, for spans and
-/// for skipping the tables the other backend would need.
-pub(crate) fn lde_backend(height: usize, width: usize, added_bits: usize) -> &'static str {
-    #[cfg(feature = "cuda-sppark")]
-    if sppark::takes_lde(height, width, added_bits) {
-        return "sppark";
-    }
-    #[cfg(not(feature = "cuda-sppark"))]
-    let _ = (height, width, added_bits);
-    "legacy"
-}
-
-/// The backend the quotient's wide forward transform runs on.
-pub(crate) fn quotient_backend(
-    quotient_size: usize,
-    quotient_degree: usize,
-    log_blowup: usize,
-) -> &'static str {
-    #[cfg(feature = "cuda-sppark")]
-    {
-        let lde_height = (quotient_size / quotient_degree.max(1)) << log_blowup;
-        if sppark::takes_forward(quotient_size, 2)
-            || sppark::takes_forward(lde_height, 2 * quotient_degree)
-        {
-            return "sppark";
-        }
-    }
-    #[cfg(not(feature = "cuda-sppark"))]
-    let _ = (quotient_size, quotient_degree, log_blowup);
-    "legacy"
-}
-
-/// The backend a lookup LDE of the shape runs on: its committed width is
-/// two columns per lookup group.
-pub(crate) fn lookup_backend(
-    height: usize,
-    num_lookups: usize,
-    group_size: usize,
-    log_blowup: usize,
-) -> &'static str {
-    let groups = num_lookups.div_ceil(group_size.max(1)).max(1);
-    lde_backend(height, 2 * groups, log_blowup)
-}
-
 pub(crate) fn quotient_lde_memory_upper_bound(
     graph: &ConstraintGraph<Goldilocks>,
     public_count: usize,
@@ -1140,20 +986,13 @@ pub(crate) fn lookup_graph_lde_memory_upper_bound(
         .saturating_add(1)
         .saturating_mul(main_width)
         .saturating_mul(size_of::<Goldilocks>());
-    // Device-cached twiddles and shift powers may be cold for this height.
-    let constant_bytes = height
-        .saturating_div(2)
-        .saturating_add(height)
-        .saturating_add(extended_height / 2)
-        .saturating_mul(size_of::<Goldilocks>());
     Some((
         output_bytes,
         metadata_bytes
             .saturating_add(message_bytes)
             .saturating_add(delta_bytes)
             .saturating_add(scratch_bytes)
-            .saturating_add(trace_chunk_bytes)
-            .saturating_add(constant_bytes),
+            .saturating_add(trace_chunk_bytes),
     ))
 }
 
@@ -1317,7 +1156,7 @@ pub(crate) fn quotient_lde_mixed(
 ) -> CudaLde {
     let _span = tracing::info_span!(
         "cuda/quotient_lde",
-        backend = quotient_backend(quotient_size, quotient_degree, log_blowup),
+        backend = "sppark",
         device = dft.device_id,
         quotient_size,
         quotient_degree,
@@ -1395,16 +1234,8 @@ fn quotient_lde_sources(
     assert_eq!(alpha.len(), 2 * expected_constraints);
     let trace_height = quotient_size / quotient_degree;
     let lde_height = trace_height << log_blowup;
-    let quotient_twiddles = dft.legacy_twiddles(
-        forward_backend(quotient_size, 2) == "legacy",
-        log2_strict_usize(quotient_size),
-        false,
-    );
-    let lde_twiddles = dft.legacy_twiddles(
-        forward_backend(lde_height, 2 * quotient_degree) == "legacy",
-        log2_strict_usize(lde_height),
-        false,
-    );
+    let quotient_plan = dft.forward_plan(quotient_size, 2);
+    let lde_plan = dft.forward_plan(lde_height, 2 * quotient_degree);
     let height_inverse = Goldilocks::ONE.div_2exp_u64(log2_strict_usize(quotient_size) as u64);
     let weight_step = Goldilocks::GENERATOR.exp_u64(trace_height as u64).inverse();
     let weights: Vec<_> = weight_step
@@ -1480,8 +1311,8 @@ fn quotient_lde_sources(
                 next_step,
                 quotient_degree,
                 log_blowup,
-                table_ptr(&quotient_twiddles),
-                table_ptr(&lde_twiddles),
+                &quotient_plan.raw,
+                &lde_plan.raw,
                 weights.as_ptr().cast(),
             )
         }
@@ -1520,8 +1351,8 @@ fn quotient_lde_sources(
                 next_step,
                 quotient_degree,
                 log_blowup,
-                table_ptr(&quotient_twiddles),
-                table_ptr(&lde_twiddles),
+                &quotient_plan.raw,
+                &lde_plan.raw,
                 weights.as_ptr().cast(),
             )
         }
@@ -1878,7 +1709,7 @@ pub(crate) fn lookup_lde_resident(
     let _span = tracing::info_span!(
         "cuda/lookup_lde",
         path = "direct",
-        backend = lookup_backend(height, num_lookups, group_size, log_blowup),
+        backend = "sppark",
         device = dft.device_id,
         height,
         num_lookups,
@@ -1912,11 +1743,12 @@ pub(crate) fn lookup_lde_resident(
     assert_eq!(multiplicities.len(), height * num_lookups);
     assert_eq!(args.len(), height * args_width);
     let extended_height = height << log_blowup;
-    let legacy = lookup_backend(height, num_lookups, group_size, log_blowup) == "legacy";
-    let inverse_twiddles = dft.legacy_twiddles(legacy, log2_strict_usize(height), true);
-    let shift_powers = dft.shift_powers(height, Goldilocks::GENERATOR);
-    let forward_twiddles = dft.legacy_twiddles(legacy, log2_strict_usize(extended_height), false);
-    let height_inverse = Goldilocks::ONE.div_2exp_u64(log2_strict_usize(height) as u64);
+    let plan = dft.lde_plan(
+        height,
+        2 * num_lookups.div_ceil(group_size),
+        log_blowup,
+        Goldilocks::GENERATOR,
+    );
     let mut tail = [Goldilocks::ZERO; 4];
     let mut handle = core::ptr::null_mut();
     let status = unsafe {
@@ -1935,10 +1767,7 @@ pub(crate) fn lookup_lde_resident(
             gamma.as_ptr().cast(),
             raw_u64(ext_w),
             log_blowup,
-            table_ptr(&inverse_twiddles),
-            shift_powers.as_ptr().cast(),
-            table_ptr(&forward_twiddles),
-            raw_u64(height_inverse),
+            &plan.raw,
         )
     };
     check_cuda(status, "resident CUDA lookup LDE");
@@ -1971,7 +1800,7 @@ pub(crate) fn lookup_lde_resident_partitioned(
     let _span = tracing::info_span!(
         "cuda/lookup_lde",
         path = "partitioned",
-        backend = lookup_backend(height, num_lookups, group_size, log_blowup),
+        backend = "sppark",
         device = dft.device_id,
         height,
         num_lookups,
@@ -1989,11 +1818,12 @@ pub(crate) fn lookup_lde_resident_partitioned(
     assert_eq!(multiplicities.len(), height * num_lookups);
     assert_eq!(args.len(), height * args_width);
     let extended_height = height << log_blowup;
-    let legacy = lookup_backend(height, num_lookups, group_size, log_blowup) == "legacy";
-    let inverse_twiddles = dft.legacy_twiddles(legacy, log2_strict_usize(height), true);
-    let shift_powers = dft.shift_powers(height, Goldilocks::GENERATOR);
-    let forward_twiddles = dft.legacy_twiddles(legacy, log2_strict_usize(extended_height), false);
-    let height_inverse = Goldilocks::ONE.div_2exp_u64(log2_strict_usize(height) as u64);
+    let plan = dft.lde_plan(
+        height,
+        2 * num_lookups.div_ceil(group_size),
+        log_blowup,
+        Goldilocks::GENERATOR,
+    );
     let total_started = std::time::Instant::now();
     let create_started = std::time::Instant::now();
     let mut pending_handle = core::ptr::null_mut();
@@ -2123,10 +1953,7 @@ pub(crate) fn lookup_lde_resident_partitioned(
             pending_handle.as_ptr(),
             &mut handle,
             tail.as_mut_ptr().cast(),
-            table_ptr(&inverse_twiddles),
-            shift_powers.as_ptr().cast(),
-            table_ptr(&forward_twiddles),
-            raw_u64(height_inverse),
+            &plan.raw,
         )
     };
     pending.handle = None;
@@ -2170,7 +1997,7 @@ pub(crate) fn lookup_graph_lde_resident(
     let _span = tracing::info_span!(
         "cuda/lookup_lde",
         path = "graph",
-        backend = lookup_backend(height, graph.lookups.len(), group_size, log_blowup),
+        backend = "sppark",
         device = dft.device_id,
         height,
         num_lookups = graph.lookups.len(),
@@ -2182,11 +2009,12 @@ pub(crate) fn lookup_graph_lde_resident(
     let num_lookups = lookups.len();
     let groups = num_lookups.div_ceil(group_size.max(1));
     let extended_height = height << log_blowup;
-    let legacy = lookup_backend(height, num_lookups, group_size, log_blowup) == "legacy";
-    let inverse_twiddles = dft.legacy_twiddles(legacy, log2_strict_usize(height), true);
-    let shift_powers = dft.shift_powers(height, Goldilocks::GENERATOR);
-    let forward_twiddles = dft.legacy_twiddles(legacy, log2_strict_usize(extended_height), false);
-    let height_inverse = Goldilocks::ONE.div_2exp_u64(log2_strict_usize(height) as u64);
+    let plan = dft.lde_plan(
+        height,
+        2 * num_lookups.div_ceil(group_size),
+        log_blowup,
+        Goldilocks::GENERATOR,
+    );
     let mut tail = [Goldilocks::ZERO; 4];
     let mut handle = core::ptr::null_mut();
     let status = unsafe {
@@ -2208,10 +2036,7 @@ pub(crate) fn lookup_graph_lde_resident(
             gamma.as_ptr().cast(),
             raw_u64(ext_w),
             log_blowup,
-            table_ptr(&inverse_twiddles),
-            shift_powers.as_ptr().cast(),
-            table_ptr(&forward_twiddles),
-            raw_u64(height_inverse),
+            &plan.raw,
         )
     };
     check_cuda(status, "resident CUDA graph lookup LDE");
@@ -2289,7 +2114,7 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
             backend = if height == 1 || width == 0 {
                 "noop"
             } else if Self::use_cuda_dft(height, width) {
-                forward_backend(height, width)
+                "sppark"
             } else {
                 "cpu"
             }
@@ -2302,27 +2127,23 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
             return self.cpu.dft_batch(matrix);
         }
 
-        let twiddles = self.legacy_twiddles(
-            forward_backend(height, width) == "legacy",
-            log2_strict_usize(height),
-            false,
-        );
+        let plan = self.forward_plan(height, width);
         // SAFETY: Goldilocks is repr(transparent) over u64 (asserted above),
         // every u64 bit pattern is a valid Goldilocks value, all buffers have
         // the element counts implied by height/width, and the FFI call is
-        // synchronous so the borrowed twiddle buffer outlives device use.
+        // synchronous so the matrix and transform plan outlive device use.
         let status = unsafe {
             multi_stark_cuda_dft_batch(
                 self.device_id,
                 matrix.values.as_mut_ptr().cast(),
                 height,
                 width,
-                table_ptr(&twiddles),
+                &plan.raw,
             )
         };
         check_cuda(status, "batched DFT");
 
-        // The CUDA DIF kernel writes bit-reversed rows. Wrap that storage so
+        // The CUDA transform writes bit-reversed rows. Wrap that storage so
         // callers observe the natural-order evaluations required by the trait.
         BitReversalPerm::new_view(matrix)
     }
@@ -2349,7 +2170,7 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
             backend = if width == 0 {
                 "noop"
             } else if height > 1 && Self::use_cuda_coset_lde(extended_height, width) {
-                lde_backend(height, width, added_bits)
+                "sppark"
             } else {
                 "cpu"
             }
@@ -2370,13 +2191,7 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
             return self.cpu.coset_lde_batch(matrix, added_bits, shift);
         }
 
-        let log_height = log2_strict_usize(height);
-        let legacy = lde_backend(height, width, added_bits) == "legacy";
-        let inverse_twiddles = self.legacy_twiddles(legacy, log_height, true);
-        let forward_twiddles =
-            self.legacy_twiddles(legacy, log2_strict_usize(extended_height), false);
-        let shift_powers = self.shift_powers(height, shift);
-        let height_inverse = Goldilocks::ONE.div_2exp_u64(log_height as u64);
+        let plan = self.lde_plan(height, width, added_bits, shift);
         let mut output = Goldilocks::zero_vec(extended_height * width);
 
         // SAFETY: the input/output and cached tables have the exact lengths
@@ -2390,10 +2205,7 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
                 height,
                 width,
                 added_bits,
-                table_ptr(&inverse_twiddles),
-                shift_powers.as_ptr().cast(),
-                table_ptr(&forward_twiddles),
-                raw_u64(height_inverse),
+                &plan.raw,
             )
         };
         check_cuda(status, "coset LDE");
@@ -3101,7 +2913,7 @@ unsafe extern "C" {
         values: *mut u64,
         height: usize,
         width: usize,
-        twiddles: *const u64,
+        plan: *const RawPlan,
     ) -> i32;
 
     fn multi_stark_cuda_coset_lde_batch(
@@ -3111,10 +2923,7 @@ unsafe extern "C" {
         height: usize,
         width: usize,
         added_bits: usize,
-        inverse_twiddles: *const u64,
-        shift_powers: *const u64,
-        forward_twiddles: *const u64,
-        height_inverse: u64,
+        plan: *const RawPlan,
     ) -> i32;
 
     fn multi_stark_cuda_coset_lde_create(
@@ -3124,22 +2933,10 @@ unsafe extern "C" {
         height: usize,
         width: usize,
         added_bits: usize,
-        inverse_twiddles: *const u64,
-        shift_powers: *const u64,
-        forward_twiddles: *const u64,
-        height_inverse: u64,
+        plan: *const RawPlan,
     ) -> i32;
 
-    fn multi_stark_cuda_prepare_lde_constants(
-        device_id: i32,
-        inverse_twiddles: *const u64,
-        inverse_count: usize,
-        shift_powers: *const u64,
-        height: usize,
-        forward_twiddles: *const u64,
-        forward_count: usize,
-    ) -> i32;
-
+    fn multi_stark_cuda_prepare_lde_constants(device_id: i32, plan: *const RawPlan) -> i32;
     fn multi_stark_cuda_lde_create_from_host(
         device_id: i32,
         handle: *mut *mut c_void,
@@ -3265,8 +3062,8 @@ unsafe extern "C" {
         next_step: usize,
         quotient_degree: usize,
         log_blowup: usize,
-        quotient_twiddles: *const u64,
-        lde_twiddles: *const u64,
+        quotient_plan: *const RawPlan,
+        lde_plan: *const RawPlan,
         slice_weights: *const u64,
     ) -> i32;
     fn multi_stark_cuda_quotient_lde_mixed(
@@ -3309,8 +3106,8 @@ unsafe extern "C" {
         next_step: usize,
         quotient_degree: usize,
         log_blowup: usize,
-        quotient_twiddles: *const u64,
-        lde_twiddles: *const u64,
+        quotient_plan: *const RawPlan,
+        lde_plan: *const RawPlan,
         slice_weights: *const u64,
     ) -> i32;
     fn multi_stark_cuda_mixed_lde_open_row(
@@ -3405,10 +3202,7 @@ unsafe extern "C" {
         gamma: *const u64,
         ext_w: u64,
         added_bits: usize,
-        inverse_twiddles: *const u64,
-        shift_powers: *const u64,
-        forward_twiddles: *const u64,
-        height_inverse: u64,
+        plan: *const RawPlan,
     ) -> i32;
     fn multi_stark_cuda_lookup_lde(
         device_id: i32,
@@ -3425,10 +3219,7 @@ unsafe extern "C" {
         gamma: *const u64,
         ext_w: u64,
         added_bits: usize,
-        inverse_twiddles: *const u64,
-        shift_powers: *const u64,
-        forward_twiddles: *const u64,
-        height_inverse: u64,
+        plan: *const RawPlan,
     ) -> i32;
     fn multi_stark_cuda_lookup_lde_begin_partitioned(
         device_id: i32,
@@ -3463,10 +3254,7 @@ unsafe extern "C" {
         pending_handle: *mut c_void,
         output_handle: *mut *mut c_void,
         total: *mut u64,
-        inverse_twiddles: *const u64,
-        shift_powers: *const u64,
-        forward_twiddles: *const u64,
-        height_inverse: u64,
+        plan: *const RawPlan,
     ) -> i32;
     fn multi_stark_cuda_lookup_lde_cancel_partitioned(
         device_id: i32,

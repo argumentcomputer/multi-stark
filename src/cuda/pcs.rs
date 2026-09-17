@@ -72,6 +72,14 @@ fn goldilocks_quadratic_inverse_denominators(
 }
 
 pub trait CudaPcsDft<T: TwoAdicField>: TwoAdicSubgroupDft<T> {
+    fn coset_lde_workspace_bytes(
+        &self,
+        height: usize,
+        width: usize,
+        added_bits: usize,
+        shift: T,
+    ) -> usize;
+
     fn prepare_coset_lde_constants(&self, height: usize, added_bits: usize, shift: T);
 
     fn coset_lde_batch_resident(
@@ -614,6 +622,18 @@ where
             .sum::<usize>();
         let dft = &self.dft;
         let log_blowup = self.fri.log_blowup;
+        let transform_workspaces: Vec<_> = evaluations
+            .iter()
+            .map(|(domain, matrix)| {
+                dft.coset_lde_workspace_bytes(
+                    matrix.height(),
+                    matrix.width(),
+                    log_blowup,
+                    Val::GENERATOR / domain.shift(),
+                )
+            })
+            .collect();
+        let max_transform_workspace = transform_workspaces.iter().copied().max().unwrap_or(0);
         let (initial_free, total_bytes) =
             crate::cuda::device_memory_info(self.mmcs.cuda_device_id());
         let minimum_free = std::env::var("MULTI_STARK_CUDA_MIN_FREE_BYTES")
@@ -627,8 +647,13 @@ where
         let release_traces_during_construction = source_bytes
             .saturating_add(lde_bytes)
             .saturating_add(minimum_free)
+            .saturating_add(max_transform_workspace)
             > initial_free;
-        if lde_bytes.saturating_add(minimum_free) > initial_free {
+        if lde_bytes
+            .saturating_add(minimum_free)
+            .saturating_add(max_transform_workspace)
+            > initial_free
+        {
             let max_lde_height = evaluations
                 .iter()
                 .map(|(_, matrix)| matrix.height() << log_blowup)
@@ -640,7 +665,8 @@ where
             let tree_workspace_bytes = max_lde_height.saturating_mul(96);
             let gpu_lde_budget = initial_free
                 .saturating_sub(minimum_free)
-                .saturating_sub(tree_workspace_bytes);
+                .saturating_sub(tree_workspace_bytes)
+                .saturating_sub(max_transform_workspace);
             let matrix_resources = evaluations
                 .iter()
                 .map(|(_, matrix)| {
@@ -706,7 +732,10 @@ where
             // GPU lane during commitment. Its selected matrices are transformed
             // temporarily for hashing, then recomputed by the CPU for durable
             // host storage while CUDA moves on to the retained groups.
-            let transient_reserve = max_lde_height.saturating_mul(32).saturating_add(64 << 20);
+            let transient_reserve = max_lde_height
+                .saturating_mul(32)
+                .saturating_add(64 << 20)
+                .saturating_add(max_transform_workspace);
             let select_transient_plan = |transient_budget| {
                 height_indices
                     .iter()
@@ -1035,7 +1064,11 @@ where
         let wave_size = if release_traces_during_construction {
             1
         } else {
-            CUDA_LDE_WAVE
+            let workspace_budget = initial_free
+                .saturating_sub(source_bytes)
+                .saturating_sub(lde_bytes)
+                .saturating_sub(minimum_free);
+            (workspace_budget / max_transform_workspace.max(1)).clamp(1, CUDA_LDE_WAVE)
         };
         for wave in evaluations.chunks(wave_size) {
             let transform =

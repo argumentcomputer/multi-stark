@@ -1215,45 +1215,6 @@ mod tests {
     use p3_dft::{NaiveDft, Radix2DitParallel};
     use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
-    /// Host model of the CUDA radix-2 DIF kernel. It intentionally mirrors
-    /// `cuda/kernels.cu` stage/index/twiddle ordering and returns raw
-    /// bit-reversed storage.
-    fn cuda_dif_model(mut matrix: RowMajorMatrix<Val>, inverse: bool) -> RowMajorMatrix<Val> {
-        let height = matrix.height();
-        if height <= 1 {
-            return matrix;
-        }
-        let width = matrix.width();
-        let log_height = log2_strict_usize(height);
-        let root = Val::two_adic_generator(log_height);
-        let root = if inverse { root.inverse() } else { root };
-        let twiddles: Vec<_> = root.powers().take(height / 2).collect();
-
-        let mut half = height / 2;
-        loop {
-            let stride = height / (2 * half);
-            for butterfly in 0..height / 2 {
-                let offset = butterfly % half;
-                let group = butterfly / half;
-                let row_0 = group * (2 * half) + offset;
-                let row_1 = row_0 + half;
-                for column in 0..width {
-                    let index_0 = row_0 * width + column;
-                    let index_1 = row_1 * width + column;
-                    let left = matrix.values[index_0];
-                    let right = matrix.values[index_1];
-                    matrix.values[index_0] = left + right;
-                    matrix.values[index_1] = (left - right) * twiddles[offset * stride];
-                }
-            }
-            if half == 1 {
-                break;
-            }
-            half >>= 1;
-        }
-        matrix
-    }
-
     /// `lde_from_coefficients` must reproduce, value for value, the matrix
     /// `TwoAdicFriPcs::commit` stores for the same polynomials given as
     /// trace-domain evaluations: `coset_lde_batch` with the generator shift
@@ -1361,52 +1322,6 @@ mod tests {
                             lde_from_shifted_coefficients(&naive, naive_slices.clone(), log_blowup);
                         assert_eq!(naive_lde, radix_lde);
                     }
-                }
-            }
-        }
-    }
-
-    /// Pins the first-party CUDA kernel's DIF ordering and fused coset-LDE
-    /// pipeline even on machines without a CUDA toolkit or GPU.
-    #[test]
-    fn cuda_dif_and_coset_lde_model_match_cpu() {
-        let mut rng = SmallRng::seed_from_u64(3);
-        let radix = Radix2DitParallel::<Val>::default();
-        for log_height in [0usize, 1, 2, 5, 8] {
-            for width in [1usize, 2, 7] {
-                let height = 1 << log_height;
-                let matrix =
-                    RowMajorMatrix::new((0..height * width).map(|_| rng.random()).collect(), width);
-                let expected_dft = radix
-                    .dft_batch(matrix.clone())
-                    .bit_reverse_rows()
-                    .to_row_major_matrix();
-                assert_eq!(cuda_dif_model(matrix.clone(), false), expected_dft);
-
-                for added_bits in [0usize, 1, 2, 3] {
-                    // CUDA pipeline: inverse DIF (bit-reversed coefficients),
-                    // bit-reverse + normalize + shift, zero-pad, forward DIF.
-                    let mut coefficients = cuda_dif_model(matrix.clone(), true)
-                        .bit_reverse_rows()
-                        .to_row_major_matrix();
-                    let height_inverse = Val::ONE.div_2exp_u64(log_height as u64);
-                    let mut shift = Val::ONE;
-                    for row in 0..height {
-                        for value in &mut coefficients.values[row * width..(row + 1) * width] {
-                            *value *= height_inverse * shift;
-                        }
-                        shift *= Val::GENERATOR;
-                    }
-                    coefficients.pad_to_height(height << added_bits, Val::ZERO);
-                    let actual = cuda_dif_model(coefficients, false);
-                    let expected = radix
-                        .coset_lde_batch(matrix.clone(), added_bits, Val::GENERATOR)
-                        .bit_reverse_rows()
-                        .to_row_major_matrix();
-                    assert_eq!(
-                        actual, expected,
-                        "height=2^{log_height}, blowup=2^{added_bits}, width={width}"
-                    );
                 }
             }
         }

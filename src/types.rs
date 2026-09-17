@@ -565,20 +565,11 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                     self.log_blowup,
                 );
                 let current_staging = staging_bytes(input);
-                let constant_bytes = quotient_size
-                    .saturating_add(lde_height)
-                    .saturating_div(2)
-                    .saturating_add(quotient_degree)
-                    .saturating_mul(size_of::<Val>());
-                // The sppark path's column panels for the two forward
-                // transforms, zero when they stay on the first-party kernels.
-                #[cfg(feature = "cuda-sppark")]
+                let constant_bytes = quotient_degree.saturating_mul(size_of::<Val>());
+                let quotient_plan = self.pcs.dft.forward_plan(quotient_size, 2);
+                let lde_plan = self.pcs.dft.forward_plan(lde_height, 2 * quotient_degree);
                 let kernel_workspace = kernel_workspace
-                    .saturating_add(crate::cuda::sppark::forward_panel_bytes(quotient_size, 2))
-                    .saturating_add(crate::cuda::sppark::forward_panel_bytes(
-                        lde_height,
-                        2 * quotient_degree,
-                    ));
+                    .saturating_add(quotient_plan.scratch_bytes().max(lde_plan.scratch_bytes()));
                 (
                     index,
                     output_bytes,
@@ -822,14 +813,6 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                                 .saturating_mul(2 * size_of::<Val>()),
                         )
                         .saturating_add(arg_offsets.len().saturating_mul(size_of::<usize>()))
-                        // Device-cached inverse/forward twiddles and coset
-                        // powers may be cold for this height.
-                        .saturating_add(
-                            height
-                                .saturating_add(height / 2)
-                                .saturating_add(extended_height / 2)
-                                .saturating_mul(size_of::<Val>()),
-                        )
                 };
                 let main_width = self
                     .pcs
@@ -849,18 +832,20 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                         )
                     })
                     .flatten();
-                // The sppark path's column panels for the lookup LDE, on
-                // either path; zero when it stays on the first-party kernels.
-                #[cfg(feature = "cuda-sppark")]
-                let sppark_panel =
-                    crate::cuda::sppark::panel_bytes(height, 2 * groups, self.log_blowup);
-                #[cfg(not(feature = "cuda-sppark"))]
-                let sppark_panel = 0;
+                let transform_bytes = if num_lookups == 0 {
+                    0
+                } else {
+                    let plan =
+                        self.pcs
+                            .dft
+                            .lde_plan(height, 2 * groups, self.log_blowup, Val::GENERATOR);
+                    plan.scratch_bytes().saturating_add(plan.constant_bytes())
+                };
                 (
                     index,
                     output_bytes,
-                    direct_temporary_bytes.saturating_add(sppark_panel),
-                    graph_memory.map(|(_, temporary)| temporary.saturating_add(sppark_panel)),
+                    direct_temporary_bytes.saturating_add(transform_bytes),
+                    graph_memory.map(|(_, temporary)| temporary.saturating_add(transform_bytes)),
                     extended_height,
                 )
             })
@@ -1139,6 +1124,20 @@ pub(crate) type Blake3CompressionFunction = CompressionFunctionFromHasher<Blake3
 
 #[cfg(feature = "cuda")]
 impl CudaPcsDft<Val> for CudaDft {
+    fn coset_lde_workspace_bytes(
+        &self,
+        height: usize,
+        width: usize,
+        added_bits: usize,
+        shift: Val,
+    ) -> usize {
+        if width == 0 {
+            return 0;
+        }
+        let plan = self.lde_plan(height, width, added_bits, shift);
+        plan.scratch_bytes().saturating_add(plan.constant_bytes())
+    }
+
     fn prepare_coset_lde_constants(&self, height: usize, added_bits: usize, shift: Val) {
         self.prepare_coset_lde_constants(height, added_bits, shift);
     }

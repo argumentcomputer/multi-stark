@@ -18,12 +18,7 @@
 #include <cstring>
 #include <new>
 #include "metrics.cuh"
-#ifdef MULTI_STARK_SPPARK
-extern "C" int multi_stark_sppark_forward(int device, uint64_t* values, size_t height, size_t width);
-extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, uint64_t* values,
-                                            size_t height, size_t width, size_t added_bits,
-                                            const uint64_t* shift_powers);
-#endif
+#include "ntt.cuh"
 
 
 
@@ -1568,270 +1563,6 @@ __global__ void gather_mixed_lde_rows(uint64_t* output,
     }
 }
 
-__global__ void radix2_dif_stage(uint64_t* values, size_t height, size_t width,
-                                 size_t half, const uint64_t* twiddles) {
-    const size_t total = (height >> 1) * width;
-    const size_t stride = height / (2 * half);
-    const size_t grid_stride = static_cast<size_t>(blockDim.x) * gridDim.x;
-    for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         index < total; index += grid_stride) {
-        const size_t butterfly = index / width;
-        const size_t column = index - butterfly * width;
-        const size_t offset = butterfly % half;
-        const size_t group = butterfly / half;
-        const size_t row_0 = group * (2 * half) + offset;
-        const size_t row_1 = row_0 + half;
-        const size_t index_0 = row_0 * width + column;
-        const size_t index_1 = row_1 * width + column;
-        const uint64_t left = values[index_0];
-        const uint64_t right = values[index_1];
-        values[index_0] = goldilocks_add(left, right);
-        values[index_1] = goldilocks_mul(
-            goldilocks_sub(left, right), twiddles[offset * stride]);
-    }
-}
-
-// Fuse two consecutive radix-2 DIF stages. Each thread owns one column of
-// one four-row butterfly, so row-major accesses remain coalesced while the
-// intermediate values never return to global memory.
-__global__ void radix4_dif_stage(uint64_t* values,size_t height,size_t width,
-    size_t half,const uint64_t* twiddles){
-    const size_t quarter=half>>1,total=(height>>2)*width,stride=height/(2*half);
-    const size_t grid_stride=static_cast<size_t>(blockDim.x)*gridDim.x;
-    for(size_t index=static_cast<size_t>(blockIdx.x)*blockDim.x+threadIdx.x;index<total;index+=grid_stride){
-        const size_t butterfly=index/width,column=index-butterfly*width;
-        const size_t offset=butterfly%quarter,group=butterfly/quarter,base=group*(4*quarter)+offset;
-        const size_t i0=base*width+column,i1=(base+quarter)*width+column;
-        const size_t i2=(base+2*quarter)*width+column,i3=(base+3*quarter)*width+column;
-        const uint64_t a=values[i0],b=values[i1],c=values[i2],d=values[i3];
-        const uint64_t ac0=goldilocks_add(a,c),ac1=goldilocks_mul(goldilocks_sub(a,c),twiddles[offset*stride]);
-        const uint64_t bd0=goldilocks_add(b,d),bd1=goldilocks_mul(goldilocks_sub(b,d),twiddles[(offset+quarter)*stride]);
-        const uint64_t second_twiddle=twiddles[offset*(2*stride)];
-        values[i0]=goldilocks_add(ac0,bd0);
-        values[i1]=goldilocks_mul(goldilocks_sub(ac0,bd0),second_twiddle);
-        values[i2]=goldilocks_add(ac1,bd1);
-        values[i3]=goldilocks_mul(goldilocks_sub(ac1,bd1),second_twiddle);
-    }
-}
-
-// Fuse three consecutive DIF stages. A thread owns one column of an
-// eight-row butterfly, cutting the global-memory passes for large row-major
-// transforms from three to one while using the identical radix-2 twiddles.
-__global__ void radix8_dif_stage(uint64_t* values,size_t height,size_t width,
-    size_t half,const uint64_t* twiddles){
-    const size_t eighth=half>>2,total=(height>>3)*width,stride=height/(2*half);
-    const size_t grid_stride=static_cast<size_t>(blockDim.x)*gridDim.x;
-    for(size_t index=static_cast<size_t>(blockIdx.x)*blockDim.x+threadIdx.x;index<total;index+=grid_stride){
-        const size_t butterfly=index/width,column=index-butterfly*width;
-        const size_t offset=butterfly%eighth,group=butterfly/eighth;
-        const size_t base=group*(8*eighth)+offset;
-        const size_t i0=(base+0*eighth)*width+column,i1=(base+1*eighth)*width+column;
-        const size_t i2=(base+2*eighth)*width+column,i3=(base+3*eighth)*width+column;
-        const size_t i4=(base+4*eighth)*width+column,i5=(base+5*eighth)*width+column;
-        const size_t i6=(base+6*eighth)*width+column,i7=(base+7*eighth)*width+column;
-        const uint64_t a0=values[i0],a1=values[i1],a2=values[i2],a3=values[i3];
-        const uint64_t a4=values[i4],a5=values[i5],a6=values[i6],a7=values[i7];
-        const uint64_t x0=goldilocks_add(a0,a4),x1=goldilocks_add(a1,a5);
-        const uint64_t x2=goldilocks_add(a2,a6),x3=goldilocks_add(a3,a7);
-        const uint64_t x4=goldilocks_mul(goldilocks_sub(a0,a4),twiddles[(offset+0*eighth)*stride]);
-        const uint64_t x5=goldilocks_mul(goldilocks_sub(a1,a5),twiddles[(offset+1*eighth)*stride]);
-        const uint64_t x6=goldilocks_mul(goldilocks_sub(a2,a6),twiddles[(offset+2*eighth)*stride]);
-        const uint64_t x7=goldilocks_mul(goldilocks_sub(a3,a7),twiddles[(offset+3*eighth)*stride]);
-        const uint64_t t20=twiddles[offset*(2*stride)];
-        const uint64_t t21=twiddles[(offset+eighth)*(2*stride)];
-        const uint64_t y0=goldilocks_add(x0,x2),y1=goldilocks_add(x1,x3);
-        const uint64_t y2=goldilocks_mul(goldilocks_sub(x0,x2),t20);
-        const uint64_t y3=goldilocks_mul(goldilocks_sub(x1,x3),t21);
-        const uint64_t y4=goldilocks_add(x4,x6),y5=goldilocks_add(x5,x7);
-        const uint64_t y6=goldilocks_mul(goldilocks_sub(x4,x6),t20);
-        const uint64_t y7=goldilocks_mul(goldilocks_sub(x5,x7),t21);
-        const uint64_t t3=twiddles[offset*(4*stride)];
-        values[i0]=goldilocks_add(y0,y1);values[i1]=goldilocks_mul(goldilocks_sub(y0,y1),t3);
-        values[i2]=goldilocks_add(y2,y3);values[i3]=goldilocks_mul(goldilocks_sub(y2,y3),t3);
-        values[i4]=goldilocks_add(y4,y5);values[i5]=goldilocks_mul(goldilocks_sub(y4,y5),t3);
-        values[i6]=goldilocks_add(y6,y7);values[i7]=goldilocks_mul(goldilocks_sub(y6,y7),t3);
-    }
-}
-
-// Fuse the small-half tail of a DIF transform in shared memory. Once a
-// 2*start_half row group fits in a block, every remaining butterfly is local
-// to that group; launching and round-tripping through global memory for each
-// of those stages only adds latency and bandwidth traffic.
-__global__ void radix2_dif_tail(uint64_t* values, size_t height, size_t width,
-                                size_t start_half,
-                                const uint64_t* twiddles) {
-    extern __shared__ uint64_t local_values[];
-    const size_t rows_per_group = 2 * start_half;
-    const size_t elements_per_group = rows_per_group * width;
-    const size_t groups = height / rows_per_group;
-
-    for (size_t group = blockIdx.x; group < groups; group += gridDim.x) {
-        const size_t global_base = group * elements_per_group;
-        for (size_t index = threadIdx.x; index < elements_per_group;
-             index += blockDim.x) {
-            local_values[index] = values[global_base + index];
-        }
-        __syncthreads();
-
-        for (size_t half = start_half;; half >>= 1) {
-            const size_t butterflies = start_half * width;
-            const size_t stride = height / (2 * half);
-            for (size_t index = threadIdx.x; index < butterflies;
-                 index += blockDim.x) {
-                const size_t butterfly = index / width;
-                const size_t column = index - butterfly * width;
-                const size_t offset = butterfly % half;
-                const size_t subgroup = butterfly / half;
-                const size_t row_0 = subgroup * (2 * half) + offset;
-                const size_t row_1 = row_0 + half;
-                const size_t index_0 = row_0 * width + column;
-                const size_t index_1 = row_1 * width + column;
-                const uint64_t left = local_values[index_0];
-                const uint64_t right = local_values[index_1];
-                local_values[index_0] = goldilocks_add(left, right);
-                local_values[index_1] = goldilocks_mul(
-                    goldilocks_sub(left, right), twiddles[offset * stride]);
-            }
-            __syncthreads();
-            if (half == 1) {
-                break;
-            }
-        }
-
-        for (size_t index = threadIdx.x; index < elements_per_group;
-             index += blockDim.x) {
-            values[global_base + index] = local_values[index];
-        }
-        __syncthreads();
-    }
-}
-
-// Wide row-major matrices cannot fit all columns of a row group in shared
-// memory. Tile the columns as well, preserving coalesced row-major loads while
-// fusing the final DIF stages independently for each column tile.
-__global__ void radix2_dif_tail_tiled(uint64_t* values,size_t height,size_t width,
-    size_t start_half,const uint64_t* twiddles,size_t columns_per_tile){
-    extern __shared__ uint64_t local_values[];const size_t rows=2*start_half;
-    const size_t groups=height/rows,column_tiles=(width+columns_per_tile-1)/columns_per_tile;
-    const size_t tile_count=groups*column_tiles;
-    for(size_t tile_index=blockIdx.x;tile_index<tile_count;tile_index+=gridDim.x){
-        const size_t group=tile_index/column_tiles,column_tile=tile_index%column_tiles;
-        const size_t column_base=column_tile*columns_per_tile;
-        const size_t columns=(column_base+columns_per_tile<width)?columns_per_tile:width-column_base;
-        const size_t elements=rows*columns;
-        for(size_t index=threadIdx.x;index<elements;index+=blockDim.x){const size_t row=index/columns,column=index-row*columns;
-            local_values[index]=values[(group*rows+row)*width+column_base+column];}
-        __syncthreads();
-        for(size_t half=start_half;;half>>=1){const size_t butterflies=start_half*columns,stride=height/(2*half);
-            for(size_t index=threadIdx.x;index<butterflies;index+=blockDim.x){const size_t butterfly=index/columns,column=index-butterfly*columns;
-                const size_t offset=butterfly%half,subgroup=butterfly/half,row0=subgroup*(2*half)+offset,row1=row0+half;
-                const size_t i0=row0*columns+column,i1=row1*columns+column;const uint64_t left=local_values[i0],right=local_values[i1];
-                local_values[i0]=goldilocks_add(left,right);local_values[i1]=goldilocks_mul(goldilocks_sub(left,right),twiddles[offset*stride]);}
-            __syncthreads();if(half==1)break;
-        }
-        for(size_t index=threadIdx.x;index<elements;index+=blockDim.x){const size_t row=index/columns,column=index-row*columns;
-            values[(group*rows+row)*width+column_base+column]=local_values[index];}
-        __syncthreads();
-    }
-}
-
-cudaError_t launch_dif(int device_id, uint64_t* values, size_t height, size_t width,
-                       const uint64_t* twiddles) {
-    if (multi_stark_metrics::enabled() && height > 1 && width > 0) {
-        const unsigned log = strict_log2(height);
-        const unsigned bucket = width == 1 ? 0 : width == 2 ? 1 : width < 8 ? 2 : 3;
-        if (log <= 32) multi_stark_metrics::add(device_id,
-            multi_stark_metrics::NTT_OFFSET + log * 4 + bucket, 1);
-    }
-    if (height <= 1 || width == 0) {
-        return cudaSuccess;
-    }
-    const size_t total = (height >> 1) * width;
-    const unsigned int blocks = blocks_for(total);
-    // Wide row-major batches use fused stages regardless of height: short,
-    // wide traces can contain as many cells as tall traces. Width-2 FRI
-    // codewords retain the shared-memory tail specialized below.
-    if (width >= 8) {
-        size_t half = height >> 1;
-        while (half >= 4) {
-            radix8_dif_stage<<<blocks_for((height >> 3) * width), THREADS>>>(
-                values, height, width, half, twiddles);
-            const cudaError_t status = cudaGetLastError();
-            if (status != cudaSuccess) return status;
-            half >>= 3;
-        }
-        if (half == 2) {
-            radix4_dif_stage<<<blocks_for((height >> 2) * width), THREADS>>>(
-                values, height, width, half, twiddles);
-            return cudaGetLastError();
-        }
-        if (half == 1) {
-            radix2_dif_stage<<<blocks, THREADS>>>(values, height, width, 1,
-                                                  twiddles);
-        }
-        return cudaGetLastError();
-    }
-    if (width > 2) {
-        for (size_t half = height >> 1;; half >>= 1) {
-            radix2_dif_stage<<<blocks, THREADS>>>(values, height, width, half,
-                                                  twiddles);
-            const cudaError_t status = cudaGetLastError();
-            if (status != cudaSuccess) return status;
-            if (half == 1) return cudaSuccess;
-        }
-    }
-    constexpr size_t TAIL_HALF = 128;
-    for (size_t half = height >> 1; half > TAIL_HALF; half >>= 1) {
-        radix2_dif_stage<<<blocks, THREADS>>>(values, height, width, half,
-                                              twiddles);
-        const cudaError_t status = cudaGetLastError();
-        if (status != cudaSuccess) {
-            return status;
-        }
-    }
-
-    const size_t start_half =
-        height < 2 * TAIL_HALF ? height >> 1 : TAIL_HALF;
-    const size_t groups = height / (2 * start_half);
-    const unsigned int tail_blocks = static_cast<unsigned int>(
-        groups < MAX_BLOCKS ? groups : MAX_BLOCKS);
-    const size_t shared_bytes = 2 * start_half * width * sizeof(uint64_t);
-    radix2_dif_tail<<<tail_blocks, THREADS, shared_bytes>>>(
-        values, height, width, start_half, twiddles);
-    return cudaGetLastError();
-}
-
-__global__ void bit_reverse_scale_and_shift(uint64_t* values, size_t height,
-                                            size_t width, unsigned int log_height,
-                                            uint64_t height_inverse,
-                                            const uint64_t* shift_powers) {
-    const size_t total = height * width;
-    const size_t grid_stride = static_cast<size_t>(blockDim.x) * gridDim.x;
-    for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         index < total; index += grid_stride) {
-        const size_t row = index / width;
-        const size_t column = index - row * width;
-        const size_t reverse_row = reverse_index_bits(row, log_height);
-        if (row > reverse_row) {
-            continue;
-        }
-
-        const size_t reverse_index = reverse_row * width + column;
-        const uint64_t left = values[index];
-        if (row == reverse_row) {
-            values[index] = goldilocks_mul(
-                left, goldilocks_mul(height_inverse, shift_powers[row]));
-            continue;
-        }
-
-        const uint64_t right = values[reverse_index];
-        values[index] = goldilocks_mul(
-            right, goldilocks_mul(height_inverse, shift_powers[row]));
-        values[reverse_index] = goldilocks_mul(
-            left, goldilocks_mul(height_inverse, shift_powers[reverse_row]));
-    }
-}
-
 __global__ void goldilocks_ops_kernel(uint64_t* sums, uint64_t* differences,
                                       uint64_t* products, uint64_t* inverses,
                                       const uint64_t* left, const uint64_t* right,
@@ -2253,88 +1984,41 @@ cudaError_t copy_to_host(uint64_t* destination, const DeviceBuffer& source,
 
 }  // namespace
 
-// A first-party twiddle table of `count` entries for a transform, cached
-// on the device when `legacy`. The Rust side builds no table for a
-// transform it sends through sppark, and that absence is the dispatch
-// decision on this side; a table required by a first-party transform but
-// missing is an argument error rather than a read past an empty buffer.
-static cudaError_t legacy_table(int device_id, const uint64_t* host, size_t count, int kind, bool legacy,
-                                const uint64_t** out) {
-    *out = nullptr;
-    if (!legacy) return cudaSuccess;
-    if (!host) return cudaErrorInvalidValue;
-    return cached_device_constants(device_id, host, count, kind, 0, 0, out);
+static cudaError_t plan_constants(int device, const MultiStarkNttPlan* plan,
+                                  const uint64_t** powers) {
+    const auto* host = plan->shift_powers;
+    return cached_device_constants(device, host, plan->height, 3, host[0],
+                                    plan->height > 1 ? host[1] : 0, powers);
 }
 
-// The inverse-shift-forward sequence in place on `values`, whose first
-// `height` rows hold natural-order evaluations and whose tail is zero: the
-// sppark panel above its height threshold, the first-party stages
-// otherwise. Both leave bit-reversed rows; `canonical_pass` adds the
-// reduction pass the lookup paths run after the first-party stages.
-static cudaError_t coset_lde_in_place(int device_id, uint64_t* values, size_t height, size_t width,
-                                      size_t extended_height, const uint64_t* inverse_twiddles,
-                                      const uint64_t* shift_powers, const uint64_t* forward_twiddles,
-                                      uint64_t height_inverse, bool canonical_pass) {
-    // The Rust side decides the backend once, by the shape, and hands the
-    // first-party tables over only for the first-party path; the tables'
-    // absence is the sppark decision, so a backend switch between the two
-    // sides cannot split a transform.
-#ifdef MULTI_STARK_SPPARK
-    if (forward_twiddles == nullptr) {
-        if (multi_stark_metrics::enabled()) {
-            multi_stark_metrics::add(device_id, multi_stark_metrics::SpparkTaken, 1);
-            multi_stark_metrics::add(device_id, multi_stark_metrics::NTT_SPPARK_OFFSET + multi_stark_metrics::ntt_shape(height, width), 1);
-            multi_stark_metrics::add(device_id, multi_stark_metrics::NTT_SPPARK_OFFSET + multi_stark_metrics::ntt_shape(extended_height, width), 1);
-        }
-        const size_t added_bits = strict_log2(extended_height) - strict_log2(height);
-        return static_cast<cudaError_t>(multi_stark_sppark_coset_lde(
-            device_id, values, values, height, width, added_bits, shift_powers));
-    }
-    if (multi_stark_metrics::enabled()) multi_stark_metrics::add(device_id, multi_stark_metrics::SpparkDeclined, 1);
-#else
-    if (forward_twiddles == nullptr) return cudaErrorInvalidValue;
-#endif
-    cudaError_t status = launch_dif(device_id, values, height, width, inverse_twiddles);
-    if (status == cudaSuccess) {
-        bit_reverse_scale_and_shift<<<blocks_for(height * width), THREADS>>>(
-            values, height, width, strict_log2(height), height_inverse, shift_powers);
-        status = cudaGetLastError();
-    }
-    if (status == cudaSuccess) status = launch_dif(device_id, values, extended_height, width, forward_twiddles);
-    if (status == cudaSuccess && canonical_pass) {
-        canonicalize_goldilocks<<<blocks_for(extended_height * width), THREADS>>>(values, extended_height * width);
-        status = cudaGetLastError();
-    }
-    return status;
+static void record_transform(int device, size_t height, size_t width) {
+    if (multi_stark_metrics::enabled() && height > 1)
+        multi_stark_metrics::add(device, multi_stark_metrics::NTT_OFFSET +
+                                 multi_stark_metrics::ntt_shape(height, width), 1);
 }
 
-// A forward transform in place on natural-order rows, leaving bit-reversed
-// rows: sppark above its height threshold, the first-party stages otherwise.
-static cudaError_t forward_in_place(int device_id, uint64_t* values, size_t height, size_t width,
-                                    const uint64_t* twiddles) {
-#ifdef MULTI_STARK_SPPARK
-    if (twiddles == nullptr) {
-        if (multi_stark_metrics::enabled()) {
-            multi_stark_metrics::add(device_id, multi_stark_metrics::SpparkTaken, 1);
-            multi_stark_metrics::add(device_id, multi_stark_metrics::NTT_SPPARK_OFFSET + multi_stark_metrics::ntt_shape(height, width), 1);
-        }
-        return static_cast<cudaError_t>(multi_stark_sppark_forward(device_id, values, height, width));
-    }
-    if (multi_stark_metrics::enabled()) multi_stark_metrics::add(device_id, multi_stark_metrics::SpparkDeclined, 1);
-#else
-    if (twiddles == nullptr) return cudaErrorInvalidValue;
-#endif
-    return launch_dif(device_id, values, height, width, twiddles);
+static cudaError_t coset_lde(int device, const uint64_t* trace, uint64_t* values,
+                             const MultiStarkNttPlan* plan) {
+    const uint64_t* powers = nullptr;
+    cudaError_t status = plan_constants(device, plan, &powers);
+    if (status != cudaSuccess) return status;
+    record_transform(device, plan->height, plan->width);
+    record_transform(device, plan->extended_height, plan->width);
+    return static_cast<cudaError_t>(multi_stark_sppark_coset_lde(device, trace, values, plan, powers));
+}
+
+static cudaError_t forward_in_place(int device, uint64_t* values, const MultiStarkNttPlan* plan) {
+    record_transform(device, plan->height, plan->width);
+    return static_cast<cudaError_t>(multi_stark_sppark_forward(device, values, plan));
 }
 
 extern "C" int multi_stark_cuda_dft_batch(int device_id, uint64_t* values,
                                            size_t height, size_t width,
-                                           const uint64_t* twiddles) {
+                                           const MultiStarkNttPlan* plan) {
     if (values == nullptr || !is_power_of_two(height) ||
         width == 0 || !product_fits(height, width)) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
-    const bool legacy = twiddles != nullptr;
     cudaError_t status = cudaSetDevice(device_id);
     if (status != cudaSuccess) {
         return static_cast<int>(status);
@@ -2343,13 +2027,9 @@ extern "C" int multi_stark_cuda_dft_batch(int device_id, uint64_t* values,
     const size_t elements = height * width;
     HostRegistration registered_values(values, elements * sizeof(uint64_t));
     DeviceBuffer device_values;
-    DeviceBuffer device_twiddles;
     status = copy_to_device(device_values, values, elements);
-    if (status == cudaSuccess && legacy) {
-        status = copy_to_device(device_twiddles, twiddles, height / 2);
-    }
     if (status == cudaSuccess) {
-        status = forward_in_place(device_id, device_values.get(), height, width, device_twiddles.get());
+        status = forward_in_place(device_id, device_values.get(), plan);
     }
     if (status == cudaSuccess) {
         status = copy_to_host(values, device_values, elements);
@@ -2359,10 +2039,8 @@ extern "C" int multi_stark_cuda_dft_batch(int device_id, uint64_t* values,
 
 extern "C" int multi_stark_cuda_coset_lde_batch(
     int device_id, uint64_t* output, const uint64_t* input, size_t height,
-    size_t width, size_t added_bits, const uint64_t* inverse_twiddles,
-    const uint64_t* shift_powers, const uint64_t* forward_twiddles,
-    uint64_t height_inverse) {
-    if (output == nullptr || input == nullptr || shift_powers == nullptr ||
+    size_t width, size_t added_bits, const MultiStarkNttPlan* plan) {
+    if (output == nullptr || input == nullptr || plan == nullptr || plan->shift_powers == nullptr ||
         !is_power_of_two(height) || width == 0 ||
         added_bits >= sizeof(size_t) * 8 || height > (SIZE_MAX >> added_bits)) {
         return static_cast<int>(cudaErrorInvalidValue);
@@ -2371,7 +2049,6 @@ extern "C" int multi_stark_cuda_coset_lde_batch(
     if (!product_fits(extended_height, width)) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
-    const bool legacy = forward_twiddles != nullptr;
 
     cudaError_t status = cudaSetDevice(device_id);
     if (status != cudaSuccess) {
@@ -2385,32 +2062,14 @@ extern "C" int multi_stark_cuda_coset_lde_batch(
     HostRegistration registered_output(output,
                                        output_elements * sizeof(uint64_t));
     DeviceBuffer device_values;
-    DeviceBuffer device_inverse_twiddles;
-    DeviceBuffer device_shift_powers;
-    DeviceBuffer device_forward_twiddles;
     status = device_values.allocate(output_elements);
-    if (status == cudaSuccess) {
-        status = cudaMemset(device_values.get(), 0, output_elements * sizeof(uint64_t));
-    }
     if (status == cudaSuccess) {
         status = cudaMemcpy(device_values.get(), input,
                             input_elements * sizeof(uint64_t),
                             cudaMemcpyHostToDevice);
     }
-    if (status == cudaSuccess && legacy) {
-        status = copy_to_device(device_inverse_twiddles, inverse_twiddles, height / 2);
-    }
     if (status == cudaSuccess) {
-        status = copy_to_device(device_shift_powers, shift_powers, height);
-    }
-    if (status == cudaSuccess && legacy) {
-        status = copy_to_device(device_forward_twiddles, forward_twiddles,
-                                extended_height / 2);
-    }
-    if (status == cudaSuccess) {
-        status = coset_lde_in_place(device_id, device_values.get(), height, width, extended_height,
-                                    device_inverse_twiddles.get(), device_shift_powers.get(),
-                                    device_forward_twiddles.get(), height_inverse, false);
+        status = coset_lde(device_id, device_values.get(), device_values.get(), plan);
     }
     if (status == cudaSuccess) {
         status = copy_to_host(output, device_values, output_elements);
@@ -2420,11 +2079,9 @@ extern "C" int multi_stark_cuda_coset_lde_batch(
 
 static int coset_lde_create(
     int device_id, void** handle, const uint64_t* input, size_t height,
-    size_t width, size_t added_bits, const uint64_t* inverse_twiddles,
-    const uint64_t* shift_powers, const uint64_t* forward_twiddles,
-    uint64_t height_inverse, void* context, TraceWriter writer) {
+    size_t width, size_t added_bits, const MultiStarkNttPlan* plan, void* context, TraceWriter writer) {
     if (handle == nullptr || (input == nullptr && writer == nullptr) ||
-        shift_powers == nullptr ||
+        plan == nullptr || plan->shift_powers == nullptr ||
         !is_power_of_two(height) || width == 0 ||
         added_bits >= sizeof(size_t) * 8 || height > (SIZE_MAX >> added_bits)) {
         return static_cast<int>(cudaErrorInvalidValue);
@@ -2457,34 +2114,6 @@ static int coset_lde_create(
     }
     if (status == cudaSuccess) lde->trace_height = height;
 
-#ifdef MULTI_STARK_SPPARK
-    // The sppark path writes every output row itself from its own scratch.
-    const bool sppark = forward_twiddles == nullptr;
-    if (multi_stark_metrics::enabled()) {
-        multi_stark_metrics::add(device_id, sppark ? multi_stark_metrics::SpparkTaken : multi_stark_metrics::SpparkDeclined, 1);
-        if (sppark) {
-            multi_stark_metrics::add(device_id, multi_stark_metrics::NTT_SPPARK_OFFSET + multi_stark_metrics::ntt_shape(height, width), 1);
-            multi_stark_metrics::add(device_id, multi_stark_metrics::NTT_SPPARK_OFFSET + multi_stark_metrics::ntt_shape(extended_height, width), 1);
-        }
-    }
-#else
-    const bool sppark = false;
-    if (forward_twiddles == nullptr) {
-        destroy_resident_lde(lde);
-        return static_cast<int>(cudaErrorInvalidValue);
-    }
-#endif
-    // Large pageable uploads otherwise serialize through the driver's hidden
-    // staging pool; they go through the persistent staging slots instead.
-    // Small ones take the direct pageable path.
-    const uint64_t *device_inverse_twiddles=nullptr,*device_shift_powers=nullptr,*device_forward_twiddles=nullptr;
-    // The source prefix is overwritten by the trace copy. Only the padded
-    // tail needs zeroing before the forward transform.
-    if (status == cudaSuccess && !sppark && output_elements > input_elements) {
-        status = cudaMemsetAsync(lde->values + input_elements, 0,
-                                 (output_elements - input_elements) * sizeof(uint64_t),
-                                 cudaStreamPerThread);
-    }
     if (status == cudaSuccess) {
         if (writer) {
             constexpr size_t TILE_ROWS = size_t(1) << 16;
@@ -2502,40 +2131,8 @@ static int coset_lde_create(
                                      cudaStreamPerThread);
         }
     }
-    if (status == cudaSuccess) {
-        status = cached_device_constants(device_id,shift_powers,height,3,shift_powers[0],height>1?shift_powers[1]:0,&device_shift_powers);
-    }
-#ifdef MULTI_STARK_SPPARK
-    if (status == cudaSuccess && sppark) {
-        status = static_cast<cudaError_t>(multi_stark_sppark_coset_lde(
-            device_id, lde->trace_values, lde->values, height, width, added_bits, device_shift_powers));
-    }
-#endif
-    if (status == cudaSuccess && !sppark) {
-        status = cudaMemcpyAsync(lde->values, lde->trace_values,
-                                 input_elements * sizeof(uint64_t),
-                                 cudaMemcpyDeviceToDevice,
-                                 cudaStreamPerThread);
-    }
     if (status == cudaSuccess)
-        status = legacy_table(device_id, inverse_twiddles, height / 2, 1, !sppark && height > 1, &device_inverse_twiddles);
-    if (status == cudaSuccess)
-        status = legacy_table(device_id, forward_twiddles, extended_height / 2, 2, !sppark, &device_forward_twiddles);
-    if (status == cudaSuccess && !sppark) {
-        status = launch_dif(device_id, lde->values, height, width,device_inverse_twiddles);
-    }
-    if (status == cudaSuccess && !sppark) {
-        bit_reverse_scale_and_shift<<<blocks_for(input_elements), THREADS>>>(
-            lde->values, height, width, strict_log2(height), height_inverse,
-            device_shift_powers);
-        status = cudaGetLastError();
-    }
-    if (status == cudaSuccess && !sppark) {
-        status = launch_dif(device_id, lde->values, extended_height, width,device_forward_twiddles);
-    }
-    // Normalization and every DIF butterfly produce canonical field values,
-    // including the height-one case. A final reduction pass is redundant;
-    // raw-representation tests protect the Merkle byte contract.
+        status = coset_lde(device_id, lde->trace_values, lde->values, plan);
     if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
     if (status != cudaSuccess) {
         destroy_resident_lde(lde);
@@ -2547,23 +2144,20 @@ static int coset_lde_create(
 
 extern "C" int multi_stark_cuda_coset_lde_create(
     int device_id, void** handle, const uint64_t* input, size_t height,
-    size_t width, size_t added_bits, const uint64_t* inverse_twiddles,
-    const uint64_t* shift_powers, const uint64_t* forward_twiddles,
-    uint64_t height_inverse) {
+    size_t width, size_t added_bits, const MultiStarkNttPlan* plan) {
     return coset_lde_create(device_id, handle, input, height, width, added_bits,
-        inverse_twiddles, shift_powers, forward_twiddles, height_inverse, nullptr, nullptr);
+        plan, nullptr, nullptr);
 }
 
 // Context ownership transfers only on success. Its lifetime covers trace
 // release and LDE eviction because lookup recovery still needs original rows.
 extern "C" int multi_stark_cuda_coset_lde_generate(
     int device_id, void** handle, size_t height, size_t width, size_t added_bits,
-    const uint64_t* inverse_twiddles, const uint64_t* shift_powers,
-    const uint64_t* forward_twiddles, uint64_t height_inverse,
+    const MultiStarkNttPlan* plan,
     void* context, TraceWriter writer, TraceDestroy destroy) {
     if (!context || !writer || !destroy) return static_cast<int>(cudaErrorInvalidValue);
     const int status = coset_lde_create(device_id, handle, nullptr, height, width, added_bits,
-        inverse_twiddles, shift_powers, forward_twiddles, height_inverse, context, writer);
+        plan, context, writer);
     if (status == 0) static_cast<ResidentLde*>(*handle)->trace_destroy = destroy;
     return status;
 }
@@ -2578,19 +2172,10 @@ extern "C" void* multi_stark_cuda_lde_generator_context(const void* handle) {
     return lde->trace_writer ? lde->trace_context : nullptr;
 }
 
-extern "C" int multi_stark_cuda_prepare_lde_constants(
-    int device_id,const uint64_t* inverse_twiddles,size_t inverse_count,
-    const uint64_t* shift_powers,size_t height,const uint64_t* forward_twiddles,
-    size_t forward_count) {
-    if((inverse_count&&!inverse_twiddles)||!shift_powers||!height||
-       (forward_count&&!forward_twiddles))return static_cast<int>(cudaErrorInvalidValue);
-    cudaError_t status=cudaSetDevice(device_id);const uint64_t* ignored=nullptr;
-    if(status==cudaSuccess&&inverse_count)
-        status=cached_device_constants(device_id,inverse_twiddles,inverse_count,1,0,0,&ignored);
-    if(status==cudaSuccess)
-        status=cached_device_constants(device_id,shift_powers,height,3,shift_powers[0],height>1?shift_powers[1]:0,&ignored);
-    if(status==cudaSuccess&&forward_count)
-        status=cached_device_constants(device_id,forward_twiddles,forward_count,2,0,0,&ignored);
+extern "C" int multi_stark_cuda_prepare_lde_constants(int device_id, const MultiStarkNttPlan* plan) {
+    cudaError_t status = cudaSetDevice(device_id);
+    const uint64_t* ignored = nullptr;
+    if (status == cudaSuccess) status = plan_constants(device_id, plan, &ignored);
     return static_cast<int>(status);
 }
 
@@ -2927,8 +2512,8 @@ extern "C" int multi_stark_cuda_quotient_lde(
     const uint64_t* alpha,
     size_t constraint_count, const uint64_t* delta, uint64_t ext_w,
     size_t quotient_size, size_t next_step, size_t quotient_degree,
-    size_t log_blowup, const uint64_t* quotient_twiddles,
-    const uint64_t* lde_twiddles, const uint64_t* slice_weights) {
+    size_t log_blowup, const MultiStarkNttPlan* quotient_plan,
+    const MultiStarkNttPlan* lde_plan, const uint64_t* slice_weights) {
     if (output_handle == nullptr || nodes == nullptr || roots == nullptr ||
         main_handle == nullptr || stage2_handle == nullptr || publics == nullptr ||
         alpha == nullptr || delta == nullptr ||
@@ -2975,9 +2560,7 @@ extern "C" int multi_stark_cuda_quotient_lde(
     if(status==cudaSuccess)status=generate_coset_selectors(ds,quotient_size,next_step,
         coset_shift,coset_generator,trace_last,vanishing_start,vanishing_step);
 
-    const uint64_t *device_quotient_twiddles=nullptr,*device_lde_twiddles=nullptr,*device_weights=nullptr;
-    if(status==cudaSuccess)status=legacy_table(device_id,quotient_twiddles,quotient_size/2,2,quotient_twiddles!=nullptr,&device_quotient_twiddles);
-    if(status==cudaSuccess)status=legacy_table(device_id,lde_twiddles,lde_height/2,2,lde_twiddles!=nullptr,&device_lde_twiddles);
+    const uint64_t* device_weights=nullptr;
     if(status==cudaSuccess)status=cached_device_constants(device_id,slice_weights,quotient_degree,4,slice_weights[0],quotient_degree>1?slice_weights[1]:0,&device_weights);
 
     size_t budget=0;if(status==cudaSuccess)status=quotient_shared_memory_budget(device_id,&budget);
@@ -2999,7 +2582,7 @@ extern "C" int multi_stark_cuda_quotient_lde(
             dp,ds,dal,dd,ext_w,quotient_size,next_step,scratch,0,quotient_size,false);
         status=cudaGetLastError();
     }
-    if(status==cudaSuccess)status=forward_in_place(device_id, quotient,quotient_size,2,device_quotient_twiddles);
+    if(status==cudaSuccess)status=forward_in_place(device_id, quotient,quotient_plan);
 
     ResidentLde* lde = nullptr;
     if(status==cudaSuccess) {
@@ -3016,7 +2599,7 @@ extern "C" int multi_stark_cuda_quotient_lde(
             quotient_degree,2);
         status=cudaGetLastError();
     }
-    if(status==cudaSuccess)status=forward_in_place(device_id, lde->values,lde_height,width,device_lde_twiddles);
+    if(status==cudaSuccess)status=forward_in_place(device_id, lde->values,lde_plan);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(status==cudaSuccess) {
         *output_handle=lde;
@@ -3049,8 +2632,8 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed(
     uint64_t vanishing_start, uint64_t vanishing_step, const uint64_t* alpha,
     size_t constraint_count, const uint64_t* delta, uint64_t ext_w,
     size_t quotient_size, size_t next_step, size_t quotient_degree,
-    size_t log_blowup, const uint64_t* quotient_twiddles,
-    const uint64_t* lde_twiddles, const uint64_t* slice_weights) {
+    size_t log_blowup, const MultiStarkNttPlan* quotient_plan,
+    const MultiStarkNttPlan* lde_plan, const uint64_t* slice_weights) {
     const auto one_source = [](const void* handle, const uint64_t* host) {
         return (handle != nullptr) != (host != nullptr);
     };
@@ -3103,9 +2686,7 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed(
     if(status==cudaSuccess)status=generate_coset_selectors(ds,quotient_size,next_step,
         coset_shift,coset_generator,trace_last,vanishing_start,vanishing_step);
 
-    const uint64_t *device_quotient_twiddles=nullptr,*device_lde_twiddles=nullptr,*device_weights=nullptr;
-    if(status==cudaSuccess)status=legacy_table(device_id,quotient_twiddles,quotient_size/2,2,quotient_twiddles!=nullptr,&device_quotient_twiddles);
-    if(status==cudaSuccess)status=legacy_table(device_id,lde_twiddles,lde_height/2,2,lde_twiddles!=nullptr,&device_lde_twiddles);
+    const uint64_t* device_weights=nullptr;
     if(status==cudaSuccess)status=cached_device_constants(device_id,slice_weights,quotient_degree,4,slice_weights[0],quotient_degree>1?slice_weights[1]:0,&device_weights);
 
     const auto* prep_resident=static_cast<const ResidentLde*>(preprocessed_handle);
@@ -3227,7 +2808,7 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed(
     }
     for(size_t i=0;i<2;++i)if(status==cudaSuccess&&stream_busy[i])status=cudaStreamSynchronize(streams[i]);
 
-    if(status==cudaSuccess)status=forward_in_place(device_id, quotient,quotient_size,2,device_quotient_twiddles);
+    if(status==cudaSuccess)status=forward_in_place(device_id, quotient,quotient_plan);
     ResidentLde* lde=nullptr;
     if(status==cudaSuccess)status=create_resident_lde(&lde);
     if(status==cudaSuccess){lde->height=lde_height;lde->width=width;status=cudaMalloc(reinterpret_cast<void**>(&lde->values),lde_height*width*sizeof(uint64_t));}
@@ -3237,7 +2818,7 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed(
             lde->values,quotient,device_weights,quotient_size,trace_height,quotient_degree,2);
         status=cudaGetLastError();
     }
-    if(status==cudaSuccess)status=forward_in_place(device_id, lde->values,lde_height,width,device_lde_twiddles);
+    if(status==cudaSuccess)status=forward_in_place(device_id, lde->values,lde_plan);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(status==cudaSuccess)*output_handle=lde;else if(lde)destroy_resident_lde(lde);
     for(size_t i=0;i<2;++i){
@@ -3448,14 +3029,13 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
     const void* nodes,size_t node_count,size_t slot_count,const void* lookups,size_t lookup_count,
     const uint32_t* lookup_args,size_t lookup_arg_count,const void* preprocessed_handle,
     const void* main_handle,size_t group_size,const uint64_t* beta,const uint64_t* gamma,
-    uint64_t ext_w,size_t added_bits,const uint64_t* inverse_twiddles,
-    const uint64_t* shift_powers,const uint64_t* forward_twiddles,uint64_t height_inverse){
+    uint64_t ext_w,size_t added_bits,const MultiStarkNttPlan* plan){
     auto* main=const_cast<ResidentLde*>(static_cast<const ResidentLde*>(main_handle));
     auto* prep=static_cast<const ResidentLde*>(preprocessed_handle);
     if(!output_handle||!total||!nodes||!node_count||!slot_count||!lookups||!lookup_count||
        (lookup_arg_count&&!lookup_args)||!main||
        (!main->trace_values&&!main->host_trace_values&&!main->trace_writer)||!main->trace_height||
-       !group_size||!beta||!gamma||!shift_powers||
+       !group_size||!beta||!gamma||(!plan || !plan->shift_powers)||
        !is_power_of_two(main->trace_height)||added_bits>=sizeof(size_t)*8||
        main->trace_height>(SIZE_MAX>>added_bits)||(prep&&!prep->trace_values)) {
         return static_cast<int>(cudaErrorInvalidValue);
@@ -3523,12 +3103,7 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
     if(status==cudaSuccess)status=exclusive_scan_ext2(reinterpret_cast<Ext2*>(lde->values),deltas,count);
     if(status==cudaSuccess)status=cudaMemcpy(total,lde->values+2*(count-1),sizeof(Ext2),cudaMemcpyDeviceToHost);
     if(status==cudaSuccess)status=cudaMemcpy(total+2,deltas+count-1,sizeof(Ext2),cudaMemcpyDeviceToHost);
-    const uint64_t *dit=nullptr,*dshift=nullptr,*dft=nullptr;
-    const bool legacy_tables=forward_twiddles!=nullptr;
-    if(status==cudaSuccess)status=legacy_table(device_id,inverse_twiddles,height/2,1,legacy_tables,&dit);
-    if(status==cudaSuccess)status=cached_device_constants(device_id,shift_powers,height,3,shift_powers[0],height>1?shift_powers[1]:0,&dshift);
-    if(status==cudaSuccess)status=legacy_table(device_id,forward_twiddles,extended_height/2,2,legacy_tables,&dft);
-    if(status==cudaSuccess)status=coset_lde_in_place(device_id,lde->values,height,width,extended_height,dit,dshift,dft,height_inverse,true);
+    if(status==cudaSuccess)status=coset_lde(device_id,lde->values,lde->values,plan);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(status==cudaSuccess)*output_handle=lde;else destroy_resident_lde(lde);
     cudaFree(trace_chunk);cudaFree(scratch);cudaFree(deltas);cudaFree(multiplicities);cudaFree(norm_inverses);cudaFree(norms);cudaFree(conjugates);cudaFree(metadata);
@@ -3539,10 +3114,9 @@ extern "C" int multi_stark_cuda_lookup_lde(int device_id,void** output_handle,ui
     const uint64_t* multiplicities,const uint64_t* args,const size_t* arg_offsets,
     size_t height,size_t num_lookups,size_t args_width,size_t group_size,
     const uint64_t* beta,const uint64_t* gamma,uint64_t ext_w,size_t added_bits,
-    const uint64_t* inverse_twiddles,const uint64_t* shift_powers,
-    const uint64_t* forward_twiddles,uint64_t height_inverse){
+    const MultiStarkNttPlan* plan){
     if(!output_handle||!total||!multiplicities||!arg_offsets||!height||!num_lookups||
-       !group_size||!beta||!gamma||!shift_powers||
+       !group_size||!beta||!gamma||(!plan || !plan->shift_powers)||
        (args_width&&!args)||!is_power_of_two(height)||
        added_bits>=sizeof(size_t)*8||height>(SIZE_MAX>>added_bits))
         return static_cast<int>(cudaErrorInvalidValue);
@@ -3587,12 +3161,7 @@ extern "C" int multi_stark_cuda_lookup_lde(int device_id,void** output_handle,ui
     if(status==cudaSuccess)status=cudaMemcpy(total,lde->values+2*(count-1),sizeof(Ext2),cudaMemcpyDeviceToHost);
     if(status==cudaSuccess)status=cudaMemcpy(total+2,deltas+count-1,sizeof(Ext2),cudaMemcpyDeviceToHost);
     scan_done=now();
-    const uint64_t *dit=nullptr,*dshift=nullptr,*dft=nullptr;
-    const bool legacy_tables=forward_twiddles!=nullptr;
-    if(status==cudaSuccess)status=legacy_table(device_id,inverse_twiddles,height/2,1,legacy_tables,&dit);
-    if(status==cudaSuccess)status=cached_device_constants(device_id,shift_powers,height,3,shift_powers[0],height>1?shift_powers[1]:0,&dshift);
-    if(status==cudaSuccess)status=legacy_table(device_id,forward_twiddles,extended_height/2,2,legacy_tables,&dft);
-    if(status==cudaSuccess)status=coset_lde_in_place(device_id,lde->values,height,width,extended_height,dit,dshift,dft,height_inverse,true);
+    if(status==cudaSuccess)status=coset_lde(device_id,lde->values,lde->values,plan);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(profile){const double finished=now();fprintf(stderr,
         "[multi-stark/cuda] lookup phases: height=%zu lookups=%zu slots=%zu args_width=%zu allocate=%.3fs rows=%.3fs scan=%.3fs dft=%.3fs\n",
@@ -3744,10 +3313,9 @@ extern "C" int multi_stark_cuda_lookup_lde_cpu_rows_partitioned(
 
 extern "C" int multi_stark_cuda_lookup_lde_finish_partitioned(
     int device_id, void* pending_handle, void** output_handle, uint64_t* total,
-    const uint64_t* inverse_twiddles, const uint64_t* shift_powers,
-    const uint64_t* forward_twiddles, uint64_t height_inverse) {
+    const MultiStarkNttPlan* plan) {
     auto* pending = static_cast<PendingLookupLde*>(pending_handle);
-    if (!pending || !output_handle || !total || !shift_powers) {
+    if (!pending || !output_handle || !total || (!plan || !plan->shift_powers)) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
     *output_handle = nullptr;
@@ -3763,24 +3331,8 @@ extern "C" int multi_stark_cuda_lookup_lde_finish_partitioned(
         status = cudaMemcpy(total + 2, pending->deltas + count - 1,
                             sizeof(Ext2), cudaMemcpyDeviceToHost);
 
-    const uint64_t* inverse = nullptr;
-    const uint64_t* shifts = nullptr;
-    const uint64_t* forward = nullptr;
-    const size_t width = 2 * pending->slots;
-    const bool legacy_tables = forward_twiddles != nullptr;
     if (status == cudaSuccess)
-        status = legacy_table(device_id, inverse_twiddles, pending->height / 2, 1, legacy_tables, &inverse);
-    if (status == cudaSuccess)
-        status = cached_device_constants(device_id, shift_powers,
-                                         pending->height, 3, shift_powers[0],
-                                         pending->height > 1 ? shift_powers[1] : 0,
-                                         &shifts);
-    if (status == cudaSuccess)
-        status = legacy_table(device_id, forward_twiddles, pending->extended_height / 2, 2, legacy_tables, &forward);
-    if (status == cudaSuccess)
-        status = coset_lde_in_place(device_id, pending->lde->values, pending->height, width,
-                                    pending->extended_height, inverse, shifts, forward,
-                                    height_inverse, true);
+        status = coset_lde(device_id, pending->lde->values, pending->lde->values, plan);
     if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
     if (status == cudaSuccess) {
         *output_handle = pending->lde;
