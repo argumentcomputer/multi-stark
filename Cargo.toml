@@ -39,7 +39,7 @@ p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c837
 # adapter compiles against the headers its build script exports.
 [dependencies.sppark]
 git = "https://github.com/argumentcomputer/sppark"
-rev = "6c5d826de1a36324a6c3e2ce3663139476f9b143"
+rev = "176af27edd74ff51e0e8c601e6aa344b1a854f59"
 optional = true
 features = ["cuda"]
 
