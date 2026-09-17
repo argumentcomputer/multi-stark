@@ -240,7 +240,7 @@ size_t panel_budget_bytes() {
 std::atomic<int> backend_flag{-1};
 
 unsigned min_log_height() {
-    return unsigned(decimal_setting("MULTI_STARK_SPPARK_MIN_LOG_HEIGHT", 20));
+    return unsigned(decimal_setting("MULTI_STARK_SPPARK_MIN_LOG_HEIGHT", 18));
 }
 
 // The columns one panel holds at `column_bytes` each: as many as the
@@ -313,9 +313,9 @@ extern "C" void multi_stark_sppark_select_backend(int selected) {
 }
 
 // Whether a transform of `height` input rows is tall enough for the sppark
-// path. Short transforms are launch-bound on the per-column baseline and
-// stay on the first-party kernels below MULTI_STARK_SPPARK_MIN_LOG_HEIGHT
-// (20).
+// path. Below MULTI_STARK_SPPARK_MIN_LOG_HEIGHT (18) the panel's gather and
+// scatter passes cost more than the first-party kernels save, and the
+// first-party kernels stay.
 extern "C" int multi_stark_sppark_takes(size_t height) {
     const int flag = multi_stark_sppark_backend_selected();
     if (flag == 2) return 1;

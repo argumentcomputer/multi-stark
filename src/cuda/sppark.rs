@@ -83,8 +83,8 @@ pub enum Backend {
     /// The first-party kernels only.
     Legacy,
     /// sppark for LDEs at or above the height threshold
-    /// (`MULTI_STARK_SPPARK_MIN_LOG_HEIGHT`, 20), where the per-column
-    /// baseline wins; the first-party kernels below it.
+    /// (`MULTI_STARK_SPPARK_MIN_LOG_HEIGHT`, 18), where the panel path
+    /// wins; the first-party kernels below it.
     Sppark,
     /// sppark at every height: for comparing the paths on small shapes.
     SpparkAllHeights,
@@ -531,6 +531,8 @@ mod tests {
             !takes(1 << 12),
             "short transforms stay on the first-party kernels"
         );
+        assert!(!takes(1 << 17));
+        assert!(takes(1 << 18));
         assert!(takes(1 << 20));
         assert!(takes_lde(1 << 20, 533, 2));
         assert!(takes_forward(1 << 20, 2));
