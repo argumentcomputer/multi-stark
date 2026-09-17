@@ -36,6 +36,8 @@ pub enum Direction {
 
 unsafe extern "C" {
     fn multi_stark_sppark_max_lg_domain() -> c_int;
+    fn multi_stark_sppark_backend_selected() -> c_int;
+    fn multi_stark_sppark_select_backend(selected: c_int);
     fn multi_stark_sppark_ntt_device(
         device: c_int,
         d_inout: *mut u64,
@@ -52,6 +54,20 @@ unsafe extern "C" {
         direction: c_int,
         coset: c_int,
     ) -> c_int;
+}
+
+/// Whether the prover's resident LDEs take the sppark path: selected by
+/// `MULTI_STARK_CUDA_NTT=sppark` or by [`select_backend`].
+pub fn backend_selected() -> bool {
+    unsafe { multi_stark_sppark_backend_selected() != 0 }
+}
+
+/// Routes the prover's resident LDEs through sppark, or back to the
+/// first-party kernels, for the rest of the process. Comparisons in one
+/// process toggle it between constructions; concurrent constructions all
+/// see the latest value.
+pub fn select_backend(sppark: bool) {
+    unsafe { multi_stark_sppark_select_backend(c_int::from(sppark)) }
 }
 
 /// The largest log domain size the compiled upstream parameters support.
@@ -198,6 +214,81 @@ mod tests {
         let status = try_ntt_host(1 << 20, &mut values, Order::NN, Direction::Forward, false);
         assert_eq!(status, Err(101));
         assert_eq!(values, input);
+    }
+
+    /// One resident LDE both ways, comparing stored words and the Merkle root
+    /// of a commitment over the matrix.
+    fn resident_lde_both_ways(
+        matrix: RowMajorMatrix<Goldilocks>,
+        added_bits: usize,
+        shift: Goldilocks,
+    ) {
+        let dft = super::super::CudaDft::new(0);
+        select_backend(false);
+        let legacy = dft.coset_lde_batch_resident(&matrix, added_bits, shift);
+        let legacy_rows = legacy.to_row_major_matrix();
+        select_backend(true);
+        let candidate = dft.coset_lde_batch_resident(&matrix, added_bits, shift);
+        let candidate_rows = candidate.to_row_major_matrix();
+        select_backend(false);
+        assert_eq!(
+            raw_words(&candidate_rows.values),
+            raw_words(&legacy_rows.values),
+            "height {} width {} blowup {added_bits}",
+            matrix.height(),
+            matrix.width()
+        );
+    }
+
+    #[test]
+    fn resident_lde_matches_the_first_party_kernels_bit_for_bit() {
+        let mut rng = SmallRng::seed_from_u64(0x1de5);
+        for log_height in [0usize, 1, 2, 5, 8, 12, 14] {
+            for added_bits in [0usize, 1, 2, 3] {
+                for width in [1usize, 2, 3, 7, 8, 33] {
+                    let height = 1 << log_height;
+                    let matrix = RowMajorMatrix::new(
+                        (0..height * width).map(|_| rng.random()).collect(),
+                        width,
+                    );
+                    resident_lde_both_ways(matrix, added_bits, Goldilocks::GENERATOR);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resident_lde_reduces_raw_representatives_like_the_first_party_kernels() {
+        let p = Goldilocks::ORDER_U64;
+        let words = [0u64, 1, p - 1, p, p + 1, u64::MAX, 7, p + 7];
+        let height = 1usize << 10;
+        let width = 9;
+        // SAFETY: the test reinterprets raw words as field elements on purpose.
+        let values: Vec<Goldilocks> = (0..height * width)
+            .map(|i| unsafe { core::mem::transmute::<u64, Goldilocks>(words[i % words.len()]) })
+            .collect();
+        for shift in [
+            Goldilocks::GENERATOR,
+            Goldilocks::ONE,
+            Goldilocks::from_u64(11),
+        ] {
+            resident_lde_both_ways(RowMajorMatrix::new(values.clone(), width), 2, shift);
+        }
+    }
+
+    #[test]
+    fn resident_lde_panels_narrower_than_the_matrix_cover_every_column() {
+        // A 2^12 x 33 matrix at blowup 2 needs 16 KiB x 2 per column, so a
+        // 256 KiB budget forces panels of a few columns.
+        let mut rng = SmallRng::seed_from_u64(0x9a7e);
+        let previous = std::env::var("MULTI_STARK_SPPARK_PANEL_BYTES").ok();
+        unsafe { std::env::set_var("MULTI_STARK_SPPARK_PANEL_BYTES", "262144") };
+        let matrix = RowMajorMatrix::new((0..(1 << 12) * 33).map(|_| rng.random()).collect(), 33);
+        resident_lde_both_ways(matrix, 2, Goldilocks::GENERATOR);
+        match previous {
+            Some(value) => unsafe { std::env::set_var("MULTI_STARK_SPPARK_PANEL_BYTES", value) },
+            None => unsafe { std::env::remove_var("MULTI_STARK_SPPARK_PANEL_BYTES") },
+        }
     }
 
     #[test]

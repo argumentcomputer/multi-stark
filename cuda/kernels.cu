@@ -18,6 +18,12 @@
 #include <cstring>
 #include <new>
 #include "metrics.cuh"
+#ifdef MULTI_STARK_SPPARK
+extern "C" int multi_stark_sppark_backend_selected();
+extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, uint64_t* values,
+                                            size_t height, size_t width, size_t added_bits,
+                                            const uint64_t* shift_powers);
+#endif
 
 namespace {
 
@@ -2384,13 +2390,19 @@ static int coset_lde_create(
     }
     if (status == cudaSuccess) lde->trace_height = height;
 
+#ifdef MULTI_STARK_SPPARK
+    // The sppark path writes every output row itself from its own scratch.
+    const bool sppark = multi_stark_sppark_backend_selected() != 0;
+#else
+    const bool sppark = false;
+#endif
     // Large pageable uploads otherwise serialize through the driver's hidden
     // staging pool; they go through the persistent staging slots instead.
     // Small ones take the direct pageable path.
     const uint64_t *device_inverse_twiddles=nullptr,*device_shift_powers=nullptr,*device_forward_twiddles=nullptr;
     // The source prefix is overwritten by the trace copy. Only the padded
     // tail needs zeroing before the forward transform.
-    if (status == cudaSuccess && output_elements > input_elements) {
+    if (status == cudaSuccess && !sppark && output_elements > input_elements) {
         status = cudaMemsetAsync(lde->values + input_elements, 0,
                                  (output_elements - input_elements) * sizeof(uint64_t),
                                  cudaStreamPerThread);
@@ -2413,30 +2425,36 @@ static int coset_lde_create(
         }
     }
     if (status == cudaSuccess) {
+        status = cached_device_constants(device_id,shift_powers,height,3,shift_powers[0],height>1?shift_powers[1]:0,&device_shift_powers);
+    }
+#ifdef MULTI_STARK_SPPARK
+    if (status == cudaSuccess && sppark) {
+        status = static_cast<cudaError_t>(multi_stark_sppark_coset_lde(
+            device_id, lde->trace_values, lde->values, height, width, added_bits, device_shift_powers));
+    }
+#endif
+    if (status == cudaSuccess && !sppark) {
         status = cudaMemcpyAsync(lde->values, lde->trace_values,
                                  input_elements * sizeof(uint64_t),
                                  cudaMemcpyDeviceToDevice,
                                  cudaStreamPerThread);
     }
-    if (status == cudaSuccess && height > 1) {
+    if (status == cudaSuccess && !sppark && height > 1) {
         status = cached_device_constants(device_id,inverse_twiddles,height/2,1,0,0,&device_inverse_twiddles);
     }
-    if (status == cudaSuccess) {
-        status = cached_device_constants(device_id,shift_powers,height,3,shift_powers[0],height>1?shift_powers[1]:0,&device_shift_powers);
-    }
-    if (status == cudaSuccess) {
+    if (status == cudaSuccess && !sppark) {
         status = cached_device_constants(device_id,forward_twiddles,extended_height/2,2,0,0,&device_forward_twiddles);
     }
-    if (status == cudaSuccess) {
+    if (status == cudaSuccess && !sppark) {
         status = launch_dif(device_id, lde->values, height, width,device_inverse_twiddles);
     }
-    if (status == cudaSuccess) {
+    if (status == cudaSuccess && !sppark) {
         bit_reverse_scale_and_shift<<<blocks_for(input_elements), THREADS>>>(
             lde->values, height, width, strict_log2(height), height_inverse,
             device_shift_powers);
         status = cudaGetLastError();
     }
-    if (status == cudaSuccess) {
+    if (status == cudaSuccess && !sppark) {
         status = launch_dif(device_id, lde->values, extended_height, width,device_forward_twiddles);
     }
     // Normalization and every DIF butterfly produce canonical field values,

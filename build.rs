@@ -66,6 +66,7 @@ fn main() {
                 .arg("-lineinfo")
                 .arg("--compiler-options=-fPIC")
                 .arg(format!("-I{}", root.display()))
+                .arg("-Icuda")
                 .arg("-DFEATURE_GOLDILOCKS")
                 // The fork's runtime without exceptions or its thread pool:
                 // no C++ runtime library symbols, so the archive links into
@@ -112,6 +113,9 @@ fn main() {
         .arg("-o")
         .arg(&library)
         .arg("cuda/kernels.cu");
+    if !sppark_objects.is_empty() {
+        command.arg("-DMULTI_STARK_SPPARK");
+    }
     command.args(&sppark_objects);
 
     for architecture in &architectures {

@@ -13,6 +13,8 @@
 #include <ntt/ntt.cuh>
 
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 
 namespace {
 
@@ -100,5 +102,166 @@ extern "C" int multi_stark_sppark_ntt_host(int device, uint64_t* inout, uint32_t
     const cudaError_t synced = cudaStreamSynchronize(cudaStreamPerThread);
     if (result == 0) result = static_cast<int>(synced);
     cudaFree(d_inout);
+    return result;
+}
+
+// --- Resident coset LDE through sppark ---------------------------------
+//
+// The prover's matrices are row-major with the transform along the column,
+// while upstream transforms one contiguous vector. A panel of columns is
+// gathered into column-major scratch, transformed column by column, and
+// scattered back in the bit-reversed row order the commitment expects:
+//
+//   A[c][r]  = canonical(trace[r][f + c])              r < N
+//   inverse NR on A[c], normalized upstream            (bit-reversed coeffs)
+//   B[c][i]  = A[c][rev(i)] * shift^i                  i < N, zero beyond
+//   forward NR on B[c] over M = N << added_bits         (bit-reversed evals)
+//   values[r][f + c] = B[c][r]                          r < M
+//
+// The gather reduces representatives at or above the modulus, which upstream
+// does not accept. Two panels of C columns cost 16 * M * C bytes; C is sized
+// from MULTI_STARK_SPPARK_PANEL_BYTES (default 4 GiB) and the width.
+
+#include "goldilocks.cuh"
+
+namespace {
+
+constexpr unsigned PANEL_THREADS = 256;
+constexpr size_t MAX_BLOCKS = 65535;
+
+unsigned blocks_for_total(size_t total) {
+    const size_t blocks = (total + PANEL_THREADS - 1) / PANEL_THREADS;
+    return static_cast<unsigned>(blocks < MAX_BLOCKS ? blocks : MAX_BLOCKS);
+}
+
+__device__ __forceinline__ size_t reverse_bits(size_t index, unsigned log) {
+    return log == 0 ? 0 : static_cast<size_t>(__brev(static_cast<unsigned>(index)) >> (32 - log));
+}
+
+__global__ void gather_columns(const uint64_t* __restrict__ trace, size_t height, size_t width,
+                               size_t first, size_t columns, size_t extended_height,
+                               uint64_t* __restrict__ panel) {
+    const size_t total = height * columns;
+    const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < total;
+         index += stride) {
+        const size_t row = index / columns;
+        const size_t column = index - row * columns;
+        panel[column * extended_height + row] = multi_stark_cuda::canonicalize(trace[row * width + first + column]);
+    }
+}
+
+__global__ void shift_columns(const uint64_t* __restrict__ coefficients, uint64_t* __restrict__ panel,
+                              size_t height, unsigned log_height, size_t extended_height,
+                              size_t columns, const uint64_t* __restrict__ shift_powers) {
+    const size_t total = extended_height * columns;
+    const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < total;
+         index += stride) {
+        const size_t column = index / extended_height;
+        const size_t row = index - column * extended_height;
+        uint64_t value = 0;
+        if (row < height) {
+            const uint64_t coefficient = coefficients[column * extended_height + reverse_bits(row, log_height)];
+            value = multi_stark_cuda::goldilocks_mul(coefficient, shift_powers[row]);
+        }
+        panel[index] = value;
+    }
+}
+
+__global__ void scatter_columns(const uint64_t* __restrict__ panel, size_t extended_height, size_t width,
+                                size_t first, size_t columns, uint64_t* __restrict__ values) {
+    const size_t total = extended_height * columns;
+    const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < total;
+         index += stride) {
+        const size_t row = index / columns;
+        const size_t column = index - row * columns;
+        values[row * width + first + column] = panel[column * extended_height + row];
+    }
+}
+
+unsigned log2_exact(size_t value) {
+    unsigned log = 0;
+    while ((size_t(1) << log) < value) ++log;
+    return log;
+}
+
+int backend_flag = -1;
+
+// Read per construction: one getenv against a transform of gigabytes, and
+// tests vary it within a process.
+size_t panel_budget_bytes() {
+    size_t budget = size_t(4) << 30;
+    if (const char* configured = getenv("MULTI_STARK_SPPARK_PANEL_BYTES")) {
+        char* end = nullptr;
+        const unsigned long long parsed = strtoull(configured, &end, 10);
+        if (end != configured && *end == '\0' && parsed > 0) budget = parsed;
+    }
+    return budget;
+}
+
+}  // namespace
+
+// Whether the prover's transforms take the sppark path: MULTI_STARK_CUDA_NTT=sppark,
+// or a runtime selection, which tests use to compare both paths in one process.
+extern "C" int multi_stark_sppark_backend_selected() {
+    if (backend_flag < 0) {
+        const char* configured = getenv("MULTI_STARK_CUDA_NTT");
+        backend_flag = configured && strcmp(configured, "sppark") == 0;
+    }
+    return backend_flag;
+}
+
+extern "C" void multi_stark_sppark_select_backend(int selected) { backend_flag = selected ? 1 : 0; }
+
+// The coset LDE of `trace` (height x width, natural row order, device memory)
+// into `values` (extended_height x width, bit-reversed rows), with the coset
+// shift powers `shift_powers[i] = shift^i` for i < height. Scratch is
+// allocated per call within the panel budget.
+extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, uint64_t* values,
+                                            size_t height, size_t width, size_t added_bits,
+                                            const uint64_t* shift_powers) {
+    if (!trace || !values || !shift_powers || height == 0 || width == 0 || (height & (height - 1)))
+        return static_cast<int>(cudaErrorInvalidValue);
+    const size_t extended_height = height << added_bits;
+    const unsigned log_height = log2_exact(height);
+    const unsigned log_extended = log_height + static_cast<unsigned>(added_bits);
+    cudaError_t status = cudaSetDevice(device);
+    if (status != cudaSuccess) return static_cast<int>(status);
+    const size_t column_bytes = 2 * extended_height * sizeof(uint64_t);
+    size_t columns = panel_budget_bytes() / column_bytes;
+    if (columns == 0) columns = 1;
+    if (columns > width) columns = width;
+    uint64_t* scratch = nullptr;
+    status = cudaMalloc(reinterpret_cast<void**>(&scratch), columns * column_bytes);
+    if (status != cudaSuccess) return static_cast<int>(status);
+    uint64_t* a = scratch;
+    uint64_t* b = scratch + columns * extended_height;
+    int result = 0;
+    for (size_t first = 0; result == 0 && first < width; first += columns) {
+        const size_t count = width - first < columns ? width - first : columns;
+        gather_columns<<<blocks_for_total(height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
+            trace, height, width, first, count, extended_height, a);
+        result = static_cast<int>(cudaGetLastError());
+        for (size_t column = 0; result == 0 && column < count && log_height > 0; ++column)
+            result = multi_stark_sppark_ntt_device(device, a + column * extended_height, log_height, 1, 1, 0);
+        if (result == 0) {
+            shift_columns<<<blocks_for_total(extended_height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
+                a, b, height, log_height, extended_height, count, shift_powers);
+            result = static_cast<int>(cudaGetLastError());
+        }
+        for (size_t column = 0; result == 0 && column < count && log_extended > 0; ++column)
+            result = multi_stark_sppark_ntt_device(device, b + column * extended_height, log_extended, 1, 0, 0);
+        if (result == 0) {
+            scatter_columns<<<blocks_for_total(extended_height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
+                b, extended_height, width, first, count, values);
+            result = static_cast<int>(cudaGetLastError());
+        }
+    }
+    // The scratch outlives every kernel that reads it: the free is ordered
+    // behind them on the same stream.
+    const cudaError_t freed = cudaFreeAsync(scratch, cudaStreamPerThread);
+    if (result == 0) result = static_cast<int>(freed);
     return result;
 }
