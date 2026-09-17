@@ -174,6 +174,8 @@ impl CudaDft {
     ) -> CudaLde {
         let height = matrix.height();
         let width = matrix.width();
+        let _span =
+            tracing::info_span!("cuda/lde", kind = "host", height, width, added_bits).entered();
         Self::validate_dimensions(height, width);
         assert!(width > 0, "resident CUDA LDE requires at least one column");
         let extended_height = height
@@ -345,6 +347,8 @@ impl CudaDft {
     ) -> CudaLde {
         let height = generator.height();
         let width = generator.width();
+        let _span =
+            tracing::info_span!("cuda/lde", kind = "generated", height, width, added_bits).entered();
         Self::validate_dimensions(height, width);
         let extended_height = height
             .checked_shl(added_bits.try_into().unwrap())
@@ -492,6 +496,7 @@ impl CudaLde {
         g_inv: Goldilocks,
         ext_w: Goldilocks,
     ) -> Self {
+        let _span = tracing::info_span!("cuda/fri_fold").entered();
         let mut handle = core::ptr::null_mut();
         let status = unsafe {
             multi_stark_cuda_fri_fold_resident(
@@ -1207,6 +1212,7 @@ pub(crate) fn quotient_lde_mixed(
     quotient_degree: usize,
     log_blowup: usize,
 ) -> CudaLde {
+    let _span = tracing::info_span!("cuda/quotient_lde").entered();
     quotient_lde_sources(
         dft,
         graph,
@@ -1750,6 +1756,7 @@ pub(crate) fn lookup_lde_resident(
     ext_w: Goldilocks,
     log_blowup: usize,
 ) -> (CudaLde, [Goldilocks; 2]) {
+    let _span = tracing::info_span!("cuda/lookup_lde", path = "direct", height, num_lookups, group_size).entered();
     assert!((1..=8).contains(&group_size));
     assert_eq!(arg_offsets.len(), num_lookups + 1);
     assert_eq!(arg_offsets.first(), Some(&0));
@@ -1831,6 +1838,7 @@ pub(crate) fn lookup_lde_resident_partitioned(
     log_blowup: usize,
     cpu_deltas: impl Fn(core::ops::Range<usize>) -> Vec<[Goldilocks; 2]> + Sync,
 ) -> (CudaLde, [Goldilocks; 2]) {
+    let _span = tracing::info_span!("cuda/lookup_lde", path = "partitioned", height, num_lookups, group_size).entered();
     assert!((1..=8).contains(&group_size));
     assert_eq!(arg_offsets.len(), num_lookups + 1);
     assert_eq!(arg_offsets.first(), Some(&0));
@@ -2018,6 +2026,8 @@ pub(crate) fn lookup_graph_lde_resident(
     log_blowup: usize,
 ) -> Option<(CudaLde, [Goldilocks; 2])> {
     assert!((1..=8).contains(&group_size));
+    let _span =
+        tracing::info_span!("cuda/lookup_lde", path = "graph", height, group_size).entered();
     let (nodes, slot_count, lookups, args) = encode_lookup_nodes(graph)?;
     let num_lookups = lookups.len();
     let groups = num_lookups.div_ceil(group_size.max(1));

@@ -105,6 +105,16 @@ pub(crate) fn commit(
             "generated trace commitment exceeds device admission; reduce the shard cell budget"
         );
         let shift = Val::GENERATOR / domain.shift();
+        let source_span = tracing::info_span!(
+            "stark/commit_source",
+            kind = match &source {
+                TraceSource::Host(_) => "host",
+                TraceSource::Generated(_) => "generated",
+            },
+            height = source.height(),
+            width = source.width()
+        )
+        .entered();
         pcs.dft
             .prepare_coset_lde_constants(source.height(), blowup, shift);
         let (lde, trace) = match source {
@@ -128,7 +138,9 @@ pub(crate) fn commit(
         resident.push(Some(lde));
         host.push(spilled);
         retained.push(trace);
+        drop(source_span);
     }
+    let _merkle_span = tracing::info_span!("stark/commit_merkle").entered();
     let needed = max_height.saturating_mul(96).saturating_add(reserve);
     for index in 0..resident.len() {
         if device_memory_info(device).0 >= needed {

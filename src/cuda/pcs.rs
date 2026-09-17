@@ -341,10 +341,14 @@ where
             params.max_log_arity,
         );
         let arity = 1 << log_arity;
-        let (commitment, round) = params.mmcs.commit_cuda_fri(codeword, log_arity);
+        let (commitment, round) = tracing::info_span!("stark/fri_round_commit")
+            .in_scope(|| params.mmcs.commit_cuda_fri(codeword, log_arity));
         challenger.observe(commitment.clone());
         commits.push(commitment);
-        commit_pow_witnesses.push(challenger.grind(params.commit_proof_of_work_bits));
+        commit_pow_witnesses.push(
+            tracing::info_span!("stark/fri_commit_grind")
+                .in_scope(|| challenger.grind(params.commit_proof_of_work_bits)),
+        );
         let beta: Challenge = challenger.sample_algebra_element();
         let mut beta_step = beta;
         let betas = (0..log_arity)
@@ -396,10 +400,13 @@ where
     for &log_arity in &log_arities {
         challenger.observe(Val::from_usize(log_arity));
     }
-    let query_pow_witness = challenger.grind(params.query_proof_of_work_bits);
+    let _query_span = tracing::info_span!("stark/fri_queries").entered();
+    let query_pow_witness = tracing::info_span!("stark/fri_query_grind")
+        .in_scope(|| challenger.grind(params.query_proof_of_work_bits));
     let query_indices = iter::repeat_with(|| challenger.sample_bits(log_global_max_height))
         .take(params.num_queries)
         .collect_vec();
+    let input_openings_span = tracing::info_span!("stark/fri_input_openings").entered();
     let input_openings = prover_data_with_opening_points
         .iter()
         .map(|(data, _)| {
@@ -415,6 +422,7 @@ where
             }
         })
         .collect_vec();
+    drop(input_openings_span);
     let mut current_indices = query_indices;
     let commit_phase_openings = rounds
         .iter()
@@ -429,8 +437,8 @@ where
                 .iter()
                 .map(|&index| index >> log_arity)
                 .collect_vec();
-            let (opened_rows, opening_proof) =
-                params.mmcs.open_cuda_fri_batch(round, &group_indices);
+            let (opened_rows, opening_proof) = tracing::info_span!("stark/fri_commit_phase_opening")
+                .in_scope(|| params.mmcs.open_cuda_fri_batch(round, &group_indices));
             current_indices = group_indices;
             let sibling_values = positions
                 .into_iter()
@@ -1198,7 +1206,7 @@ where
             .iter()
             .all(|(data, _)| self.mmcs.is_cuda_resident(data))
         {
-            let resident_rounds = debug_span!("cuda prepare resident rounds").in_scope(|| {
+            let resident_rounds = tracing::info_span!("stark/fri_prepare_rounds").in_scope(|| {
                 commitment_data_with_opening_points
                     .iter()
                     .map(|(data, points)| (self.mmcs.resident_or_upload(data), points))
@@ -1212,7 +1220,7 @@ where
                 .unwrap_or(0);
             let final_fri_height = self.fri.blowup() * self.fri.final_poly_len();
             if resident_max_height > 1024 && resident_max_height > final_fri_height {
-                let _resident_guard = debug_span!("cuda resident fri").entered();
+                let _resident_guard = tracing::info_span!("stark/fri_resident").entered();
                 let rounds = resident_rounds;
                 let device_id = self.mmcs.cuda_device_id();
                 assert_eq!(<Challenge as BasedVectorSpace<Val>>::DIMENSION, 2);
@@ -1308,7 +1316,7 @@ where
                             .collect_vec()
                     })
                     .collect_vec();
-                let interpolated = debug_span!("cuda interpolate openings")
+                let interpolated = tracing::info_span!("stark/fri_interpolate")
                     .in_scope(|| workspace.interpolate(&interpolation_tasks, output_count, ext_w));
                 let all_opened_values = layouts
                     .into_iter()
@@ -1366,10 +1374,10 @@ where
                         }
                     }
                 }
-                debug_span!("cuda reduce openings")
+                tracing::info_span!("stark/fri_reduce")
                     .in_scope(|| workspace.reduce(&reduction_tasks, &alpha_pairs, ext_w));
                 let fri_input = reduced.into_iter().rev().flatten().collect_vec();
-                let fri_proof = debug_span!("cuda prove fri").in_scope(|| {
+                let fri_proof = tracing::info_span!("stark/fri_prove").in_scope(|| {
                     prove_fri_cuda_resident(
                         &self.fri,
                         fri_input,
@@ -1415,7 +1423,8 @@ where
             .expect("No Matrices Supplied?");
         let final_fri_height = self.fri.blowup() * self.fri.final_poly_len();
         if cuda_max_height > 1024 && cuda_max_height > final_fri_height {
-            let _resident_guard = debug_span!("cuda streamed fri").entered();
+            let _resident_guard = tracing::info_span!("stark/fri_streamed").entered();
+            let prepare_span = tracing::info_span!("stark/fri_prepare").entered();
             let phase_started = std::time::Instant::now();
             let device_id = self.mmcs.cuda_device_id();
             assert_eq!(<Challenge as BasedVectorSpace<Val>>::DIMENSION, 2);
@@ -1584,6 +1593,8 @@ where
                 );
             }
 
+            drop(prepare_span);
+            let interpolate_span = tracing::info_span!("stark/fri_interpolate").entered();
             let interpolation_started = std::time::Instant::now();
             let ((cpu_opened, cpu_interpolation_seconds), gpu_opened, gpu_interpolation_seconds) =
                 std::thread::scope(|scope| {
@@ -1713,6 +1724,8 @@ where
                 );
             }
 
+            drop(interpolate_span);
+            let observe_span = tracing::info_span!("stark/fri_observe_openings").entered();
             for round in &all_opened_values {
                 for matrix in round {
                     for values in matrix {
@@ -1749,6 +1762,8 @@ where
                 })
                 .collect_vec();
 
+            drop(observe_span);
+            let _reduce_span = tracing::info_span!("stark/fri_reduce").entered();
             let reduction_started = std::time::Instant::now();
             let ((cpu_reduced, cpu_reduction_seconds), mut gpu_reduced, gpu_reduction_seconds) =
                 std::thread::scope(|scope| {
@@ -1881,7 +1896,7 @@ where
             }
             let fri_input = gpu_reduced.into_iter().rev().flatten().collect_vec();
             let folding_started = std::time::Instant::now();
-            let fri_proof = debug_span!("cuda prove streamed fri").in_scope(|| {
+            let fri_proof = tracing::info_span!("stark/fri_prove").in_scope(|| {
                 prove_fri_cuda_resident(
                     &self.fri,
                     fri_input,
