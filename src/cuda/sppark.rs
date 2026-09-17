@@ -69,14 +69,15 @@ fn log_len(values: usize) -> u32 {
 
 /// Transforms `values` in place on `device`: uploaded, transformed and
 /// downloaded within the call. `coset` selects the coset by the field
-/// generator.
-pub fn ntt_host(
+/// generator. An error is the CUDA status the adapter returned; `device`
+/// must be the CUDA ordinal of a device upstream supports.
+pub fn try_ntt_host(
     device: i32,
     values: &mut [Goldilocks],
     order: Order,
     direction: Direction,
     coset: bool,
-) {
+) -> Result<(), i32> {
     let lg = log_len(values.len());
     let status = unsafe {
         multi_stark_sppark_ntt_host(
@@ -88,7 +89,20 @@ pub fn ntt_host(
             c_int::from(coset),
         )
     };
-    check_cuda(status, "sppark host transform");
+    if status == 0 { Ok(()) } else { Err(status) }
+}
+
+/// [`try_ntt_host`], panicking on a CUDA status like the other backends.
+pub fn ntt_host(
+    device: i32,
+    values: &mut [Goldilocks],
+    order: Order,
+    direction: Direction,
+    coset: bool,
+) {
+    if let Err(status) = try_ntt_host(device, values, order, direction, coset) {
+        check_cuda(status, "sppark host transform");
+    }
 }
 
 /// Transforms `2^lg` field elements at `d_inout` in place on the calling
@@ -173,6 +187,17 @@ mod tests {
                 "{what}: word {i} is not canonical: {word:#x}"
             );
         }
+    }
+
+    #[test]
+    fn an_unknown_device_ordinal_is_rejected_before_any_launch() {
+        // cudaErrorInvalidDevice is 101; the adapter answers it for an
+        // ordinal upstream did not enumerate, without touching the buffer.
+        let input = random(8, 0xde);
+        let mut values = input.clone();
+        let status = try_ntt_host(1 << 20, &mut values, Order::NN, Direction::Forward, false);
+        assert_eq!(status, Err(101));
+        assert_eq!(values, input);
     }
 
     #[test]
