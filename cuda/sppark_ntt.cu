@@ -211,18 +211,27 @@ size_t panel_budget_bytes() {
 }
 
 // -1 unread, 0 first-party, 1 sppark above the height threshold, 2 sppark
-// for every height (tests compare the paths on small shapes).
-int backend_flag = -1;
+// for every height (tests compare the paths on small shapes). Read and
+// written from concurrent constructions.
+std::atomic<int> backend_flag{-1};
 
 unsigned min_log_height() {
     return unsigned(decimal_setting("MULTI_STARK_SPPARK_MIN_LOG_HEIGHT", 20));
 }
 
-size_t panel_columns(size_t width, size_t extended_height) {
-    const size_t column_bytes = 2 * extended_height * sizeof(uint64_t);
-    size_t columns = panel_budget_bytes() / column_bytes;
-    if (columns == 0) columns = 1;
+// The columns one panel holds at `column_bytes` each: as many as the
+// budget admits, at most the width. Zero when one column does not fit,
+// which the dispatch rules decline before any allocation.
+size_t panel_columns(size_t width, size_t column_bytes) {
+    const size_t columns = panel_budget_bytes() / column_bytes;
     return columns < width ? columns : width;
+}
+
+// Whether a transform of 2^log rows is within upstream's compiled domain.
+bool within_domain(size_t height, size_t added_bits) {
+    if (height == 0 || (height & (height - 1))) return false;
+    const unsigned log = log2_exact(height);
+    return added_bits <= MAX_LG_DOMAIN_SIZE && log + added_bits <= MAX_LG_DOMAIN_SIZE;
 }
 
 }  // namespace
@@ -230,19 +239,26 @@ size_t panel_columns(size_t width, size_t extended_height) {
 // Whether the prover's transforms take the sppark path: MULTI_STARK_CUDA_NTT=sppark,
 // or a runtime selection, which tests use to compare both paths in one process.
 extern "C" int multi_stark_sppark_backend_selected() {
-    if (backend_flag < 0) {
+    int flag = backend_flag.load(std::memory_order_acquire);
+    if (flag < 0) {
         const char* configured = getenv("MULTI_STARK_CUDA_NTT");
-        backend_flag = configured && strcmp(configured, "sppark") == 0;
+        int expected = -1;
+        const int read = configured && strcmp(configured, "sppark") == 0;
+        // The first reader publishes; a concurrent selection wins over it.
+        flag = backend_flag.compare_exchange_strong(expected, read, std::memory_order_acq_rel) ? read : expected;
     }
-    return backend_flag;
+    return flag;
 }
 
 // 0 first-party, 1 sppark above the height threshold, 2 sppark always.
-extern "C" void multi_stark_sppark_select_backend(int selected) { backend_flag = selected; }
+extern "C" void multi_stark_sppark_select_backend(int selected) {
+    backend_flag.store(selected, std::memory_order_release);
+}
 
-// Whether a resident LDE of `height` input rows takes the sppark path.
-// Short transforms are launch-bound on the per-column baseline and stay on
-// the first-party kernels below MULTI_STARK_SPPARK_MIN_LOG_HEIGHT (20).
+// Whether a transform of `height` input rows is tall enough for the sppark
+// path. Short transforms are launch-bound on the per-column baseline and
+// stay on the first-party kernels below MULTI_STARK_SPPARK_MIN_LOG_HEIGHT
+// (20).
 extern "C" int multi_stark_sppark_takes(size_t height) {
     const int flag = multi_stark_sppark_backend_selected();
     if (flag == 2) return 1;
@@ -250,12 +266,35 @@ extern "C" int multi_stark_sppark_takes(size_t height) {
     return height >= (size_t(1) << min_log_height());
 }
 
-// The scratch the sppark path allocates for one LDE: two panels of the
-// columns the budget admits, sized for the extended height.
-extern "C" size_t multi_stark_sppark_panel_bytes(size_t height, size_t width, size_t added_bits) {
-    if (!multi_stark_sppark_takes(height) || width == 0) return 0;
+// Whether a resident coset LDE of the shape takes the sppark path: tall
+// enough, the extended height within upstream's compiled domain, and one
+// column's scratch within the panel budget.
+extern "C" int multi_stark_sppark_takes_lde(size_t height, size_t width, size_t added_bits) {
+    if (width == 0 || !multi_stark_sppark_takes(height) || !within_domain(height, added_bits)) return 0;
     const size_t extended_height = height << added_bits;
-    return panel_columns(width, extended_height) * 2 * extended_height * sizeof(uint64_t);
+    return 2 * extended_height * sizeof(uint64_t) <= panel_budget_bytes();
+}
+
+// Whether a forward transform of the shape takes the sppark path.
+extern "C" int multi_stark_sppark_takes_forward(size_t height, size_t width) {
+    if (width == 0 || !multi_stark_sppark_takes(height) || !within_domain(height, 0)) return 0;
+    return height * sizeof(uint64_t) <= panel_budget_bytes();
+}
+
+// The scratch the sppark path allocates for one LDE: two panels of the
+// columns the budget admits, sized for the extended height. Zero when the
+// shape does not take the path.
+extern "C" size_t multi_stark_sppark_panel_bytes(size_t height, size_t width, size_t added_bits) {
+    if (!multi_stark_sppark_takes_lde(height, width, added_bits)) return 0;
+    const size_t column_bytes = 2 * (height << added_bits) * sizeof(uint64_t);
+    return panel_columns(width, column_bytes) * column_bytes;
+}
+
+// The scratch the sppark path allocates for one forward transform.
+extern "C" size_t multi_stark_sppark_forward_panel_bytes(size_t height, size_t width) {
+    if (!multi_stark_sppark_takes_forward(height, width)) return 0;
+    const size_t column_bytes = height * sizeof(uint64_t);
+    return panel_columns(width, column_bytes) * column_bytes;
 }
 
 // The coset LDE of `trace` (height x width, natural row order, device memory)
@@ -282,7 +321,8 @@ extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, u
     cudaError_t status = cudaSetDevice(device);
     if (status != cudaSuccess) return static_cast<int>(status);
     const size_t column_bytes = 2 * extended_height * sizeof(uint64_t);
-    const size_t columns = panel_columns(width, extended_height);
+    const size_t columns = panel_columns(width, column_bytes);
+    if (columns == 0) return static_cast<int>(cudaErrorInvalidValue);
     uint64_t* scratch = nullptr;
     status = cudaMalloc(reinterpret_cast<void**>(&scratch), columns * column_bytes);
     if (status != cudaSuccess) return static_cast<int>(status);
@@ -327,7 +367,8 @@ extern "C" int multi_stark_sppark_forward(int device, uint64_t* values, size_t h
     if (log_height == 0) return 0;
     cudaError_t status = cudaSetDevice(device);
     if (status != cudaSuccess) return static_cast<int>(status);
-    const size_t columns = panel_columns(width, height);
+    const size_t columns = panel_columns(width, height * sizeof(uint64_t));
+    if (columns == 0) return static_cast<int>(cudaErrorInvalidValue);
     uint64_t* panel = nullptr;
     status = cudaMalloc(reinterpret_cast<void**>(&panel), columns * height * sizeof(uint64_t));
     if (status != cudaSuccess) return static_cast<int>(status);

@@ -39,7 +39,10 @@ unsafe extern "C" {
     fn multi_stark_sppark_select_backend(selected: c_int);
     fn multi_stark_sppark_takes(height: usize) -> c_int;
     fn multi_stark_sppark_transforms_run() -> u64;
+    fn multi_stark_sppark_takes_lde(height: usize, width: usize, added_bits: usize) -> c_int;
+    fn multi_stark_sppark_takes_forward(height: usize, width: usize) -> c_int;
     fn multi_stark_sppark_panel_bytes(height: usize, width: usize, added_bits: usize) -> usize;
+    fn multi_stark_sppark_forward_panel_bytes(height: usize, width: usize) -> usize;
     fn multi_stark_sppark_ntt_device(
         device: c_int,
         d_inout: *mut u64,
@@ -94,9 +97,36 @@ pub fn transforms_run() -> u64 {
     unsafe { multi_stark_sppark_transforms_run() }
 }
 
-/// Whether a resident LDE of `height` input rows takes the sppark path.
+/// Whether a transform of `height` input rows is tall enough for the sppark
+/// path; the shape rules below decide a dispatch.
 pub fn takes(height: usize) -> bool {
     unsafe { multi_stark_sppark_takes(height) != 0 }
+}
+
+/// Whether a resident coset LDE of the shape takes the sppark path: tall
+/// enough, within upstream's compiled domain after expansion, and one
+/// column's scratch within the panel budget.
+pub fn takes_lde(height: usize, width: usize, added_bits: usize) -> bool {
+    unsafe { multi_stark_sppark_takes_lde(height, width, added_bits) != 0 }
+}
+
+/// Whether a forward transform of the shape takes the sppark path.
+pub fn takes_forward(height: usize, width: usize) -> bool {
+    unsafe { multi_stark_sppark_takes_forward(height, width) != 0 }
+}
+
+/// The scratch one forward transform of the shape allocates on the sppark
+/// path; zero when the shape stays on the first-party kernels.
+pub fn forward_panel_bytes(height: usize, width: usize) -> usize {
+    unsafe { multi_stark_sppark_forward_panel_bytes(height, width) }
+}
+
+/// Serializes tests that switch the process-wide backend, so a comparison
+/// sees the backend it selected on both of its constructions.
+#[cfg(test)]
+pub(crate) fn backend_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// The scratch the sppark path allocates for that LDE, to admit alongside
@@ -277,6 +307,7 @@ mod tests {
 
     #[test]
     fn resident_lde_matches_the_first_party_kernels_bit_for_bit() {
+        let _guard = backend_lock();
         let mut rng = SmallRng::seed_from_u64(0x1de5);
         for log_height in [0usize, 1, 2, 5, 8, 12, 14] {
             for added_bits in [0usize, 1, 2, 3] {
@@ -294,6 +325,7 @@ mod tests {
 
     #[test]
     fn resident_lde_reduces_raw_representatives_like_the_first_party_kernels() {
+        let _guard = backend_lock();
         let p = Goldilocks::ORDER_U64;
         let words = [0u64, 1, p - 1, p, p + 1, u64::MAX, 7, p + 7];
         let height = 1usize << 10;
@@ -313,6 +345,7 @@ mod tests {
 
     #[test]
     fn resident_lde_panels_narrower_than_the_matrix_cover_every_column() {
+        let _guard = backend_lock();
         // A 2^12 x 33 matrix at blowup 2 needs 16 KiB x 2 per column, so a
         // 256 KiB budget forces panels of a few columns.
         let mut rng = SmallRng::seed_from_u64(0x9a7e);
@@ -328,6 +361,7 @@ mod tests {
 
     #[test]
     fn general_dft_matches_the_first_party_kernels_bit_for_bit() {
+        let _guard = backend_lock();
         // Shapes above the CUDA DFT threshold of 2^15 cells.
         let mut rng = SmallRng::seed_from_u64(0xdf7);
         let dft = super::super::CudaDft::new(0);
@@ -353,6 +387,7 @@ mod tests {
 
     #[test]
     fn host_coset_lde_matches_the_first_party_kernels_bit_for_bit() {
+        let _guard = backend_lock();
         // The host entry takes matrices of width at most two whose extended
         // height reaches 2^15.
         let mut rng = SmallRng::seed_from_u64(0x1e5);
@@ -389,13 +424,24 @@ mod tests {
 
     #[test]
     fn the_height_threshold_and_the_panel_budget_decide_dispatch_and_scratch() {
+        let _guard = backend_lock();
         select_backend(Backend::Sppark);
         assert!(
             !takes(1 << 12),
             "short transforms stay on the first-party kernels"
         );
         assert!(takes(1 << 20));
+        assert!(takes_lde(1 << 20, 533, 2));
+        assert!(takes_forward(1 << 20, 2));
+        assert!(
+            !takes_lde(1 << 24, 6, 5),
+            "2^29 output rows are beyond the compiled domain"
+        );
+        assert!(!takes_forward(1 << 29, 2));
         assert_eq!(panel_bytes(1 << 12, 533, 2), 0);
+        assert_eq!(panel_bytes(1 << 24, 6, 5), 0);
+        // A forward transform's panel is one column set at the height.
+        assert_eq!(forward_panel_bytes(1 << 22, 2), 2 * (1 << 22) * 8);
         // 2^20 rows, 533 columns, blowup 4: 2 x 2^22 x 8 bytes per column is
         // 64 MiB, so a 4 GiB budget admits 64 columns.
         assert_eq!(panel_bytes(1 << 20, 533, 2), 64 * 2 * (1 << 22) * 8);

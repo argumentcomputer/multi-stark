@@ -779,7 +779,8 @@ mod tests {
     #[cfg(feature = "cuda-sppark")]
     #[test]
     fn sppark_transforms_prove_the_same_batch() {
-        use crate::cuda::sppark::{Backend, select_backend, transforms_run};
+        use crate::cuda::sppark::{Backend, backend_lock, select_backend, transforms_run};
+        let _guard = backend_lock();
         let (system, key) = byte_system(config());
         select_backend(Backend::Legacy);
         let legacy = system.prove_batch(&key, two_shards(&system), vec![]);

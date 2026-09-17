@@ -7,10 +7,10 @@
 
 pub(crate) mod metrics;
 pub(crate) mod mmcs;
-#[cfg(feature = "cuda-sppark")]
-pub mod sppark;
 #[doc(hidden)]
 pub mod pcs;
+#[cfg(feature = "cuda-sppark")]
+pub mod sppark;
 pub(crate) mod witness;
 
 use core::ffi::{CStr, c_char, c_void};
@@ -180,7 +180,7 @@ impl CudaDft {
         let _span = tracing::info_span!(
             "cuda/lde",
             kind = "host",
-            backend = "legacy",
+            backend = lde_backend(height, width, added_bits),
             device = self.device_id,
             height,
             width,
@@ -225,6 +225,9 @@ impl CudaDft {
         }
     }
 
+    /// Uploads the constants a resident LDE of the shape will need: the
+    /// coset powers always, the first-party twiddle tables only when the
+    /// shape stays on the first-party kernels.
     pub(crate) fn prepare_coset_lde_constants(
         &self,
         height: usize,
@@ -236,9 +239,18 @@ impl CudaDft {
             .expect("LDE height overflows usize");
         Self::validate_dimensions(height, 1);
         Self::validate_dimensions(extended_height, 1);
-        let inverse_twiddles = self.twiddles(log2_strict_usize(height), true);
+        let legacy_tables = lde_backend(height, 1, added_bits) == "legacy";
+        let inverse_twiddles = if legacy_tables {
+            self.twiddles(log2_strict_usize(height), true)
+        } else {
+            Arc::from(Vec::new())
+        };
         let shift_powers = self.shift_powers(height, shift);
-        let forward_twiddles = self.twiddles(log2_strict_usize(extended_height), false);
+        let forward_twiddles = if legacy_tables {
+            self.twiddles(log2_strict_usize(extended_height), false)
+        } else {
+            Arc::from(Vec::new())
+        };
         let status = unsafe {
             multi_stark_cuda_prepare_lde_constants(
                 self.device_id,
@@ -361,7 +373,7 @@ impl CudaDft {
         let _span = tracing::info_span!(
             "cuda/lde",
             kind = "generated",
-            backend = "legacy",
+            backend = lde_backend(height, width, added_bits),
             device = self.device_id,
             height,
             width,
@@ -816,6 +828,50 @@ fn encode_quotient_nodes(
 /// kernel use the same liveness calculation. The scratch term assumes the
 /// global-memory path; devices able to fit the slots in shared memory need
 /// less than this bound.
+/// The backend a resident coset LDE of the shape runs on, for spans and
+/// for skipping the tables the other backend would need.
+pub(crate) fn lde_backend(height: usize, width: usize, added_bits: usize) -> &'static str {
+    #[cfg(feature = "cuda-sppark")]
+    if sppark::takes_lde(height, width, added_bits) {
+        return "sppark";
+    }
+    #[cfg(not(feature = "cuda-sppark"))]
+    let _ = (height, width, added_bits);
+    "legacy"
+}
+
+/// The backend the quotient's wide forward transform runs on.
+pub(crate) fn quotient_backend(
+    quotient_size: usize,
+    quotient_degree: usize,
+    log_blowup: usize,
+) -> &'static str {
+    #[cfg(feature = "cuda-sppark")]
+    {
+        let lde_height = (quotient_size / quotient_degree.max(1)) << log_blowup;
+        if sppark::takes_forward(quotient_size, 2)
+            || sppark::takes_forward(lde_height, 2 * quotient_degree)
+        {
+            return "sppark";
+        }
+    }
+    #[cfg(not(feature = "cuda-sppark"))]
+    let _ = (quotient_size, quotient_degree, log_blowup);
+    "legacy"
+}
+
+/// The backend a lookup LDE of the shape runs on: its committed width is
+/// two columns per lookup group.
+pub(crate) fn lookup_backend(
+    height: usize,
+    num_lookups: usize,
+    group_size: usize,
+    log_blowup: usize,
+) -> &'static str {
+    let groups = num_lookups.div_ceil(group_size.max(1)).max(1);
+    lde_backend(height, 2 * groups, log_blowup)
+}
+
 pub(crate) fn quotient_lde_memory_upper_bound(
     graph: &ConstraintGraph<Goldilocks>,
     public_count: usize,
@@ -1233,7 +1289,7 @@ pub(crate) fn quotient_lde_mixed(
 ) -> CudaLde {
     let _span = tracing::info_span!(
         "cuda/quotient_lde",
-        backend = "legacy",
+        backend = quotient_backend(quotient_size, quotient_degree, log_blowup),
         device = dft.device_id,
         quotient_size,
         quotient_degree,
@@ -1786,7 +1842,7 @@ pub(crate) fn lookup_lde_resident(
     let _span = tracing::info_span!(
         "cuda/lookup_lde",
         path = "direct",
-        backend = "legacy",
+        backend = lookup_backend(height, num_lookups, group_size, log_blowup),
         device = dft.device_id,
         height,
         num_lookups,
@@ -1878,7 +1934,7 @@ pub(crate) fn lookup_lde_resident_partitioned(
     let _span = tracing::info_span!(
         "cuda/lookup_lde",
         path = "partitioned",
-        backend = "legacy",
+        backend = lookup_backend(height, num_lookups, group_size, log_blowup),
         device = dft.device_id,
         height,
         num_lookups,
@@ -2076,7 +2132,7 @@ pub(crate) fn lookup_graph_lde_resident(
     let _span = tracing::info_span!(
         "cuda/lookup_lde",
         path = "graph",
-        backend = "legacy",
+        backend = lookup_backend(height, graph.lookups.len(), group_size, log_blowup),
         device = dft.device_id,
         height,
         num_lookups = graph.lookups.len(),

@@ -20,11 +20,15 @@
 #include "metrics.cuh"
 #ifdef MULTI_STARK_SPPARK
 extern "C" int multi_stark_sppark_takes(size_t height);
+extern "C" int multi_stark_sppark_takes_lde(size_t height, size_t width, size_t added_bits);
+extern "C" int multi_stark_sppark_takes_forward(size_t height, size_t width);
 extern "C" int multi_stark_sppark_forward(int device, uint64_t* values, size_t height, size_t width);
 extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, uint64_t* values,
                                             size_t height, size_t width, size_t added_bits,
                                             const uint64_t* shift_powers);
 #endif
+
+
 
 namespace {
 
@@ -2252,6 +2256,26 @@ cudaError_t copy_to_host(uint64_t* destination, const DeviceBuffer& source,
 
 }  // namespace
 
+// Whether the shape's inverse-shift-forward sequence, or forward transform,
+// runs through sppark; false without the feature.
+static bool sppark_takes_lde(size_t height, size_t width, size_t extended_height) {
+#ifdef MULTI_STARK_SPPARK
+    return multi_stark_sppark_takes_lde(height, width, strict_log2(extended_height) - strict_log2(height)) != 0;
+#else
+    (void)height; (void)width; (void)extended_height;
+    return false;
+#endif
+}
+
+static bool sppark_takes_forward(size_t height, size_t width) {
+#ifdef MULTI_STARK_SPPARK
+    return multi_stark_sppark_takes_forward(height, width) != 0;
+#else
+    (void)height; (void)width;
+    return false;
+#endif
+}
+
 // The inverse-shift-forward sequence in place on `values`, whose first
 // `height` rows hold natural-order evaluations and whose tail is zero: the
 // sppark panel above its height threshold, the first-party stages
@@ -2262,7 +2286,7 @@ static cudaError_t coset_lde_in_place(int device_id, uint64_t* values, size_t he
                                       const uint64_t* shift_powers, const uint64_t* forward_twiddles,
                                       uint64_t height_inverse, bool canonical_pass) {
 #ifdef MULTI_STARK_SPPARK
-    if (multi_stark_sppark_takes(height)) {
+    if (sppark_takes_lde(height, width, extended_height)) {
         if (multi_stark_metrics::enabled()) {
             multi_stark_metrics::add(device_id, multi_stark_metrics::SpparkTaken, 1);
             multi_stark_metrics::add(device_id, multi_stark_metrics::NTT_SPPARK_OFFSET + multi_stark_metrics::ntt_shape(height, width), 1);
@@ -2293,7 +2317,7 @@ static cudaError_t coset_lde_in_place(int device_id, uint64_t* values, size_t he
 static cudaError_t forward_in_place(int device_id, uint64_t* values, size_t height, size_t width,
                                     const uint64_t* twiddles) {
 #ifdef MULTI_STARK_SPPARK
-    if (multi_stark_sppark_takes(height)) {
+    if (sppark_takes_forward(height, width)) {
         if (multi_stark_metrics::enabled()) {
             multi_stark_metrics::add(device_id, multi_stark_metrics::SpparkTaken, 1);
             multi_stark_metrics::add(device_id, multi_stark_metrics::NTT_SPPARK_OFFSET + multi_stark_metrics::ntt_shape(height, width), 1);
@@ -2436,7 +2460,7 @@ static int coset_lde_create(
 
 #ifdef MULTI_STARK_SPPARK
     // The sppark path writes every output row itself from its own scratch.
-    const bool sppark = multi_stark_sppark_takes(height) != 0;
+    const bool sppark = multi_stark_sppark_takes_lde(height, width, added_bits) != 0;
     if (multi_stark_metrics::enabled()) {
         multi_stark_metrics::add(device_id, sppark ? multi_stark_metrics::SpparkTaken : multi_stark_metrics::SpparkDeclined, 1);
         if (sppark) {
@@ -2558,13 +2582,13 @@ extern "C" int multi_stark_cuda_prepare_lde_constants(
     const uint64_t* shift_powers,size_t height,const uint64_t* forward_twiddles,
     size_t forward_count) {
     if((inverse_count&&!inverse_twiddles)||!shift_powers||!height||
-       !forward_twiddles||!forward_count)return static_cast<int>(cudaErrorInvalidValue);
+       (forward_count&&!forward_twiddles))return static_cast<int>(cudaErrorInvalidValue);
     cudaError_t status=cudaSetDevice(device_id);const uint64_t* ignored=nullptr;
     if(status==cudaSuccess&&inverse_count)
         status=cached_device_constants(device_id,inverse_twiddles,inverse_count,1,0,0,&ignored);
     if(status==cudaSuccess)
         status=cached_device_constants(device_id,shift_powers,height,3,shift_powers[0],height>1?shift_powers[1]:0,&ignored);
-    if(status==cudaSuccess)
+    if(status==cudaSuccess&&forward_count)
         status=cached_device_constants(device_id,forward_twiddles,forward_count,2,0,0,&ignored);
     return static_cast<int>(status);
 }
@@ -2952,8 +2976,8 @@ extern "C" int multi_stark_cuda_quotient_lde(
         coset_shift,coset_generator,trace_last,vanishing_start,vanishing_step);
 
     const uint64_t *device_quotient_twiddles=nullptr,*device_lde_twiddles=nullptr,*device_weights=nullptr;
-    if(status==cudaSuccess)status=cached_device_constants(device_id,quotient_twiddles,quotient_size/2,2,0,0,&device_quotient_twiddles);
-    if(status==cudaSuccess)status=cached_device_constants(device_id,lde_twiddles,lde_height/2,2,0,0,&device_lde_twiddles);
+    if(status==cudaSuccess&&!sppark_takes_forward(quotient_size,2))status=cached_device_constants(device_id,quotient_twiddles,quotient_size/2,2,0,0,&device_quotient_twiddles);
+    if(status==cudaSuccess&&!sppark_takes_forward(lde_height,width))status=cached_device_constants(device_id,lde_twiddles,lde_height/2,2,0,0,&device_lde_twiddles);
     if(status==cudaSuccess)status=cached_device_constants(device_id,slice_weights,quotient_degree,4,slice_weights[0],quotient_degree>1?slice_weights[1]:0,&device_weights);
 
     size_t budget=0;if(status==cudaSuccess)status=quotient_shared_memory_budget(device_id,&budget);
@@ -3081,8 +3105,8 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed(
         coset_shift,coset_generator,trace_last,vanishing_start,vanishing_step);
 
     const uint64_t *device_quotient_twiddles=nullptr,*device_lde_twiddles=nullptr,*device_weights=nullptr;
-    if(status==cudaSuccess)status=cached_device_constants(device_id,quotient_twiddles,quotient_size/2,2,0,0,&device_quotient_twiddles);
-    if(status==cudaSuccess)status=cached_device_constants(device_id,lde_twiddles,lde_height/2,2,0,0,&device_lde_twiddles);
+    if(status==cudaSuccess&&!sppark_takes_forward(quotient_size,2))status=cached_device_constants(device_id,quotient_twiddles,quotient_size/2,2,0,0,&device_quotient_twiddles);
+    if(status==cudaSuccess&&!sppark_takes_forward(lde_height,width))status=cached_device_constants(device_id,lde_twiddles,lde_height/2,2,0,0,&device_lde_twiddles);
     if(status==cudaSuccess)status=cached_device_constants(device_id,slice_weights,quotient_degree,4,slice_weights[0],quotient_degree>1?slice_weights[1]:0,&device_weights);
 
     const auto* prep_resident=static_cast<const ResidentLde*>(preprocessed_handle);
@@ -3501,9 +3525,10 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
     if(status==cudaSuccess)status=cudaMemcpy(total,lde->values+2*(count-1),sizeof(Ext2),cudaMemcpyDeviceToHost);
     if(status==cudaSuccess)status=cudaMemcpy(total+2,deltas+count-1,sizeof(Ext2),cudaMemcpyDeviceToHost);
     const uint64_t *dit=nullptr,*dshift=nullptr,*dft=nullptr;
-    if(status==cudaSuccess)status=cached_device_constants(device_id,inverse_twiddles,height/2,1,0,0,&dit);
+    const bool legacy_tables=!sppark_takes_lde(height,width,extended_height);
+    if(status==cudaSuccess&&legacy_tables)status=cached_device_constants(device_id,inverse_twiddles,height/2,1,0,0,&dit);
     if(status==cudaSuccess)status=cached_device_constants(device_id,shift_powers,height,3,shift_powers[0],height>1?shift_powers[1]:0,&dshift);
-    if(status==cudaSuccess)status=cached_device_constants(device_id,forward_twiddles,extended_height/2,2,0,0,&dft);
+    if(status==cudaSuccess&&legacy_tables)status=cached_device_constants(device_id,forward_twiddles,extended_height/2,2,0,0,&dft);
     if(status==cudaSuccess)status=coset_lde_in_place(device_id,lde->values,height,width,extended_height,dit,dshift,dft,height_inverse,true);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(status==cudaSuccess)*output_handle=lde;else destroy_resident_lde(lde);
@@ -3564,9 +3589,10 @@ extern "C" int multi_stark_cuda_lookup_lde(int device_id,void** output_handle,ui
     if(status==cudaSuccess)status=cudaMemcpy(total+2,deltas+count-1,sizeof(Ext2),cudaMemcpyDeviceToHost);
     scan_done=now();
     const uint64_t *dit=nullptr,*dshift=nullptr,*dft=nullptr;
-    if(status==cudaSuccess)status=cached_device_constants(device_id,inverse_twiddles,height/2,1,0,0,&dit);
+    const bool legacy_tables=!sppark_takes_lde(height,width,extended_height);
+    if(status==cudaSuccess&&legacy_tables)status=cached_device_constants(device_id,inverse_twiddles,height/2,1,0,0,&dit);
     if(status==cudaSuccess)status=cached_device_constants(device_id,shift_powers,height,3,shift_powers[0],height>1?shift_powers[1]:0,&dshift);
-    if(status==cudaSuccess)status=cached_device_constants(device_id,forward_twiddles,extended_height/2,2,0,0,&dft);
+    if(status==cudaSuccess&&legacy_tables)status=cached_device_constants(device_id,forward_twiddles,extended_height/2,2,0,0,&dft);
     if(status==cudaSuccess)status=coset_lde_in_place(device_id,lde->values,height,width,extended_height,dit,dshift,dft,height_inverse,true);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(profile){const double finished=now();fprintf(stderr,
@@ -3742,7 +3768,10 @@ extern "C" int multi_stark_cuda_lookup_lde_finish_partitioned(
     const uint64_t* inverse = nullptr;
     const uint64_t* shifts = nullptr;
     const uint64_t* forward = nullptr;
-    if (status == cudaSuccess)
+    const size_t width = 2 * pending->slots;
+    const bool legacy_tables =
+        !sppark_takes_lde(pending->height, width, pending->extended_height);
+    if (status == cudaSuccess && legacy_tables)
         status = cached_device_constants(device_id, inverse_twiddles,
                                          pending->height / 2, 1, 0, 0, &inverse);
     if (status == cudaSuccess)
@@ -3750,11 +3779,10 @@ extern "C" int multi_stark_cuda_lookup_lde_finish_partitioned(
                                          pending->height, 3, shift_powers[0],
                                          pending->height > 1 ? shift_powers[1] : 0,
                                          &shifts);
-    if (status == cudaSuccess)
+    if (status == cudaSuccess && legacy_tables)
         status = cached_device_constants(device_id, forward_twiddles,
                                          pending->extended_height / 2, 2, 0, 0,
                                          &forward);
-    const size_t width = 2 * pending->slots;
     if (status == cudaSuccess)
         status = coset_lde_in_place(device_id, pending->lde->values, pending->height, width,
                                     pending->extended_height, inverse, shifts, forward,
