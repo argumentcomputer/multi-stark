@@ -6,8 +6,9 @@
 // enqueued after the call on its own stream follows the transform, and the
 // host is not blocked. Upstream's field type is a plain 64-bit word with
 // canonical values, the same storage the prover's matrices use. The fork
-// is built with SPPARK_NO_CXX_RUNTIME: CUDA failures inside upstream are
-// recorded per thread and read back here rather than thrown.
+// is built with SPPARK_NO_CXX_RUNTIME: a CUDA failure inside upstream ends
+// the process with a message rather than throwing, which matches the
+// status checks on the Rust side.
 #include <ff/goldilocks.hpp>
 #include <ntt/ntt.cuh>
 
@@ -49,32 +50,32 @@ extern "C" int multi_stark_sppark_ntt_device(int device, uint64_t* d_inout, uint
         return static_cast<int>(cudaErrorInvalidValue);
     cudaError_t status = cudaSetDevice(device);
     if (status != cudaSuccess) return static_cast<int>(status);
-    // Upstream enumerates the visible devices in CUDA order; the caller's
-    // ordinal must name the same device.
-    if (device < 0 || static_cast<size_t>(device) >= ngpus())
-        return static_cast<int>(cudaErrorInvalidDevice);
-    (void)sppark_take_cuda_error();
-    const gpu_t& gpu = select_gpu(device);
-    if (gpu.cid() != device) return static_cast<int>(cudaErrorInvalidDevice);
+    // Upstream keeps only the devices it supports, so its logical index can
+    // differ from the CUDA ordinal; find the entry by ordinal.
+    const gpu_t* found = nullptr;
+    for (const gpu_t* candidate : all_gpus())
+        if (candidate->cid() == device) found = candidate;
+    if (!found) return static_cast<int>(cudaErrorInvalidDevice);
+    const gpu_t& gpu = select_gpu(found->id());
     EventPair events;
     status = events.create();
     if (status != cudaSuccess) return static_cast<int>(status);
     status = cudaEventRecord(events.before, cudaStreamPerThread);
     if (status != cudaSuccess) return static_cast<int>(status);
-    {
-        stream_t stream(gpu.id());
-        stream.wait(events.before);
-        NTT::Base_dev_ptr(stream, reinterpret_cast<fr_t*>(d_inout), lg,
-                          static_cast<NTT::InputOutputOrder>(order),
-                          static_cast<NTT::Direction>(direction),
-                          static_cast<NTT::Type>(coset));
-        stream.record(events.after);
-        // The stream is destroyed here; CUDA defers that until its work has
-        // drained, and the caller's stream waits on it below.
-    }
-    // The fork records the first failing CUDA call instead of throwing.
-    if (const int recorded = sppark_take_cuda_error()) return recorded;
+    // Upstream's CUDA failures end the process (the fork's runtime mode), so
+    // everything past the launch either completes or never returns.
+    stream_t stream(gpu.id());
+    stream.wait(events.before);
+    NTT::Base_dev_ptr(stream, reinterpret_cast<fr_t*>(d_inout), lg,
+                      static_cast<NTT::InputOutputOrder>(order),
+                      static_cast<NTT::Direction>(direction),
+                      static_cast<NTT::Type>(coset));
+    stream.record(events.after);
     status = cudaStreamWaitEvent(cudaStreamPerThread, events.after, 0);
+    // Only once the caller's stream waits on the transform may the private
+    // stream go; if that wait could not be installed, drain the stream here
+    // so nothing still runs against the caller's buffer on return.
+    if (status != cudaSuccess) stream.sync();
     return static_cast<int>(status);
 }
 
