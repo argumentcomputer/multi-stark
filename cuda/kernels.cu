@@ -20,6 +20,7 @@
 #include "metrics.cuh"
 #ifdef MULTI_STARK_SPPARK
 extern "C" int multi_stark_sppark_takes(size_t height);
+extern "C" int multi_stark_sppark_forward(int device, uint64_t* values, size_t height, size_t width);
 extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, uint64_t* values,
                                             size_t height, size_t width, size_t added_bits,
                                             const uint64_t* shift_powers);
@@ -2251,6 +2252,59 @@ cudaError_t copy_to_host(uint64_t* destination, const DeviceBuffer& source,
 
 }  // namespace
 
+// The inverse-shift-forward sequence in place on `values`, whose first
+// `height` rows hold natural-order evaluations and whose tail is zero: the
+// sppark panel above its height threshold, the first-party stages
+// otherwise. Both leave bit-reversed rows; `canonical_pass` adds the
+// reduction pass the lookup paths run after the first-party stages.
+static cudaError_t coset_lde_in_place(int device_id, uint64_t* values, size_t height, size_t width,
+                                      size_t extended_height, const uint64_t* inverse_twiddles,
+                                      const uint64_t* shift_powers, const uint64_t* forward_twiddles,
+                                      uint64_t height_inverse, bool canonical_pass) {
+#ifdef MULTI_STARK_SPPARK
+    if (multi_stark_sppark_takes(height)) {
+        if (multi_stark_metrics::enabled()) {
+            multi_stark_metrics::add(device_id, multi_stark_metrics::SpparkTaken, 1);
+            multi_stark_metrics::add(device_id, multi_stark_metrics::NTT_SPPARK_OFFSET + multi_stark_metrics::ntt_shape(height, width), 1);
+            multi_stark_metrics::add(device_id, multi_stark_metrics::NTT_SPPARK_OFFSET + multi_stark_metrics::ntt_shape(extended_height, width), 1);
+        }
+        const size_t added_bits = strict_log2(extended_height) - strict_log2(height);
+        return static_cast<cudaError_t>(multi_stark_sppark_coset_lde(
+            device_id, values, values, height, width, added_bits, shift_powers));
+    }
+    if (multi_stark_metrics::enabled()) multi_stark_metrics::add(device_id, multi_stark_metrics::SpparkDeclined, 1);
+#endif
+    cudaError_t status = launch_dif(device_id, values, height, width, inverse_twiddles);
+    if (status == cudaSuccess) {
+        bit_reverse_scale_and_shift<<<blocks_for(height * width), THREADS>>>(
+            values, height, width, strict_log2(height), height_inverse, shift_powers);
+        status = cudaGetLastError();
+    }
+    if (status == cudaSuccess) status = launch_dif(device_id, values, extended_height, width, forward_twiddles);
+    if (status == cudaSuccess && canonical_pass) {
+        canonicalize_goldilocks<<<blocks_for(extended_height * width), THREADS>>>(values, extended_height * width);
+        status = cudaGetLastError();
+    }
+    return status;
+}
+
+// A forward transform in place on natural-order rows, leaving bit-reversed
+// rows: sppark above its height threshold, the first-party stages otherwise.
+static cudaError_t forward_in_place(int device_id, uint64_t* values, size_t height, size_t width,
+                                    const uint64_t* twiddles) {
+#ifdef MULTI_STARK_SPPARK
+    if (multi_stark_sppark_takes(height)) {
+        if (multi_stark_metrics::enabled()) {
+            multi_stark_metrics::add(device_id, multi_stark_metrics::SpparkTaken, 1);
+            multi_stark_metrics::add(device_id, multi_stark_metrics::NTT_SPPARK_OFFSET + multi_stark_metrics::ntt_shape(height, width), 1);
+        }
+        return static_cast<cudaError_t>(multi_stark_sppark_forward(device_id, values, height, width));
+    }
+    if (multi_stark_metrics::enabled()) multi_stark_metrics::add(device_id, multi_stark_metrics::SpparkDeclined, 1);
+#endif
+    return launch_dif(device_id, values, height, width, twiddles);
+}
+
 extern "C" int multi_stark_cuda_dft_batch(int device_id, uint64_t* values,
                                            size_t height, size_t width,
                                            const uint64_t* twiddles) {
@@ -2272,7 +2326,7 @@ extern "C" int multi_stark_cuda_dft_batch(int device_id, uint64_t* values,
         status = copy_to_device(device_twiddles, twiddles, height / 2);
     }
     if (status == cudaSuccess) {
-        status = launch_dif(device_id, device_values.get(), height, width, device_twiddles.get());
+        status = forward_in_place(device_id, device_values.get(), height, width, device_twiddles.get());
     }
     if (status == cudaSuccess) {
         status = copy_to_host(values, device_values, elements);
@@ -2331,19 +2385,9 @@ extern "C" int multi_stark_cuda_coset_lde_batch(
                                 extended_height / 2);
     }
     if (status == cudaSuccess) {
-        status = launch_dif(device_id, device_values.get(), height, width,
-                            device_inverse_twiddles.get());
-    }
-    if (status == cudaSuccess) {
-        const size_t total = input_elements;
-        bit_reverse_scale_and_shift<<<blocks_for(total), THREADS>>>(
-            device_values.get(), height, width, strict_log2(height),
-            height_inverse, device_shift_powers.get());
-        status = cudaGetLastError();
-    }
-    if (status == cudaSuccess) {
-        status = launch_dif(device_id, device_values.get(), extended_height, width,
-                            device_forward_twiddles.get());
+        status = coset_lde_in_place(device_id, device_values.get(), height, width, extended_height,
+                                    device_inverse_twiddles.get(), device_shift_powers.get(),
+                                    device_forward_twiddles.get(), height_inverse, false);
     }
     if (status == cudaSuccess) {
         status = copy_to_host(output, device_values, output_elements);
@@ -2931,7 +2975,7 @@ extern "C" int multi_stark_cuda_quotient_lde(
             dp,ds,dal,dd,ext_w,quotient_size,next_step,scratch,0,quotient_size,false);
         status=cudaGetLastError();
     }
-    if(status==cudaSuccess)status=launch_dif(device_id, quotient,quotient_size,2,device_quotient_twiddles);
+    if(status==cudaSuccess)status=forward_in_place(device_id, quotient,quotient_size,2,device_quotient_twiddles);
 
     ResidentLde* lde = nullptr;
     if(status==cudaSuccess) {
@@ -2948,7 +2992,7 @@ extern "C" int multi_stark_cuda_quotient_lde(
             quotient_degree,2);
         status=cudaGetLastError();
     }
-    if(status==cudaSuccess)status=launch_dif(device_id, lde->values,lde_height,width,device_lde_twiddles);
+    if(status==cudaSuccess)status=forward_in_place(device_id, lde->values,lde_height,width,device_lde_twiddles);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(status==cudaSuccess) {
         *output_handle=lde;
@@ -3160,7 +3204,7 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed(
     }
     for(size_t i=0;i<2;++i)if(status==cudaSuccess&&stream_busy[i])status=cudaStreamSynchronize(streams[i]);
 
-    if(status==cudaSuccess)status=launch_dif(device_id, quotient,quotient_size,2,device_quotient_twiddles);
+    if(status==cudaSuccess)status=forward_in_place(device_id, quotient,quotient_size,2,device_quotient_twiddles);
     ResidentLde* lde=nullptr;
     if(status==cudaSuccess)status=create_resident_lde(&lde);
     if(status==cudaSuccess){lde->height=lde_height;lde->width=width;status=cudaMalloc(reinterpret_cast<void**>(&lde->values),lde_height*width*sizeof(uint64_t));}
@@ -3170,7 +3214,7 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed(
             lde->values,quotient,device_weights,quotient_size,trace_height,quotient_degree,2);
         status=cudaGetLastError();
     }
-    if(status==cudaSuccess)status=launch_dif(device_id, lde->values,lde_height,width,device_lde_twiddles);
+    if(status==cudaSuccess)status=forward_in_place(device_id, lde->values,lde_height,width,device_lde_twiddles);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(status==cudaSuccess)*output_handle=lde;else if(lde)destroy_resident_lde(lde);
     for(size_t i=0;i<2;++i){
@@ -3460,10 +3504,7 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
     if(status==cudaSuccess)status=cached_device_constants(device_id,inverse_twiddles,height/2,1,0,0,&dit);
     if(status==cudaSuccess)status=cached_device_constants(device_id,shift_powers,height,3,shift_powers[0],height>1?shift_powers[1]:0,&dshift);
     if(status==cudaSuccess)status=cached_device_constants(device_id,forward_twiddles,extended_height/2,2,0,0,&dft);
-    if(status==cudaSuccess)status=launch_dif(device_id, lde->values,height,width,dit);
-    if(status==cudaSuccess){bit_reverse_scale_and_shift<<<blocks_for(height*width),THREADS>>>(lde->values,height,width,strict_log2(height),height_inverse,dshift);status=cudaGetLastError();}
-    if(status==cudaSuccess)status=launch_dif(device_id, lde->values,extended_height,width,dft);
-    if(status==cudaSuccess){canonicalize_goldilocks<<<blocks_for(extended_height*width),THREADS>>>(lde->values,extended_height*width);status=cudaGetLastError();}
+    if(status==cudaSuccess)status=coset_lde_in_place(device_id,lde->values,height,width,extended_height,dit,dshift,dft,height_inverse,true);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(status==cudaSuccess)*output_handle=lde;else destroy_resident_lde(lde);
     cudaFree(trace_chunk);cudaFree(scratch);cudaFree(deltas);cudaFree(multiplicities);cudaFree(norm_inverses);cudaFree(norms);cudaFree(conjugates);cudaFree(metadata);
@@ -3526,10 +3567,7 @@ extern "C" int multi_stark_cuda_lookup_lde(int device_id,void** output_handle,ui
     if(status==cudaSuccess)status=cached_device_constants(device_id,inverse_twiddles,height/2,1,0,0,&dit);
     if(status==cudaSuccess)status=cached_device_constants(device_id,shift_powers,height,3,shift_powers[0],height>1?shift_powers[1]:0,&dshift);
     if(status==cudaSuccess)status=cached_device_constants(device_id,forward_twiddles,extended_height/2,2,0,0,&dft);
-    if(status==cudaSuccess)status=launch_dif(device_id, lde->values,height,width,dit);
-    if(status==cudaSuccess){bit_reverse_scale_and_shift<<<blocks_for(height*width),THREADS>>>(lde->values,height,width,strict_log2(height),height_inverse,dshift);status=cudaGetLastError();}
-    if(status==cudaSuccess)status=launch_dif(device_id, lde->values,extended_height,width,dft);
-    if(status==cudaSuccess){canonicalize_goldilocks<<<blocks_for(extended_height*width),THREADS>>>(lde->values,extended_height*width);status=cudaGetLastError();}
+    if(status==cudaSuccess)status=coset_lde_in_place(device_id,lde->values,height,width,extended_height,dit,dshift,dft,height_inverse,true);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(profile){const double finished=now();fprintf(stderr,
         "[multi-stark/cuda] lookup phases: height=%zu lookups=%zu slots=%zu args_width=%zu allocate=%.3fs rows=%.3fs scan=%.3fs dft=%.3fs\n",
@@ -3718,21 +3756,9 @@ extern "C" int multi_stark_cuda_lookup_lde_finish_partitioned(
                                          &forward);
     const size_t width = 2 * pending->slots;
     if (status == cudaSuccess)
-        status = launch_dif(device_id, pending->lde->values, pending->height, width, inverse);
-    if (status == cudaSuccess) {
-        bit_reverse_scale_and_shift<<<blocks_for(pending->height * width), THREADS>>>(
-            pending->lde->values, pending->height, width,
-            strict_log2(pending->height), height_inverse, shifts);
-        status = cudaGetLastError();
-    }
-    if (status == cudaSuccess)
-        status = launch_dif(device_id, pending->lde->values, pending->extended_height,
-                            width, forward);
-    if (status == cudaSuccess) {
-        canonicalize_goldilocks<<<blocks_for(pending->extended_height * width), THREADS>>>(
-            pending->lde->values, pending->extended_height * width);
-        status = cudaGetLastError();
-    }
+        status = coset_lde_in_place(device_id, pending->lde->values, pending->height, width,
+                                    pending->extended_height, inverse, shifts, forward,
+                                    height_inverse, true);
     if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
     if (status == cudaSuccess) {
         *output_handle = pending->lde;

@@ -773,6 +773,29 @@ mod tests {
         system.verify_batch(&decoded).unwrap();
     }
 
+    /// Every transform of a batch proof, main and lookup LDEs and the
+    /// quotient, produces the same bytes through sppark as through the
+    /// first-party kernels.
+    #[cfg(feature = "cuda-sppark")]
+    #[test]
+    fn sppark_transforms_prove_the_same_batch() {
+        use crate::cuda::sppark::{Backend, select_backend, transforms_run};
+        let (system, key) = byte_system(config());
+        select_backend(Backend::Legacy);
+        let legacy = system.prove_batch(&key, two_shards(&system), vec![]);
+        select_backend(Backend::SpparkAllHeights);
+        let before = transforms_run();
+        let candidate = system.prove_batch(&key, two_shards(&system), vec![]);
+        let through_sppark = transforms_run() - before;
+        select_backend(Backend::Legacy);
+        assert!(
+            through_sppark > 0,
+            "the proof's transforms ran through sppark"
+        );
+        assert_eq!(candidate.to_bytes().unwrap(), legacy.to_bytes().unwrap());
+        system.verify_batch(&candidate).unwrap();
+    }
+
     #[test]
     fn regenerated_shards_prove_the_same_batch() {
         let (system, key) = byte_system(config());
