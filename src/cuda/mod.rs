@@ -83,6 +83,18 @@ impl CudaDft {
         self.device_id
     }
 
+    /// The first-party twiddle table for a transform, or none when the
+    /// transform runs through sppark, which needs no table; the kernels
+    /// reject a missing table on the first-party path.
+    fn legacy_twiddles(
+        &self,
+        legacy: bool,
+        log_height: usize,
+        inverse: bool,
+    ) -> Option<Arc<[Goldilocks]>> {
+        legacy.then(|| self.twiddles(log_height, inverse))
+    }
+
     fn twiddles(&self, log_height: usize, inverse: bool) -> Arc<[Goldilocks]> {
         let key = (log_height, inverse);
         if let Some(twiddles) = self
@@ -195,8 +207,10 @@ impl CudaDft {
         Self::validate_dimensions(extended_height, width);
 
         let log_height = log2_strict_usize(height);
-        let inverse_twiddles = self.twiddles(log_height, true);
-        let forward_twiddles = self.twiddles(log2_strict_usize(extended_height), false);
+        let legacy = lde_backend(height, width, added_bits) == "legacy";
+        let inverse_twiddles = self.legacy_twiddles(legacy, log_height, true);
+        let forward_twiddles =
+            self.legacy_twiddles(legacy, log2_strict_usize(extended_height), false);
         let shift_powers = self.shift_powers(height, shift);
         let height_inverse = Goldilocks::ONE.div_2exp_u64(log_height as u64);
         let mut handle = core::ptr::null_mut();
@@ -210,9 +224,9 @@ impl CudaDft {
                 height,
                 width,
                 added_bits,
-                inverse_twiddles.as_ptr().cast(),
+                table_ptr(&inverse_twiddles),
                 shift_powers.as_ptr().cast(),
-                forward_twiddles.as_ptr().cast(),
+                table_ptr(&forward_twiddles),
                 raw_u64(height_inverse),
             )
         };
@@ -239,27 +253,20 @@ impl CudaDft {
             .expect("LDE height overflows usize");
         Self::validate_dimensions(height, 1);
         Self::validate_dimensions(extended_height, 1);
-        let legacy_tables = lde_backend(height, 1, added_bits) == "legacy";
-        let inverse_twiddles = if legacy_tables {
-            self.twiddles(log2_strict_usize(height), true)
-        } else {
-            Arc::from(Vec::new())
-        };
+        let legacy = lde_backend(height, 1, added_bits) == "legacy";
+        let inverse_twiddles = self.legacy_twiddles(legacy, log2_strict_usize(height), true);
         let shift_powers = self.shift_powers(height, shift);
-        let forward_twiddles = if legacy_tables {
-            self.twiddles(log2_strict_usize(extended_height), false)
-        } else {
-            Arc::from(Vec::new())
-        };
+        let forward_twiddles =
+            self.legacy_twiddles(legacy, log2_strict_usize(extended_height), false);
         let status = unsafe {
             multi_stark_cuda_prepare_lde_constants(
                 self.device_id,
-                inverse_twiddles.as_ptr().cast(),
-                inverse_twiddles.len(),
+                table_ptr(&inverse_twiddles),
+                inverse_twiddles.as_ref().map_or(0, |table| table.len()),
                 shift_powers.as_ptr().cast(),
                 height,
-                forward_twiddles.as_ptr().cast(),
-                forward_twiddles.len(),
+                table_ptr(&forward_twiddles),
+                forward_twiddles.as_ref().map_or(0, |table| table.len()),
             )
         };
         check_cuda(status, "prepare resident LDE constants");
@@ -386,8 +393,10 @@ impl CudaDft {
             .expect("LDE height overflow");
         Self::validate_dimensions(extended_height, width);
         let log_height = log2_strict_usize(height);
-        let inverse_twiddles = self.twiddles(log_height, true);
-        let forward_twiddles = self.twiddles(log2_strict_usize(extended_height), false);
+        let legacy = lde_backend(height, width, added_bits) == "legacy";
+        let inverse_twiddles = self.legacy_twiddles(legacy, log_height, true);
+        let forward_twiddles =
+            self.legacy_twiddles(legacy, log2_strict_usize(extended_height), false);
         let shift_powers = self.shift_powers(height, shift);
         let mut context = Box::new(generator);
         let mut handle = core::ptr::null_mut();
@@ -398,9 +407,9 @@ impl CudaDft {
                 height,
                 width,
                 added_bits,
-                inverse_twiddles.as_ptr().cast(),
+                table_ptr(&inverse_twiddles),
                 shift_powers.as_ptr().cast(),
-                forward_twiddles.as_ptr().cast(),
+                table_ptr(&forward_twiddles),
                 raw_u64(Goldilocks::ONE.div_2exp_u64(log_height as u64)),
                 (&mut *context as *mut Generator).cast(),
                 write_generated_trace,
@@ -828,6 +837,25 @@ fn encode_quotient_nodes(
 /// kernel use the same liveness calculation. The scratch term assumes the
 /// global-memory path; devices able to fit the slots in shared memory need
 /// less than this bound.
+/// A host table's pointer for the kernels: null when the transform runs
+/// through sppark and no table was built.
+fn table_ptr(table: &Option<Arc<[Goldilocks]>>) -> *const u64 {
+    table
+        .as_ref()
+        .map_or(core::ptr::null(), |table| table.as_ptr().cast())
+}
+
+/// The backend a forward transform of the shape runs on.
+pub(crate) fn forward_backend(height: usize, width: usize) -> &'static str {
+    #[cfg(feature = "cuda-sppark")]
+    if sppark::takes_forward(height, width) {
+        return "sppark";
+    }
+    #[cfg(not(feature = "cuda-sppark"))]
+    let _ = (height, width);
+    "legacy"
+}
+
 /// The backend a resident coset LDE of the shape runs on, for spans and
 /// for skipping the tables the other backend would need.
 pub(crate) fn lde_backend(height: usize, width: usize, added_bits: usize) -> &'static str {
@@ -1367,8 +1395,16 @@ fn quotient_lde_sources(
     assert_eq!(alpha.len(), 2 * expected_constraints);
     let trace_height = quotient_size / quotient_degree;
     let lde_height = trace_height << log_blowup;
-    let quotient_twiddles = dft.twiddles(log2_strict_usize(quotient_size), false);
-    let lde_twiddles = dft.twiddles(log2_strict_usize(lde_height), false);
+    let quotient_twiddles = dft.legacy_twiddles(
+        forward_backend(quotient_size, 2) == "legacy",
+        log2_strict_usize(quotient_size),
+        false,
+    );
+    let lde_twiddles = dft.legacy_twiddles(
+        forward_backend(lde_height, 2 * quotient_degree) == "legacy",
+        log2_strict_usize(lde_height),
+        false,
+    );
     let height_inverse = Goldilocks::ONE.div_2exp_u64(log2_strict_usize(quotient_size) as u64);
     let weight_step = Goldilocks::GENERATOR.exp_u64(trace_height as u64).inverse();
     let weights: Vec<_> = weight_step
@@ -1444,8 +1480,8 @@ fn quotient_lde_sources(
                 next_step,
                 quotient_degree,
                 log_blowup,
-                quotient_twiddles.as_ptr().cast(),
-                lde_twiddles.as_ptr().cast(),
+                table_ptr(&quotient_twiddles),
+                table_ptr(&lde_twiddles),
                 weights.as_ptr().cast(),
             )
         }
@@ -1484,8 +1520,8 @@ fn quotient_lde_sources(
                 next_step,
                 quotient_degree,
                 log_blowup,
-                quotient_twiddles.as_ptr().cast(),
-                lde_twiddles.as_ptr().cast(),
+                table_ptr(&quotient_twiddles),
+                table_ptr(&lde_twiddles),
                 weights.as_ptr().cast(),
             )
         }
@@ -1876,9 +1912,10 @@ pub(crate) fn lookup_lde_resident(
     assert_eq!(multiplicities.len(), height * num_lookups);
     assert_eq!(args.len(), height * args_width);
     let extended_height = height << log_blowup;
-    let inverse_twiddles = dft.twiddles(log2_strict_usize(height), true);
+    let legacy = lookup_backend(height, num_lookups, group_size, log_blowup) == "legacy";
+    let inverse_twiddles = dft.legacy_twiddles(legacy, log2_strict_usize(height), true);
     let shift_powers = dft.shift_powers(height, Goldilocks::GENERATOR);
-    let forward_twiddles = dft.twiddles(log2_strict_usize(extended_height), false);
+    let forward_twiddles = dft.legacy_twiddles(legacy, log2_strict_usize(extended_height), false);
     let height_inverse = Goldilocks::ONE.div_2exp_u64(log2_strict_usize(height) as u64);
     let mut tail = [Goldilocks::ZERO; 4];
     let mut handle = core::ptr::null_mut();
@@ -1898,9 +1935,9 @@ pub(crate) fn lookup_lde_resident(
             gamma.as_ptr().cast(),
             raw_u64(ext_w),
             log_blowup,
-            inverse_twiddles.as_ptr().cast(),
+            table_ptr(&inverse_twiddles),
             shift_powers.as_ptr().cast(),
-            forward_twiddles.as_ptr().cast(),
+            table_ptr(&forward_twiddles),
             raw_u64(height_inverse),
         )
     };
@@ -1952,9 +1989,10 @@ pub(crate) fn lookup_lde_resident_partitioned(
     assert_eq!(multiplicities.len(), height * num_lookups);
     assert_eq!(args.len(), height * args_width);
     let extended_height = height << log_blowup;
-    let inverse_twiddles = dft.twiddles(log2_strict_usize(height), true);
+    let legacy = lookup_backend(height, num_lookups, group_size, log_blowup) == "legacy";
+    let inverse_twiddles = dft.legacy_twiddles(legacy, log2_strict_usize(height), true);
     let shift_powers = dft.shift_powers(height, Goldilocks::GENERATOR);
-    let forward_twiddles = dft.twiddles(log2_strict_usize(extended_height), false);
+    let forward_twiddles = dft.legacy_twiddles(legacy, log2_strict_usize(extended_height), false);
     let height_inverse = Goldilocks::ONE.div_2exp_u64(log2_strict_usize(height) as u64);
     let total_started = std::time::Instant::now();
     let create_started = std::time::Instant::now();
@@ -2085,9 +2123,9 @@ pub(crate) fn lookup_lde_resident_partitioned(
             pending_handle.as_ptr(),
             &mut handle,
             tail.as_mut_ptr().cast(),
-            inverse_twiddles.as_ptr().cast(),
+            table_ptr(&inverse_twiddles),
             shift_powers.as_ptr().cast(),
-            forward_twiddles.as_ptr().cast(),
+            table_ptr(&forward_twiddles),
             raw_u64(height_inverse),
         )
     };
@@ -2144,9 +2182,10 @@ pub(crate) fn lookup_graph_lde_resident(
     let num_lookups = lookups.len();
     let groups = num_lookups.div_ceil(group_size.max(1));
     let extended_height = height << log_blowup;
-    let inverse_twiddles = dft.twiddles(log2_strict_usize(height), true);
+    let legacy = lookup_backend(height, num_lookups, group_size, log_blowup) == "legacy";
+    let inverse_twiddles = dft.legacy_twiddles(legacy, log2_strict_usize(height), true);
     let shift_powers = dft.shift_powers(height, Goldilocks::GENERATOR);
-    let forward_twiddles = dft.twiddles(log2_strict_usize(extended_height), false);
+    let forward_twiddles = dft.legacy_twiddles(legacy, log2_strict_usize(extended_height), false);
     let height_inverse = Goldilocks::ONE.div_2exp_u64(log2_strict_usize(height) as u64);
     let mut tail = [Goldilocks::ZERO; 4];
     let mut handle = core::ptr::null_mut();
@@ -2169,9 +2208,9 @@ pub(crate) fn lookup_graph_lde_resident(
             gamma.as_ptr().cast(),
             raw_u64(ext_w),
             log_blowup,
-            inverse_twiddles.as_ptr().cast(),
+            table_ptr(&inverse_twiddles),
             shift_powers.as_ptr().cast(),
-            forward_twiddles.as_ptr().cast(),
+            table_ptr(&forward_twiddles),
             raw_u64(height_inverse),
         )
     };
@@ -2250,7 +2289,7 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
             backend = if height == 1 || width == 0 {
                 "noop"
             } else if Self::use_cuda_dft(height, width) {
-                "legacy"
+                forward_backend(height, width)
             } else {
                 "cpu"
             }
@@ -2263,7 +2302,11 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
             return self.cpu.dft_batch(matrix);
         }
 
-        let twiddles = self.twiddles(log2_strict_usize(height), false);
+        let twiddles = self.legacy_twiddles(
+            forward_backend(height, width) == "legacy",
+            log2_strict_usize(height),
+            false,
+        );
         // SAFETY: Goldilocks is repr(transparent) over u64 (asserted above),
         // every u64 bit pattern is a valid Goldilocks value, all buffers have
         // the element counts implied by height/width, and the FFI call is
@@ -2274,7 +2317,7 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
                 matrix.values.as_mut_ptr().cast(),
                 height,
                 width,
-                twiddles.as_ptr().cast(),
+                table_ptr(&twiddles),
             )
         };
         check_cuda(status, "batched DFT");
@@ -2306,7 +2349,7 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
             backend = if width == 0 {
                 "noop"
             } else if height > 1 && Self::use_cuda_coset_lde(extended_height, width) {
-                "legacy"
+                lde_backend(height, width, added_bits)
             } else {
                 "cpu"
             }
@@ -2328,8 +2371,10 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
         }
 
         let log_height = log2_strict_usize(height);
-        let inverse_twiddles = self.twiddles(log_height, true);
-        let forward_twiddles = self.twiddles(log2_strict_usize(extended_height), false);
+        let legacy = lde_backend(height, width, added_bits) == "legacy";
+        let inverse_twiddles = self.legacy_twiddles(legacy, log_height, true);
+        let forward_twiddles =
+            self.legacy_twiddles(legacy, log2_strict_usize(extended_height), false);
         let shift_powers = self.shift_powers(height, shift);
         let height_inverse = Goldilocks::ONE.div_2exp_u64(log_height as u64);
         let mut output = Goldilocks::zero_vec(extended_height * width);
@@ -2345,9 +2390,9 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
                 height,
                 width,
                 added_bits,
-                inverse_twiddles.as_ptr().cast(),
+                table_ptr(&inverse_twiddles),
                 shift_powers.as_ptr().cast(),
-                forward_twiddles.as_ptr().cast(),
+                table_ptr(&forward_twiddles),
                 raw_u64(height_inverse),
             )
         };
