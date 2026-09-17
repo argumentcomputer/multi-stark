@@ -37,6 +37,18 @@ fn main() {
         (24, 17, 2),
         (22, 2, 2),
         (20, 2, 2),
+        // Short shapes below the sppark height threshold: the aggregation
+        // circuits' tables and narrow lookup and quotient codewords.
+        (8, 20, 2),
+        (10, 33, 2),
+        (12, 8, 2),
+        (14, 40, 2),
+        (15, 129, 2),
+        (16, 2, 2),
+        (17, 16, 2),
+        (18, 2, 2),
+        (19, 2, 2),
+        (19, 49, 2),
     ] {
         let height = 1 << log_height;
         let values = (0..height * width)
