@@ -1,7 +1,7 @@
 //! CPU-only snapshots of counters accumulated at CUDA operation boundaries.
 
 pub(crate) fn emit_snapshot() {
-    if !tracing::enabled!(target: "prover_metrics", tracing::Level::INFO) {
+    if !tracing::event_enabled!(target: "prover_metrics", tracing::Level::INFO) {
         return;
     }
     const SHAPES: usize = 33 * 4;
