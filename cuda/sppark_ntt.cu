@@ -549,8 +549,12 @@ extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, u
     const size_t budget = panel_budget_bytes();
     if (budget < column_bytes + extra) return static_cast<int>(cudaErrorInvalidValue);
     const size_t columns = panel_columns(width, column_bytes, budget - extra);
+    // Pool allocations on the caller's stream: no device synchronization
+    // per LDE, and the async free below returns them to the pool they came
+    // from. (CUPTI 2026.2.1's memory tracking faults on an async free of
+    // memory from cudaMalloc, which this pairing also avoids.)
     uint64_t* scratch = nullptr;
-    status = cudaMalloc(reinterpret_cast<void**>(&scratch), columns * column_bytes + extra);
+    status = cudaMallocAsync(reinterpret_cast<void**>(&scratch), columns * column_bytes + extra, cudaStreamPerThread);
     if (status != cudaSuccess) return static_cast<int>(status);
     uint64_t* a = scratch;
     uint64_t* b = scratch + columns * height;
@@ -609,7 +613,7 @@ extern "C" int multi_stark_sppark_forward(int device, uint64_t* values, size_t h
     const size_t columns = panel_columns(width, height * sizeof(uint64_t), panel_budget_bytes());
     if (columns == 0) return static_cast<int>(cudaErrorInvalidValue);
     uint64_t* panel = nullptr;
-    status = cudaMalloc(reinterpret_cast<void**>(&panel), columns * height * sizeof(uint64_t));
+    status = cudaMallocAsync(reinterpret_cast<void**>(&panel), columns * height * sizeof(uint64_t), cudaStreamPerThread);
     if (status != cudaSuccess) return static_cast<int>(status);
     int result = 0;
     for (size_t first = 0; result == 0 && first < width; first += columns) {
