@@ -10,12 +10,22 @@
 namespace multi_stark_metrics {
 constexpr size_t DEVICES = 64;
 constexpr size_t NTT_OFFSET = 16;
-constexpr size_t WORDS = NTT_OFFSET + 33 * 4;
+// Transform shape counts, one block per backend: first-party, then sppark.
+constexpr size_t NTT_SHAPES = 33 * 4;
+constexpr size_t NTT_SPPARK_OFFSET = NTT_OFFSET + NTT_SHAPES;
+constexpr size_t WORDS = NTT_SPPARK_OFFSET + NTT_SHAPES;
 enum Counter : size_t {
     UploadCalls, UploadRequestedBytes, UploadChunks, UploadFailures, UploadHostNs,
     CosetHits, CosetMisses, CosetUploadedBytes, ConstantBytes,
-    DriverFreeBytes, TotalBytes, MemorySamples
+    DriverFreeBytes, TotalBytes, MemorySamples,
+    SpparkTaken, SpparkDeclined
 };
+inline size_t ntt_shape(size_t height, size_t width) {
+    unsigned log = 0;
+    while ((size_t(1) << log) < height) ++log;
+    const size_t bucket = width == 1 ? 0 : width == 2 ? 1 : width < 8 ? 2 : 3;
+    return log * 4 + bucket;
+}
 std::atomic<uint64_t> counters[DEVICES][WORDS]{};
 inline bool enabled() {
     static const bool value = std::getenv("AIUR_METRICS") != nullptr;

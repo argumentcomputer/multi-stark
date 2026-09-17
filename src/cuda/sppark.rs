@@ -38,6 +38,8 @@ unsafe extern "C" {
     fn multi_stark_sppark_max_lg_domain() -> c_int;
     fn multi_stark_sppark_backend_selected() -> c_int;
     fn multi_stark_sppark_select_backend(selected: c_int);
+    fn multi_stark_sppark_takes(height: usize) -> c_int;
+    fn multi_stark_sppark_panel_bytes(height: usize, width: usize, added_bits: usize) -> usize;
     fn multi_stark_sppark_ntt_device(
         device: c_int,
         d_inout: *mut u64,
@@ -62,12 +64,40 @@ pub fn backend_selected() -> bool {
     unsafe { multi_stark_sppark_backend_selected() != 0 }
 }
 
-/// Routes the prover's resident LDEs through sppark, or back to the
-/// first-party kernels, for the rest of the process. Comparisons in one
-/// process toggle it between constructions; concurrent constructions all
-/// see the latest value.
-pub fn select_backend(sppark: bool) {
-    unsafe { multi_stark_sppark_select_backend(c_int::from(sppark)) }
+/// Which transforms take the sppark path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    /// The first-party kernels only.
+    Legacy,
+    /// sppark for LDEs at or above the height threshold
+    /// (`MULTI_STARK_SPPARK_MIN_LOG_HEIGHT`, 20), where the per-column
+    /// baseline wins; the first-party kernels below it.
+    Sppark,
+    /// sppark at every height: for comparing the paths on small shapes.
+    SpparkAllHeights,
+}
+
+/// Selects the backend for the rest of the process. Comparisons in one
+/// process switch between constructions; concurrent constructions all see
+/// the latest value.
+pub fn select_backend(backend: Backend) {
+    let flag = match backend {
+        Backend::Legacy => 0,
+        Backend::Sppark => 1,
+        Backend::SpparkAllHeights => 2,
+    };
+    unsafe { multi_stark_sppark_select_backend(flag) }
+}
+
+/// Whether a resident LDE of `height` input rows takes the sppark path.
+pub fn takes(height: usize) -> bool {
+    unsafe { multi_stark_sppark_takes(height) != 0 }
+}
+
+/// The scratch the sppark path allocates for that LDE, to admit alongside
+/// the trace and the LDE; zero when the first-party kernels take it.
+pub fn panel_bytes(height: usize, width: usize, added_bits: usize) -> usize {
+    unsafe { multi_stark_sppark_panel_bytes(height, width, added_bits) }
 }
 
 /// The largest log domain size the compiled upstream parameters support.
@@ -224,13 +254,13 @@ mod tests {
         shift: Goldilocks,
     ) {
         let dft = super::super::CudaDft::new(0);
-        select_backend(false);
+        select_backend(Backend::Legacy);
         let legacy = dft.coset_lde_batch_resident(&matrix, added_bits, shift);
         let legacy_rows = legacy.to_row_major_matrix();
-        select_backend(true);
+        select_backend(Backend::SpparkAllHeights);
         let candidate = dft.coset_lde_batch_resident(&matrix, added_bits, shift);
         let candidate_rows = candidate.to_row_major_matrix();
-        select_backend(false);
+        select_backend(Backend::Legacy);
         assert_eq!(
             raw_words(&candidate_rows.values),
             raw_words(&legacy_rows.values),
@@ -289,6 +319,25 @@ mod tests {
             Some(value) => unsafe { std::env::set_var("MULTI_STARK_SPPARK_PANEL_BYTES", value) },
             None => unsafe { std::env::remove_var("MULTI_STARK_SPPARK_PANEL_BYTES") },
         }
+    }
+
+    #[test]
+    fn the_height_threshold_and_the_panel_budget_decide_dispatch_and_scratch() {
+        select_backend(Backend::Sppark);
+        assert!(
+            !takes(1 << 12),
+            "short transforms stay on the first-party kernels"
+        );
+        assert!(takes(1 << 20));
+        assert_eq!(panel_bytes(1 << 12, 533, 2), 0);
+        // 2^20 rows, 533 columns, blowup 4: 2 x 2^22 x 8 bytes per column is
+        // 64 MiB, so a 4 GiB budget admits 64 columns.
+        assert_eq!(panel_bytes(1 << 20, 533, 2), 64 * 2 * (1 << 22) * 8);
+        select_backend(Backend::SpparkAllHeights);
+        assert!(takes(2));
+        select_backend(Backend::Legacy);
+        assert!(!takes(1 << 24));
+        assert_eq!(panel_bytes(1 << 24, 6, 2), 0);
     }
 
     #[test]

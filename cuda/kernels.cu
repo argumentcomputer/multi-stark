@@ -19,7 +19,7 @@
 #include <new>
 #include "metrics.cuh"
 #ifdef MULTI_STARK_SPPARK
-extern "C" int multi_stark_sppark_backend_selected();
+extern "C" int multi_stark_sppark_takes(size_t height);
 extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, uint64_t* values,
                                             size_t height, size_t width, size_t added_bits,
                                             const uint64_t* shift_powers);
@@ -2392,7 +2392,14 @@ static int coset_lde_create(
 
 #ifdef MULTI_STARK_SPPARK
     // The sppark path writes every output row itself from its own scratch.
-    const bool sppark = multi_stark_sppark_backend_selected() != 0;
+    const bool sppark = multi_stark_sppark_takes(height) != 0;
+    if (multi_stark_metrics::enabled()) {
+        multi_stark_metrics::add(device_id, sppark ? multi_stark_metrics::SpparkTaken : multi_stark_metrics::SpparkDeclined, 1);
+        if (sppark) {
+            multi_stark_metrics::add(device_id, multi_stark_metrics::NTT_SPPARK_OFFSET + multi_stark_metrics::ntt_shape(height, width), 1);
+            multi_stark_metrics::add(device_id, multi_stark_metrics::NTT_SPPARK_OFFSET + multi_stark_metrics::ntt_shape(extended_height, width), 1);
+        }
+    }
 #else
     const bool sppark = false;
 #endif
