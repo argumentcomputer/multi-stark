@@ -59,6 +59,16 @@ unsafe extern "C" {
         direction: c_int,
         coset: c_int,
     ) -> c_int;
+    fn multi_stark_sppark_ntt_batch_host(
+        device: c_int,
+        inout: *mut u64,
+        lg: u32,
+        order: c_int,
+        direction: c_int,
+        coset: c_int,
+        batch: u32,
+        stride: usize,
+    ) -> c_int;
 }
 
 /// Whether the prover's resident LDEs take the sppark path: selected by
@@ -168,6 +178,41 @@ pub fn try_ntt_host(
             order as c_int,
             direction as c_int,
             c_int::from(coset),
+        )
+    };
+    if status == 0 { Ok(()) } else { Err(status) }
+}
+
+/// `count` vectors of `2^lg` elements laid out `stride` elements apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Batch {
+    pub lg: u32,
+    pub count: u32,
+    pub stride: usize,
+}
+
+/// Transforms the vectors of `batch` in `values` (`count * stride` long) in
+/// one batched launch sequence, uploaded, transformed and downloaded within
+/// the call.
+pub fn try_ntt_batch_host(
+    device: i32,
+    values: &mut [Goldilocks],
+    batch: Batch,
+    order: Order,
+    direction: Direction,
+    coset: bool,
+) -> Result<(), i32> {
+    assert_eq!(values.len(), batch.count as usize * batch.stride);
+    let status = unsafe {
+        multi_stark_sppark_ntt_batch_host(
+            device,
+            values.as_mut_ptr().cast(),
+            batch.lg,
+            order as c_int,
+            direction as c_int,
+            c_int::from(coset),
+            batch.count,
+            batch.stride,
         )
     };
     if status == 0 { Ok(()) } else { Err(status) }
@@ -422,6 +467,62 @@ mod tests {
         }
     }
 
+    /// The fork's batched launch sequence transforms every vector of a
+    /// batch exactly as the single-vector entry does, for each order,
+    /// direction and coset setting, with padding between the vectors.
+    #[test]
+    fn a_batch_of_vectors_matches_the_vectors_one_by_one() {
+        let mut rng = SmallRng::seed_from_u64(0xba7c);
+        for (lg, count, padding) in [(4u32, 3u32, 0usize), (10, 7, 8), (12, 5, 0), (16, 3, 16)] {
+            let length = 1usize << lg;
+            let stride = length + padding;
+            let batch = Batch { lg, count, stride };
+            let values: Vec<Goldilocks> =
+                (0..count as usize * stride).map(|_| rng.random()).collect();
+            for order in [Order::NN, Order::NR, Order::RN, Order::RR] {
+                for direction in [Direction::Forward, Direction::Inverse] {
+                    for coset in [false, true] {
+                        let mut batched = values.clone();
+                        try_ntt_batch_host(0, &mut batched, batch, order, direction, coset)
+                            .unwrap();
+                        let mut expected = values.clone();
+                        for vector in expected.chunks_exact_mut(stride) {
+                            ntt_host(0, &mut vector[..length], order, direction, coset);
+                        }
+                        assert_eq!(
+                            raw_words(&batched),
+                            raw_words(&expected),
+                            "2^{lg} x {count} stride {stride} {order:?} {direction:?} coset {coset}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// With column batching switched off the panel path launches its
+    /// columns one by one and still matches the first-party kernels.
+    #[test]
+    fn unbatched_columns_match_the_first_party_kernels() {
+        let _guard = backend_lock();
+        let previous = std::env::var("MULTI_STARK_SPPARK_BATCH_BYTES").ok();
+        unsafe { std::env::set_var("MULTI_STARK_SPPARK_BATCH_BYTES", "0") };
+        let mut rng = SmallRng::seed_from_u64(0x0ff);
+        for (log_height, width, added_bits) in [(10usize, 5usize, 2usize), (12, 33, 1), (8, 3, 3)] {
+            let matrix = RowMajorMatrix::new(
+                (0..(1 << log_height) * width)
+                    .map(|_| rng.random())
+                    .collect(),
+                width,
+            );
+            resident_lde_both_ways(&matrix, added_bits, Goldilocks::GENERATOR);
+        }
+        match previous {
+            Some(value) => unsafe { std::env::set_var("MULTI_STARK_SPPARK_BATCH_BYTES", value) },
+            None => unsafe { std::env::remove_var("MULTI_STARK_SPPARK_BATCH_BYTES") },
+        }
+    }
+
     #[test]
     fn the_height_threshold_and_the_panel_budget_decide_dispatch_and_scratch() {
         let _guard = backend_lock();
@@ -442,9 +543,10 @@ mod tests {
         assert_eq!(panel_bytes(1 << 24, 6, 5), 0);
         // A forward transform's panel is one column set at the height.
         assert_eq!(forward_panel_bytes(1 << 22, 2), 2 * (1 << 22) * 8);
-        // 2^20 rows, 533 columns, blowup 4: 2 x 2^22 x 8 bytes per column is
-        // 64 MiB, so a 4 GiB budget admits 64 columns.
-        assert_eq!(panel_bytes(1 << 20, 533, 2), 64 * 2 * (1 << 22) * 8);
+        // 2^20 rows, 533 columns, blowup 4: (2^20 + 2^22) x 8 bytes per
+        // column is 40 MiB, so a 4 GiB budget admits 102 columns.
+        let column_bytes = ((1 << 20) + (1 << 22)) * 8;
+        assert_eq!(panel_bytes(1 << 20, 533, 2), 102 * column_bytes);
         select_backend(Backend::SpparkAllHeights);
         assert!(takes(2));
         select_backend(Backend::Legacy);

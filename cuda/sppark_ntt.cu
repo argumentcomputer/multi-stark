@@ -43,13 +43,16 @@ bool valid_arguments(const void* d_inout, uint32_t lg, int order, int direction,
 
 extern "C" int multi_stark_sppark_max_lg_domain() { return MAX_LG_DOMAIN_SIZE; }
 
-// One in-place transform of 2^lg field elements at `d_inout` on `device`.
+// `batch` in-place transforms of 2^lg field elements each, `stride`
+// elements apart from `d_inout` on `device`, in one launch sequence.
 // `order` is NTT::InputOutputOrder (NN, NR, RN, RR), `direction` 0 forward
 // or 1 inverse, `coset` 1 for the multiplicative coset by the field
 // generator. Inverse transforms are normalized by 1/2^lg upstream.
-extern "C" int multi_stark_sppark_ntt_device(int device, uint64_t* d_inout, uint32_t lg,
-                                              int order, int direction, int coset) {
-    if (!valid_arguments(d_inout, lg, order, direction, coset))
+extern "C" int multi_stark_sppark_ntt_batch_device(int device, uint64_t* d_inout, uint32_t lg,
+                                                    int order, int direction, int coset,
+                                                    uint32_t batch, size_t stride) {
+    if (!valid_arguments(d_inout, lg, order, direction, coset) || batch == 0 || batch > 65535 ||
+        (batch > 1 && stride < (size_t(1) << lg)))
         return static_cast<int>(cudaErrorInvalidValue);
     cudaError_t status = cudaSetDevice(device);
     if (status != cudaSuccess) return static_cast<int>(status);
@@ -69,10 +72,10 @@ extern "C" int multi_stark_sppark_ntt_device(int device, uint64_t* d_inout, uint
     // everything past the launch either completes or never returns.
     stream_t stream(gpu.id());
     stream.wait(events.before);
-    NTT::Base_dev_ptr(stream, reinterpret_cast<fr_t*>(d_inout), lg,
-                      static_cast<NTT::InputOutputOrder>(order),
-                      static_cast<NTT::Direction>(direction),
-                      static_cast<NTT::Type>(coset));
+    NTT::Base_dev_ptr_batch(stream, reinterpret_cast<fr_t*>(d_inout), lg,
+                            static_cast<NTT::InputOutputOrder>(order),
+                            static_cast<NTT::Direction>(direction),
+                            static_cast<NTT::Type>(coset), batch, stride);
     stream.record(events.after);
     status = cudaStreamWaitEvent(cudaStreamPerThread, events.after, 0);
     // Only once the caller's stream waits on the transform may the private
@@ -82,13 +85,22 @@ extern "C" int multi_stark_sppark_ntt_device(int device, uint64_t* d_inout, uint
     return static_cast<int>(status);
 }
 
-// The same transform on host memory: uploads, transforms, downloads and
-// synchronizes. For contract checks and small inputs, not the prover.
-extern "C" int multi_stark_sppark_ntt_host(int device, uint64_t* inout, uint32_t lg, int order,
-                                            int direction, int coset) {
-    if (!valid_arguments(inout, lg, order, direction, coset))
+// One transform: the batch entry with a single vector.
+extern "C" int multi_stark_sppark_ntt_device(int device, uint64_t* d_inout, uint32_t lg,
+                                              int order, int direction, int coset) {
+    return multi_stark_sppark_ntt_batch_device(device, d_inout, lg, order, direction, coset, 1,
+                                               size_t(1) << lg);
+}
+
+// The batched transform on host memory: `batch * stride` words uploaded,
+// transformed, downloaded and synchronized. For contract checks and small
+// inputs, not the prover.
+extern "C" int multi_stark_sppark_ntt_batch_host(int device, uint64_t* inout, uint32_t lg, int order,
+                                                  int direction, int coset, uint32_t batch,
+                                                  size_t stride) {
+    if (!valid_arguments(inout, lg, order, direction, coset) || batch == 0 || stride < (size_t(1) << lg))
         return static_cast<int>(cudaErrorInvalidValue);
-    const size_t bytes = (size_t(1) << lg) * sizeof(uint64_t);
+    const size_t bytes = batch * stride * sizeof(uint64_t);
     cudaError_t status = cudaSetDevice(device);
     if (status != cudaSuccess) return static_cast<int>(status);
     uint64_t* d_inout = nullptr;
@@ -96,7 +108,8 @@ extern "C" int multi_stark_sppark_ntt_host(int device, uint64_t* inout, uint32_t
     if (status != cudaSuccess) return static_cast<int>(status);
     status = cudaMemcpyAsync(d_inout, inout, bytes, cudaMemcpyHostToDevice, cudaStreamPerThread);
     int result = static_cast<int>(status);
-    if (result == 0) result = multi_stark_sppark_ntt_device(device, d_inout, lg, order, direction, coset);
+    if (result == 0)
+        result = multi_stark_sppark_ntt_batch_device(device, d_inout, lg, order, direction, coset, batch, stride);
     if (result == 0)
         result = static_cast<int>(
             cudaMemcpyAsync(inout, d_inout, bytes, cudaMemcpyDeviceToHost, cudaStreamPerThread));
@@ -104,6 +117,12 @@ extern "C" int multi_stark_sppark_ntt_host(int device, uint64_t* inout, uint32_t
     if (result == 0) result = static_cast<int>(synced);
     cudaFree(d_inout);
     return result;
+}
+
+// One transform on host memory: the batch entry with a single vector.
+extern "C" int multi_stark_sppark_ntt_host(int device, uint64_t* inout, uint32_t lg, int order,
+                                            int direction, int coset) {
+    return multi_stark_sppark_ntt_batch_host(device, inout, lg, order, direction, coset, 1, size_t(1) << lg);
 }
 
 // --- Resident coset LDE through sppark ---------------------------------
@@ -120,8 +139,12 @@ extern "C" int multi_stark_sppark_ntt_host(int device, uint64_t* inout, uint32_t
 //   values[r][f + c] = B[c][r]                          r < M
 //
 // The gather reduces representatives at or above the modulus, which upstream
-// does not accept. Two panels of C columns cost 16 * M * C bytes; C is sized
-// from MULTI_STARK_SPPARK_PANEL_BYTES (default 4 GiB) and the width.
+// does not accept. The compact panel A and the extended panel B cost
+// 8 * (N + M) * C bytes for C columns; C is sized from
+// MULTI_STARK_SPPARK_PANEL_BYTES (default 4 GiB) and the width. The columns
+// of a panel go through batched launch sequences (the fork's grid
+// dimension) in groups sized to the L2 cache; MULTI_STARK_SPPARK_BATCH_BYTES
+// sets the group, 0 launches every column on its own.
 
 #include "goldilocks.cuh"
 
@@ -152,6 +175,7 @@ __global__ void gather_columns(const uint64_t* __restrict__ trace, size_t height
     }
 }
 
+// `coefficients` holds `height` bit-reversed coefficients per column.
 __global__ void shift_columns(const uint64_t* __restrict__ coefficients, uint64_t* __restrict__ panel,
                               size_t height, unsigned log_height, size_t extended_height,
                               size_t columns, const uint64_t* __restrict__ shift_powers) {
@@ -163,7 +187,7 @@ __global__ void shift_columns(const uint64_t* __restrict__ coefficients, uint64_
         const size_t row = index - column * extended_height;
         uint64_t value = 0;
         if (row < height) {
-            const uint64_t coefficient = coefficients[column * extended_height + reverse_bits(row, log_height)];
+            const uint64_t coefficient = coefficients[column * height + reverse_bits(row, log_height)];
             value = multi_stark_cuda::goldilocks_mul(coefficient, shift_powers[row]);
         }
         panel[index] = value;
@@ -220,10 +244,12 @@ unsigned min_log_height() {
 }
 
 // The columns one panel holds at `column_bytes` each: as many as the
-// budget admits, at most the width. Zero when one column does not fit,
-// which the dispatch rules decline before any allocation.
+// budget admits, at most the width and the batch a launch grid can carry.
+// Zero when one column does not fit, which the dispatch rules decline
+// before any allocation.
 size_t panel_columns(size_t width, size_t column_bytes) {
-    const size_t columns = panel_budget_bytes() / column_bytes;
+    size_t columns = panel_budget_bytes() / column_bytes;
+    if (columns > 65535) columns = 65535;
     return columns < width ? columns : width;
 }
 
@@ -232,6 +258,37 @@ bool within_domain(size_t height, size_t added_bits) {
     if (height == 0 || (height & (height - 1))) return false;
     const unsigned log = log2_exact(height);
     return added_bits <= MAX_LG_DOMAIN_SIZE && log + added_bits <= MAX_LG_DOMAIN_SIZE;
+}
+
+// The bytes one batched launch sequence keeps in flight: the columns of a
+// group go through every stage together, so a group that fits the L2 cache
+// keeps the reuse between stages that one column at a time had, while
+// short columns still share launches. MULTI_STARK_SPPARK_BATCH_BYTES
+// overrides the device's L2 size; 0 launches every column on its own.
+size_t batch_group_bytes(int device) {
+    const unsigned long long setting = decimal_setting("MULTI_STARK_SPPARK_BATCH_BYTES", ~0ull);
+    if (setting != ~0ull) return static_cast<size_t>(setting);
+    int l2 = 0;
+    if (cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, device) != cudaSuccess || l2 <= 0)
+        l2 = 64 << 20;
+    return static_cast<size_t>(l2);
+}
+
+// The `count` columns of a panel, `stride` elements apart, through batched
+// launch sequences of as many columns as the group budget holds.
+int transform_columns(int device, uint64_t* panel, uint32_t lg, int direction, size_t count,
+                      size_t stride) {
+    if (lg == 0) return 0;
+    const size_t column_bytes = (size_t(1) << lg) * sizeof(uint64_t);
+    size_t group = batch_group_bytes(device) / column_bytes;
+    if (group == 0) group = 1;
+    int result = 0;
+    for (size_t first = 0; result == 0 && first < count; first += group) {
+        const size_t batch = count - first < group ? count - first : group;
+        result = multi_stark_sppark_ntt_batch_device(device, panel + first * stride, lg, 1, direction, 0,
+                                                     static_cast<uint32_t>(batch), stride);
+    }
+    return result;
 }
 
 }  // namespace
@@ -268,11 +325,11 @@ extern "C" int multi_stark_sppark_takes(size_t height) {
 
 // Whether a resident coset LDE of the shape takes the sppark path: tall
 // enough, the extended height within upstream's compiled domain, and one
-// column's scratch within the panel budget.
+// column's scratch, the compact and the extended panel, within the budget.
 extern "C" int multi_stark_sppark_takes_lde(size_t height, size_t width, size_t added_bits) {
     if (width == 0 || !multi_stark_sppark_takes(height) || !within_domain(height, added_bits)) return 0;
     const size_t extended_height = height << added_bits;
-    return 2 * extended_height * sizeof(uint64_t) <= panel_budget_bytes();
+    return (height + extended_height) * sizeof(uint64_t) <= panel_budget_bytes();
 }
 
 // Whether a forward transform of the shape takes the sppark path.
@@ -281,12 +338,12 @@ extern "C" int multi_stark_sppark_takes_forward(size_t height, size_t width) {
     return height * sizeof(uint64_t) <= panel_budget_bytes();
 }
 
-// The scratch the sppark path allocates for one LDE: two panels of the
-// columns the budget admits, sized for the extended height. Zero when the
-// shape does not take the path.
+// The scratch the sppark path allocates for one LDE: the compact and the
+// extended panel of the columns the budget admits. Zero when the shape
+// does not take the path.
 extern "C" size_t multi_stark_sppark_panel_bytes(size_t height, size_t width, size_t added_bits) {
     if (!multi_stark_sppark_takes_lde(height, width, added_bits)) return 0;
-    const size_t column_bytes = 2 * (height << added_bits) * sizeof(uint64_t);
+    const size_t column_bytes = (height + (height << added_bits)) * sizeof(uint64_t);
     return panel_columns(width, column_bytes) * column_bytes;
 }
 
@@ -320,29 +377,27 @@ extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, u
     const unsigned log_extended = log_height + static_cast<unsigned>(added_bits);
     cudaError_t status = cudaSetDevice(device);
     if (status != cudaSuccess) return static_cast<int>(status);
-    const size_t column_bytes = 2 * extended_height * sizeof(uint64_t);
+    const size_t column_bytes = (height + extended_height) * sizeof(uint64_t);
     const size_t columns = panel_columns(width, column_bytes);
     if (columns == 0) return static_cast<int>(cudaErrorInvalidValue);
     uint64_t* scratch = nullptr;
     status = cudaMalloc(reinterpret_cast<void**>(&scratch), columns * column_bytes);
     if (status != cudaSuccess) return static_cast<int>(status);
     uint64_t* a = scratch;
-    uint64_t* b = scratch + columns * extended_height;
+    uint64_t* b = scratch + columns * height;
     int result = 0;
     for (size_t first = 0; result == 0 && first < width; first += columns) {
         const size_t count = width - first < columns ? width - first : columns;
         gather_columns<<<blocks_for_total(height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
-            trace, height, width, first, count, extended_height, a);
+            trace, height, width, first, count, height, a);
         result = static_cast<int>(cudaGetLastError());
-        for (size_t column = 0; result == 0 && column < count && log_height > 0; ++column)
-            result = multi_stark_sppark_ntt_device(device, a + column * extended_height, log_height, 1, 1, 0);
+        if (result == 0) result = transform_columns(device, a, log_height, 1, count, height);
         if (result == 0) {
             shift_columns<<<blocks_for_total(extended_height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
                 a, b, height, log_height, extended_height, count, shift_powers);
             result = static_cast<int>(cudaGetLastError());
         }
-        for (size_t column = 0; result == 0 && column < count && log_extended > 0; ++column)
-            result = multi_stark_sppark_ntt_device(device, b + column * extended_height, log_extended, 1, 0, 0);
+        if (result == 0) result = transform_columns(device, b, log_extended, 0, count, extended_height);
         if (result == 0) {
             scatter_columns<<<blocks_for_total(extended_height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
                 b, extended_height, width, first, count, values);
@@ -378,8 +433,7 @@ extern "C" int multi_stark_sppark_forward(int device, uint64_t* values, size_t h
         gather_columns<<<blocks_for_total(height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
             values, height, width, first, count, height, panel);
         result = static_cast<int>(cudaGetLastError());
-        for (size_t column = 0; result == 0 && column < count; ++column)
-            result = multi_stark_sppark_ntt_device(device, panel + column * height, log_height, 1, 0, 0);
+        if (result == 0) result = transform_columns(device, panel, log_height, 0, count, height);
         if (result == 0) {
             scatter_columns<<<blocks_for_total(height * count), PANEL_THREADS, 0, cudaStreamPerThread>>>(
                 panel, height, width, first, count, values);

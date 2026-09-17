@@ -14,6 +14,11 @@ fn main() {
     println!("cargo:rerun-if-changed=cuda/kernels.cu");
     println!("cargo:rerun-if-changed=cuda/goldilocks.cuh");
     println!("cargo:rerun-if-changed=cuda/sppark_ntt.cu");
+    if let Some(root) = env::var_os("DEP_SPPARK_ROOT") {
+        let root = PathBuf::from(root);
+        println!("cargo:rerun-if-changed={}", root.join("ntt").display());
+        println!("cargo:rerun-if-changed={}", root.join("util").display());
+    }
     println!("cargo:rerun-if-env-changed=NVCC");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
