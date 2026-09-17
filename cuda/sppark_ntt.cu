@@ -5,18 +5,15 @@
 // sees the same completion contract as the first-party kernels: work
 // enqueued after the call on its own stream follows the transform, and the
 // host is not blocked. Upstream's field type is a plain 64-bit word with
-// canonical values, the same storage the prover's matrices use.
+// canonical values, the same storage the prover's matrices use. The fork
+// is built with SPPARK_NO_CXX_RUNTIME: CUDA failures inside upstream are
+// recorded per thread and read back here rather than thrown.
 #include <ff/goldilocks.hpp>
 #include <ntt/ntt.cuh>
 
 #include <cstdint>
-#include <exception>
 
 namespace {
-
-// Status codes above the CUDA range: an upstream exception carries its own
-// CUDA error when it has one.
-constexpr int SPPARK_EXCEPTION = 20000;
 
 struct EventPair {
     cudaEvent_t before = nullptr;
@@ -52,16 +49,19 @@ extern "C" int multi_stark_sppark_ntt_device(int device, uint64_t* d_inout, uint
         return static_cast<int>(cudaErrorInvalidValue);
     cudaError_t status = cudaSetDevice(device);
     if (status != cudaSuccess) return static_cast<int>(status);
-    try {
-        const gpu_t& gpu = select_gpu(device);
-        // Upstream enumerates the visible devices in CUDA order; the caller's
-        // ordinal must name the same device.
-        if (gpu.cid() != device) return static_cast<int>(cudaErrorInvalidDevice);
-        EventPair events;
-        status = events.create();
-        if (status != cudaSuccess) return static_cast<int>(status);
-        status = cudaEventRecord(events.before, cudaStreamPerThread);
-        if (status != cudaSuccess) return static_cast<int>(status);
+    // Upstream enumerates the visible devices in CUDA order; the caller's
+    // ordinal must name the same device.
+    if (device < 0 || static_cast<size_t>(device) >= ngpus())
+        return static_cast<int>(cudaErrorInvalidDevice);
+    (void)sppark_take_cuda_error();
+    const gpu_t& gpu = select_gpu(device);
+    if (gpu.cid() != device) return static_cast<int>(cudaErrorInvalidDevice);
+    EventPair events;
+    status = events.create();
+    if (status != cudaSuccess) return static_cast<int>(status);
+    status = cudaEventRecord(events.before, cudaStreamPerThread);
+    if (status != cudaSuccess) return static_cast<int>(status);
+    {
         stream_t stream(gpu.id());
         stream.wait(events.before);
         NTT::Base_dev_ptr(stream, reinterpret_cast<fr_t*>(d_inout), lg,
@@ -69,17 +69,13 @@ extern "C" int multi_stark_sppark_ntt_device(int device, uint64_t* d_inout, uint
                           static_cast<NTT::Direction>(direction),
                           static_cast<NTT::Type>(coset));
         stream.record(events.after);
-        status = cudaStreamWaitEvent(cudaStreamPerThread, events.after, 0);
-        // The stream is destroyed on return; CUDA defers that until its work
-        // has drained, and the caller's stream already waits on it.
-        return static_cast<int>(status);
-    } catch (const cuda_error& error) {
-        // Upstream stores the negated CUDA code.
-        const int code = static_cast<int>(error.code());
-        return SPPARK_EXCEPTION + (code < 0 ? -code : code);
-    } catch (const std::exception&) {
-        return SPPARK_EXCEPTION;
+        // The stream is destroyed here; CUDA defers that until its work has
+        // drained, and the caller's stream waits on it below.
     }
+    // The fork records the first failing CUDA call instead of throwing.
+    if (const int recorded = sppark_take_cuda_error()) return recorded;
+    status = cudaStreamWaitEvent(cudaStreamPerThread, events.after, 0);
+    return static_cast<int>(status);
 }
 
 // The same transform on host memory: uploads, transforms, downloads and
