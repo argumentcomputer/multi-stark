@@ -78,11 +78,16 @@ pub(crate) fn commit(
     let mut host: Vec<Option<RowMajorMatrix<Val>>> = Vec::with_capacity(evaluations.len());
     let mut retained = Vec::with_capacity(evaluations.len());
     for (domain, source) in evaluations {
+        #[cfg(feature = "cuda-sppark")]
+        let panel = super::sppark::panel_bytes(source.height(), source.width(), blowup);
+        #[cfg(not(feature = "cuda-sppark"))]
+        let panel = 0;
         let needed = source
             .height()
             .saturating_mul(source.width())
             .saturating_mul(8)
             .saturating_mul((1 << blowup) + 1)
+            .saturating_add(panel)
             .saturating_add(reserve);
         // Generator caches go before any LDE spills: they are rebuilt from
         // host seeds on demand, a spilled LDE is uploaded again.

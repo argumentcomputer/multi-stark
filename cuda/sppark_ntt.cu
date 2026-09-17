@@ -187,8 +187,6 @@ unsigned log2_exact(size_t value) {
     return log;
 }
 
-int backend_flag = -1;
-
 // Read per construction: one getenv against a transform of gigabytes, and
 // tests vary it within a process.
 size_t panel_budget_bytes() {
@@ -199,6 +197,27 @@ size_t panel_budget_bytes() {
         if (end != configured && *end == '\0' && parsed > 0) budget = parsed;
     }
     return budget;
+}
+
+// -1 unread, 0 first-party, 1 sppark above the height threshold, 2 sppark
+// for every height (tests compare the paths on small shapes).
+int backend_flag = -1;
+
+unsigned min_log_height() {
+    unsigned log = 20;
+    if (const char* configured = getenv("MULTI_STARK_SPPARK_MIN_LOG_HEIGHT")) {
+        char* end = nullptr;
+        const unsigned long parsed = strtoul(configured, &end, 10);
+        if (end != configured && *end == '\0') log = static_cast<unsigned>(parsed);
+    }
+    return log;
+}
+
+size_t panel_columns(size_t width, size_t extended_height) {
+    const size_t column_bytes = 2 * extended_height * sizeof(uint64_t);
+    size_t columns = panel_budget_bytes() / column_bytes;
+    if (columns == 0) columns = 1;
+    return columns < width ? columns : width;
 }
 
 }  // namespace
@@ -213,7 +232,26 @@ extern "C" int multi_stark_sppark_backend_selected() {
     return backend_flag;
 }
 
-extern "C" void multi_stark_sppark_select_backend(int selected) { backend_flag = selected ? 1 : 0; }
+// 0 first-party, 1 sppark above the height threshold, 2 sppark always.
+extern "C" void multi_stark_sppark_select_backend(int selected) { backend_flag = selected; }
+
+// Whether a resident LDE of `height` input rows takes the sppark path.
+// Short transforms are launch-bound on the per-column baseline and stay on
+// the first-party kernels below MULTI_STARK_SPPARK_MIN_LOG_HEIGHT (20).
+extern "C" int multi_stark_sppark_takes(size_t height) {
+    const int flag = multi_stark_sppark_backend_selected();
+    if (flag == 2) return 1;
+    if (flag != 1) return 0;
+    return height >= (size_t(1) << min_log_height());
+}
+
+// The scratch the sppark path allocates for one LDE: two panels of the
+// columns the budget admits, sized for the extended height.
+extern "C" size_t multi_stark_sppark_panel_bytes(size_t height, size_t width, size_t added_bits) {
+    if (!multi_stark_sppark_takes(height) || width == 0) return 0;
+    const size_t extended_height = height << added_bits;
+    return panel_columns(width, extended_height) * 2 * extended_height * sizeof(uint64_t);
+}
 
 // The coset LDE of `trace` (height x width, natural row order, device memory)
 // into `values` (extended_height x width, bit-reversed rows), with the coset
@@ -230,9 +268,7 @@ extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, u
     cudaError_t status = cudaSetDevice(device);
     if (status != cudaSuccess) return static_cast<int>(status);
     const size_t column_bytes = 2 * extended_height * sizeof(uint64_t);
-    size_t columns = panel_budget_bytes() / column_bytes;
-    if (columns == 0) columns = 1;
-    if (columns > width) columns = width;
+    const size_t columns = panel_columns(width, extended_height);
     uint64_t* scratch = nullptr;
     status = cudaMalloc(reinterpret_cast<void**>(&scratch), columns * column_bytes);
     if (status != cudaSuccess) return static_cast<int>(status);
