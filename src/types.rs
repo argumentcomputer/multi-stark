@@ -570,6 +570,15 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                     .saturating_div(2)
                     .saturating_add(quotient_degree)
                     .saturating_mul(size_of::<Val>());
+                // The sppark path's column panels for the two forward
+                // transforms, zero when they stay on the first-party kernels.
+                #[cfg(feature = "cuda-sppark")]
+                let kernel_workspace = kernel_workspace
+                    .saturating_add(crate::cuda::sppark::forward_panel_bytes(quotient_size, 2))
+                    .saturating_add(crate::cuda::sppark::forward_panel_bytes(
+                        lde_height,
+                        2 * quotient_degree,
+                    ));
                 (
                     index,
                     output_bytes,
@@ -840,11 +849,18 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                         )
                     })
                     .flatten();
+                // The sppark path's column panels for the lookup LDE, on
+                // either path; zero when it stays on the first-party kernels.
+                #[cfg(feature = "cuda-sppark")]
+                let sppark_panel =
+                    crate::cuda::sppark::panel_bytes(height, 2 * groups, self.log_blowup);
+                #[cfg(not(feature = "cuda-sppark"))]
+                let sppark_panel = 0;
                 (
                     index,
                     output_bytes,
-                    direct_temporary_bytes,
-                    graph_memory.map(|(_, temporary)| temporary),
+                    direct_temporary_bytes.saturating_add(sppark_panel),
+                    graph_memory.map(|(_, temporary)| temporary.saturating_add(sppark_panel)),
                     extended_height,
                 )
             })
