@@ -16,22 +16,22 @@ use p3_goldilocks::Goldilocks;
 use super::check_cuda;
 
 /// The allocation and launch shape shared by admission and CUDA execution.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 #[repr(C)]
 pub(crate) struct RawPlan {
-    pub height: usize,
-    pub width: usize,
-    pub extended_height: usize,
-    pub columns: usize,
-    pub inverse_group: usize,
-    pub forward_group: usize,
-    pub scratch_bytes: usize,
-    pub shift_powers: *const u64,
+    height: usize,
+    width: usize,
+    extended_height: usize,
+    columns: usize,
+    inverse_group: usize,
+    forward_group: usize,
+    scratch_bytes: usize,
+    shift_powers: *const u64,
 }
 
 #[derive(Debug)]
 pub(crate) struct TransformPlan {
-    pub raw: RawPlan,
+    raw: RawPlan,
     powers: Option<std::sync::Arc<[Goldilocks]>>,
 }
 
@@ -41,6 +41,10 @@ unsafe impl Send for TransformPlan {}
 unsafe impl Sync for TransformPlan {}
 
 impl TransformPlan {
+    pub(crate) fn raw(&self) -> &RawPlan {
+        &self.raw
+    }
+
     pub(crate) fn scratch_bytes(&self) -> usize {
         self.raw.scratch_bytes
     }
@@ -539,6 +543,65 @@ mod tests {
                 ))
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn ffi_rejects_mismatched_transform_plans() {
+        let dft = super::super::CudaDft::new(0);
+        let input = vec![Goldilocks::ONE; 8 * 3];
+        for plan in [
+            dft.forward_plan(4, 3),
+            dft.forward_plan(8, 4),
+            dft.lde_plan(8, 3, 1, Goldilocks::GENERATOR),
+            dft.lde_plan(8, 3, 0, Goldilocks::GENERATOR),
+        ] {
+            let mut values = input.clone();
+            let status = unsafe {
+                super::super::multi_stark_cuda_dft_batch(
+                    0,
+                    values.as_mut_ptr().cast(),
+                    8,
+                    3,
+                    plan.raw(),
+                )
+            };
+            assert_eq!(status, 1, "cudaErrorInvalidValue");
+            assert_eq!(values, input);
+        }
+        for plan in [
+            dft.lde_plan(4, 3, 2, Goldilocks::GENERATOR),
+            dft.lde_plan(8, 4, 1, Goldilocks::GENERATOR),
+            dft.lde_plan(8, 3, 2, Goldilocks::GENERATOR),
+        ] {
+            let mut output = vec![Goldilocks::TWO; 16 * 3];
+            let status = unsafe {
+                super::super::multi_stark_cuda_coset_lde_batch(
+                    0,
+                    output.as_mut_ptr().cast(),
+                    input.as_ptr().cast(),
+                    8,
+                    3,
+                    1,
+                    plan.raw(),
+                )
+            };
+            assert_eq!(status, 1, "cudaErrorInvalidValue");
+            assert!(output.iter().all(|v| *v == Goldilocks::TWO));
+            let mut handle = core::ptr::null_mut();
+            let status = unsafe {
+                super::super::multi_stark_cuda_coset_lde_create(
+                    0,
+                    &mut handle,
+                    input.as_ptr().cast(),
+                    8,
+                    3,
+                    1,
+                    plan.raw(),
+                )
+            };
+            assert_eq!(status, 1, "cudaErrorInvalidValue");
+            assert!(handle.is_null());
         }
     }
 

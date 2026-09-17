@@ -1986,6 +1986,7 @@ cudaError_t copy_to_host(uint64_t* destination, const DeviceBuffer& source,
 
 static cudaError_t plan_constants(int device, const MultiStarkNttPlan* plan,
                                   const uint64_t** powers) {
+    if (!plan || !plan->shift_powers) return cudaErrorInvalidValue;
     const auto* host = plan->shift_powers;
     return cached_device_constants(device, host, plan->height, 3, host[0],
                                     plan->height > 1 ? host[1] : 0, powers);
@@ -1997,8 +1998,16 @@ static void record_transform(int device, size_t height, size_t width) {
                                  multi_stark_metrics::ntt_shape(height, width), 1);
 }
 
+static bool plan_matches(const MultiStarkNttPlan* plan, size_t height,
+                         size_t width, size_t extended_height) {
+    return plan && plan->height == height && plan->width == width &&
+           plan->extended_height == extended_height;
+}
+
 static cudaError_t coset_lde(int device, const uint64_t* trace, uint64_t* values,
+                             size_t height, size_t width, size_t extended_height,
                              const MultiStarkNttPlan* plan) {
+    if (!plan_matches(plan, height, width, extended_height)) return cudaErrorInvalidValue;
     const uint64_t* powers = nullptr;
     cudaError_t status = plan_constants(device, plan, &powers);
     if (status != cudaSuccess) return status;
@@ -2007,7 +2016,10 @@ static cudaError_t coset_lde(int device, const uint64_t* trace, uint64_t* values
     return static_cast<cudaError_t>(multi_stark_sppark_coset_lde(device, trace, values, plan, powers));
 }
 
-static cudaError_t forward_in_place(int device, uint64_t* values, const MultiStarkNttPlan* plan) {
+static cudaError_t forward_in_place(int device, uint64_t* values, size_t height,
+                                     size_t width, const MultiStarkNttPlan* plan) {
+    if (!plan_matches(plan, height, width, height) || plan->shift_powers)
+        return cudaErrorInvalidValue;
     record_transform(device, plan->height, plan->width);
     return static_cast<cudaError_t>(multi_stark_sppark_forward(device, values, plan));
 }
@@ -2029,7 +2041,7 @@ extern "C" int multi_stark_cuda_dft_batch(int device_id, uint64_t* values,
     DeviceBuffer device_values;
     status = copy_to_device(device_values, values, elements);
     if (status == cudaSuccess) {
-        status = forward_in_place(device_id, device_values.get(), plan);
+        status = forward_in_place(device_id, device_values.get(), height, width, plan);
     }
     if (status == cudaSuccess) {
         status = copy_to_host(values, device_values, elements);
@@ -2069,7 +2081,7 @@ extern "C" int multi_stark_cuda_coset_lde_batch(
                             cudaMemcpyHostToDevice);
     }
     if (status == cudaSuccess) {
-        status = coset_lde(device_id, device_values.get(), device_values.get(), plan);
+        status = coset_lde(device_id, device_values.get(), device_values.get(), height, width, extended_height, plan);
     }
     if (status == cudaSuccess) {
         status = copy_to_host(output, device_values, output_elements);
@@ -2132,7 +2144,7 @@ static int coset_lde_create(
         }
     }
     if (status == cudaSuccess)
-        status = coset_lde(device_id, lde->trace_values, lde->values, plan);
+        status = coset_lde(device_id, lde->trace_values, lde->values, height, width, extended_height, plan);
     if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
     if (status != cudaSuccess) {
         destroy_resident_lde(lde);
@@ -2582,7 +2594,7 @@ extern "C" int multi_stark_cuda_quotient_lde(
             dp,ds,dal,dd,ext_w,quotient_size,next_step,scratch,0,quotient_size,false);
         status=cudaGetLastError();
     }
-    if(status==cudaSuccess)status=forward_in_place(device_id, quotient,quotient_plan);
+    if(status==cudaSuccess)status=forward_in_place(device_id, quotient,quotient_size,2,quotient_plan);
 
     ResidentLde* lde = nullptr;
     if(status==cudaSuccess) {
@@ -2599,7 +2611,7 @@ extern "C" int multi_stark_cuda_quotient_lde(
             quotient_degree,2);
         status=cudaGetLastError();
     }
-    if(status==cudaSuccess)status=forward_in_place(device_id, lde->values,lde_plan);
+    if(status==cudaSuccess)status=forward_in_place(device_id, lde->values,lde_height,width,lde_plan);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(status==cudaSuccess) {
         *output_handle=lde;
@@ -2808,7 +2820,7 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed(
     }
     for(size_t i=0;i<2;++i)if(status==cudaSuccess&&stream_busy[i])status=cudaStreamSynchronize(streams[i]);
 
-    if(status==cudaSuccess)status=forward_in_place(device_id, quotient,quotient_plan);
+    if(status==cudaSuccess)status=forward_in_place(device_id, quotient,quotient_size,2,quotient_plan);
     ResidentLde* lde=nullptr;
     if(status==cudaSuccess)status=create_resident_lde(&lde);
     if(status==cudaSuccess){lde->height=lde_height;lde->width=width;status=cudaMalloc(reinterpret_cast<void**>(&lde->values),lde_height*width*sizeof(uint64_t));}
@@ -2818,7 +2830,7 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed(
             lde->values,quotient,device_weights,quotient_size,trace_height,quotient_degree,2);
         status=cudaGetLastError();
     }
-    if(status==cudaSuccess)status=forward_in_place(device_id, lde->values,lde_plan);
+    if(status==cudaSuccess)status=forward_in_place(device_id, lde->values,lde_height,width,lde_plan);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(status==cudaSuccess)*output_handle=lde;else if(lde)destroy_resident_lde(lde);
     for(size_t i=0;i<2;++i){
@@ -3103,7 +3115,7 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
     if(status==cudaSuccess)status=exclusive_scan_ext2(reinterpret_cast<Ext2*>(lde->values),deltas,count);
     if(status==cudaSuccess)status=cudaMemcpy(total,lde->values+2*(count-1),sizeof(Ext2),cudaMemcpyDeviceToHost);
     if(status==cudaSuccess)status=cudaMemcpy(total+2,deltas+count-1,sizeof(Ext2),cudaMemcpyDeviceToHost);
-    if(status==cudaSuccess)status=coset_lde(device_id,lde->values,lde->values,plan);
+    if(status==cudaSuccess)status=coset_lde(device_id,lde->values,lde->values,height,width,extended_height,plan);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(status==cudaSuccess)*output_handle=lde;else destroy_resident_lde(lde);
     cudaFree(trace_chunk);cudaFree(scratch);cudaFree(deltas);cudaFree(multiplicities);cudaFree(norm_inverses);cudaFree(norms);cudaFree(conjugates);cudaFree(metadata);
@@ -3161,7 +3173,7 @@ extern "C" int multi_stark_cuda_lookup_lde(int device_id,void** output_handle,ui
     if(status==cudaSuccess)status=cudaMemcpy(total,lde->values+2*(count-1),sizeof(Ext2),cudaMemcpyDeviceToHost);
     if(status==cudaSuccess)status=cudaMemcpy(total+2,deltas+count-1,sizeof(Ext2),cudaMemcpyDeviceToHost);
     scan_done=now();
-    if(status==cudaSuccess)status=coset_lde(device_id,lde->values,lde->values,plan);
+    if(status==cudaSuccess)status=coset_lde(device_id,lde->values,lde->values,height,width,extended_height,plan);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(profile){const double finished=now();fprintf(stderr,
         "[multi-stark/cuda] lookup phases: height=%zu lookups=%zu slots=%zu args_width=%zu allocate=%.3fs rows=%.3fs scan=%.3fs dft=%.3fs\n",
@@ -3332,7 +3344,8 @@ extern "C" int multi_stark_cuda_lookup_lde_finish_partitioned(
                             sizeof(Ext2), cudaMemcpyDeviceToHost);
 
     if (status == cudaSuccess)
-        status = coset_lde(device_id, pending->lde->values, pending->lde->values, plan);
+        status = coset_lde(device_id, pending->lde->values, pending->lde->values,
+                           pending->height, pending->lde->width, pending->lde->height, plan);
     if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
     if (status == cudaSuccess) {
         *output_handle = pending->lde;
