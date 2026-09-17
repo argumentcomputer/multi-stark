@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 namespace {
 
@@ -52,8 +53,9 @@ extern "C" int multi_stark_sppark_max_lg_domain() { return MAX_LG_DOMAIN_SIZE; }
 extern "C" int multi_stark_sppark_ntt_batch_device(int device, uint64_t* d_inout, uint32_t lg,
                                                     int order, int direction, int coset,
                                                     uint32_t batch, size_t stride) {
+    // Upstream indexes with index_t, 32 bits at this domain limit.
     if (!valid_arguments(d_inout, lg, order, direction, coset) || batch == 0 || batch > 65535 ||
-        (batch > 1 && stride < (size_t(1) << lg)))
+        (batch > 1 && stride < (size_t(1) << lg)) || stride > size_t(std::numeric_limits<index_t>::max()))
         return static_cast<int>(cudaErrorInvalidValue);
     cudaError_t status = cudaSetDevice(device);
     if (status != cudaSuccess) return static_cast<int>(status);
@@ -139,11 +141,12 @@ extern "C" int multi_stark_sppark_ntt_host(int device, uint64_t* inout, uint32_t
 //   forward RN on B[c] over M = N << added_bits               (natural-order evals)
 //   values[rev(r)][f + c] = B[c][r]                           r < M
 //
-// That is the fused expansion: it feeds the forward transform in
-// bit-reversed order, no pass restores the coefficient order, and the row
-// permutation folds into the scatter. The default restores the order
-// instead (B[c][i] = A[c][rev(i)] * shift^i), transforms in NR order and
-// scatters naturally; `fused_expansion` decides and records why. The gather reduces representatives at or
+// That feeds the forward transform in bit-reversed order, so no pass
+// restores the coefficient order and the row permutation folds into the
+// scatter. The default restores the order instead (B[c][i] = A[c][rev(i)]
+// * shift^i), transforms in NR order and scatters naturally;
+// `fused_expansion` decides and records why. Neither folds the expansion
+// into the transform's first pass; that remains upstream's kernels' job. The gather reduces representatives at or
 // above the modulus, which upstream does not accept. The compact panel A
 // and the extended panel B cost 8 * (N + M) * C bytes for C columns; C is
 // sized from MULTI_STARK_SPPARK_PANEL_BYTES (default 4 GiB) and the width.
@@ -359,8 +362,8 @@ unsigned min_log_height() {
 // budget admits, at most the width and the batch a launch grid can carry.
 // Zero when one column does not fit, which the dispatch rules decline
 // before any allocation.
-size_t panel_columns(size_t width, size_t column_bytes) {
-    size_t columns = panel_budget_bytes() / column_bytes;
+size_t panel_columns(size_t width, size_t column_bytes, size_t budget) {
+    size_t columns = budget / column_bytes;
     if (columns > 65535) columns = 65535;
     return columns < width ? columns : width;
 }
@@ -390,18 +393,17 @@ size_t batch_group_bytes(int device) {
 }
 
 // Whether a panel's expansion feeds the forward transform in bit-reversed
-// order with the row permutation in the scatter (fused), or restores the
-// coefficient order first and scatters naturally. Measured on the RTX PRO
-// 6000, the fused expansion saves the restoring pass but its reversing
-// scatter costs as much on wide panels and more on tall narrow ones, so
-// restoring is the default. MULTI_STARK_SPPARK_FUSED: 1 always, 2 for
-// compact panels beyond the L2 cache, otherwise never.
-bool fused_expansion(int device, size_t compact_panel_bytes) {
-    switch (decimal_setting("MULTI_STARK_SPPARK_FUSED", 0)) {
-        case 1: return true;
-        case 2: return compact_panel_bytes > l2_bytes(device);
-        default: return false;
-    }
+// order with the row permutation in the scatter (MULTI_STARK_SPPARK_FUSED=1),
+// or restores the coefficient order first and scatters naturally. Measured
+// on the RTX PRO 6000, the bit-reversed feed saves the restoring pass but
+// its reversing scatter costs as much on wide panels and more on tall
+// narrow ones, so restoring is the default.
+bool fused_expansion() { return decimal_setting("MULTI_STARK_SPPARK_FUSED", 0) == 1; }
+
+// The reversed coset powers the bit-reversed feed reads: one word per input
+// row, nothing on the restoring path.
+size_t expansion_extra_bytes(size_t height) {
+    return fused_expansion() ? height * sizeof(uint64_t) : 0;
 }
 
 // MULTI_STARK_SPPARK_STAGE_TIMING=1 prints the stage times of every coset
@@ -491,7 +493,7 @@ extern "C" int multi_stark_sppark_takes(size_t height) {
 extern "C" int multi_stark_sppark_takes_lde(size_t height, size_t width, size_t added_bits) {
     if (width == 0 || !multi_stark_sppark_takes(height) || !within_domain(height, added_bits)) return 0;
     const size_t extended_height = height << added_bits;
-    return (height + extended_height) * sizeof(uint64_t) <= panel_budget_bytes();
+    return (height + extended_height) * sizeof(uint64_t) + expansion_extra_bytes(height) <= panel_budget_bytes();
 }
 
 // Whether a forward transform of the shape takes the sppark path.
@@ -500,20 +502,22 @@ extern "C" int multi_stark_sppark_takes_forward(size_t height, size_t width) {
     return height * sizeof(uint64_t) <= panel_budget_bytes();
 }
 
-// The scratch the sppark path allocates for one LDE: the compact and the
-// extended panel of the columns the budget admits, and the reversed coset
-// powers. Zero when the shape does not take the path.
+// The scratch the sppark path allocates for one LDE, within the panel
+// budget: the compact and the extended panel of the columns the budget
+// admits, plus the bit-reversed feed's reversed coset powers when that
+// expansion is selected. Zero when the shape does not take the path.
 extern "C" size_t multi_stark_sppark_panel_bytes(size_t height, size_t width, size_t added_bits) {
     if (!multi_stark_sppark_takes_lde(height, width, added_bits)) return 0;
     const size_t column_bytes = (height + (height << added_bits)) * sizeof(uint64_t);
-    return panel_columns(width, column_bytes) * column_bytes + height * sizeof(uint64_t);
+    const size_t extra = expansion_extra_bytes(height);
+    return panel_columns(width, column_bytes, panel_budget_bytes() - extra) * column_bytes + extra;
 }
 
 // The scratch the sppark path allocates for one forward transform.
 extern "C" size_t multi_stark_sppark_forward_panel_bytes(size_t height, size_t width) {
     if (!multi_stark_sppark_takes_forward(height, width)) return 0;
     const size_t column_bytes = height * sizeof(uint64_t);
-    return panel_columns(width, column_bytes) * column_bytes;
+    return panel_columns(width, column_bytes, panel_budget_bytes()) * column_bytes;
 }
 
 // The coset LDE of `trace` (height x width, natural row order, device memory)
@@ -539,19 +543,24 @@ extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, u
     const unsigned log_extended = log_height + static_cast<unsigned>(added_bits);
     cudaError_t status = cudaSetDevice(device);
     if (status != cudaSuccess) return static_cast<int>(status);
+    const bool fused = fused_expansion();
     const size_t column_bytes = (height + extended_height) * sizeof(uint64_t);
-    const size_t columns = panel_columns(width, column_bytes);
-    if (columns == 0) return static_cast<int>(cudaErrorInvalidValue);
+    const size_t extra = expansion_extra_bytes(height);
+    const size_t budget = panel_budget_bytes();
+    if (budget < column_bytes + extra) return static_cast<int>(cudaErrorInvalidValue);
+    const size_t columns = panel_columns(width, column_bytes, budget - extra);
     uint64_t* scratch = nullptr;
-    status = cudaMalloc(reinterpret_cast<void**>(&scratch), columns * column_bytes + height * sizeof(uint64_t));
+    status = cudaMalloc(reinterpret_cast<void**>(&scratch), columns * column_bytes + extra);
     if (status != cudaSuccess) return static_cast<int>(status);
     uint64_t* a = scratch;
     uint64_t* b = scratch + columns * height;
     uint64_t* powers = b + columns * extended_height;
     int result = 0;
-    reverse_powers<<<blocks_for_total(height), PANEL_THREADS, 0, cudaStreamPerThread>>>(
-        shift_powers, height, log_height, powers);
-    result = static_cast<int>(cudaGetLastError());
+    if (fused) {
+        reverse_powers<<<blocks_for_total(height), PANEL_THREADS, 0, cudaStreamPerThread>>>(
+            shift_powers, height, log_height, powers);
+        result = static_cast<int>(cudaGetLastError());
+    }
     StageTimer timer;
     for (size_t first = 0; result == 0 && first < width; first += columns) {
         const size_t count = width - first < columns ? width - first : columns;
@@ -560,7 +569,6 @@ extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, u
         timer.mark(1);
         if (result == 0) result = transform_columns(device, a, log_height, 1, 1, count, height);
         timer.mark(2);
-        const bool fused = fused_expansion(device, height * count * sizeof(uint64_t));
         const dim3 column_grid(blocks_for_total(extended_height), static_cast<unsigned>(count));
         if (result == 0) {
             if (fused)
@@ -598,7 +606,7 @@ extern "C" int multi_stark_sppark_forward(int device, uint64_t* values, size_t h
     if (log_height == 0) return 0;
     cudaError_t status = cudaSetDevice(device);
     if (status != cudaSuccess) return static_cast<int>(status);
-    const size_t columns = panel_columns(width, height * sizeof(uint64_t));
+    const size_t columns = panel_columns(width, height * sizeof(uint64_t), panel_budget_bytes());
     if (columns == 0) return static_cast<int>(cudaErrorInvalidValue);
     uint64_t* panel = nullptr;
     status = cudaMalloc(reinterpret_cast<void**>(&panel), columns * height * sizeof(uint64_t));

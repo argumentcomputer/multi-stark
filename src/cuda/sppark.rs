@@ -202,7 +202,14 @@ pub fn try_ntt_batch_host(
     direction: Direction,
     coset: bool,
 ) -> Result<(), i32> {
-    assert_eq!(values.len(), batch.count as usize * batch.stride);
+    let words = (batch.count as usize)
+        .checked_mul(batch.stride)
+        .expect("batch words overflow usize");
+    assert_eq!(values.len(), words);
+    assert!(
+        u32::try_from(batch.stride).is_ok(),
+        "the adapter indexes vectors with 32 bits"
+    );
     let status = unsafe {
         multi_stark_sppark_ntt_batch_host(
             device,
@@ -546,10 +553,16 @@ mod tests {
         // A forward transform's panel is one column set at the height.
         assert_eq!(forward_panel_bytes(1 << 22, 2), 2 * (1 << 22) * 8);
         // 2^20 rows, 533 columns, blowup 4: (2^20 + 2^22) x 8 bytes per
-        // column is 40 MiB, so a 4 GiB budget admits 102 columns, plus the
-        // reversed coset powers.
+        // column is 40 MiB, so a 4 GiB budget admits 102 columns, and the
+        // bit-reversed feed's reversed powers when that expansion is on.
         let column_bytes = ((1 << 20) + (1 << 22)) * 8;
-        assert_eq!(panel_bytes(1 << 20, 533, 2), 102 * column_bytes + (1 << 20) * 8);
+        let extra = if std::env::var("MULTI_STARK_SPPARK_FUSED").as_deref() == Ok("1") {
+            (1 << 20) * 8
+        } else {
+            0
+        };
+        assert_eq!(panel_bytes(1 << 20, 533, 2), 102 * column_bytes + extra);
+        assert!(panel_bytes(1 << 20, 533, 2) <= 4 << 30);
         select_backend(Backend::SpparkAllHeights);
         assert!(takes(2));
         select_backend(Backend::Legacy);
