@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstring>
 #include <new>
+#include "metrics.cuh"
 
 namespace {
 
@@ -57,13 +58,22 @@ cudaError_t cached_device_constants(int device,const uint64_t* host,size_t count
     while(__sync_lock_test_and_set(&constant_cache_lock,1)){}
     for(auto* entry=constant_cache;entry;entry=entry->next)if(entry->device==device&&
         entry->count==count&&entry->kind==kind&&entry->key0==key0&&entry->key1==key1){
+        if (kind == 5 && multi_stark_metrics::enabled()) multi_stark_metrics::add(device, multi_stark_metrics::CosetHits, 1);
         *output=entry->values;__sync_lock_release(&constant_cache_lock);return cudaSuccess;}
     auto* entry=new(std::nothrow) ConstantCacheEntry;
     if(!entry){__sync_lock_release(&constant_cache_lock);return cudaErrorMemoryAllocation;}
     entry->device=device;entry->count=count;entry->kind=kind;entry->key0=key0;entry->key1=key1;
     cudaError_t status=persistent_malloc(reinterpret_cast<void**>(&entry->values),count*sizeof(uint64_t));
     if(status==cudaSuccess)status=cudaMemcpy(entry->values,host,count*sizeof(uint64_t),cudaMemcpyHostToDevice);
-    if(status==cudaSuccess){*output=entry->values;entry->next=constant_cache;constant_cache=entry;}
+    if(status==cudaSuccess){
+        if (multi_stark_metrics::enabled()) {
+            multi_stark_metrics::add(device, multi_stark_metrics::ConstantBytes, count * sizeof(uint64_t));
+            if (kind == 5) {
+                multi_stark_metrics::add(device, multi_stark_metrics::CosetMisses, 1);
+                multi_stark_metrics::add(device, multi_stark_metrics::CosetUploadedBytes, count * sizeof(uint64_t));
+            }
+        }
+        *output=entry->values;entry->next=constant_cache;constant_cache=entry;}
     else{persistent_free(entry->values);delete entry;}
     __sync_lock_release(&constant_cache_lock);return status;
 }
@@ -534,6 +544,8 @@ void parallel_memcpy(void* destination, const void* source, size_t bytes) {
 // stream through a leased staging slot; returns with the copy complete.
 cudaError_t staged_upload(void* device, const void* host, size_t bytes) {
     const int device_index = current_device_index();
+    cudaError_t status = cudaSuccess;
+    multi_stark_metrics::Upload metrics(device_index, bytes, status);
     uint64_t** slots = upload_staging[device_index];
     bool* in_use = upload_staging_in_use[device_index];
     pthread_mutex_lock(&upload_staging_mutex);
@@ -550,7 +562,6 @@ cudaError_t staged_upload(void* device, const void* host, size_t bytes) {
         }
     }
     in_use[slot] = true;
-    cudaError_t status = cudaSuccess;
     cudaEvent_t* events = upload_staging_events[device_index][slot];
     if (slots[slot] == nullptr) {
         status = cudaMallocHost(reinterpret_cast<void**>(&slots[slot]),
@@ -575,6 +586,7 @@ cudaError_t staged_upload(void* device, const void* host, size_t bytes) {
             const size_t chunk = std::min(UPLOAD_STAGING_CHUNK, bytes - offset);
             if (status == cudaSuccess) {
                 parallel_memcpy(buffer, source + offset, chunk);
+                ++metrics.chunks;
                 status = cudaMemcpyAsync(target + offset, buffer, chunk,
                                          cudaMemcpyHostToDevice, cudaStreamPerThread);
             }
@@ -1715,8 +1727,14 @@ __global__ void radix2_dif_tail_tiled(uint64_t* values,size_t height,size_t widt
     }
 }
 
-cudaError_t launch_dif(uint64_t* values, size_t height, size_t width,
+cudaError_t launch_dif(int device_id, uint64_t* values, size_t height, size_t width,
                        const uint64_t* twiddles) {
+    if (multi_stark_metrics::enabled() && height > 1 && width > 0) {
+        const unsigned log = strict_log2(height);
+        const unsigned bucket = width == 1 ? 0 : width == 2 ? 1 : width < 8 ? 2 : 3;
+        if (log <= 32) multi_stark_metrics::add(device_id,
+            multi_stark_metrics::NTT_OFFSET + log * 4 + bucket, 1);
+    }
     if (height <= 1 || width == 0) {
         return cudaSuccess;
     }
@@ -2248,7 +2266,7 @@ extern "C" int multi_stark_cuda_dft_batch(int device_id, uint64_t* values,
         status = copy_to_device(device_twiddles, twiddles, height / 2);
     }
     if (status == cudaSuccess) {
-        status = launch_dif(device_values.get(), height, width, device_twiddles.get());
+        status = launch_dif(device_id, device_values.get(), height, width, device_twiddles.get());
     }
     if (status == cudaSuccess) {
         status = copy_to_host(values, device_values, elements);
@@ -2307,7 +2325,7 @@ extern "C" int multi_stark_cuda_coset_lde_batch(
                                 extended_height / 2);
     }
     if (status == cudaSuccess) {
-        status = launch_dif(device_values.get(), height, width,
+        status = launch_dif(device_id, device_values.get(), height, width,
                             device_inverse_twiddles.get());
     }
     if (status == cudaSuccess) {
@@ -2318,7 +2336,7 @@ extern "C" int multi_stark_cuda_coset_lde_batch(
         status = cudaGetLastError();
     }
     if (status == cudaSuccess) {
-        status = launch_dif(device_values.get(), extended_height, width,
+        status = launch_dif(device_id, device_values.get(), extended_height, width,
                             device_forward_twiddles.get());
     }
     if (status == cudaSuccess) {
@@ -2410,7 +2428,7 @@ static int coset_lde_create(
         status = cached_device_constants(device_id,forward_twiddles,extended_height/2,2,0,0,&device_forward_twiddles);
     }
     if (status == cudaSuccess) {
-        status = launch_dif(lde->values, height, width,device_inverse_twiddles);
+        status = launch_dif(device_id, lde->values, height, width,device_inverse_twiddles);
     }
     if (status == cudaSuccess) {
         bit_reverse_scale_and_shift<<<blocks_for(input_elements), THREADS>>>(
@@ -2419,7 +2437,7 @@ static int coset_lde_create(
         status = cudaGetLastError();
     }
     if (status == cudaSuccess) {
-        status = launch_dif(lde->values, extended_height, width,device_forward_twiddles);
+        status = launch_dif(device_id, lde->values, extended_height, width,device_forward_twiddles);
     }
     // Normalization and every DIF butterfly produce canonical field values,
     // including the height-one case. A final reduction pass is redundant;
@@ -2888,7 +2906,7 @@ extern "C" int multi_stark_cuda_quotient_lde(
             dp,ds,dal,dd,ext_w,quotient_size,next_step,scratch,0,quotient_size,false);
         status=cudaGetLastError();
     }
-    if(status==cudaSuccess)status=launch_dif(quotient,quotient_size,2,device_quotient_twiddles);
+    if(status==cudaSuccess)status=launch_dif(device_id, quotient,quotient_size,2,device_quotient_twiddles);
 
     ResidentLde* lde = nullptr;
     if(status==cudaSuccess) {
@@ -2905,7 +2923,7 @@ extern "C" int multi_stark_cuda_quotient_lde(
             quotient_degree,2);
         status=cudaGetLastError();
     }
-    if(status==cudaSuccess)status=launch_dif(lde->values,lde_height,width,device_lde_twiddles);
+    if(status==cudaSuccess)status=launch_dif(device_id, lde->values,lde_height,width,device_lde_twiddles);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(status==cudaSuccess) {
         *output_handle=lde;
@@ -3117,7 +3135,7 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed(
     }
     for(size_t i=0;i<2;++i)if(status==cudaSuccess&&stream_busy[i])status=cudaStreamSynchronize(streams[i]);
 
-    if(status==cudaSuccess)status=launch_dif(quotient,quotient_size,2,device_quotient_twiddles);
+    if(status==cudaSuccess)status=launch_dif(device_id, quotient,quotient_size,2,device_quotient_twiddles);
     ResidentLde* lde=nullptr;
     if(status==cudaSuccess)status=create_resident_lde(&lde);
     if(status==cudaSuccess){lde->height=lde_height;lde->width=width;status=cudaMalloc(reinterpret_cast<void**>(&lde->values),lde_height*width*sizeof(uint64_t));}
@@ -3127,7 +3145,7 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed(
             lde->values,quotient,device_weights,quotient_size,trace_height,quotient_degree,2);
         status=cudaGetLastError();
     }
-    if(status==cudaSuccess)status=launch_dif(lde->values,lde_height,width,device_lde_twiddles);
+    if(status==cudaSuccess)status=launch_dif(device_id, lde->values,lde_height,width,device_lde_twiddles);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(status==cudaSuccess)*output_handle=lde;else if(lde)destroy_resident_lde(lde);
     for(size_t i=0;i<2;++i){
@@ -3417,9 +3435,9 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
     if(status==cudaSuccess)status=cached_device_constants(device_id,inverse_twiddles,height/2,1,0,0,&dit);
     if(status==cudaSuccess)status=cached_device_constants(device_id,shift_powers,height,3,shift_powers[0],height>1?shift_powers[1]:0,&dshift);
     if(status==cudaSuccess)status=cached_device_constants(device_id,forward_twiddles,extended_height/2,2,0,0,&dft);
-    if(status==cudaSuccess)status=launch_dif(lde->values,height,width,dit);
+    if(status==cudaSuccess)status=launch_dif(device_id, lde->values,height,width,dit);
     if(status==cudaSuccess){bit_reverse_scale_and_shift<<<blocks_for(height*width),THREADS>>>(lde->values,height,width,strict_log2(height),height_inverse,dshift);status=cudaGetLastError();}
-    if(status==cudaSuccess)status=launch_dif(lde->values,extended_height,width,dft);
+    if(status==cudaSuccess)status=launch_dif(device_id, lde->values,extended_height,width,dft);
     if(status==cudaSuccess){canonicalize_goldilocks<<<blocks_for(extended_height*width),THREADS>>>(lde->values,extended_height*width);status=cudaGetLastError();}
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(status==cudaSuccess)*output_handle=lde;else destroy_resident_lde(lde);
@@ -3483,9 +3501,9 @@ extern "C" int multi_stark_cuda_lookup_lde(int device_id,void** output_handle,ui
     if(status==cudaSuccess)status=cached_device_constants(device_id,inverse_twiddles,height/2,1,0,0,&dit);
     if(status==cudaSuccess)status=cached_device_constants(device_id,shift_powers,height,3,shift_powers[0],height>1?shift_powers[1]:0,&dshift);
     if(status==cudaSuccess)status=cached_device_constants(device_id,forward_twiddles,extended_height/2,2,0,0,&dft);
-    if(status==cudaSuccess)status=launch_dif(lde->values,height,width,dit);
+    if(status==cudaSuccess)status=launch_dif(device_id, lde->values,height,width,dit);
     if(status==cudaSuccess){bit_reverse_scale_and_shift<<<blocks_for(height*width),THREADS>>>(lde->values,height,width,strict_log2(height),height_inverse,dshift);status=cudaGetLastError();}
-    if(status==cudaSuccess)status=launch_dif(lde->values,extended_height,width,dft);
+    if(status==cudaSuccess)status=launch_dif(device_id, lde->values,extended_height,width,dft);
     if(status==cudaSuccess){canonicalize_goldilocks<<<blocks_for(extended_height*width),THREADS>>>(lde->values,extended_height*width);status=cudaGetLastError();}
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(profile){const double finished=now();fprintf(stderr,
@@ -3675,7 +3693,7 @@ extern "C" int multi_stark_cuda_lookup_lde_finish_partitioned(
                                          &forward);
     const size_t width = 2 * pending->slots;
     if (status == cudaSuccess)
-        status = launch_dif(pending->lde->values, pending->height, width, inverse);
+        status = launch_dif(device_id, pending->lde->values, pending->height, width, inverse);
     if (status == cudaSuccess) {
         bit_reverse_scale_and_shift<<<blocks_for(pending->height * width), THREADS>>>(
             pending->lde->values, pending->height, width,
@@ -3683,7 +3701,7 @@ extern "C" int multi_stark_cuda_lookup_lde_finish_partitioned(
         status = cudaGetLastError();
     }
     if (status == cudaSuccess)
-        status = launch_dif(pending->lde->values, pending->extended_height,
+        status = launch_dif(device_id, pending->lde->values, pending->extended_height,
                             width, forward);
     if (status == cudaSuccess) {
         canonicalize_goldilocks<<<blocks_for(pending->extended_height * width), THREADS>>>(
@@ -4540,6 +4558,11 @@ extern "C" int multi_stark_cuda_memory_info(int device_id, size_t* free_bytes,
     cudaError_t status = cudaSetDevice(device_id);
     if (status == cudaSuccess) retain_default_pool(device_id);
     if (status == cudaSuccess) status = cudaMemGetInfo(free_bytes, total_bytes);
+    if (status == cudaSuccess && multi_stark_metrics::enabled()) {
+        multi_stark_metrics::sample(device_id, multi_stark_metrics::DriverFreeBytes, *free_bytes);
+        multi_stark_metrics::sample(device_id, multi_stark_metrics::TotalBytes, *total_bytes);
+        multi_stark_metrics::add(device_id, multi_stark_metrics::MemorySamples, 1);
+    }
     // cudaMemGetInfo excludes pages retained by cudaMallocAsync's default
     // pool, even though subsequent stream allocations can reuse them. Treat
     // the unused part of that pool as available for admission decisions; using
@@ -4575,4 +4598,12 @@ extern "C" int multi_stark_cuda_generate_trace_rows(int device, void* context,
     if (status == cudaSuccess) status = cudaMemcpy(output, tile, rows * width * sizeof(uint64_t), cudaMemcpyDeviceToHost);
     if (tile) cudaFree(tile);
     return static_cast<int>(status);
+}
+
+extern "C" void multi_stark_cuda_metrics_snapshot(uint64_t* output, size_t count) {
+    if (!output || count != multi_stark_metrics::DEVICES * multi_stark_metrics::WORDS) return;
+    for (size_t device = 0; device < multi_stark_metrics::DEVICES; ++device)
+        for (size_t key = 0; key < multi_stark_metrics::WORDS; ++key)
+            output[device * multi_stark_metrics::WORDS + key] =
+                multi_stark_metrics::counters[device][key].load(std::memory_order_relaxed);
 }

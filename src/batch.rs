@@ -544,6 +544,8 @@ where
                 Retention::Regenerate => None,
             });
             barrier.claims.push(claims);
+            #[cfg(feature = "cuda")]
+            crate::cuda::metrics::emit_snapshot();
         });
         barrier
     }
@@ -608,6 +610,8 @@ where
                 _ => unreachable!("a shard is either retained or rebuilt"),
             };
             proofs.push(self.prove_batch_shard(key, stage_1, &claims, &preamble, shard));
+            #[cfg(feature = "cuda")]
+            crate::cuda::metrics::emit_snapshot();
         });
         BatchProof { preamble, proofs }
     }

@@ -15,8 +15,8 @@ use p3_commit::{ExtensionMmcs, Pcs as PcsTrait};
 use p3_dft::Radix2DitParallel;
 use p3_field::BasedVectorSpace;
 use p3_field::{
-    extension::BinomialExtensionField, ExtensionField, Field, PrimeCharacteristicRing,
-    PrimeField64, TwoAdicField,
+    ExtensionField, Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField,
+    extension::BinomialExtensionField,
 };
 use p3_fri::FriParameters as InnerFriParameters;
 #[cfg(not(feature = "cuda"))]
@@ -29,9 +29,9 @@ use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
 
 #[cfg(feature = "cuda")]
-use crate::cuda::pcs::CudaPcsDft;
-#[cfg(feature = "cuda")]
 use crate::cuda::CudaDft;
+#[cfg(feature = "cuda")]
+use crate::cuda::pcs::CudaPcsDft;
 
 pub type Val = Goldilocks;
 pub type PackedVal = <Val as Field>::Packing;
@@ -1006,6 +1006,9 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
             let mut graph_path = admits_graph();
             let (mut temporary_bytes, mut target) = target_for(graph_path);
             if target > total_device_bytes {
+                tracing::info!(target: "prover_metrics", metric = "lookup_admission",
+                    job = index, graph_path, admitted = false, reason = "device_capacity",
+                    output_bytes, temporary_bytes, target_bytes = target);
                 return None;
             }
             let mut free_bytes = self.pcs.mmcs.ensure_device_headroom(
@@ -1035,6 +1038,9 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                     );
                 }
             }
+            tracing::info!(target: "prover_metrics", metric = "lookup_admission",
+                job = index, graph_path, admitted = free_bytes >= target,
+                output_bytes, temporary_bytes, target_bytes = target, free_bytes);
             if free_bytes < target {
                 return None;
             }
@@ -1181,7 +1187,7 @@ mod pcs_ref_gen {
     use super::*;
     use p3_commit::Mmcs as _;
     use p3_field::{
-        batch_multiplicative_inverse, BasedVectorSpace, PrimeCharacteristicRing, PrimeField64,
+        BasedVectorSpace, PrimeCharacteristicRing, PrimeField64, batch_multiplicative_inverse,
     };
     use p3_matrix::dense::RowMajorMatrix;
     use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
