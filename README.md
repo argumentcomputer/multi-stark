@@ -121,7 +121,7 @@ one column within the panel budget; invalid shapes fail before allocation.
 | `MULTI_STARK_SPPARK_PANEL_BYTES=4294967296` | Maximum transform scratch; zero selects the default. A budget smaller than one column is a configuration error |
 | `MULTI_STARK_SPPARK_BATCH_BYTES=<bytes>` | Bytes per batched launch group; defaults to the device's L2 size, zero launches one column at a time |
 | `MULTI_STARK_SPPARK_STAGE_TIMING=1` | Print each panel's gather, inverse, expansion, forward and scatter times; synchronizes each measured panel |
-| `AIUR_METRICS=<path>` with `RUST_LOG=prover_metrics=info` | Enables lightweight per-device transform-shape counters; Ix writes them to the selected metrics file |
+| `AIUR_METRICS=<path>` | Enables lightweight per-device transform-shape counters; Ix writes them to the selected metrics file |
 
 Panel and batching settings are captured when the device DFT is constructed.
 There is no backend selector, height threshold or alternative expansion mode.
