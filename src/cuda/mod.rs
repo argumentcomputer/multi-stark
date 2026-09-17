@@ -408,6 +408,7 @@ unsafe extern "C" {
         destroy: unsafe extern "C" fn(*mut c_void),
     ) -> i32;
     fn multi_stark_cuda_lde_has_generator(handle: *const c_void) -> bool;
+    fn multi_stark_cuda_lde_generator_context(handle: *const c_void) -> *mut c_void;
 }
 
 pub struct CudaLde {
@@ -423,6 +424,19 @@ unsafe impl Sync for CudaLde {}
 impl CudaLde {
     pub(crate) fn has_generator(&self) -> bool {
         unsafe { multi_stark_cuda_lde_has_generator(self.raw_handle()) }
+    }
+
+    /// Frees what the trace generator, if any, caches on this device. The
+    /// generator stays attached and keeps serving tiles from the host.
+    pub(crate) fn release_generator_device(&self) {
+        let context = unsafe { multi_stark_cuda_lde_generator_context(self.raw_handle()) };
+        if context.is_null() {
+            return;
+        }
+        // SAFETY: the handle owns the boxed generator until it is destroyed,
+        // and the box holds exactly the `Generator` the LDE was created with.
+        let generator = unsafe { &*context.cast::<Generator>() };
+        generator.release_device(self.device_id);
     }
 
     pub(crate) const fn raw_handle(&self) -> *const c_void {

@@ -16,6 +16,12 @@ pub trait TraceGenerator<F: Field>: Send + Sync {
     /// Fill a device tile synchronously on its owning device and calling stream.
     #[cfg(feature = "cuda")]
     fn write_device_rows(&self, output: crate::cuda::DeviceTraceView<'_>) -> Result<(), String>;
+
+    /// Free whatever the source keeps on `device_id` to serve tiles faster,
+    /// such as seeds left resident between a commitment and the lookup pass
+    /// that regenerates rows from them. Tiles must still be served afterwards.
+    #[cfg(feature = "cuda")]
+    fn release_device(&self, _device_id: i32) {}
 }
 
 #[derive(Clone)]

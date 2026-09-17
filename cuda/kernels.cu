@@ -2396,6 +2396,12 @@ extern "C" bool multi_stark_cuda_lde_has_generator(const void* handle) {
     return handle && static_cast<const ResidentLde*>(handle)->trace_writer;
 }
 
+extern "C" void* multi_stark_cuda_lde_generator_context(const void* handle) {
+    if (!handle) return nullptr;
+    const auto* lde = static_cast<const ResidentLde*>(handle);
+    return lde->trace_writer ? lde->trace_context : nullptr;
+}
+
 extern "C" int multi_stark_cuda_prepare_lde_constants(
     int device_id,const uint64_t* inverse_twiddles,size_t inverse_count,
     const uint64_t* shift_powers,size_t height,const uint64_t* forward_twiddles,
