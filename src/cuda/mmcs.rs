@@ -157,6 +157,46 @@ impl<M> CudaMmcsData<M> {
 }
 
 impl CudaMmcsData<RowMajorMatrix<Goldilocks>> {
+    /// Whether [`Self::resident_with_trace`] returns an LDE for this matrix,
+    /// without attaching anything. A hybrid LDE qualifies while its values are
+    /// resident, and after a spill as long as it can regenerate its trace from
+    /// a generator or a retained host trace. Admission decisions that size a
+    /// budget for the graph kernel must use this predicate, so that the budget
+    /// and the kernel that then runs agree.
+    pub(crate) fn has_resident_with_trace(&self, index: usize) -> bool {
+        match self {
+            Self::Cuda {
+                resident,
+                retained_traces,
+                ..
+            } => {
+                index < resident.len()
+                    && retained_traces
+                        .get()
+                        .is_none_or(|retained| index < retained.len())
+            }
+            Self::Hybrid {
+                resident,
+                resident_active,
+                retained_traces,
+                ..
+            } => {
+                let Some(Some(lde)) = resident.get(index) else {
+                    return false;
+                };
+                let (Some(active), Some(retained)) =
+                    (resident_active.get(index), retained_traces.get(index))
+                else {
+                    return false;
+                };
+                active.load(std::sync::atomic::Ordering::Acquire)
+                    || lde.has_generator()
+                    || retained.is_some()
+            }
+            Self::Cpu(_) => false,
+        }
+    }
+
     pub(crate) fn resident_with_trace(&self, index: usize) -> Option<&CudaLde> {
         match self {
             Self::Cuda {
