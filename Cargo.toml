@@ -33,10 +33,12 @@ p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89
 p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
 p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
 
-# sppark's Goldilocks NTT, for the comparison backend behind `cuda-sppark`.
-# Pinned; the adapter compiles against the headers its build script exports.
+# sppark's Goldilocks NTT, for the comparison backend behind `cuda-sppark`,
+# from the organization's fork: its `multi-stark/no-cxx-runtime` branch adds
+# the `SPPARK_NO_CXX_RUNTIME` build mode the adapter relies on. Pinned; the
+# adapter compiles against the headers its build script exports.
 [dependencies.sppark]
-git = "https://github.com/supranational/sppark"
+git = "https://github.com/argumentcomputer/sppark"
 rev = "17278d74295392f9813f009300b257a688422b7a"
 optional = true
 features = ["cuda"]

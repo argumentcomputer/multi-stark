@@ -67,6 +67,11 @@ fn main() {
                 .arg("--compiler-options=-fPIC")
                 .arg(format!("-I{}", root.display()))
                 .arg("-DFEATURE_GOLDILOCKS")
+                // The fork's runtime without exceptions or its thread pool:
+                // no C++ runtime library symbols, so the archive links into
+                // the Lean executable, which carries libc++ rather than
+                // libstdc++.
+                .arg("-DSPPARK_NO_CXX_RUNTIME")
                 .arg("-o")
                 .arg(&object)
                 .arg(&source);
