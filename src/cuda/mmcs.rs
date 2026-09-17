@@ -108,6 +108,38 @@ fn hybrid_resident_candidates<M>(
         .collect()
 }
 
+/// Frees the device caches of generator-backed resident LDEs, one at a time
+/// until `target_free_bytes` is met, and returns the free bytes then. A cache
+/// is the cheapest headroom there is: the generator rebuilds it from host
+/// seeds on demand, whereas an evicted LDE must be materialized and uploaded
+/// again.
+fn release_generator_caches<M>(
+    device_id: i32,
+    data: &CudaMmcsData<M>,
+    protected_index: Option<usize>,
+    target_free_bytes: usize,
+) -> usize {
+    let mut free_bytes = super::device_memory_info(device_id).0;
+    let CudaMmcsData::Hybrid { resident, .. } = data else {
+        return free_bytes;
+    };
+    for (index, lde) in resident.iter().enumerate() {
+        if free_bytes >= target_free_bytes {
+            break;
+        }
+        if protected_index == Some(index) {
+            continue;
+        }
+        let Some(lde) = lde else { continue };
+        if !lde.has_generator() {
+            continue;
+        }
+        lde.release_generator_device();
+        free_bytes = super::device_memory_info(device_id).0;
+    }
+    free_bytes
+}
+
 fn evict_hybrid_resident<M>(data: &CudaMmcsData<M>, index: usize) {
     let CudaMmcsData::Hybrid {
         resident,
@@ -126,6 +158,7 @@ fn evict_hybrid_resident<M>(data: &CudaMmcsData<M>, index: usize) {
     // SAFETY: admission transitions run between proving stages, when no CUDA
     // operation can access this LDE or its trace.
     unsafe { lde.release_values() };
+    lde.release_generator_device();
     super::witness::record_lde_spill(
         lde.device_id,
         lde.height() * lde.width() * size_of::<Goldilocks>(),
@@ -673,6 +706,16 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
         if free_bytes >= target_free_bytes {
             return free_bytes;
         }
+        free_bytes =
+            release_generator_caches(self.device_id, data, protected_index, target_free_bytes);
+        if free_bytes >= target_free_bytes {
+            if super::memory_diagnostics_enabled() {
+                eprintln!(
+                    "[multi-stark/cuda] {phase} admitted after releasing generator caches: free={free_bytes}"
+                );
+            }
+            return free_bytes;
+        }
         let mut candidates = hybrid_resident_candidates(data, protected_index);
         while free_bytes < target_free_bytes && !candidates.is_empty() {
             let deficit_cells = target_free_bytes
@@ -722,6 +765,18 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
         }
         if measured_free_bytes >= target_free_bytes {
             return measured_free_bytes;
+        }
+        for data in data {
+            measured_free_bytes =
+                release_generator_caches(self.device_id, data, None, target_free_bytes);
+            if measured_free_bytes >= target_free_bytes {
+                if super::memory_diagnostics_enabled() {
+                    eprintln!(
+                        "[multi-stark/cuda] {phase} batch admitted after releasing generator caches: free={measured_free_bytes}"
+                    );
+                }
+                return measured_free_bytes;
+            }
         }
         let initial_free_bytes = measured_free_bytes;
         let mut released_bytes = 0usize;

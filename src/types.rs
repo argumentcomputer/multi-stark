@@ -971,6 +971,7 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
             // retained matrix remains owned by the prover data.
             if let Some(main) = main {
                 unsafe { main.release_trace() };
+                main.release_generator_device();
             }
             result
         };
