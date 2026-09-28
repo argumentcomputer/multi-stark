@@ -1075,8 +1075,7 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
         }));
         if !wide_heights.is_empty() {
             let mut resident: Vec<Option<CudaLde>> = Vec::with_capacity(ldes.len());
-            let mut host: Vec<Option<RowMajorMatrix<Goldilocks>>> =
-                Vec::with_capacity(ldes.len());
+            let mut host: Vec<Option<RowMajorMatrix<Goldilocks>>> = Vec::with_capacity(ldes.len());
             for lde in ldes {
                 if wide_heights.contains(&lde.height()) {
                     host.push(Some(lde.to_row_major_matrix()));
@@ -1496,7 +1495,9 @@ mod tests {
         // 4096 columns of 8 bytes is exactly the 32 KiB the leaf kernel takes.
         assert!(host_hashed_heights([d(4096, 8)]).is_empty());
         assert_eq!(
-            host_hashed_heights([d(4097, 8)]).into_iter().collect::<Vec<_>>(),
+            host_hashed_heights([d(4097, 8)])
+                .into_iter()
+                .collect::<Vec<_>>(),
             vec![8]
         );
         // Matrices at one height share a leaf row, so their widths add up;
@@ -1514,8 +1515,17 @@ mod tests {
     #[test]
     fn resident_commit_with_a_wide_height_group_matches_the_cpu() {
         let dims = [
-            (4096, 14), (2048, 14), (4096, 17), (4, 37), (4, 35), (4, 371),
-            (4, 9282), (256, 110), (4, 6), (1024, 3), (262144, 10),
+            (4096, 14),
+            (2048, 14),
+            (4096, 17),
+            (4, 37),
+            (4, 35),
+            (4, 371),
+            (4, 9282),
+            (256, 110),
+            (4, 6),
+            (1024, 3),
+            (262144, 10),
         ];
         let matrices: Vec<_> = dims
             .iter()
@@ -1529,8 +1539,10 @@ mod tests {
         );
         let (expected_commitment, expected_data) = cpu.commit(matrices.clone());
         let indices = [0, 3, 1000, 262143];
-        let expected_openings: Vec<_> =
-            indices.iter().map(|&i| cpu.open_batch(i, &expected_data)).collect();
+        let expected_openings: Vec<_> = indices
+            .iter()
+            .map(|&i| cpu.open_batch(i, &expected_data))
+            .collect();
         let mmcs = CudaMmcs::with_device(cpu, 0);
         let ldes = matrices
             .iter()
