@@ -179,7 +179,8 @@
 //! the prover's work.
 
 use crate::config::{
-    Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsProof, StarkGenericConfig, Val,
+    Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsData, PcsProof,
+    StarkGenericConfig, Val,
 };
 use crate::eval::VarValues;
 use crate::lookup::{LookupValues, fingerprint};
@@ -254,8 +255,74 @@ impl<SC: StarkGenericConfig> Clone for Proof<SC> {
     }
 }
 
+/// Round-one state of a proof: the stage-1 (main) trace commitment together
+/// with everything the remaining rounds need. Produced by
+/// [`System::prove_stage_1`], consumed by [`System::prove_after_challenges`].
+///
+/// Holding a `Stage1` across a batch's challenge barrier keeps the committed
+/// LDE and Merkle tree resident; a caller that cannot afford that may drop it
+/// after reading [`Stage1::active`], [`Stage1::log_degrees`] and
+/// [`Stage1::stage_1_trace_commit`], and recommit the same witness later —
+/// the commitment is deterministic.
+pub struct Stage1<SC: StarkGenericConfig> {
+    /// Activation bitmap over the canonical circuit set (see [`Proof::active`]).
+    pub active: Vec<bool>,
+    /// Canonical index of each active circuit, in order.
+    pub active_indices: Vec<usize>,
+    /// Log2 trace height of each active circuit.
+    pub log_degrees: Vec<usize>,
+    /// The stage-1 commitment.
+    pub stage_1_trace_commit: Com<SC>,
+    /// PCS prover data behind the commitment (LDE and Merkle tree).
+    pub stage_1_trace_data: PcsData<SC>,
+    /// Lookup witness of each active circuit, in active order.
+    pub lookups: Vec<LookupValues<Val<SC>>>,
+}
+
+/// Observes length-prefixed claims: the claim count, then each claim's
+/// length and elements, so distinct claim structures (e.g. `[[a, b]]` vs
+/// `[[a], [b]]`) yield distinct transcripts.
+pub(crate) fn observe_claims<SC: StarkGenericConfig>(
+    challenger: &mut SC::Challenger,
+    claims: &[&[Val<SC>]],
+) {
+    challenger.observe(Val::<SC>::from_usize(claims.len()));
+    for claim in claims {
+        challenger.observe(Val::<SC>::from_usize(claim.len()));
+        challenger.observe_slice(claim);
+    }
+}
+
+/// Samples the lookup argument challenge β and the fingerprint challenge γ,
+/// observing each back into the transcript.
+pub(crate) fn sample_lookup_challenges<SC: StarkGenericConfig>(
+    challenger: &mut SC::Challenger,
+) -> (SC::Challenge, SC::Challenge) {
+    let lookup_argument_challenge: SC::Challenge = challenger.sample_algebra_element();
+    challenger.observe_algebra_element(lookup_argument_challenge);
+    let fingerprint_challenge: SC::Challenge = challenger.sample_algebra_element();
+    challenger.observe_algebra_element(fingerprint_challenge);
+    (lookup_argument_challenge, fingerprint_challenge)
+}
+
+/// The accumulator contributed by public claims: each claim is one message
+/// pushed with multiplicity one, `Σ (β + fingerprint(γ, claim))⁻¹`.
+pub(crate) fn claims_accumulator<SC: StarkGenericConfig>(
+    lookup_argument_challenge: SC::Challenge,
+    fingerprint_challenge: &SC::Challenge,
+    claims: &[&[Val<SC>]],
+) -> SC::Challenge {
+    let mut acc = SC::Challenge::ZERO;
+    for claim in claims {
+        let message =
+            lookup_argument_challenge + fingerprint(fingerprint_challenge, claim.iter().cloned());
+        acc += message.inverse();
+    }
+    acc
+}
+
 impl<SC: StarkGenericConfig> Proof<SC> {
-    fn serde_config() -> Configuration<LittleEndian, Fixint> {
+    pub(crate) fn serde_config() -> Configuration<LittleEndian, Fixint> {
         standard().with_little_endian().with_fixed_int_encoding()
     }
 
@@ -313,12 +380,62 @@ where
         claims: &[&[Val<SC>]],
         witness: SystemWitness<Val<SC>>,
     ) -> Proof<SC> {
-        let pcs = self.config.pcs();
+        let stage_1 = self.prove_stage_1(witness);
         let mut challenger = self.config.initialise_challenger();
 
         // Bind the system shape into the transcript. The protocol parameters
         // are already bound via the challenger seed.
         self.observe_shape(&mut challenger);
+
+        // The activation bitmap is bound into the transcript before any
+        // commitment or challenge (see `Stage1::active`).
+        for &is_active in &stage_1.active {
+            challenger.observe(Val::<SC>::from_bool(is_active));
+        }
+
+        if let Some(commit) = &self.preprocessed_commit {
+            challenger.observe(commit.clone());
+        }
+        challenger.observe(stage_1.stage_1_trace_commit.clone());
+
+        // Observe the traces' heights. This binds the proof to specific domain
+        // sizes; the verifier reads these from the (untrusted) proof, so they
+        // must influence every subsequent challenge.
+        for log_degree in &stage_1.log_degrees {
+            challenger.observe(Val::<SC>::from_usize(*log_degree));
+        }
+
+        // Observe the claims, length-prefixed so that distinct claim
+        // structures (e.g. [[a, b]] vs [[a], [b]]) yield distinct transcripts.
+        // This has to be done before generating the lookup argument challenge,
+        // otherwise the lookup argument can be attacked.
+        observe_claims::<SC>(&mut challenger, claims);
+
+        let (lookup_argument_challenge, fingerprint_challenge) =
+            sample_lookup_challenges::<SC>(&mut challenger);
+        let acc =
+            claims_accumulator::<SC>(lookup_argument_challenge, &fingerprint_challenge, claims);
+
+        self.prove_after_challenges(
+            key,
+            stage_1,
+            challenger,
+            lookup_argument_challenge,
+            fingerprint_challenge,
+            acc,
+        )
+    }
+
+    /// Round one of a proof: commits the stage-1 (main) traces and retains
+    /// what the remaining rounds need. No transcript is touched here — the
+    /// caller decides which transcript the commitment enters (a single
+    /// proof's own, or a batch's shared one — see [`crate::batch`]).
+    ///
+    /// # Panics
+    /// Panics if every circuit's trace is empty (nothing to prove).
+    #[tracing::instrument(level = "info", skip_all, name = "stark/stage1_commit")]
+    pub fn prove_stage_1(&self, witness: SystemWitness<Val<SC>>) -> Stage1<SC> {
+        let pcs = self.config.pcs();
 
         // Sparse activation: a circuit whose stage-1 trace is empty is
         // INACTIVE for this proof — nothing of it is committed, opened,
@@ -327,12 +444,8 @@ where
         // hence no sends or receives, so omitting it leaves the global
         // balance unchanged — while dishonestly deactivating a circuit the
         // execution needs leaves an unmatched channel send and the final
-        // accumulator cannot be zero. The activation bitmap is bound into
-        // the transcript here, before any commitment or challenge.
+        // accumulator cannot be zero.
         let active: Vec<bool> = witness.traces.iter().map(|t| t.height() > 0).collect();
-        for &is_active in &active {
-            challenger.observe(Val::<SC>::from_bool(is_active));
-        }
         // Canonical index of each active circuit, in order; matrix position
         // within every per-proof commitment == position in this list.
         let active_indices: Vec<usize> = active
@@ -344,16 +457,10 @@ where
             !active_indices.is_empty(),
             "cannot prove with every circuit deactivated (all traces empty)"
         );
-        // Canonical index -> active position (None = inactive).
-        let mut active_pos: Vec<Option<usize>> = vec![None; active.len()];
-        for (pos, &ci) in active_indices.iter().enumerate() {
-            active_pos[ci] = Some(pos);
-        }
 
         // Cost: "Stage 1 commit" — coset LDE (FFT) of each trace from n_i to
         // n_i·B rows (an iDFT plus B coset DFTs per column), then Merkle
         // tree. FFT work: Σ w_i · (B+1) · n_i · log₂(n_i).
-        let _g = tracing::info_span!("stark/stage1_commit").entered();
         let mut log_degrees = vec![];
         let evaluations = witness
             .traces
@@ -368,55 +475,58 @@ where
                 (trace_domain, trace)
             });
         let (stage_1_trace_commit, stage_1_trace_data) = pcs.commit(evaluations);
-        drop(_g);
 
-        if let Some(commit) = &self.preprocessed_commit {
-            challenger.observe(commit.clone());
-        }
-        challenger.observe(stage_1_trace_commit.clone());
-
-        // Observe the traces' heights. This binds the proof to specific domain
-        // sizes; the verifier reads these from the (untrusted) proof, so they
-        // must influence every subsequent challenge.
-        for log_degree in &log_degrees {
-            challenger.observe(Val::<SC>::from_usize(*log_degree));
-        }
-
-        // Observe the claims, length-prefixed so that distinct claim
-        // structures (e.g. [[a, b]] vs [[a], [b]]) yield distinct transcripts.
-        // This has to be done before generating the lookup argument challenge,
-        // otherwise the lookup argument can be attacked.
-        challenger.observe(Val::<SC>::from_usize(claims.len()));
-        for claim in claims {
-            challenger.observe(Val::<SC>::from_usize(claim.len()));
-            challenger.observe_slice(claim);
-        }
-
-        // Lookup challenges.
-        let lookup_argument_challenge: SC::Challenge = challenger.sample_algebra_element();
-        challenger.observe_algebra_element(lookup_argument_challenge);
-        let fingerprint_challenge: SC::Challenge = challenger.sample_algebra_element();
-        challenger.observe_algebra_element(fingerprint_challenge);
-
-        // Initial accumulator from the claims.
-        let mut acc = SC::Challenge::ZERO;
-        for claim in claims {
-            let message = lookup_argument_challenge
-                + fingerprint(&fingerprint_challenge, claim.iter().cloned());
-            acc += message.inverse();
-        }
-
-        // Cost: "Lookup trace construction" — fingerprint (Horner), batch
-        // inversion, and accumulator update. Total: Σ n_i·L_i extension field ops.
-        let _g = tracing::info_span!("stark/lookup_construction").entered();
         // Only active circuits enter the accumulator chain; the chain (and
         // `intermediate_accumulators`) is indexed by active position.
-        let active_lookups: Vec<_> = witness
+        let lookups: Vec<_> = witness
             .lookups
             .into_iter()
             .zip(&active)
             .filter_map(|(l, &is_active)| is_active.then_some(l))
             .collect();
+
+        Stage1 {
+            active,
+            active_indices,
+            log_degrees,
+            stage_1_trace_commit,
+            stage_1_trace_data,
+            lookups,
+        }
+    }
+
+    /// Rounds two onward: given a committed [`Stage1`], a transcript that has
+    /// just sampled the lookup challenges, and the initial accumulator the
+    /// verifier will derive, builds the stage-2 traces, the quotient and the
+    /// FRI opening. Shared by the single-proof protocol and the batch
+    /// protocol, which differ only in how the transcript reached this point.
+    pub fn prove_after_challenges(
+        &self,
+        key: &ProverKey<SC>,
+        stage_1: Stage1<SC>,
+        mut challenger: SC::Challenger,
+        lookup_argument_challenge: SC::Challenge,
+        fingerprint_challenge: SC::Challenge,
+        mut acc: SC::Challenge,
+    ) -> Proof<SC> {
+        let pcs = self.config.pcs();
+        let Stage1 {
+            active,
+            active_indices,
+            log_degrees,
+            stage_1_trace_commit,
+            stage_1_trace_data,
+            lookups: active_lookups,
+        } = stage_1;
+        // Canonical index -> active position (None = inactive).
+        let mut active_pos: Vec<Option<usize>> = vec![None; active.len()];
+        for (pos, &ci) in active_indices.iter().enumerate() {
+            active_pos[ci] = Some(pos);
+        }
+
+        // Cost: "Lookup trace construction" — fingerprint (Horner), batch
+        // inversion, and accumulator update. Total: Σ n_i·L_i extension field ops.
+        let _g = tracing::info_span!("stark/lookup_construction").entered();
         let group_sizes: Vec<usize> = active_indices
             .iter()
             .map(|&ci| self.circuits[ci].lookup_group_size)
@@ -661,8 +771,13 @@ where
         }
         // The preprocessed commitment is built once over ALL preprocessed
         // traces at system construction, so its round must carry one entry
-        // per preprocessed matrix regardless of activation: an inactive
-        // circuit's preprocessed matrix is opened at no points.
+        // per preprocessed matrix regardless of activation. An inactive
+        // circuit's preprocessed matrix is opened at ζ alone: no constraint
+        // reads the value, but the PCS pins every matrix's width to the
+        // claimed values at its first opening point (the leaf hash flattens
+        // same-height rows into one stream, so a matrix opened nowhere would
+        // leave its row boundary unauthenticated) and rejects a matrix with
+        // no opening points.
         for (prep_index, &pos) in self.preprocessed_indices.iter().zip(&active_pos) {
             if prep_index.is_some() {
                 match pos {
@@ -673,7 +788,7 @@ where
                             .expect("domain has no next point");
                         round0_openings.push(vec![zeta, zeta_next]);
                     }
-                    None => round0_openings.push(vec![]),
+                    None => round0_openings.push(vec![zeta]),
                 }
             }
         }

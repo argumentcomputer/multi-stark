@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
     use p3_field::{Field, PrimeCharacteristicRing};
     use p3_matrix::dense::RowMajorMatrix;
@@ -125,7 +125,7 @@ mod tests {
         }
     }
 
-    fn byte_system(
+    pub(crate) fn byte_system(
         config: GoldilocksBlake3Config,
     ) -> (
         System<GoldilocksBlake3Config>,
@@ -142,12 +142,15 @@ mod tests {
         System::new(config, [CircuitInputs::from(byte_table), u32_add])
     }
 
-    struct AddCalls {
-        calls: Vec<(u32, u32)>,
+    pub(crate) struct AddCalls {
+        pub(crate) calls: Vec<(u32, u32)>,
     }
 
     impl AddCalls {
-        fn witness(&self, system: &System<GoldilocksBlake3Config>) -> SystemWitness<Val> {
+        pub(crate) fn witness(
+            &self,
+            system: &System<GoldilocksBlake3Config>,
+        ) -> SystemWitness<Val> {
             let byte_width = 1;
             let add_width = 14;
             let mut byte_trace = RowMajorMatrix::new(vec![Val::ZERO; byte_width * 256], byte_width);
@@ -158,7 +161,7 @@ mod tests {
             SystemWitness::from_stage_1(traces, system)
         }
 
-        fn traces(
+        pub(crate) fn traces(
             &self,
             byte_trace: &mut RowMajorMatrix<Val>,
             add_trace: &mut RowMajorMatrix<Val>,

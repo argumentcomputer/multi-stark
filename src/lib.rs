@@ -1,3 +1,4 @@
+pub mod batch;
 pub mod config;
 #[cfg(feature = "cuda")]
 pub mod cuda;
