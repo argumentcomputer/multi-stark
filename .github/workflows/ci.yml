@@ -15,17 +15,15 @@ permissions:
 
 jobs:
   linux-test:
-    # Change to warp-ubuntu-latest-x64-16x for a more powerful runner (GitHub App must be enabled for this repo)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           repository: argumentcomputer/ci-workflows
       - uses: ./.github/actions/ci-env
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
       - uses: taiki-e/install-action@nextest
-      - uses: Swatinem/rust-cache@v2
       - name: Linux Tests
         run: |
           cargo nextest run --profile ci --cargo-profile dev-ci --workspace --features parallel
@@ -33,13 +31,12 @@ jobs:
   lints:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           repository: argumentcomputer/ci-workflows
       - uses: ./.github/actions/ci-env
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
       - name: Check Rustfmt code style
         run: cargo fmt --all --check
       # Runtime correctness is validated on NVIDIA runners via cuda/smoke.sh. Keep the
@@ -47,7 +44,7 @@ jobs:
       - name: Check CPU targets compile
         run: cargo check --release --all-targets --features parallel --workspace
       - name: Check clippy lints
-        run: cargo clippy --release --workspace --all-targets --features parallel -- -D warnings
+        run: cargo clippy --release --workspace --all-targets --features parallel
       - name: Doctests
         run: cargo test --doc --workspace
       - name: Get Rust version
@@ -61,19 +58,24 @@ jobs:
 
   cuda-compile:
     # A toolkit container is sufficient for compile coverage; no GPU runner
-    # is needed. Warp's larger x64 runner keeps the full cubin-set build fast
-    # and provides the same native-codegen compatibility domain as Ix CI.
-    runs-on: warp-ubuntu-latest-x64-8x
+    # is needed. The runner request mirrors Ix CI, the downstream consumer
+    # of the CUDA backend. The container cannot see a host bind mount, so
+    # its Cargo cache lives in the S3-backed actions cache.
+    runs-on: runs-on=${{ github.run_id }}-cuda-compile-${{ github.run_attempt }}/cpu=8/family=r7i+r8i+r7a+r8a/image=ubuntu26-full-x64/volume=100gb/extras=s3-cache
     container: nvidia/cuda:12.8.1-devel-ubuntu24.04
     steps:
-      - uses: actions/checkout@v6
-      - name: Install Rust bootstrap dependencies
+      - uses: runs-on/action@v2
+      - uses: actions/checkout@v7
+      # The devel image ships build-essential (a dependency of cuda-nvcc)
+      # and ca-certificates, but purges curl after adding NVIDIA's apt
+      # repository, and the toolchain action fetches rustup with curl.
+      - name: Install curl for the rustup installer
         run: |
           apt-get update
-          apt-get install --yes --no-install-recommends build-essential ca-certificates curl
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          rustflags: -Ctarget-cpu=native -Dwarnings
-          cache-key: warp-x64
+          apt-get install --yes --no-install-recommends curl
+      # Codegen comes from .cargo/config.toml, as in the other jobs. The action
+      # sets build.warnings=deny, which makes cargo fail on clippy warnings
+      # too, so the clippy command below does not repeat -D warnings.
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
       - name: Compile and lint CUDA targets
-        run: cargo clippy --release --locked --all-targets --features parallel,cuda -- -D warnings
+        run: cargo clippy --release --locked --all-targets --features parallel,cuda
