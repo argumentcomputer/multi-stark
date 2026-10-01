@@ -17,13 +17,16 @@ jobs:
   linux-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: argumentcomputer/ci-workflows
-      - uses: ./.github/actions/ci-env
-      - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
-      - uses: taiki-e/install-action@nextest
+          persist-credentials: false
+      # The action denies warnings through cargo's build.warnings, which
+      # covers clippy too, and leaves RUSTFLAGS unset so codegen comes from
+      # .cargo/config.toml.
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: nextest
       - name: Linux Tests
         run: |
           cargo nextest run --profile ci --cargo-profile dev-ci --workspace --features parallel
@@ -31,12 +34,14 @@ jobs:
   lints:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: argumentcomputer/ci-workflows
-      - uses: ./.github/actions/ci-env
-      - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
+          persist-credentials: false
+      # actionlint, shellcheck, pinact and zizmor over this repo's workflows.
+      # Runs before the toolchain setup so a workflow problem fails fast.
+      - name: Lint workflows
+        uses: argumentcomputer/ci-workflows/.github/actions/lint-workflows@a3a7b1b8f081503e6bf26341a3c5f759df96497a # main
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
       - name: Check Rustfmt code style
         run: cargo fmt --all --check
       # Runtime correctness is validated on NVIDIA runners via cuda/smoke.sh. Keep the
@@ -48,13 +53,13 @@ jobs:
       - name: Doctests
         run: cargo test --doc --workspace
       - name: Get Rust version
-        run: |
-          echo "RUST_VERSION=$(awk -F '"' '/^channel/ {print $2}' rust-toolchain.toml)" | tee -a $GITHUB_ENV
+        id: rust-version
+        run: echo "version=$(awk -F '"' '/^channel/ {print $2}' rust-toolchain.toml)" | tee -a "$GITHUB_OUTPUT"
       # Lint dependencies for licensing and auditing issues as per `deny.toml`
       - name: Cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
-          rust-version: ${{ env.RUST_VERSION }}
+          rust-version: ${{ steps.rust-version.outputs.version }}
 
   cuda-compile:
     # A toolkit container is sufficient for compile coverage; no GPU runner
@@ -64,8 +69,10 @@ jobs:
     runs-on: runs-on=${{ github.run_id }}-cuda-compile-${{ github.run_attempt }}/cpu=8/family=r7i+r8i+r7a+r8a/image=ubuntu26-full-x64/volume=100gb/extras=s3-cache
     container: nvidia/cuda:12.8.1-devel-ubuntu24.04
     steps:
-      - uses: runs-on/action@v2
-      - uses: actions/checkout@v7
+      - uses: runs-on/action@dfae4d98c5537a0dc7bbb7e6b9211f30ba240f6d # v2.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The devel image ships build-essential (a dependency of cuda-nvcc)
       # and ca-certificates, but purges curl after adding NVIDIA's apt
       # repository, and the toolchain action fetches rustup with curl.
@@ -76,6 +83,6 @@ jobs:
       # Codegen comes from .cargo/config.toml, as in the other jobs. The action
       # sets build.warnings=deny, which makes cargo fail on clippy warnings
       # too, so the clippy command below does not repeat -D warnings.
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
       - name: Compile and lint CUDA targets
         run: cargo clippy --release --locked --all-targets --features parallel,cuda
