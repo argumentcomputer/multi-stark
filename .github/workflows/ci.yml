@@ -40,7 +40,7 @@ jobs:
       # actionlint, shellcheck, pinact and zizmor over this repo's workflows.
       # Runs before the toolchain setup so a workflow problem fails fast.
       - name: Lint workflows
-        uses: argumentcomputer/ci-workflows/.github/actions/lint-workflows@a3a7b1b8f081503e6bf26341a3c5f759df96497a # main
+        uses: argumentcomputer/ci-workflows/.github/actions/lint-workflows@main
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
       - name: Check Rustfmt code style
         run: cargo fmt --all --check
