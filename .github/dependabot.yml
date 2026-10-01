@@ -6,6 +6,8 @@ updates:
       separator: "-"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     # Create separate pull requests for major vs minor/patch version updates, as major bumps will likely introduce breaking changes
     groups:
       rust-minor:
@@ -28,6 +30,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns:
