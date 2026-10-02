@@ -1,0 +1,7 @@
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # Branch-tracking ref allowed by .github/pinact.yaml
+        "argumentcomputer/ci-workflows/*": ref-pin
+        "*": hash-pin

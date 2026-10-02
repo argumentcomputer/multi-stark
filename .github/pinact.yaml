@@ -1,8 +1,7 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/suzuki-shunsuke/pinact/main/json-schema/pinact.json
 version: 3
-
-ignore_actions:
-  # ci-workflows publishes no tags, so its actions are pinned to a commit of
-  # `main` and carry no release comment for pinact to verify.
-  - name: argumentcomputer/ci-workflows/.*
-    ref: "[0-9a-f]{40}"
+rules:
+  # Branch refs that must keep tracking their branch: there is no stable tag
+  # to pin to. The shared ci-workflows actions are consumed from `main`.
+  - ignore: true
+    conditions:
+      - expr: ActionName matches "^argumentcomputer/ci-workflows/"
