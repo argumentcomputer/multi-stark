@@ -9,7 +9,6 @@ use p3_matrix::{Matrix, dense::RowMajorMatrix};
 pub trait TraceGenerator<F: Field>: Send + Sync {
     fn height(&self) -> usize;
     fn width(&self) -> usize;
-    fn host_bytes(&self) -> usize;
     /// Fill contiguous rows, wrapping at the padded height for lookup halos.
     fn write_rows(&self, first: usize, output: &mut [F]);
 

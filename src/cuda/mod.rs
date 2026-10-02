@@ -5,11 +5,10 @@
 //! lookup traces, quotient evaluations, and FRI codewords on the selected GPU.
 //! All public protocol types and serialized proofs remain unchanged.
 
-pub(crate) mod metrics;
 pub(crate) mod mmcs;
 #[doc(hidden)]
 pub mod pcs;
-pub mod sppark;
+pub(crate) mod sppark;
 pub(crate) mod witness;
 
 use core::ffi::{CStr, c_char, c_void};
@@ -145,7 +144,6 @@ impl CudaDft {
         let _span = tracing::info_span!(
             "cuda/lde",
             kind = "host",
-            backend = "sppark",
             device = self.device_id,
             height,
             width,
@@ -201,8 +199,6 @@ impl CudaDft {
     }
 }
 
-/// Bit-reversed coset-LDE storage owned by a CUDA device allocation.
-#[doc(hidden)]
 /// A borrowed output tile on the selected CUDA device. The writer must finish
 /// using it before returning; rows wrap at the source's padded height.
 pub struct DeviceTraceView<'a> {
@@ -267,37 +263,7 @@ unsafe extern "C" fn destroy_generated_trace(context: *mut c_void) {
 }
 
 impl CudaDft {
-    /// Materialize a bounded generated tile for diagnostics and reference checks.
-    pub fn generated_trace_rows(
-        &self,
-        source: Generator,
-        first: usize,
-        rows: usize,
-    ) -> RowMajorMatrix<Goldilocks> {
-        assert!(
-            rows > 0 && rows <= (1 << 16) + 1,
-            "generated tile exceeds the row limit"
-        );
-        let width = source.width();
-        let mut output =
-            vec![Goldilocks::ZERO; rows.checked_mul(width).expect("trace tile overflow")];
-        let mut source = source;
-        let status = unsafe {
-            multi_stark_cuda_generate_trace_rows(
-                self.device_id,
-                (&mut source as *mut Generator).cast(),
-                write_generated_trace,
-                first,
-                rows,
-                width,
-                output.as_mut_ptr().cast(),
-            )
-        };
-        check_cuda(status, "generated trace tile download");
-        RowMajorMatrix::new(output, width)
-    }
-
-    pub fn generate_coset_lde(
+    pub(crate) fn generate_coset_lde(
         &self,
         generator: Generator,
         added_bits: usize,
@@ -308,7 +274,6 @@ impl CudaDft {
         let _span = tracing::info_span!(
             "cuda/lde",
             kind = "generated",
-            backend = "sppark",
             device = self.device_id,
             height,
             width,
@@ -348,15 +313,6 @@ impl CudaDft {
 }
 
 unsafe extern "C" {
-    fn multi_stark_cuda_generate_trace_rows(
-        device: i32,
-        context: *mut c_void,
-        writer: unsafe extern "C" fn(*mut c_void, i32, *mut u64, usize, usize) -> i32,
-        first: usize,
-        rows: usize,
-        width: usize,
-        output: *mut u64,
-    ) -> i32;
     fn multi_stark_cuda_coset_lde_generate(
         device: i32,
         output: *mut *mut c_void,
@@ -372,6 +328,8 @@ unsafe extern "C" {
     fn multi_stark_cuda_lde_generator_context(handle: *const c_void) -> *mut c_void;
 }
 
+/// Bit-reversed coset-LDE storage owned by a CUDA device allocation.
+#[doc(hidden)]
 pub struct CudaLde {
     device_id: i32,
     handle: NonNull<c_void>,
@@ -746,6 +704,14 @@ fn encode_quotient_nodes(
     (nodes, slots, count as usize)
 }
 
+/// Conservative device-memory requirement for one fused quotient job.
+///
+/// The graph evaluator reuses slots as soon as their final consumer has run,
+/// so `graph.nodes.len()` can be orders of magnitude larger than the live
+/// device scratch. Keep this estimate beside the encoder so admission and the
+/// kernel use the same liveness calculation. The scratch term assumes the
+/// global-memory path; devices able to fit the slots in shared memory need
+/// less than this bound.
 pub(crate) fn quotient_lde_memory_upper_bound(
     graph: &ConstraintGraph<Goldilocks>,
     public_count: usize,
@@ -1156,7 +1122,6 @@ pub(crate) fn quotient_lde_mixed(
 ) -> CudaLde {
     let _span = tracing::info_span!(
         "cuda/quotient_lde",
-        backend = "sppark",
         device = dft.device_id,
         quotient_size,
         quotient_degree,
@@ -1709,7 +1674,6 @@ pub(crate) fn lookup_lde_resident(
     let _span = tracing::info_span!(
         "cuda/lookup_lde",
         path = "direct",
-        backend = "sppark",
         device = dft.device_id,
         height,
         num_lookups,
@@ -1800,7 +1764,6 @@ pub(crate) fn lookup_lde_resident_partitioned(
     let _span = tracing::info_span!(
         "cuda/lookup_lde",
         path = "partitioned",
-        backend = "sppark",
         device = dft.device_id,
         height,
         num_lookups,
@@ -1997,7 +1960,6 @@ pub(crate) fn lookup_graph_lde_resident(
     let _span = tracing::info_span!(
         "cuda/lookup_lde",
         path = "graph",
-        backend = "sppark",
         device = dft.device_id,
         height,
         num_lookups = graph.lookups.len(),
@@ -2226,6 +2188,15 @@ pub(crate) fn device_memory_info(device_id: i32) -> (usize, usize) {
         unsafe { multi_stark_cuda_memory_info(device_id, &mut free_bytes, &mut total_bytes) };
     check_cuda(status, "CUDA device initialization");
     (free_bytes, total_bytes)
+}
+
+/// Device bytes the prover keeps free for its later stages: a quarter of the
+/// device unless `MULTI_STARK_CUDA_MIN_FREE_BYTES` says otherwise.
+pub(crate) fn minimum_free_bytes(total_bytes: usize) -> usize {
+    std::env::var("MULTI_STARK_CUDA_MIN_FREE_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(total_bytes / 4)
 }
 
 pub(crate) fn memory_diagnostics_enabled() -> bool {

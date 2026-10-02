@@ -74,24 +74,23 @@ pub(crate) struct Planner {
 
 impl Planner {
     pub(crate) fn new(device: i32) -> Self {
-        fn setting(name: &str) -> Option<usize> {
-            std::env::var(name).ok().map(|value| {
-                value
-                    .parse()
-                    .unwrap_or_else(|_| panic!("{name} must be a non-negative byte count"))
+        let panel_bytes = std::env::var("MULTI_STARK_SPPARK_PANEL_BYTES")
+            .ok()
+            .map(|value| {
+                value.parse().unwrap_or_else(|_| {
+                    panic!("MULTI_STARK_SPPARK_PANEL_BYTES must be a non-negative byte count")
+                })
             })
-        }
+            .filter(|&n| n != 0)
+            .unwrap_or(4usize << 30);
+        // Launch groups sized to the L2 cache keep a group's columns resident
+        // across the stages of a batched transform.
         let mut l2_bytes = 0;
         check_cuda(
             unsafe { multi_stark_sppark_l2_bytes(device, &mut l2_bytes) },
             "NTT device properties",
         );
-        Self::with_budgets(
-            setting("MULTI_STARK_SPPARK_PANEL_BYTES")
-                .filter(|&n| n != 0)
-                .unwrap_or(4usize << 30),
-            setting("MULTI_STARK_SPPARK_BATCH_BYTES").unwrap_or(l2_bytes),
-        )
+        Self::with_budgets(panel_bytes, l2_bytes)
     }
 
     pub(crate) fn with_budgets(panel_bytes: usize, batch_bytes: usize) -> Self {
@@ -185,18 +184,20 @@ impl Planner {
 
 /// `NTT::InputOutputOrder`: whether the input and the output are in natural
 /// (`N`) or bit-reversed (`R`) order.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
-pub enum Order {
+enum Order {
     NN = 0,
     NR = 1,
     RN = 2,
     RR = 3,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
-pub enum Direction {
+enum Direction {
     Forward = 0,
     Inverse = 1,
 }
@@ -206,15 +207,7 @@ unsafe extern "C" {
     fn multi_stark_sppark_l2_bytes(device: c_int, bytes: *mut usize) -> c_int;
     #[cfg(test)]
     fn multi_stark_sppark_borrowed_round_trip(device: c_int, values: *mut u64, lg: u32) -> c_int;
-    fn multi_stark_sppark_transforms_run() -> u64;
-    fn multi_stark_sppark_ntt_device(
-        device: c_int,
-        d_inout: *mut u64,
-        lg: u32,
-        order: c_int,
-        direction: c_int,
-        coset: c_int,
-    ) -> c_int;
+    #[cfg(test)]
     fn multi_stark_sppark_ntt_host(
         device: c_int,
         inout: *mut u64,
@@ -223,6 +216,7 @@ unsafe extern "C" {
         direction: c_int,
         coset: c_int,
     ) -> c_int;
+    #[cfg(test)]
     fn multi_stark_sppark_ntt_batch_host(
         device: c_int,
         inout: *mut u64,
@@ -235,16 +229,12 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
-/// Number of transform operations launched, including identity shapes.
-pub fn transforms_run() -> u64 {
-    unsafe { multi_stark_sppark_transforms_run() }
-}
-
 /// The largest log domain size the compiled upstream parameters support.
-pub fn max_log_domain() -> usize {
+pub(crate) fn max_log_domain() -> usize {
     usize::try_from(unsafe { multi_stark_sppark_max_lg_domain() }).expect("domain limit")
 }
 
+#[cfg(test)]
 fn log_len(values: usize) -> u32 {
     assert!(
         values.is_power_of_two() && values > 1,
@@ -257,7 +247,8 @@ fn log_len(values: usize) -> u32 {
 /// downloaded within the call. `coset` selects the coset by the field
 /// generator. An error is the CUDA status the adapter returned; `device`
 /// must be the CUDA ordinal of a device upstream supports.
-pub fn try_ntt_host(
+#[cfg(test)]
+fn try_ntt_host(
     device: i32,
     values: &mut [Goldilocks],
     order: Order,
@@ -279,17 +270,19 @@ pub fn try_ntt_host(
 }
 
 /// `count` vectors of `2^lg` elements laid out `stride` elements apart.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Batch {
-    pub lg: u32,
-    pub count: u32,
-    pub stride: usize,
+struct Batch {
+    lg: u32,
+    count: u32,
+    stride: usize,
 }
 
 /// Transforms the vectors of `batch` in `values` (`count * stride` long) in
 /// one batched launch sequence, uploaded, transformed and downloaded within
 /// the call.
-pub fn try_ntt_batch_host(
+#[cfg(test)]
+fn try_ntt_batch_host(
     device: i32,
     values: &mut [Goldilocks],
     batch: Batch,
@@ -321,7 +314,8 @@ pub fn try_ntt_batch_host(
 }
 
 /// [`try_ntt_host`], panicking on a CUDA status like the other backends.
-pub fn ntt_host(
+#[cfg(test)]
+fn ntt_host(
     device: i32,
     values: &mut [Goldilocks],
     order: Order,
@@ -333,37 +327,9 @@ pub fn ntt_host(
     }
 }
 
-/// Transforms `2^lg` field elements at `d_inout` in place on the calling
-/// thread's stream.
-///
-/// # Safety
-///
-/// `d_inout` must be a device allocation of `2^lg` 64-bit words on
-/// `device`, and no other stream may access it until work enqueued after
-/// this call on the calling thread's stream has completed.
-pub unsafe fn ntt_device(
-    device: i32,
-    d_inout: *mut u64,
-    lg: u32,
-    order: Order,
-    direction: Direction,
-    coset: bool,
-) {
-    let status = unsafe {
-        multi_stark_sppark_ntt_device(
-            device,
-            d_inout,
-            lg,
-            order as c_int,
-            direction as c_int,
-            c_int::from(coset),
-        )
-    };
-    check_cuda(status, "sppark device transform");
-}
-
 /// The raw stored words of `values`; Goldilocks is `repr(transparent)`.
-pub fn raw_words(values: &[Goldilocks]) -> &[u64] {
+#[cfg(test)]
+fn raw_words(values: &[Goldilocks]) -> &[u64] {
     // SAFETY: Goldilocks is a transparent wrapper over u64.
     unsafe { core::slice::from_raw_parts(values.as_ptr().cast(), values.len()) }
 }

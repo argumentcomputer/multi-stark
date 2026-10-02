@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// First-party CUDA kernels for Goldilocks arithmetic and batched radix-2
-// transforms. The ABI accepts host buffers; device residency is intentionally
-// deferred to the later PCS/FRI backend.
+// First-party CUDA kernels: Goldilocks arithmetic, BLAKE3 Merkle
+// commitments, lookup and quotient construction and FRI over device-resident
+// LDEs. Transforms go through the sppark adapter declared in ntt.cuh.
 
 #include <cuda_runtime.h>
 #include "goldilocks.cuh"
@@ -17,10 +17,7 @@
 #include <algorithm>
 #include <cstring>
 #include <new>
-#include "metrics.cuh"
 #include "ntt.cuh"
-
-
 
 namespace {
 
@@ -61,22 +58,13 @@ cudaError_t cached_device_constants(int device,const uint64_t* host,size_t count
     while(__sync_lock_test_and_set(&constant_cache_lock,1)){}
     for(auto* entry=constant_cache;entry;entry=entry->next)if(entry->device==device&&
         entry->count==count&&entry->kind==kind&&entry->key0==key0&&entry->key1==key1){
-        if (kind == 5 && multi_stark_metrics::enabled()) multi_stark_metrics::add(device, multi_stark_metrics::CosetHits, 1);
         *output=entry->values;__sync_lock_release(&constant_cache_lock);return cudaSuccess;}
     auto* entry=new(std::nothrow) ConstantCacheEntry;
     if(!entry){__sync_lock_release(&constant_cache_lock);return cudaErrorMemoryAllocation;}
     entry->device=device;entry->count=count;entry->kind=kind;entry->key0=key0;entry->key1=key1;
     cudaError_t status=persistent_malloc(reinterpret_cast<void**>(&entry->values),count*sizeof(uint64_t));
     if(status==cudaSuccess)status=cudaMemcpy(entry->values,host,count*sizeof(uint64_t),cudaMemcpyHostToDevice);
-    if(status==cudaSuccess){
-        if (multi_stark_metrics::enabled()) {
-            multi_stark_metrics::add(device, multi_stark_metrics::ConstantBytes, count * sizeof(uint64_t));
-            if (kind == 5) {
-                multi_stark_metrics::add(device, multi_stark_metrics::CosetMisses, 1);
-                multi_stark_metrics::add(device, multi_stark_metrics::CosetUploadedBytes, count * sizeof(uint64_t));
-            }
-        }
-        *output=entry->values;entry->next=constant_cache;constant_cache=entry;}
+    if(status==cudaSuccess){*output=entry->values;entry->next=constant_cache;constant_cache=entry;}
     else{persistent_free(entry->values);delete entry;}
     __sync_lock_release(&constant_cache_lock);return status;
 }
@@ -255,13 +243,6 @@ __device__ __forceinline__ void blake3_hash_digest_pair(
         digest[word * 4 + 2] = static_cast<uint8_t>(value >> 16);
         digest[word * 4 + 3] = static_cast<uint8_t>(value >> 24);
     }
-}
-
-__device__ __forceinline__ size_t reverse_index_bits(size_t index, unsigned int bits) {
-    if (bits == 0) {
-        return 0;
-    }
-    return static_cast<size_t>(__brevll(static_cast<unsigned long long>(index)) >> (64 - bits));
 }
 
 unsigned int blocks_for(size_t work_items) {
@@ -548,7 +529,6 @@ void parallel_memcpy(void* destination, const void* source, size_t bytes) {
 cudaError_t staged_upload(void* device, const void* host, size_t bytes) {
     const int device_index = current_device_index();
     cudaError_t status = cudaSuccess;
-    multi_stark_metrics::Upload metrics(device_index, bytes, status);
     uint64_t** slots = upload_staging[device_index];
     bool* in_use = upload_staging_in_use[device_index];
     pthread_mutex_lock(&upload_staging_mutex);
@@ -589,7 +569,6 @@ cudaError_t staged_upload(void* device, const void* host, size_t bytes) {
             const size_t chunk = std::min(UPLOAD_STAGING_CHUNK, bytes - offset);
             if (status == cudaSuccess) {
                 parallel_memcpy(buffer, source + offset, chunk);
-                ++metrics.chunks;
                 status = cudaMemcpyAsync(target + offset, buffer, chunk,
                                          cudaMemcpyHostToDevice, cudaStreamPerThread);
             }
@@ -1584,8 +1563,8 @@ __global__ void goldilocks_ops_kernel(uint64_t* sums, uint64_t* differences,
 
 // A single-chunk message has no chunk tree to reduce. Assigning one thread
 // per row keeps every lane doing useful compression instead of leaving 31
-// lanes idle in the warp-per-row kernel. Reuse the same chunk primitive and
-// little-endian digest encoding; commitments and BLAKE3 flags are unchanged.
+// lanes idle in the warp-per-row kernel, with the same chunk primitive and
+// little-endian digest encoding.
 __global__ void blake3_hash_short_rows_kernel(uint8_t* digests,
                                               const uint8_t* messages,
                                               size_t message_bytes,
@@ -1992,12 +1971,6 @@ static cudaError_t plan_constants(int device, const MultiStarkNttPlan* plan,
                                     plan->height > 1 ? host[1] : 0, powers);
 }
 
-static void record_transform(int device, size_t height, size_t width) {
-    if (multi_stark_metrics::enabled() && height > 1)
-        multi_stark_metrics::add(device, multi_stark_metrics::NTT_OFFSET +
-                                 multi_stark_metrics::ntt_shape(height, width), 1);
-}
-
 static bool plan_matches(const MultiStarkNttPlan* plan, size_t height,
                          size_t width, size_t extended_height) {
     return plan && plan->height == height && plan->width == width &&
@@ -2011,8 +1984,6 @@ static cudaError_t coset_lde(int device, const uint64_t* trace, uint64_t* values
     const uint64_t* powers = nullptr;
     cudaError_t status = plan_constants(device, plan, &powers);
     if (status != cudaSuccess) return status;
-    record_transform(device, plan->height, plan->width);
-    record_transform(device, plan->extended_height, plan->width);
     return static_cast<cudaError_t>(multi_stark_sppark_coset_lde(device, trace, values, plan, powers));
 }
 
@@ -2020,7 +1991,6 @@ static cudaError_t forward_in_place(int device, uint64_t* values, size_t height,
                                      size_t width, const MultiStarkNttPlan* plan) {
     if (!plan_matches(plan, height, width, height) || plan->shift_powers)
         return cudaErrorInvalidValue;
-    record_transform(device, plan->height, plan->width);
     return static_cast<cudaError_t>(multi_stark_sppark_forward(device, values, plan));
 }
 
@@ -3055,13 +3025,7 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
     *output_handle=nullptr;const size_t height=main->trace_height;
     const size_t groups=(lookup_count+group_size-1)/group_size,width=2*groups;
     const size_t count=height*groups,extended_height=height<<added_bits;
-    size_t LOOKUP_ROWS_PER_CHUNK=size_t(1)<<16;
-    if (const char* configured=main->trace_writer ? getenv("MULTI_STARK_CUDA_LOOKUP_TRACE_TILE_ROWS") : nullptr) {
-        char* end=nullptr;
-        const unsigned long rows=strtoul(configured,&end,10);
-        if (end!=configured && *end=='\0' && rows>0 && rows<=LOOKUP_ROWS_PER_CHUNK)
-            LOOKUP_ROWS_PER_CHUNK=rows;
-    }
+    constexpr size_t LOOKUP_ROWS_PER_CHUNK=size_t(1)<<16;
     const size_t chunk_rows=height<LOOKUP_ROWS_PER_CHUNK?height:LOOKUP_ROWS_PER_CHUNK;
     const size_t message_count=chunk_rows*lookup_count;
     if(!product_fits(extended_height,width)||!product_fits(height,lookup_count))return static_cast<int>(cudaErrorInvalidValue);
@@ -4196,11 +4160,6 @@ extern "C" int multi_stark_cuda_memory_info(int device_id, size_t* free_bytes,
     cudaError_t status = cudaSetDevice(device_id);
     if (status == cudaSuccess) retain_default_pool(device_id);
     if (status == cudaSuccess) status = cudaMemGetInfo(free_bytes, total_bytes);
-    if (status == cudaSuccess && multi_stark_metrics::enabled()) {
-        multi_stark_metrics::sample(device_id, multi_stark_metrics::DriverFreeBytes, *free_bytes);
-        multi_stark_metrics::sample(device_id, multi_stark_metrics::TotalBytes, *total_bytes);
-        multi_stark_metrics::add(device_id, multi_stark_metrics::MemorySamples, 1);
-    }
     // cudaMemGetInfo excludes pages retained by cudaMallocAsync's default
     // pool, even though subsequent stream allocations can reuse them. Treat
     // the unused part of that pool as available for admission decisions; using
@@ -4225,23 +4184,3 @@ extern "C" int multi_stark_cuda_memory_info(int device_id, size_t* free_bytes,
     return static_cast<int>(status);
 }
 
-extern "C" int multi_stark_cuda_generate_trace_rows(int device, void* context,
-    TraceWriter writer, size_t first, size_t rows, size_t width, uint64_t* output) {
-    if (!context || !writer || !output || !rows || !width || !product_fits(rows,width))
-        return static_cast<int>(cudaErrorInvalidValue);
-    cudaError_t status = cudaSetDevice(device);
-    uint64_t* tile = nullptr;
-    if (status == cudaSuccess) status = cudaMalloc(reinterpret_cast<void**>(&tile), rows * width * sizeof(uint64_t));
-    if (status == cudaSuccess) status = static_cast<cudaError_t>(writer(context, device, tile, first, rows));
-    if (status == cudaSuccess) status = cudaMemcpy(output, tile, rows * width * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-    if (tile) cudaFree(tile);
-    return static_cast<int>(status);
-}
-
-extern "C" void multi_stark_cuda_metrics_snapshot(uint64_t* output, size_t count) {
-    if (!output || count != multi_stark_metrics::DEVICES * multi_stark_metrics::WORDS) return;
-    for (size_t device = 0; device < multi_stark_metrics::DEVICES; ++device)
-        for (size_t key = 0; key < multi_stark_metrics::WORDS; ++key)
-            output[device * multi_stark_metrics::WORDS + key] =
-                multi_stark_metrics::counters[device][key].load(std::memory_order_relaxed);
-}

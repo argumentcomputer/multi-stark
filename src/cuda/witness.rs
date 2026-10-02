@@ -15,7 +15,6 @@ use crate::witness::TraceSource;
 
 pub(crate) fn record_lde_spill(device: i32, bytes: usize) {
     tracing::debug!(device, bytes, "spilled active LDE");
-    tracing::info!(target: "prover_metrics", metric = "lde_spill", device, bytes);
 }
 
 fn spill_lde(lde: &CudaLde) -> RowMajorMatrix<Val> {
@@ -24,13 +23,6 @@ fn spill_lde(lde: &CudaLde) -> RowMajorMatrix<Val> {
     unsafe { lde.release_values() };
     record_lde_spill(lde.device_id, lde.height() * lde.width() * 8);
     matrix
-}
-
-fn reserve_bytes(total: usize) -> usize {
-    std::env::var("MULTI_STARK_CUDA_MIN_FREE_BYTES")
-        .ok()
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(total / 4)
 }
 
 pub(crate) fn commit(
@@ -73,7 +65,7 @@ pub(crate) fn commit(
     }
     let max_height = dimensions.iter().map(|d| d.height).max().unwrap();
     let (_, total) = device_memory_info(device);
-    let reserve = reserve_bytes(total).saturating_add(128 << 20);
+    let reserve = super::minimum_free_bytes(total).saturating_add(128 << 20);
     let mut resident: Vec<Option<CudaLde>> = Vec::with_capacity(evaluations.len());
     let mut host: Vec<Option<RowMajorMatrix<Val>>> = Vec::with_capacity(evaluations.len());
     let mut retained = Vec::with_capacity(evaluations.len());
@@ -135,14 +127,8 @@ pub(crate) fn commit(
         // Both kinds retain a bounded recovery source. Raw device rows need
         // not coexist with later lookup/quotient workspace.
         unsafe { lde.release_trace() };
-        let spilled = if std::env::var("MULTI_STARK_CUDA_TRACE_FORCE_SPILL").is_ok_and(|v| v == "1")
-        {
-            Some(spill_lde(&lde))
-        } else {
-            None
-        };
         resident.push(Some(lde));
-        host.push(spilled);
+        host.push(None);
         retained.push(trace);
         drop(source_span);
     }

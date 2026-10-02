@@ -1007,9 +1007,6 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
             let mut graph_path = admits_graph();
             let (mut temporary_bytes, mut target) = target_for(graph_path);
             if target > total_device_bytes {
-                tracing::info!(target: "prover_metrics", metric = "lookup_admission",
-                    job = index, graph_path, admitted = false, reason = "device_capacity",
-                    output_bytes, temporary_bytes, target_bytes = target);
                 return None;
             }
             let mut free_bytes = self.pcs.mmcs.ensure_device_headroom(
@@ -1039,9 +1036,6 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                     );
                 }
             }
-            tracing::info!(target: "prover_metrics", metric = "lookup_admission",
-                job = index, graph_path, admitted = free_bytes >= target,
-                output_bytes, temporary_bytes, target_bytes = target, free_bytes);
             if free_bytes < target {
                 return None;
             }

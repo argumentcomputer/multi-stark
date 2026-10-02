@@ -277,19 +277,15 @@ pub struct CudaTwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs> {
 /// shift times `g_k^{rev_k(i)}`, and `rev_{k+1}(i) = 2 rev_k(i)` for
 /// `i < 2^k`, so every smaller coset is a prefix of a larger one: one vector
 /// per process serves every height, and grows only when a larger height is
-/// opened. Every shard of a proof opens on the same coset; before caching,
-/// building it cost 0.32 s per shard at 2^26 rows.
+/// opened. Every shard of a proof opens on the same coset.
 fn bit_reversed_coset<Val: TwoAdicField + PrimeField64>(
     log_height: usize,
 ) -> std::sync::Arc<Vec<Goldilocks>> {
     static CACHE: std::sync::Mutex<Option<std::sync::Arc<Vec<Goldilocks>>>> =
         std::sync::Mutex::new(None);
     if let Some(coset) = cache_at_least(&CACHE, 1 << log_height) {
-        tracing::info!(target: "prover_metrics", metric = "host_coset", action = "hit",
-            log_height, cached_bytes = coset.len() * 8);
         return coset;
     }
-    tracing::info!(target: "prover_metrics", metric = "host_coset", action = "build", log_height);
     let to_gold = |v: Val| Goldilocks::from_u64(v.as_canonical_u64());
     let generator: Goldilocks = TwoAdicField::two_adic_generator(log_height);
     let shift = <Goldilocks as p3_field::Field>::GENERATOR;
@@ -636,10 +632,7 @@ where
         let max_transform_workspace = transform_workspaces.iter().copied().max().unwrap_or(0);
         let (initial_free, total_bytes) =
             crate::cuda::device_memory_info(self.mmcs.cuda_device_id());
-        let minimum_free = std::env::var("MULTI_STARK_CUDA_MIN_FREE_BYTES")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(total_bytes / 4);
+        let minimum_free = crate::cuda::minimum_free_bytes(total_bytes);
         let source_bytes = source_cells.saturating_mul(size_of::<Val>());
         let lde_bytes = source_bytes
             .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))

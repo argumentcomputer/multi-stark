@@ -1,6 +1,5 @@
 //! Resident LDE timings including upload, excluding host input construction.
-//! Run the identical benchmark against both revisions. Correctness is covered
-//! by resident_coset_lde_matches_cpu_storage and proof_compatibility.
+//! Correctness is covered by the `cuda::sppark` tests and `proof_compatibility`.
 
 #[cfg(not(feature = "cuda"))]
 fn main() {

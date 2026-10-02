@@ -1,13 +1,10 @@
 // Goldilocks transforms on the caller's stream, with immutable panel plans.
 #include <ff/goldilocks.hpp>
 #include <ntt/ntt.cuh>
+#include "goldilocks.cuh"
 #include "ntt.cuh"
 
-#include <atomic>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <limits>
 
 namespace {
@@ -50,9 +47,8 @@ static int ntt_batch_on_stream(int device, uint64_t* d_inout, uint32_t lg,
     return static_cast<int>(cudaSuccess);
 }
 
-extern "C" int multi_stark_sppark_ntt_batch_device(int device, uint64_t* data, uint32_t lg,
-                                                    int order, int direction, int coset,
-                                                    uint32_t batch, size_t stride) {
+static int ntt_batch_device(int device, uint64_t* data, uint32_t lg, int order, int direction,
+                            int coset, uint32_t batch, size_t stride) {
     return ntt_batch_on_stream(device, data, lg, order, direction, coset, batch, stride, cudaStreamPerThread);
 }
 
@@ -79,13 +75,6 @@ extern "C" int multi_stark_sppark_borrowed_round_trip(int device, uint64_t* valu
     return result;
 }
 
-// One transform: the batch entry with a single vector.
-extern "C" int multi_stark_sppark_ntt_device(int device, uint64_t* d_inout, uint32_t lg,
-                                              int order, int direction, int coset) {
-    return multi_stark_sppark_ntt_batch_device(device, d_inout, lg, order, direction, coset, 1,
-                                               size_t(1) << lg);
-}
-
 // The batched transform on host memory: `batch * stride` words uploaded,
 // transformed, downloaded and synchronized. For contract checks and small
 // inputs, not the prover.
@@ -103,7 +92,7 @@ extern "C" int multi_stark_sppark_ntt_batch_host(int device, uint64_t* inout, ui
     status = cudaMemcpyAsync(d_inout, inout, bytes, cudaMemcpyHostToDevice, cudaStreamPerThread);
     int result = static_cast<int>(status);
     if (result == 0)
-        result = multi_stark_sppark_ntt_batch_device(device, d_inout, lg, order, direction, coset, batch, stride);
+        result = ntt_batch_device(device, d_inout, lg, order, direction, coset, batch, stride);
     if (result == 0)
         result = static_cast<int>(
             cudaMemcpyAsync(inout, d_inout, bytes, cudaMemcpyDeviceToHost, cudaStreamPerThread));
@@ -123,7 +112,6 @@ extern "C" int multi_stark_sppark_ntt_host(int device, uint64_t* inout, uint32_t
 // inverse NTT, coefficient-order restoration with coset shift and expansion,
 // and forward NR transform. Scatter preserves the bit-reversed row storage
 // consumed by commitments. Gather canonicalizes lazy field representatives.
-#include "goldilocks.cuh"
 
 namespace {
 
@@ -260,53 +248,6 @@ unsigned log2_exact(size_t value) {
     return log;
 }
 
-// A decimal setting, or `fallback` when unset or not a plain number. This
-// unit is compiled by nvcc's host compiler without the C standard pin the
-// crate's C units get, where glibc redirects strtoul to a C23 symbol the
-// Lean toolchain's libc does not carry.
-unsigned long long decimal_setting(const char* name, unsigned long long fallback) {
-    const char* configured = getenv(name);
-    if (!configured || !*configured) return fallback;
-    unsigned long long value = 0;
-    for (const char* c = configured; *c; ++c) {
-        if (*c < '0' || *c > '9' || value > (~0ull - 9) / 10) return fallback;
-        value = value * 10 + unsigned(*c - '0');
-    }
-    return value;
-}
-
-// MULTI_STARK_SPPARK_STAGE_TIMING=1 prints the stage times of every coset
-// LDE to stderr: events on the caller's stream around each stage, which
-// the transforms are fenced to, and one synchronization per panel.
-struct StageTimer {
-    static constexpr int STAGES = 5;
-    bool enabled = decimal_setting("MULTI_STARK_SPPARK_STAGE_TIMING", 0) != 0;
-    cudaEvent_t marks[STAGES + 1] = {};
-    StageTimer() {
-        if (!enabled) return;
-        for (auto& mark : marks)
-            if (cudaEventCreate(&mark) != cudaSuccess) enabled = false;
-    }
-    ~StageTimer() {
-        for (auto mark : marks)
-            if (mark) cudaEventDestroy(mark);
-    }
-    void mark(int stage) {
-        if (enabled) cudaEventRecord(marks[stage], cudaStreamPerThread);
-    }
-    void report(size_t height, size_t width, size_t added_bits) {
-        if (!enabled || cudaEventSynchronize(marks[STAGES]) != cudaSuccess) return;
-        static const char* const names[STAGES] = {"gather", "inverse", "restore", "forward", "scatter"};
-        fprintf(stderr, "sppark lde height=%zu width=%zu added_bits=%zu", height, width, added_bits);
-        for (int stage = 0; stage < STAGES; ++stage) {
-            float ms = 0;
-            cudaEventElapsedTime(&ms, marks[stage], marks[stage + 1]);
-            fprintf(stderr, " %s=%.3f", names[stage], ms);
-        }
-        fprintf(stderr, "\n");
-    }
-};
-
 // The `count` columns of a panel, `stride` elements apart, through batched
 // launch sequences of as many columns as the group budget holds.
 int transform_columns(int device, uint64_t* panel, uint32_t lg, int order, int direction, size_t count,
@@ -315,8 +256,8 @@ int transform_columns(int device, uint64_t* panel, uint32_t lg, int order, int d
     int result = 0;
     for (size_t first = 0; result == 0 && first < count; first += group) {
         const size_t batch = count - first < group ? count - first : group;
-        result = multi_stark_sppark_ntt_batch_device(device, panel + first * stride, lg, order, direction, 0,
-                                                     static_cast<uint32_t>(batch), stride);
+        result = ntt_batch_device(device, panel + first * stride, lg, order, direction, 0,
+                                  static_cast<uint32_t>(batch), stride);
     }
     return result;
 }
@@ -330,16 +271,9 @@ extern "C" int multi_stark_sppark_l2_bytes(int device, size_t* bytes) {
     return static_cast<int>(status);
 }
 
-static std::atomic<uint64_t> transforms_run{0};
-
-extern "C" uint64_t multi_stark_sppark_transforms_run() {
-    return transforms_run.load(std::memory_order_relaxed);
-}
-
 extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, uint64_t* values,
                                             const MultiStarkNttPlan* plan,
                                             const uint64_t* shift_powers) {
-    transforms_run.fetch_add(1, std::memory_order_relaxed);
     const size_t height = plan->height, width = plan->width;
     const size_t extended_height = plan->extended_height, columns = plan->columns;
     const unsigned log_height = log2_exact(height), log_extended = log2_exact(extended_height);
@@ -353,27 +287,19 @@ extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, u
     uint64_t* a = scratch;
     uint64_t* b = scratch + columns * height;
     int result = 0;
-    StageTimer timer;
     for (size_t first = 0; result == 0 && first < width; first += columns) {
         const size_t count = width - first < columns ? width - first : columns;
-        timer.mark(0);
         result = static_cast<int>(gather_panel(trace, height, width, first, count, height, a));
-        timer.mark(1);
         if (result == 0) result = transform_columns(device, a, log_height, 1, 1, count, height, plan->inverse_group);
-        timer.mark(2);
         if (result == 0) {
             const dim3 column_grid(blocks_for_total(extended_height), static_cast<unsigned>(count));
             shift_columns<<<column_grid, PANEL_THREADS, 0, cudaStreamPerThread>>>(
                 a, shift_powers, height, log_height, extended_height, b);
             result = static_cast<int>(cudaGetLastError());
         }
-        timer.mark(3);
         if (result == 0) result = transform_columns(device, b, log_extended, 1, 0, count, extended_height, plan->forward_group);
-        timer.mark(4);
         if (result == 0)
             result = static_cast<int>(scatter_panel(b, extended_height, extended_height, width, first, count, values));
-        timer.mark(5);
-        if (result == 0) timer.report(height, count, log_extended - log_height);
     }
     const cudaError_t freed = cudaFreeAsync(scratch, cudaStreamPerThread);
     if (result == 0) result = static_cast<int>(freed);
@@ -381,7 +307,6 @@ extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, u
 }
 
 extern "C" int multi_stark_sppark_forward(int device, uint64_t* values, const MultiStarkNttPlan* plan) {
-    transforms_run.fetch_add(1, std::memory_order_relaxed);
     const size_t height = plan->height, width = plan->width, columns = plan->columns;
     const unsigned log_height = log2_exact(height);
     cudaError_t status = cudaSetDevice(device);

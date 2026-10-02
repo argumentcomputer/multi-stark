@@ -20,7 +20,8 @@ prover pipeline device-resident:
 2. Trace matrices are uploaded and transformed through sppark on the caller's
    stream into resident coset LDEs.
 3. First-party BLAKE3 kernels commit mixed-height matrices without copying
-   LDEs back to the host.
+   LDEs back to the host. Rows of at most one BLAKE3 chunk (1024 bytes) hash
+   with one thread per row; longer rows take a warp per row.
 4. Lookup traces and quotient LDEs are constructed from resident commitments.
 5. Batched openings, reductions, FRI folding, and Merkle authentication remain
    resident; only protocol-visible openings and proofs return to Rust.
