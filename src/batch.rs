@@ -478,7 +478,7 @@ where
     /// # Panics
     /// Panics if `claims` is empty, if any shard's traces are all empty, or
     /// if a regenerated shard does not reproduce its round-one header.
-    pub fn prove_batch_with<W>(
+    pub fn prove_batch_with<W, T>(
         &self,
         key: &ProverKey<SC>,
         claims: &[Vec<Vec<Val<SC>>>],
@@ -488,7 +488,8 @@ where
     ) -> BatchProof<SC>
     where
         Com<SC>: PartialEq,
-        W: FnMut(usize) -> SystemWitness<Val<SC>>,
+        W: FnMut(usize) -> T,
+        T: Into<crate::witness::PreparedWitness<Val<SC>>> + Send,
         Self: Sync,
         ProverKey<SC>: Sync,
         BatchPreamble<SC>: Sync,
@@ -518,9 +519,10 @@ where
     /// the next shard's witness on the calling thread; at most one witness
     /// is held ahead of the prover.
     #[tracing::instrument(level = "info", skip_all, name = "stark/batch_round_one")]
-    pub fn batch_round_one<I>(&self, round_one: I, retention: Retention) -> BatchBarrier<SC>
+    pub fn batch_round_one<I, T>(&self, round_one: I, retention: Retention) -> BatchBarrier<SC>
     where
-        I: IntoIterator<Item = (Vec<Vec<Val<SC>>>, SystemWitness<Val<SC>>)>,
+        I: IntoIterator<Item = (Vec<Vec<Val<SC>>>, T)>,
+        T: Into<crate::witness::PreparedWitness<Val<SC>>> + Send,
         Self: Sync,
         SystemWitness<Val<SC>>: Send,
         Stage1<SC>: Send,
@@ -559,7 +561,7 @@ where
     /// on the calling thread for every shard round one did not retain; at
     /// most one witness is held ahead of the prover.
     #[tracing::instrument(level = "info", skip_all, name = "stark/batch_round_two")]
-    pub fn batch_round_two<W>(
+    pub fn batch_round_two<W, T>(
         &self,
         key: &ProverKey<SC>,
         barrier: BatchBarrier<SC>,
@@ -568,7 +570,8 @@ where
     ) -> BatchProof<SC>
     where
         Com<SC>: PartialEq,
-        W: FnMut(usize) -> SystemWitness<Val<SC>>,
+        W: FnMut(usize) -> T,
+        T: Into<crate::witness::PreparedWitness<Val<SC>>> + Send,
         Self: Sync,
         ProverKey<SC>: Sync,
         BatchPreamble<SC>: Sync,

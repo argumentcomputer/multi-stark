@@ -108,6 +108,38 @@ fn hybrid_resident_candidates<M>(
         .collect()
 }
 
+/// Frees the device caches of generator-backed resident LDEs, one at a time
+/// until `target_free_bytes` is met, and returns the free bytes then. A cache
+/// is the cheapest headroom there is: the generator rebuilds it from host
+/// seeds on demand, whereas an evicted LDE must be materialized and uploaded
+/// again.
+fn release_generator_caches<M>(
+    device_id: i32,
+    data: &CudaMmcsData<M>,
+    protected_index: Option<usize>,
+    target_free_bytes: usize,
+) -> usize {
+    let mut free_bytes = super::device_memory_info(device_id).0;
+    let CudaMmcsData::Hybrid { resident, .. } = data else {
+        return free_bytes;
+    };
+    for (index, lde) in resident.iter().enumerate() {
+        if free_bytes >= target_free_bytes {
+            break;
+        }
+        if protected_index == Some(index) {
+            continue;
+        }
+        let Some(lde) = lde else { continue };
+        if !lde.has_generator() {
+            continue;
+        }
+        lde.release_generator_device();
+        free_bytes = super::device_memory_info(device_id).0;
+    }
+    free_bytes
+}
+
 fn evict_hybrid_resident<M>(data: &CudaMmcsData<M>, index: usize) {
     let CudaMmcsData::Hybrid {
         resident,
@@ -126,6 +158,11 @@ fn evict_hybrid_resident<M>(data: &CudaMmcsData<M>, index: usize) {
     // SAFETY: admission transitions run between proving stages, when no CUDA
     // operation can access this LDE or its trace.
     unsafe { lde.release_values() };
+    lde.release_generator_device();
+    super::witness::record_lde_spill(
+        lde.device_id,
+        lde.height() * lde.width() * size_of::<Goldilocks>(),
+    );
     resident_active[index].store(false, std::sync::atomic::Ordering::Release);
 }
 
@@ -153,6 +190,46 @@ impl<M> CudaMmcsData<M> {
 }
 
 impl CudaMmcsData<RowMajorMatrix<Goldilocks>> {
+    /// Whether [`Self::resident_with_trace`] returns an LDE for this matrix,
+    /// without attaching anything. A hybrid LDE qualifies while its values are
+    /// resident, and after a spill as long as it can regenerate its trace from
+    /// a generator or a retained host trace. Admission decisions that size a
+    /// budget for the graph kernel must use this predicate, so that the budget
+    /// and the kernel that then runs agree.
+    pub(crate) fn has_resident_with_trace(&self, index: usize) -> bool {
+        match self {
+            Self::Cuda {
+                resident,
+                retained_traces,
+                ..
+            } => {
+                index < resident.len()
+                    && retained_traces
+                        .get()
+                        .is_none_or(|retained| index < retained.len())
+            }
+            Self::Hybrid {
+                resident,
+                resident_active,
+                retained_traces,
+                ..
+            } => {
+                let Some(Some(lde)) = resident.get(index) else {
+                    return false;
+                };
+                let (Some(active), Some(retained)) =
+                    (resident_active.get(index), retained_traces.get(index))
+                else {
+                    return false;
+                };
+                active.load(std::sync::atomic::Ordering::Acquire)
+                    || lde.has_generator()
+                    || retained.is_some()
+            }
+            Self::Cpu(_) => false,
+        }
+    }
+
     pub(crate) fn resident_with_trace(&self, index: usize) -> Option<&CudaLde> {
         match self {
             Self::Cuda {
@@ -175,13 +252,15 @@ impl CudaMmcsData<RowMajorMatrix<Goldilocks>> {
                 retained_traces,
                 ..
             } => {
+                let lde = resident.get(index)?.as_ref()?;
                 if !resident_active
                     .get(index)?
                     .load(std::sync::atomic::Ordering::Acquire)
+                    && !lde.has_generator()
+                    && retained_traces.get(index)?.is_none()
                 {
                     return None;
                 }
-                let lde = resident.get(index)?.as_ref()?;
                 if let Some(trace) = retained_traces.get(index)?.as_ref() {
                     // SAFETY: the trace is owned by this prover data and drops
                     // after the resident LDE which holds the registered pointer.
@@ -217,9 +296,33 @@ pub(crate) fn hash_cpu_height_groups<F: p3_field::Field>(
         .collect()
 }
 
+/// The CUDA BLAKE3 leaf kernel hashes one message of at most 32 KiB per
+/// row, and a mixed tree's leaf row at a height is every matrix of that
+/// height side by side. A height group whose rows are wider than that is
+/// hashed on the host and enters the tree as a digest group; the device
+/// still builds the rest of the tree.
+pub(crate) const MAX_DEVICE_LEAF_ROW_BYTES: usize = 32 * 1024;
+
+/// The heights whose concatenated leaf row exceeds
+/// [`MAX_DEVICE_LEAF_ROW_BYTES`], and so must be hashed on the host.
+pub(crate) fn host_hashed_heights(
+    dimensions: impl IntoIterator<Item = Dimensions>,
+) -> std::collections::BTreeSet<usize> {
+    let mut row_bytes = std::collections::BTreeMap::<usize, usize>::new();
+    for dimensions in dimensions {
+        *row_bytes.entry(dimensions.height).or_default() +=
+            dimensions.width * size_of::<Goldilocks>();
+    }
+    row_bytes
+        .into_iter()
+        .filter(|(_, bytes)| *bytes > MAX_DEVICE_LEAF_ROW_BYTES)
+        .map(|(height, _)| height)
+        .collect()
+}
+
 pub(crate) fn hash_host_only_height_groups<F: PrimeField64>(
     matrices: &[Option<RowMajorMatrix<F>>],
-    resident: &[Option<CudaLde>],
+    resident: &[Option<&CudaLde>],
     deferred_dimensions: &[Option<Dimensions>],
     prehashed_heights: &std::collections::BTreeSet<usize>,
 ) -> Vec<(usize, Vec<[u8; 32]>)> {
@@ -242,7 +345,7 @@ pub(crate) fn hash_host_only_height_groups<F: PrimeField64>(
         let height = matrix.as_ref().map_or_else(
             || {
                 lde.as_ref()
-                    .map_or_else(|| deferred.unwrap().height, CudaLde::height)
+                    .map_or_else(|| deferred.unwrap().height, |lde| lde.height())
             },
             Matrix::height,
         );
@@ -389,11 +492,13 @@ pub struct CudaMmcs {
 }
 
 impl CudaMmcs {
-    pub(crate) fn new(cpu: CpuMmcs) -> Self {
-        Self {
-            cpu,
-            device_id: super::configured_device(),
-        }
+    /// A commitment scheme resident on the given CUDA device. Every kernel
+    /// it launches, allocation it makes and buffer it stages through belongs
+    /// to that device, so several of these in one process can each own a
+    /// device of their own.
+    pub(crate) fn with_device(cpu: CpuMmcs, device_id: i32) -> Self {
+        assert!(device_id >= 0, "CUDA device id must be non-negative");
+        Self { cpu, device_id }
     }
 }
 
@@ -430,6 +535,7 @@ pub trait CudaCommitMmcs<T: Send + Sync + Clone>: Mmcs<T> {
         data: &Self::ProverData<M>,
         target_free_bytes: usize,
         protected_index: Option<usize>,
+        phase: &'static str,
     ) -> usize;
 
     /// Selects spill candidates across all supplied commitments instead of
@@ -438,6 +544,7 @@ pub trait CudaCommitMmcs<T: Send + Sync + Clone>: Mmcs<T> {
         &self,
         data: &[&Self::ProverData<RowMajorMatrix<T>>],
         target_free_bytes: usize,
+        phase: &'static str,
     ) -> usize;
 
     fn matrix_dimensions(&self, data: &Self::ProverData<RowMajorMatrix<T>>) -> Vec<Dimensions>;
@@ -587,15 +694,26 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
         data: &Self::ProverData<M>,
         target_free_bytes: usize,
         protected_index: Option<usize>,
+        phase: &'static str,
     ) -> usize {
         let (mut free_bytes, _) = super::device_memory_info(self.device_id);
         if super::memory_diagnostics_enabled() {
             eprintln!(
-                "[multi-stark/cuda] admission start: target={} free={}",
+                "[multi-stark/cuda] {phase} admission start: target={} free={}",
                 target_free_bytes, free_bytes
             );
         }
         if free_bytes >= target_free_bytes {
+            return free_bytes;
+        }
+        free_bytes =
+            release_generator_caches(self.device_id, data, protected_index, target_free_bytes);
+        if free_bytes >= target_free_bytes {
+            if super::memory_diagnostics_enabled() {
+                eprintln!(
+                    "[multi-stark/cuda] {phase} admitted after releasing generator caches: free={free_bytes}"
+                );
+            }
             return free_bytes;
         }
         let mut candidates = hybrid_resident_candidates(data, protected_index);
@@ -636,16 +754,29 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
         &self,
         data: &[&Self::ProverData<RowMajorMatrix<Goldilocks>>],
         target_free_bytes: usize,
+        phase: &'static str,
     ) -> usize {
         let (mut measured_free_bytes, _) = super::device_memory_info(self.device_id);
         if super::memory_diagnostics_enabled() {
             eprintln!(
-                "[multi-stark/cuda] batch admission start: target={} free={}",
+                "[multi-stark/cuda] {phase} batch admission start: target={} free={}",
                 target_free_bytes, measured_free_bytes
             );
         }
         if measured_free_bytes >= target_free_bytes {
             return measured_free_bytes;
+        }
+        for data in data {
+            measured_free_bytes =
+                release_generator_caches(self.device_id, data, None, target_free_bytes);
+            if measured_free_bytes >= target_free_bytes {
+                if super::memory_diagnostics_enabled() {
+                    eprintln!(
+                        "[multi-stark/cuda] {phase} batch admitted after releasing generator caches: free={measured_free_bytes}"
+                    );
+                }
+                return measured_free_bytes;
+            }
         }
         let initial_free_bytes = measured_free_bytes;
         let mut released_bytes = 0usize;
@@ -934,6 +1065,38 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
         Self::Commitment,
         Self::ProverData<RowMajorMatrix<Goldilocks>>,
     ) {
+        // A height group whose leaf row is wider than the device kernel
+        // hashes cannot be part of an all-resident tree: its LDEs come back
+        // to the host, its digests are hashed there, and the commitment is
+        // the hybrid one every other stage already handles.
+        let wide_heights = host_hashed_heights(ldes.iter().map(|lde| Dimensions {
+            width: lde.width(),
+            height: lde.height(),
+        }));
+        if !wide_heights.is_empty() {
+            let mut resident: Vec<Option<CudaLde>> = Vec::with_capacity(ldes.len());
+            let mut host: Vec<Option<RowMajorMatrix<Goldilocks>>> = Vec::with_capacity(ldes.len());
+            for lde in ldes {
+                if wide_heights.contains(&lde.height()) {
+                    host.push(Some(lde.to_row_major_matrix()));
+                    resident.push(None);
+                } else {
+                    host.push(None);
+                    resident.push(Some(lde));
+                }
+            }
+            let deferred: Vec<DeferredMatrix<RowMajorMatrix<Goldilocks>>> =
+                (0..resident.len()).map(|_| None).collect();
+            let deferred_dimensions = vec![None; resident.len()];
+            let digests = hash_host_only_height_groups(
+                &host,
+                &resident.iter().map(Option::as_ref).collect::<Vec<_>>(),
+                &deferred_dimensions,
+                &std::collections::BTreeSet::new(),
+            );
+            let retained = (0..resident.len()).map(|_| None).collect();
+            return self.commit_cuda_hybrid(resident, host, deferred, retained, digests);
+        }
         let ldes = std::sync::Arc::new(ldes);
         let tree = CudaMixedMerkleTree::from_ldes(self.device_id, &ldes);
         let commitment = MerkleCap::new(vec![tree.root()]);
@@ -1094,11 +1257,20 @@ impl Mmcs<Goldilocks> for CudaMmcs {
         &self,
         inputs: Vec<M>,
     ) -> (Self::Commitment, Self::ProverData<M>) {
-        if inputs
-            .iter()
-            .map(|matrix| matrix.height().saturating_mul(matrix.width()))
-            .sum::<usize>()
-            > 1 << 18
+        // Small commitments stay on the CPU, and so does one with a height
+        // group wider than the device leaf kernel hashes (32 KiB per row);
+        // the CPU MMCS is the reference the device tree reproduces.
+        let device_hashable = host_hashed_heights(inputs.iter().map(|matrix| Dimensions {
+            width: matrix.width(),
+            height: matrix.height(),
+        }))
+        .is_empty();
+        if device_hashable
+            && inputs
+                .iter()
+                .map(|matrix| matrix.height().saturating_mul(matrix.width()))
+                .sum::<usize>()
+                > 1 << 18
         {
             let resident: Vec<_> = inputs
                 .iter()
@@ -1318,6 +1490,73 @@ mod tests {
     }
 
     #[test]
+    fn wide_height_groups_are_hashed_on_the_host() {
+        let d = |width, height| Dimensions { width, height };
+        // 4096 columns of 8 bytes is exactly the 32 KiB the leaf kernel takes.
+        assert!(host_hashed_heights([d(4096, 8)]).is_empty());
+        assert_eq!(
+            host_hashed_heights([d(4097, 8)])
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![8]
+        );
+        // Matrices at one height share a leaf row, so their widths add up;
+        // other heights are judged on their own.
+        assert_eq!(
+            host_hashed_heights([d(3000, 16), d(1500, 16), d(9282, 4), d(10, 4), d(14, 4096)])
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![4, 16]
+        );
+    }
+
+    /// The dimensions of the Aiur BLAKE3 hashing test's stage-one traces at
+    /// size 64: the height-4 group is 9,731 columns wide, 78 KB per leaf row.
+    #[test]
+    fn resident_commit_with_a_wide_height_group_matches_the_cpu() {
+        let dims = [
+            (4096, 14),
+            (2048, 14),
+            (4096, 17),
+            (4, 37),
+            (4, 35),
+            (4, 371),
+            (4, 9282),
+            (256, 110),
+            (4, 6),
+            (1024, 3),
+            (262144, 10),
+        ];
+        let matrices: Vec<_> = dims
+            .iter()
+            .enumerate()
+            .map(|(i, &(height, width))| matrix(height, width, 7 * i + 1))
+            .collect();
+        let cpu = CpuMmcs::new(
+            SerializingHasher::new(Blake3),
+            Blake3CompressionFunction::new(Blake3),
+            0,
+        );
+        let (expected_commitment, expected_data) = cpu.commit(matrices.clone());
+        let indices = [0, 3, 1000, 262143];
+        let expected_openings: Vec<_> = indices
+            .iter()
+            .map(|&i| cpu.open_batch(i, &expected_data))
+            .collect();
+        let mmcs = CudaMmcs::with_device(cpu, 0);
+        let ldes = matrices
+            .iter()
+            .map(|m| CudaLde::from_row_major_matrix(mmcs.device_id, m))
+            .collect();
+        let (commitment, data) = mmcs.commit_cuda_resident(ldes);
+        assert_eq!(commitment, expected_commitment);
+        for (&index, expected) in indices.iter().zip(&expected_openings) {
+            let opening = mmcs.open_batch(index, &data);
+            assert_eq!(opening.opened_values, expected.opened_values);
+        }
+    }
+
+    #[test]
     fn hybrid_openings_survive_device_spill() {
         let matrices = vec![matrix(16, 2, 3), matrix(8, 3, 71), matrix(16, 1, 109)];
         let cpu = CpuMmcs::new(
@@ -1328,7 +1567,7 @@ mod tests {
         let (expected_commitment, expected_data) = cpu.commit(matrices.clone());
         let expected_opening = cpu.open_batch(5, &expected_data);
 
-        let mmcs = CudaMmcs::new(cpu);
+        let mmcs = CudaMmcs::with_device(cpu, 0);
         let resident = vec![
             Some(CudaLde::from_row_major_matrix(mmcs.device_id, &matrices[0])),
             None,
@@ -1337,7 +1576,7 @@ mod tests {
         let host_matrices = vec![None, Some(matrices[1].clone()), Some(matrices[2].clone())];
         let host_digest_groups = hash_host_only_height_groups(
             &host_matrices,
-            &resident,
+            &resident.iter().map(Option::as_ref).collect::<Vec<_>>(),
             &[None, None, None],
             &std::collections::BTreeSet::new(),
         );
@@ -1362,7 +1601,7 @@ mod tests {
             expected_opening.opening_proof
         );
 
-        mmcs.ensure_device_headroom(&data, usize::MAX, None);
+        mmcs.ensure_device_headroom(&data, usize::MAX, None, "test");
         assert!(!(0..matrices.len()).any(|index| mmcs.is_matrix_cuda_resident(&data, index)));
         let spilled_opening = mmcs.open_batch(5, &data);
         assert_eq!(

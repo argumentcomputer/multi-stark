@@ -16,6 +16,7 @@ pub mod system;
 mod test_circuits;
 pub mod types;
 pub mod verifier;
+pub mod witness;
 
 pub use p3_air;
 pub use p3_field;

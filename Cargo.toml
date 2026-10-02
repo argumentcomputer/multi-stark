@@ -5,6 +5,7 @@ edition = "2024"
 authors = ["Argument Engineering <engineering@argument.xyz>"]
 license = "MIT OR Apache-2.0"
 rust-version = "1.98"
+links = "multi_stark_cuda"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -32,6 +33,14 @@ p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89
 p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
 p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
 
+# The CUDA transform engine. The fork supplies column batching, borrowed
+# streams and a runtime compatible with the Lean executable's C++ linkage.
+[dependencies.sppark]
+git = "https://github.com/argumentcomputer/sppark"
+rev = "e10e107673aa22861f0f8b9758fc62169ab919ae"
+optional = true
+features = ["cuda"]
+
 [dev-dependencies]
 criterion = "0.5"
 p3-baby-bear = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
@@ -45,10 +54,9 @@ harness = false
 
 [features]
 parallel = ["p3-maybe-rayon/parallel"]
-# Use the first-party CUDA Goldilocks DFT/LDE backend. Enabling this feature
-# requires a CUDA toolkit at build time and an NVIDIA GPU at runtime; the
-# default CPU build never invokes nvcc or links the CUDA runtime.
-cuda = ["dep:itertools", "dep:rayon"]
+# CUDA requires the toolkit at build time and an NVIDIA GPU at runtime.
+# CPU builds neither compile sppark nor link CUDA.
+cuda = ["dep:itertools", "dep:rayon", "dep:sppark"]
 
 # Similar to `release`, but preserves debug info
 [profile.dev-ci]

@@ -175,6 +175,21 @@ pub trait StarkGenericConfig {
     /// evaluations.
     fn log_blowup(&self) -> usize;
 
+    /// Commit deterministic main-trace sources.
+    fn commit_main(
+        &self,
+        evaluations: Vec<(Domain<Self>, crate::witness::TraceSource<Val<Self>>)>,
+    ) -> (Com<Self>, PcsData<Self>)
+    where
+        Self: Sized,
+    {
+        self.pcs().commit(
+            evaluations
+                .into_iter()
+                .map(|(domain, trace)| (domain, trace.materialize())),
+        )
+    }
+
     /// Normalize any backend-dependent field representatives before proof
     /// serialization. Most fields have canonical in-memory representations;
     /// configurations whose field permits lazy reduction can override this.

@@ -11,6 +11,14 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=cuda/kernels.cu");
+    println!("cargo:rerun-if-changed=cuda/goldilocks.cuh");
+    println!("cargo:rerun-if-changed=cuda/sppark_ntt.cu");
+    println!("cargo:rerun-if-changed=cuda/ntt.cuh");
+    if let Some(root) = env::var_os("DEP_SPPARK_ROOT") {
+        let root = PathBuf::from(root);
+        println!("cargo:rerun-if-changed={}", root.join("ntt").display());
+        println!("cargo:rerun-if-changed={}", root.join("util").display());
+    }
     println!("cargo:rerun-if-env-changed=NVCC");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
@@ -19,6 +27,9 @@ fn main() {
     if env::var_os("CARGO_FEATURE_CUDA").is_none() {
         return;
     }
+
+    let include = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("cuda");
+    println!("cargo:include={}", include.display());
 
     assert_eq!(
         env::var("CARGO_CFG_TARGET_OS").as_deref(),
@@ -36,6 +47,57 @@ fn main() {
     let library = out_dir.join("libmulti_stark_cuda.a");
     let architectures = cuda_architectures(&nvcc);
 
+    // sppark's units are compiled first, on their own, without the
+    // `_GNU_SOURCE` undefinition below: its runtime includes libstdc++'s
+    // `<mutex>`, whose GNU-only pthread functions that flag would hide. Their
+    // objects then join the archive.
+    let mut sppark_objects = Vec::new();
+    {
+        let root = PathBuf::from(
+            env::var_os("DEP_SPPARK_ROOT").expect("sppark's build script exports DEP_SPPARK_ROOT"),
+        );
+        for (source, object) in [
+            (PathBuf::from("cuda/sppark_ntt.cu"), "sppark_ntt.o"),
+            (root.join("util/all_gpus.cpp"), "sppark_all_gpus.o"),
+        ] {
+            let object = out_dir.join(object);
+            let mut compile = Command::new(&nvcc);
+            compile
+                .arg("-c")
+                .arg("--std=c++17")
+                .arg("--cudart=static")
+                .arg("--default-stream=per-thread")
+                .arg("-O3")
+                .arg("-lineinfo")
+                .arg("--compiler-options=-fPIC")
+                .arg(format!("-I{}", root.display()))
+                .arg("-Icuda")
+                .arg("-DFEATURE_GOLDILOCKS")
+                // The fork's runtime without exceptions or its thread pool:
+                // no C++ runtime library symbols, so the archive links into
+                // the Lean executable, which carries libc++ rather than
+                // libstdc++.
+                .arg("-DSPPARK_NO_CXX_RUNTIME")
+                .arg("-o")
+                .arg(&object)
+                .arg(&source);
+            for architecture in &architectures {
+                compile.arg(format!(
+                    "-gencode=arch=compute_{architecture},code=sm_{architecture}"
+                ));
+            }
+            let status = compile
+                .status()
+                .unwrap_or_else(|error| panic!("failed to execute {:?}: {error}", nvcc));
+            assert!(
+                status.success(),
+                "nvcc failed on {} with status {status}",
+                source.display()
+            );
+            sppark_objects.push(object);
+        }
+    }
+
     let mut command = Command::new(&nvcc);
     command
         .arg("--lib")
@@ -45,9 +107,18 @@ fn main() {
         .arg("-O3")
         .arg("-lineinfo")
         .arg("--compiler-options=-fPIC")
+        // Host code is linked by whatever toolchain links the final binary,
+        // and Lean's bundled clang links against a sysroot older than
+        // glibc 2.38. g++ predefines _GNU_SOURCE, under which glibc 2.38+
+        // renames strtol and friends to their C23 variants (__isoc23_*),
+        // which that sysroot lacks. The POSIX and default feature sets keep
+        // everything the kernels' host code uses (clock_gettime, pthreads)
+        // under the plain names.
+        .arg("--compiler-options=-U_GNU_SOURCE,-D_DEFAULT_SOURCE,-D_POSIX_C_SOURCE=200809L")
         .arg("-o")
         .arg(&library)
         .arg("cuda/kernels.cu");
+    command.args(&sppark_objects);
 
     for architecture in &architectures {
         command.arg(format!(

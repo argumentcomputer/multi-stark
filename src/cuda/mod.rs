@@ -8,12 +8,14 @@
 pub(crate) mod mmcs;
 #[doc(hidden)]
 pub mod pcs;
+pub(crate) mod sppark;
+pub(crate) mod witness;
 
 use core::ffi::{CStr, c_char, c_void};
 use core::mem::{align_of, size_of};
 use core::ptr::NonNull;
-use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use sppark::{RawPlan, TransformPlan};
+use std::sync::Arc;
 
 use crate::expr::{RowOffset, Source};
 use crate::graph::{ConstraintGraph, Node};
@@ -29,20 +31,14 @@ use p3_util::log2_strict_usize;
 const _: () = assert!(size_of::<Goldilocks>() == size_of::<u64>());
 const _: () = assert!(align_of::<Goldilocks>() == align_of::<u64>());
 
-type CachedPowers = Arc<[Goldilocks]>;
-type SharedPowerCache<Key> = Arc<RwLock<BTreeMap<Key, CachedPowers>>>;
-
 /// CUDA-backed batched DFT for the Goldilocks field.
 ///
-/// Clones share the host twiddle cache. This is important because the
-/// production configuration gives one clone to the PCS and retains another
-/// for quotient transforms.
+/// Clones share immutable transform plans and their host coset powers.
 #[derive(Clone, Debug)]
 pub struct CudaDft {
     device_id: i32,
     cpu: Radix2DitParallel<Goldilocks>,
-    twiddles: SharedPowerCache<(usize, bool)>,
-    shift_powers: SharedPowerCache<(usize, u64)>,
+    planner: sppark::Planner,
 }
 
 impl Default for CudaDft {
@@ -68,8 +64,7 @@ impl CudaDft {
         Self {
             device_id,
             cpu: Radix2DitParallel::default(),
-            twiddles: Arc::default(),
-            shift_powers: Arc::default(),
+            planner: sppark::Planner::new(device_id),
         }
     }
 
@@ -79,45 +74,18 @@ impl CudaDft {
         self.device_id
     }
 
-    fn twiddles(&self, log_height: usize, inverse: bool) -> Arc<[Goldilocks]> {
-        let key = (log_height, inverse);
-        if let Some(twiddles) = self
-            .twiddles
-            .read()
-            .expect("twiddle cache poisoned")
-            .get(&key)
-        {
-            return Arc::clone(twiddles);
-        }
-
-        let mut cache = self.twiddles.write().expect("twiddle cache poisoned");
-        Arc::clone(cache.entry(key).or_insert_with(|| {
-            let root = Goldilocks::two_adic_generator(log_height);
-            let root = if inverse { root.inverse() } else { root };
-            root.powers().take((1 << log_height) / 2).collect().into()
-        }))
+    pub(crate) fn forward_plan(&self, height: usize, width: usize) -> Arc<TransformPlan> {
+        self.planner.plan(height, width, 0, None)
     }
 
-    fn shift_powers(&self, height: usize, shift: Goldilocks) -> Arc<[Goldilocks]> {
-        let key = (height, shift.as_canonical_u64());
-        if let Some(powers) = self
-            .shift_powers
-            .read()
-            .expect("shift-power cache poisoned")
-            .get(&key)
-        {
-            return Arc::clone(powers);
-        }
-
-        let mut cache = self
-            .shift_powers
-            .write()
-            .expect("shift-power cache poisoned");
-        Arc::clone(
-            cache
-                .entry(key)
-                .or_insert_with(|| shift.powers().take(height).collect().into()),
-        )
+    pub(crate) fn lde_plan(
+        &self,
+        height: usize,
+        width: usize,
+        added_bits: usize,
+        shift: Goldilocks,
+    ) -> Arc<TransformPlan> {
+        self.planner.plan(height, width, added_bits, Some(shift))
     }
 
     fn validate_dimensions(height: usize, width: usize) {
@@ -173,6 +141,15 @@ impl CudaDft {
     ) -> CudaLde {
         let height = matrix.height();
         let width = matrix.width();
+        let _span = tracing::info_span!(
+            "cuda/lde",
+            kind = "host",
+            device = self.device_id,
+            height,
+            width,
+            added_bits
+        )
+        .entered();
         Self::validate_dimensions(height, width);
         assert!(width > 0, "resident CUDA LDE requires at least one column");
         let extended_height = height
@@ -180,11 +157,7 @@ impl CudaDft {
             .expect("LDE height overflows usize");
         Self::validate_dimensions(extended_height, width);
 
-        let log_height = log2_strict_usize(height);
-        let inverse_twiddles = self.twiddles(log_height, true);
-        let forward_twiddles = self.twiddles(log2_strict_usize(extended_height), false);
-        let shift_powers = self.shift_powers(height, shift);
-        let height_inverse = Goldilocks::ONE.div_2exp_u64(log_height as u64);
+        let plan = self.lde_plan(height, width, added_bits, shift);
         let mut handle = core::ptr::null_mut();
         // SAFETY: every host buffer has the exact dimensions validated above;
         // successful creation transfers the device allocation to `CudaLde`.
@@ -196,10 +169,7 @@ impl CudaDft {
                 height,
                 width,
                 added_bits,
-                inverse_twiddles.as_ptr().cast(),
-                shift_powers.as_ptr().cast(),
-                forward_twiddles.as_ptr().cast(),
-                raw_u64(height_inverse),
+                plan.raw(),
             )
         };
         check_cuda(status, "resident coset LDE");
@@ -211,6 +181,7 @@ impl CudaDft {
         }
     }
 
+    /// Uploads the coset powers before taking a device-memory snapshot.
     pub(crate) fn prepare_coset_lde_constants(
         &self,
         height: usize,
@@ -222,22 +193,139 @@ impl CudaDft {
             .expect("LDE height overflows usize");
         Self::validate_dimensions(height, 1);
         Self::validate_dimensions(extended_height, 1);
-        let inverse_twiddles = self.twiddles(log2_strict_usize(height), true);
-        let shift_powers = self.shift_powers(height, shift);
-        let forward_twiddles = self.twiddles(log2_strict_usize(extended_height), false);
-        let status = unsafe {
-            multi_stark_cuda_prepare_lde_constants(
-                self.device_id,
-                inverse_twiddles.as_ptr().cast(),
-                inverse_twiddles.len(),
-                shift_powers.as_ptr().cast(),
-                height,
-                forward_twiddles.as_ptr().cast(),
-                forward_twiddles.len(),
-            )
-        };
+        let plan = self.lde_plan(height, 1, added_bits, shift);
+        let status = unsafe { multi_stark_cuda_prepare_lde_constants(self.device_id, plan.raw()) };
         check_cuda(status, "prepare resident LDE constants");
     }
+}
+
+/// A borrowed output tile on the selected CUDA device. The writer must finish
+/// using it before returning; rows wrap at the source's padded height.
+pub struct DeviceTraceView<'a> {
+    device_id: i32,
+    output: *mut u64,
+    first: usize,
+    rows: usize,
+    width: usize,
+    _borrow: core::marker::PhantomData<&'a mut [u64]>,
+}
+
+impl DeviceTraceView<'_> {
+    pub fn device_id(&self) -> i32 {
+        self.device_id
+    }
+    pub fn as_mut_ptr(&self) -> *mut u64 {
+        self.output
+    }
+    pub fn first_row(&self) -> usize {
+        self.first
+    }
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+    pub fn width(&self) -> usize {
+        self.width
+    }
+}
+
+type Generator = Arc<dyn crate::witness::TraceGenerator<Goldilocks>>;
+
+unsafe extern "C" fn write_generated_trace(
+    context: *mut c_void,
+    device_id: i32,
+    output: *mut u64,
+    first: usize,
+    rows: usize,
+) -> i32 {
+    let generator = unsafe { &*context.cast::<Generator>() };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        generator.write_device_rows(DeviceTraceView {
+            device_id,
+            output,
+            first,
+            rows,
+            width: generator.width(),
+            _borrow: core::marker::PhantomData,
+        })
+    }));
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(error)) => {
+            eprintln!("[multi-stark/cuda] trace generation failed: {error}");
+            999
+        }
+        Err(_) => 999,
+    }
+}
+
+unsafe extern "C" fn destroy_generated_trace(context: *mut c_void) {
+    drop(unsafe { Box::from_raw(context.cast::<Generator>()) });
+}
+
+impl CudaDft {
+    pub(crate) fn generate_coset_lde(
+        &self,
+        generator: Generator,
+        added_bits: usize,
+        shift: Goldilocks,
+    ) -> CudaLde {
+        let height = generator.height();
+        let width = generator.width();
+        let _span = tracing::info_span!(
+            "cuda/lde",
+            kind = "generated",
+            device = self.device_id,
+            height,
+            width,
+            added_bits
+        )
+        .entered();
+        Self::validate_dimensions(height, width);
+        let extended_height = height
+            .checked_shl(added_bits.try_into().unwrap())
+            .expect("LDE height overflow");
+        Self::validate_dimensions(extended_height, width);
+        let plan = self.lde_plan(height, width, added_bits, shift);
+        let mut context = Box::new(generator);
+        let mut handle = core::ptr::null_mut();
+        let status = unsafe {
+            multi_stark_cuda_coset_lde_generate(
+                self.device_id,
+                &mut handle,
+                height,
+                width,
+                added_bits,
+                plan.raw(),
+                (&mut *context as *mut Generator).cast(),
+                write_generated_trace,
+                destroy_generated_trace,
+            )
+        };
+        check_cuda(status, "generated trace LDE");
+        let _ = Box::into_raw(context);
+        CudaLde {
+            device_id: self.device_id,
+            handle: NonNull::new(handle).expect("null generated LDE"),
+            height: extended_height,
+            width,
+        }
+    }
+}
+
+unsafe extern "C" {
+    fn multi_stark_cuda_coset_lde_generate(
+        device: i32,
+        output: *mut *mut c_void,
+        height: usize,
+        width: usize,
+        added_bits: usize,
+        plan: *const RawPlan,
+        context: *mut c_void,
+        writer: unsafe extern "C" fn(*mut c_void, i32, *mut u64, usize, usize) -> i32,
+        destroy: unsafe extern "C" fn(*mut c_void),
+    ) -> i32;
+    fn multi_stark_cuda_lde_has_generator(handle: *const c_void) -> bool;
+    fn multi_stark_cuda_lde_generator_context(handle: *const c_void) -> *mut c_void;
 }
 
 /// Bit-reversed coset-LDE storage owned by a CUDA device allocation.
@@ -253,6 +341,23 @@ unsafe impl Send for CudaLde {}
 unsafe impl Sync for CudaLde {}
 
 impl CudaLde {
+    pub(crate) fn has_generator(&self) -> bool {
+        unsafe { multi_stark_cuda_lde_has_generator(self.raw_handle()) }
+    }
+
+    /// Frees what the trace generator, if any, caches on this device. The
+    /// generator stays attached and keeps serving tiles from the host.
+    pub(crate) fn release_generator_device(&self) {
+        let context = unsafe { multi_stark_cuda_lde_generator_context(self.raw_handle()) };
+        if context.is_null() {
+            return;
+        }
+        // SAFETY: the handle owns the boxed generator until it is destroyed,
+        // and the box holds exactly the `Generator` the LDE was created with.
+        let generator = unsafe { &*context.cast::<Generator>() };
+        generator.release_device(self.device_id);
+    }
+
     pub(crate) const fn raw_handle(&self) -> *const c_void {
         self.handle.as_ptr()
     }
@@ -306,6 +411,7 @@ impl CudaLde {
         g_inv: Goldilocks,
         ext_w: Goldilocks,
     ) -> Self {
+        let _span = tracing::info_span!("cuda/fri_fold").entered();
         let mut handle = core::ptr::null_mut();
         let status = unsafe {
             multi_stark_cuda_fri_fold_resident(
@@ -846,20 +952,13 @@ pub(crate) fn lookup_graph_lde_memory_upper_bound(
         .saturating_add(1)
         .saturating_mul(main_width)
         .saturating_mul(size_of::<Goldilocks>());
-    // Device-cached twiddles and shift powers may be cold for this height.
-    let constant_bytes = height
-        .saturating_div(2)
-        .saturating_add(height)
-        .saturating_add(extended_height / 2)
-        .saturating_mul(size_of::<Goldilocks>());
     Some((
         output_bytes,
         metadata_bytes
             .saturating_add(message_bytes)
             .saturating_add(delta_bytes)
             .saturating_add(scratch_bytes)
-            .saturating_add(trace_chunk_bytes)
-            .saturating_add(constant_bytes),
+            .saturating_add(trace_chunk_bytes),
     ))
 }
 
@@ -1021,6 +1120,14 @@ pub(crate) fn quotient_lde_mixed(
     quotient_degree: usize,
     log_blowup: usize,
 ) -> CudaLde {
+    let _span = tracing::info_span!(
+        "cuda/quotient_lde",
+        device = dft.device_id,
+        quotient_size,
+        quotient_degree,
+        added_bits = log_blowup
+    )
+    .entered();
     quotient_lde_sources(
         dft,
         graph,
@@ -1092,8 +1199,8 @@ fn quotient_lde_sources(
     assert_eq!(alpha.len(), 2 * expected_constraints);
     let trace_height = quotient_size / quotient_degree;
     let lde_height = trace_height << log_blowup;
-    let quotient_twiddles = dft.twiddles(log2_strict_usize(quotient_size), false);
-    let lde_twiddles = dft.twiddles(log2_strict_usize(lde_height), false);
+    let quotient_plan = dft.forward_plan(quotient_size, 2);
+    let lde_plan = dft.forward_plan(lde_height, 2 * quotient_degree);
     let height_inverse = Goldilocks::ONE.div_2exp_u64(log2_strict_usize(quotient_size) as u64);
     let weight_step = Goldilocks::GENERATOR.exp_u64(trace_height as u64).inverse();
     let weights: Vec<_> = weight_step
@@ -1169,8 +1276,8 @@ fn quotient_lde_sources(
                 next_step,
                 quotient_degree,
                 log_blowup,
-                quotient_twiddles.as_ptr().cast(),
-                lde_twiddles.as_ptr().cast(),
+                quotient_plan.raw(),
+                lde_plan.raw(),
                 weights.as_ptr().cast(),
             )
         }
@@ -1209,8 +1316,8 @@ fn quotient_lde_sources(
                 next_step,
                 quotient_degree,
                 log_blowup,
-                quotient_twiddles.as_ptr().cast(),
-                lde_twiddles.as_ptr().cast(),
+                quotient_plan.raw(),
+                lde_plan.raw(),
                 weights.as_ptr().cast(),
             )
         }
@@ -1564,6 +1671,16 @@ pub(crate) fn lookup_lde_resident(
     ext_w: Goldilocks,
     log_blowup: usize,
 ) -> (CudaLde, [Goldilocks; 2]) {
+    let _span = tracing::info_span!(
+        "cuda/lookup_lde",
+        path = "direct",
+        device = dft.device_id,
+        height,
+        num_lookups,
+        group_size,
+        added_bits = log_blowup
+    )
+    .entered();
     assert!((1..=8).contains(&group_size));
     assert_eq!(arg_offsets.len(), num_lookups + 1);
     assert_eq!(arg_offsets.first(), Some(&0));
@@ -1590,10 +1707,12 @@ pub(crate) fn lookup_lde_resident(
     assert_eq!(multiplicities.len(), height * num_lookups);
     assert_eq!(args.len(), height * args_width);
     let extended_height = height << log_blowup;
-    let inverse_twiddles = dft.twiddles(log2_strict_usize(height), true);
-    let shift_powers = dft.shift_powers(height, Goldilocks::GENERATOR);
-    let forward_twiddles = dft.twiddles(log2_strict_usize(extended_height), false);
-    let height_inverse = Goldilocks::ONE.div_2exp_u64(log2_strict_usize(height) as u64);
+    let plan = dft.lde_plan(
+        height,
+        2 * num_lookups.div_ceil(group_size),
+        log_blowup,
+        Goldilocks::GENERATOR,
+    );
     let mut tail = [Goldilocks::ZERO; 4];
     let mut handle = core::ptr::null_mut();
     let status = unsafe {
@@ -1612,10 +1731,7 @@ pub(crate) fn lookup_lde_resident(
             gamma.as_ptr().cast(),
             raw_u64(ext_w),
             log_blowup,
-            inverse_twiddles.as_ptr().cast(),
-            shift_powers.as_ptr().cast(),
-            forward_twiddles.as_ptr().cast(),
-            raw_u64(height_inverse),
+            plan.raw(),
         )
     };
     check_cuda(status, "resident CUDA lookup LDE");
@@ -1645,6 +1761,16 @@ pub(crate) fn lookup_lde_resident_partitioned(
     log_blowup: usize,
     cpu_deltas: impl Fn(core::ops::Range<usize>) -> Vec<[Goldilocks; 2]> + Sync,
 ) -> (CudaLde, [Goldilocks; 2]) {
+    let _span = tracing::info_span!(
+        "cuda/lookup_lde",
+        path = "partitioned",
+        device = dft.device_id,
+        height,
+        num_lookups,
+        group_size,
+        added_bits = log_blowup
+    )
+    .entered();
     assert!((1..=8).contains(&group_size));
     assert_eq!(arg_offsets.len(), num_lookups + 1);
     assert_eq!(arg_offsets.first(), Some(&0));
@@ -1655,10 +1781,12 @@ pub(crate) fn lookup_lde_resident_partitioned(
     assert_eq!(multiplicities.len(), height * num_lookups);
     assert_eq!(args.len(), height * args_width);
     let extended_height = height << log_blowup;
-    let inverse_twiddles = dft.twiddles(log2_strict_usize(height), true);
-    let shift_powers = dft.shift_powers(height, Goldilocks::GENERATOR);
-    let forward_twiddles = dft.twiddles(log2_strict_usize(extended_height), false);
-    let height_inverse = Goldilocks::ONE.div_2exp_u64(log2_strict_usize(height) as u64);
+    let plan = dft.lde_plan(
+        height,
+        2 * num_lookups.div_ceil(group_size),
+        log_blowup,
+        Goldilocks::GENERATOR,
+    );
     let total_started = std::time::Instant::now();
     let create_started = std::time::Instant::now();
     let mut pending_handle = core::ptr::null_mut();
@@ -1788,10 +1916,7 @@ pub(crate) fn lookup_lde_resident_partitioned(
             pending_handle.as_ptr(),
             &mut handle,
             tail.as_mut_ptr().cast(),
-            inverse_twiddles.as_ptr().cast(),
-            shift_powers.as_ptr().cast(),
-            forward_twiddles.as_ptr().cast(),
-            raw_u64(height_inverse),
+            plan.raw(),
         )
     };
     pending.handle = None;
@@ -1832,14 +1957,26 @@ pub(crate) fn lookup_graph_lde_resident(
     log_blowup: usize,
 ) -> Option<(CudaLde, [Goldilocks; 2])> {
     assert!((1..=8).contains(&group_size));
+    let _span = tracing::info_span!(
+        "cuda/lookup_lde",
+        path = "graph",
+        device = dft.device_id,
+        height,
+        num_lookups = graph.lookups.len(),
+        group_size,
+        added_bits = log_blowup
+    )
+    .entered();
     let (nodes, slot_count, lookups, args) = encode_lookup_nodes(graph)?;
     let num_lookups = lookups.len();
     let groups = num_lookups.div_ceil(group_size.max(1));
     let extended_height = height << log_blowup;
-    let inverse_twiddles = dft.twiddles(log2_strict_usize(height), true);
-    let shift_powers = dft.shift_powers(height, Goldilocks::GENERATOR);
-    let forward_twiddles = dft.twiddles(log2_strict_usize(extended_height), false);
-    let height_inverse = Goldilocks::ONE.div_2exp_u64(log2_strict_usize(height) as u64);
+    let plan = dft.lde_plan(
+        height,
+        2 * num_lookups.div_ceil(group_size),
+        log_blowup,
+        Goldilocks::GENERATOR,
+    );
     let mut tail = [Goldilocks::ZERO; 4];
     let mut handle = core::ptr::null_mut();
     let status = unsafe {
@@ -1861,10 +1998,7 @@ pub(crate) fn lookup_graph_lde_resident(
             gamma.as_ptr().cast(),
             raw_u64(ext_w),
             log_blowup,
-            inverse_twiddles.as_ptr().cast(),
-            shift_powers.as_ptr().cast(),
-            forward_twiddles.as_ptr().cast(),
-            raw_u64(height_inverse),
+            plan.raw(),
         )
     };
     check_cuda(status, "resident CUDA graph lookup LDE");
@@ -1934,6 +2068,20 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
         let height = matrix.height();
         let width = matrix.width();
         Self::validate_dimensions(height, width);
+        let _span = tracing::info_span!(
+            "cuda/dft_batch",
+            device = self.device_id,
+            height,
+            width,
+            backend = if height == 1 || width == 0 {
+                "noop"
+            } else if Self::use_cuda_dft(height, width) {
+                "sppark"
+            } else {
+                "cpu"
+            }
+        )
+        .entered();
         if height == 1 || width == 0 {
             return BitReversalPerm::new_view(matrix);
         }
@@ -1941,23 +2089,23 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
             return self.cpu.dft_batch(matrix);
         }
 
-        let twiddles = self.twiddles(log2_strict_usize(height), false);
+        let plan = self.forward_plan(height, width);
         // SAFETY: Goldilocks is repr(transparent) over u64 (asserted above),
         // every u64 bit pattern is a valid Goldilocks value, all buffers have
         // the element counts implied by height/width, and the FFI call is
-        // synchronous so the borrowed twiddle buffer outlives device use.
+        // synchronous so the matrix and transform plan outlive device use.
         let status = unsafe {
             multi_stark_cuda_dft_batch(
                 self.device_id,
                 matrix.values.as_mut_ptr().cast(),
                 height,
                 width,
-                twiddles.as_ptr().cast(),
+                plan.raw(),
             )
         };
         check_cuda(status, "batched DFT");
 
-        // The CUDA DIF kernel writes bit-reversed rows. Wrap that storage so
+        // The CUDA transform writes bit-reversed rows. Wrap that storage so
         // callers observe the natural-order evaluations required by the trait.
         BitReversalPerm::new_view(matrix)
     }
@@ -1975,6 +2123,21 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
             .checked_shl(u32::try_from(added_bits).expect("LDE blowup exceeds u32"))
             .expect("LDE height overflows usize");
         Self::validate_dimensions(extended_height, width);
+        let _span = tracing::info_span!(
+            "cuda/coset_lde_batch",
+            device = self.device_id,
+            height,
+            width,
+            added_bits,
+            backend = if width == 0 {
+                "noop"
+            } else if height > 1 && Self::use_cuda_coset_lde(extended_height, width) {
+                "sppark"
+            } else {
+                "cpu"
+            }
+        )
+        .entered();
 
         if width == 0 {
             return BitReversalPerm::new_view(RowMajorMatrix::new(Vec::new(), width));
@@ -1990,11 +2153,7 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
             return self.cpu.coset_lde_batch(matrix, added_bits, shift);
         }
 
-        let log_height = log2_strict_usize(height);
-        let inverse_twiddles = self.twiddles(log_height, true);
-        let forward_twiddles = self.twiddles(log2_strict_usize(extended_height), false);
-        let shift_powers = self.shift_powers(height, shift);
-        let height_inverse = Goldilocks::ONE.div_2exp_u64(log_height as u64);
+        let plan = self.lde_plan(height, width, added_bits, shift);
         let mut output = Goldilocks::zero_vec(extended_height * width);
 
         // SAFETY: the input/output and cached tables have the exact lengths
@@ -2008,10 +2167,7 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
                 height,
                 width,
                 added_bits,
-                inverse_twiddles.as_ptr().cast(),
-                shift_powers.as_ptr().cast(),
-                forward_twiddles.as_ptr().cast(),
-                raw_u64(height_inverse),
+                plan.raw(),
             )
         };
         check_cuda(status, "coset LDE");
@@ -2032,6 +2188,15 @@ pub(crate) fn device_memory_info(device_id: i32) -> (usize, usize) {
         unsafe { multi_stark_cuda_memory_info(device_id, &mut free_bytes, &mut total_bytes) };
     check_cuda(status, "CUDA device initialization");
     (free_bytes, total_bytes)
+}
+
+/// Device bytes the prover keeps free for its later stages: a quarter of the
+/// device unless `MULTI_STARK_CUDA_MIN_FREE_BYTES` says otherwise.
+pub(crate) fn minimum_free_bytes(total_bytes: usize) -> usize {
+    std::env::var("MULTI_STARK_CUDA_MIN_FREE_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(total_bytes / 4)
 }
 
 pub(crate) fn memory_diagnostics_enabled() -> bool {
@@ -2370,7 +2535,14 @@ impl CudaMixedMerkleTree {
                 handles.len(),
             )
         };
-        check_cuda(status, "resident LDE Merkle tree creation");
+        if status != 0 {
+            let dimensions: Vec<(usize, usize)> =
+                ldes.iter().map(|lde| (lde.height(), lde.width())).collect();
+            check_cuda(
+                status,
+                &format!("resident LDE Merkle tree creation over (height, width) {dimensions:?}"),
+            );
+        }
         Self {
             device_id,
             handle: NonNull::new(handle).expect("CUDA returned a null mixed Merkle handle"),
@@ -2486,7 +2658,28 @@ impl CudaMixedMerkleTree {
                 host_digest_groups.len(),
             )
         };
-        check_cuda(status, "hybrid CPU/CUDA mixed-height Merkle tree creation");
+        if status != 0 {
+            let dims: Vec<Option<(usize, usize)>> = ldes
+                .iter()
+                .zip(host_matrices)
+                .zip(deferred_dimensions)
+                .map(|((lde, host), deferred)| {
+                    lde.map(|l| (l.height(), l.width()))
+                        .or_else(|| host.map(|m| (m.height(), m.width())))
+                        .or_else(|| deferred.map(|d| (d.height, d.width)))
+                })
+                .collect();
+            check_cuda(
+                status,
+                &format!(
+                    "hybrid Merkle tree creation over (height, width) {dims:?}, host digest groups at heights {:?}",
+                    host_digest_groups
+                        .iter()
+                        .map(|(h, _)| *h)
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
         let row_count = heights.into_iter().max().unwrap();
         Self {
             device_id,
@@ -2691,7 +2884,7 @@ unsafe extern "C" {
         values: *mut u64,
         height: usize,
         width: usize,
-        twiddles: *const u64,
+        plan: *const RawPlan,
     ) -> i32;
 
     fn multi_stark_cuda_coset_lde_batch(
@@ -2701,10 +2894,7 @@ unsafe extern "C" {
         height: usize,
         width: usize,
         added_bits: usize,
-        inverse_twiddles: *const u64,
-        shift_powers: *const u64,
-        forward_twiddles: *const u64,
-        height_inverse: u64,
+        plan: *const RawPlan,
     ) -> i32;
 
     fn multi_stark_cuda_coset_lde_create(
@@ -2714,22 +2904,10 @@ unsafe extern "C" {
         height: usize,
         width: usize,
         added_bits: usize,
-        inverse_twiddles: *const u64,
-        shift_powers: *const u64,
-        forward_twiddles: *const u64,
-        height_inverse: u64,
+        plan: *const RawPlan,
     ) -> i32;
 
-    fn multi_stark_cuda_prepare_lde_constants(
-        device_id: i32,
-        inverse_twiddles: *const u64,
-        inverse_count: usize,
-        shift_powers: *const u64,
-        height: usize,
-        forward_twiddles: *const u64,
-        forward_count: usize,
-    ) -> i32;
-
+    fn multi_stark_cuda_prepare_lde_constants(device_id: i32, plan: *const RawPlan) -> i32;
     fn multi_stark_cuda_lde_create_from_host(
         device_id: i32,
         handle: *mut *mut c_void,
@@ -2855,8 +3033,8 @@ unsafe extern "C" {
         next_step: usize,
         quotient_degree: usize,
         log_blowup: usize,
-        quotient_twiddles: *const u64,
-        lde_twiddles: *const u64,
+        quotient_plan: *const RawPlan,
+        lde_plan: *const RawPlan,
         slice_weights: *const u64,
     ) -> i32;
     fn multi_stark_cuda_quotient_lde_mixed(
@@ -2899,8 +3077,8 @@ unsafe extern "C" {
         next_step: usize,
         quotient_degree: usize,
         log_blowup: usize,
-        quotient_twiddles: *const u64,
-        lde_twiddles: *const u64,
+        quotient_plan: *const RawPlan,
+        lde_plan: *const RawPlan,
         slice_weights: *const u64,
     ) -> i32;
     fn multi_stark_cuda_mixed_lde_open_row(
@@ -2995,10 +3173,7 @@ unsafe extern "C" {
         gamma: *const u64,
         ext_w: u64,
         added_bits: usize,
-        inverse_twiddles: *const u64,
-        shift_powers: *const u64,
-        forward_twiddles: *const u64,
-        height_inverse: u64,
+        plan: *const RawPlan,
     ) -> i32;
     fn multi_stark_cuda_lookup_lde(
         device_id: i32,
@@ -3015,10 +3190,7 @@ unsafe extern "C" {
         gamma: *const u64,
         ext_w: u64,
         added_bits: usize,
-        inverse_twiddles: *const u64,
-        shift_powers: *const u64,
-        forward_twiddles: *const u64,
-        height_inverse: u64,
+        plan: *const RawPlan,
     ) -> i32;
     fn multi_stark_cuda_lookup_lde_begin_partitioned(
         device_id: i32,
@@ -3053,10 +3225,7 @@ unsafe extern "C" {
         pending_handle: *mut c_void,
         output_handle: *mut *mut c_void,
         total: *mut u64,
-        inverse_twiddles: *const u64,
-        shift_powers: *const u64,
-        forward_twiddles: *const u64,
-        height_inverse: u64,
+        plan: *const RawPlan,
     ) -> i32;
     fn multi_stark_cuda_lookup_lde_cancel_partitioned(
         device_id: i32,
@@ -3527,36 +3696,41 @@ mod tests {
     }
 
     #[test]
-    fn blake3_rows_match_cpu_across_chunk_boundaries() {
+    fn blake3_rows_match_cpu_across_chunk_and_launch_boundaries() {
         use p3_blake3::Blake3;
 
-        for message_bytes in [1usize, 63, 64, 65, 1023, 1024, 1025, 4264, 7400] {
-            let message_count = 17;
-            let messages: Vec<u8> = (0..message_bytes * message_count)
-                .map(|index| (index as u64).wrapping_mul(0x9e37_79b9).to_le_bytes()[0])
-                .collect();
-            let mut digests = vec![0u8; 32 * message_count];
-            // SAFETY: the input contains `message_count` fixed-size messages,
-            // the output has one 32-byte digest per message, and the call is
-            // synchronous.
-            let status = unsafe {
-                multi_stark_cuda_blake3_hash_rows(
-                    0,
-                    digests.as_mut_ptr(),
-                    messages.as_ptr(),
-                    message_bytes,
-                    message_count,
-                )
-            };
-            check_cuda(status, "BLAKE3 row hashing contract");
+        let mut rng = SmallRng::seed_from_u64(0xb1a3e3);
+        for message_bytes in [
+            1usize, 3, 4, 7, 8, 16, 31, 32, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024,
+            1025, 2048, 3072, 4264, 7400, 32768,
+        ] {
+            for message_count in [1, 31, 32, 33, 255, 256, 257, 513] {
+                let messages: Vec<u8> = (0..message_bytes * message_count)
+                    .map(|_| rng.random())
+                    .collect();
+                let mut digests = vec![0u8; 32 * message_count];
+                // SAFETY: the input contains `message_count` fixed-size messages,
+                // the output has one 32-byte digest per message, and the call is
+                // synchronous.
+                let status = unsafe {
+                    multi_stark_cuda_blake3_hash_rows(
+                        0,
+                        digests.as_mut_ptr(),
+                        messages.as_ptr(),
+                        message_bytes,
+                        message_count,
+                    )
+                };
+                check_cuda(status, "BLAKE3 row hashing contract");
 
-            for (index, message) in messages.chunks_exact(message_bytes).enumerate() {
-                let expected: [u8; 32] = Blake3.hash_iter(message.iter().copied());
-                assert_eq!(
-                    &digests[index * 32..(index + 1) * 32],
-                    &expected,
-                    "message_bytes={message_bytes}, index={index}"
-                );
+                for (index, message) in messages.chunks_exact(message_bytes).enumerate() {
+                    let expected: [u8; 32] = Blake3.hash_iter(message.iter().copied());
+                    assert_eq!(
+                        &digests[index * 32..(index + 1) * 32],
+                        &expected,
+                        "message_bytes={message_bytes}, count={message_count}, index={index}"
+                    );
+                }
             }
         }
     }
@@ -3565,7 +3739,14 @@ mod tests {
     fn blake3_merkle_root_matches_cpu() {
         use p3_blake3::Blake3;
 
-        for (row_bytes, row_count) in [(16usize, 1usize), (64, 8), (4264, 1024)] {
+        for (row_bytes, row_count) in [
+            (16usize, 1usize),
+            (64, 8),
+            (1023, 512),
+            (1024, 512),
+            (1025, 512),
+            (4264, 1024),
+        ] {
             let rows: Vec<u8> = (0..row_bytes * row_count)
                 .map(|index| (index as u64).wrapping_mul(0x517c_c1b7).to_le_bytes()[0])
                 .collect();
@@ -3714,6 +3895,55 @@ mod tests {
     }
 
     #[test]
+    fn resident_coset_lde_padding_and_raw_representatives() {
+        let cpu = Radix2DitParallel::<Goldilocks>::default();
+        let gpu = CudaDft::default();
+        let p = Goldilocks::ORDER_U64;
+        let representatives = [0, 1, p - 1, p, p + 1, u64::MAX];
+        // Exercise absent padding, one padded half, multiple padded halves,
+        // and height-one transforms with lazy input field representatives.
+        for log_height in [0usize, 1, 2, 5, 8] {
+            for width in [1usize, 2, 3, 8, 17] {
+                let height = 1 << log_height;
+                let matrix = RowMajorMatrix::new(
+                    (0..height * width)
+                        .map(|i| Goldilocks::new(representatives[i % representatives.len()]))
+                        .collect(),
+                    width,
+                );
+                for added_bits in [0usize, 1, 2, 3] {
+                    for shift in [
+                        Goldilocks::ONE,
+                        Goldilocks::GENERATOR,
+                        Goldilocks::from_u64(11),
+                    ] {
+                        let expected = cpu
+                            .coset_lde_batch(matrix.clone(), added_bits, shift)
+                            .bit_reverse_rows()
+                            .to_row_major_matrix();
+                        let actual = gpu
+                            .coset_lde_batch_resident(&matrix, added_bits, shift)
+                            .to_row_major_matrix();
+                        assert_eq!(
+                            actual, expected,
+                            "height=2^{log_height}, width={width}, added_bits={added_bits}, shift={shift}"
+                        );
+                        assert!(
+                            actual.values.iter().all(|&value| {
+                                // SAFETY: Goldilocks is repr(transparent) over u64.
+                                // Inspect storage without canonicalizing via a field accessor.
+                                let raw = unsafe { core::mem::transmute::<Goldilocks, u64>(value) };
+                                raw < p
+                            }),
+                            "LDE digest input must contain canonical field bytes"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn resident_coset_lde_matches_cpu_storage() {
         let mut rng = SmallRng::seed_from_u64(0x51de);
         let cpu = Radix2DitParallel::<Goldilocks>::default();
@@ -3724,6 +3954,12 @@ mod tests {
             (12, 2, 1),
             (14, 2, 2),
             (16, 1, 1),
+            // Fused radix-8 dispatch and all stage-count residues mod 3.
+            (17, 8, 1),
+            (18, 8, 1),
+            (18, 8, 2),
+            (19, 8, 1),
+            (18, 3, 1),
         ] {
             let height = 1 << log_height;
             let matrix =

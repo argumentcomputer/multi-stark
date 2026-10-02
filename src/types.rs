@@ -277,6 +277,18 @@ pub struct GoldilocksBlake3Config {
 
 impl GoldilocksBlake3Config {
     pub fn new(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Self {
+        Self::with_device(commitment_parameters, fri_parameters, None)
+    }
+
+    /// A configuration whose prover lives on the given CUDA device (`None`:
+    /// the device `MULTI_STARK_CUDA_DEVICE` names, or 0). Without the
+    /// `cuda` feature only device 0 exists. Configurations on distinct
+    /// devices prove concurrently in one process.
+    pub fn with_device(
+        commitment_parameters: CommitmentParameters,
+        fri_parameters: FriParameters,
+        device_id: Option<i32>,
+    ) -> Self {
         #[cfg(feature = "cuda")]
         {
             assert_eq!(
@@ -288,7 +300,20 @@ impl GoldilocksBlake3Config {
                 "the CUDA backend currently supports only binary FRI folds"
             );
         }
-        let (pcs, dft) = new_pcs(commitment_parameters, fri_parameters);
+        #[cfg(feature = "cuda")]
+        let (pcs, dft) = new_pcs(
+            commitment_parameters,
+            fri_parameters,
+            device_id.unwrap_or_else(crate::cuda::configured_device),
+        );
+        #[cfg(not(feature = "cuda"))]
+        let (pcs, dft) = {
+            assert!(
+                device_id.is_none_or(|device| device == 0),
+                "no CUDA backend to place a prover on device {device_id:?}"
+            );
+            new_pcs(commitment_parameters, fri_parameters)
+        };
         // Seed the challenger with a protocol tag for domain separation,
         // followed by every protocol parameter. Binding the parameters into
         // the seed means transcripts produced under different parameters
@@ -348,6 +373,17 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
 
     fn log_blowup(&self) -> usize {
         self.log_blowup
+    }
+
+    #[cfg(feature = "cuda")]
+    fn commit_main(
+        &self,
+        evaluations: Vec<(
+            crate::config::Domain<Self>,
+            crate::witness::TraceSource<Val>,
+        )>,
+    ) -> (crate::config::Com<Self>, crate::config::PcsData<Self>) {
+        crate::cuda::witness::commit(&self.pcs, evaluations)
     }
 
     fn canonicalize_proof(proof: &mut crate::prover::Proof<Self>) {
@@ -529,11 +565,11 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                     self.log_blowup,
                 );
                 let current_staging = staging_bytes(input);
-                let constant_bytes = quotient_size
-                    .saturating_add(lde_height)
-                    .saturating_div(2)
-                    .saturating_add(quotient_degree)
-                    .saturating_mul(size_of::<Val>());
+                let constant_bytes = quotient_degree.saturating_mul(size_of::<Val>());
+                let quotient_plan = self.pcs.dft.forward_plan(quotient_size, 2);
+                let lde_plan = self.pcs.dft.forward_plan(lde_height, 2 * quotient_degree);
+                let kernel_workspace = kernel_workspace
+                    .saturating_add(quotient_plan.scratch_bytes().max(lde_plan.scratch_bytes()));
                 (
                     index,
                     output_bytes,
@@ -586,18 +622,24 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                     .saturating_add(total_device_bytes / 64)
             };
             let mut target = required();
-            self.pcs
-                .mmcs
-                .ensure_device_headroom(input.stage_1.0, target, Some(input.stage_1.1));
+            self.pcs.mmcs.ensure_device_headroom(
+                input.stage_1.0,
+                target,
+                Some(input.stage_1.1),
+                "quotient",
+            );
             target = required();
-            self.pcs
-                .mmcs
-                .ensure_device_headroom(input.stage_2.0, target, Some(input.stage_2.1));
+            self.pcs.mmcs.ensure_device_headroom(
+                input.stage_2.0,
+                target,
+                Some(input.stage_2.1),
+                "quotient",
+            );
             if let Some((data, matrix)) = input.preprocessed {
                 target = required();
                 self.pcs
                     .mmcs
-                    .ensure_device_headroom(data, target, Some(matrix));
+                    .ensure_device_headroom(data, target, Some(matrix), "quotient");
             }
             target = required();
             let free_bytes = crate::cuda::device_memory_info(self.pcs.mmcs.cuda_device_id()).0;
@@ -692,17 +734,23 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
             .saturating_mul(96)
             .saturating_add(total_device_bytes / 64);
         if let Some(input) = inputs.first() {
-            self.pcs
-                .mmcs
-                .ensure_device_headroom(input.stage_1.0, tree_headroom, None);
-            self.pcs
-                .mmcs
-                .ensure_device_headroom(input.stage_2.0, tree_headroom, None);
+            self.pcs.mmcs.ensure_device_headroom(
+                input.stage_1.0,
+                tree_headroom,
+                None,
+                "quotient_tree",
+            );
+            self.pcs.mmcs.ensure_device_headroom(
+                input.stage_2.0,
+                tree_headroom,
+                None,
+                "quotient_tree",
+            );
         }
         if let Some((data, _)) = inputs.iter().find_map(|input| input.preprocessed) {
             self.pcs
                 .mmcs
-                .ensure_device_headroom(data, tree_headroom, None);
+                .ensure_device_headroom(data, tree_headroom, None, "quotient_tree");
         }
         if crate::cuda::device_memory_info(self.pcs.mmcs.cuda_device_id()).0 < tree_headroom {
             return None;
@@ -765,14 +813,6 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                                 .saturating_mul(2 * size_of::<Val>()),
                         )
                         .saturating_add(arg_offsets.len().saturating_mul(size_of::<usize>()))
-                        // Device-cached inverse/forward twiddles and coset
-                        // powers may be cold for this height.
-                        .saturating_add(
-                            height
-                                .saturating_add(height / 2)
-                                .saturating_add(extended_height / 2)
-                                .saturating_mul(size_of::<Val>()),
-                        )
                 };
                 let main_width = self
                     .pcs
@@ -792,11 +832,20 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                         )
                     })
                     .flatten();
+                let transform_bytes = if num_lookups == 0 {
+                    0
+                } else {
+                    let plan =
+                        self.pcs
+                            .dft
+                            .lde_plan(height, 2 * groups, self.log_blowup, Val::GENERATOR);
+                    plan.scratch_bytes().saturating_add(plan.constant_bytes())
+                };
                 (
                     index,
                     output_bytes,
-                    direct_temporary_bytes,
-                    graph_memory.map(|(_, temporary)| temporary),
+                    direct_temporary_bytes.saturating_add(transform_bytes),
+                    graph_memory.map(|(_, temporary)| temporary.saturating_add(transform_bytes)),
                     extended_height,
                 )
             })
@@ -806,10 +855,10 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         // resident, then allow that trace to become an eviction candidate for
         // later jobs.
         lookup_jobs.sort_unstable_by_key(|&(index, output, direct, graph, _)| {
-            let temporary = if self
-                .pcs
-                .mmcs
-                .is_matrix_cuda_resident(inputs[index].stage_1.0, inputs[index].stage_1.1)
+            let temporary = if inputs[index]
+                .stage_1
+                .0
+                .has_resident_with_trace(inputs[index].stage_1.1)
             {
                 graph.unwrap_or(direct)
             } else {
@@ -846,16 +895,27 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         let ext_w = pair(extension_generator * extension_generator)[0];
         let lookup_pool =
             std::sync::Arc::new(cuda_host_pool("lookup-rows", cuda_lookup_worker_count()));
-        let evaluate = |input: &crate::config::LookupCommitInput<'_, Self>, cooperative: bool| {
+        // `graph_path` is decided by admission below, which budgets the graph
+        // kernel from the same residency predicate; the kernel must not be
+        // re-chosen here or it can run under the other path's budget.
+        let evaluate = |input: &crate::config::LookupCommitInput<'_, Self>,
+                        graph_path: bool,
+                        cooperative: bool| {
             let (height, num_lookups, multiplicities, args, arg_offsets) =
                 input.lookup_values.cuda_parts();
             let group_size = input.circuit.lookup_group_size.max(1);
-            let main = input.stage_1.0.resident_with_trace(input.stage_1.1);
-            let result = if let Some(main) = main.filter(|_| num_lookups != 0) {
-                let preprocessed = match input.preprocessed {
-                    Some((data, index)) => Some(data.resident(index)?),
-                    None => None,
-                };
+            let main = graph_path.then(|| {
+                input
+                    .stage_1
+                    .0
+                    .resident_with_trace(input.stage_1.1)
+                    .expect("lookup graph admission requires a trace-backed resident LDE")
+            });
+            let result = if let Some(main) = main {
+                let preprocessed = input.preprocessed.map(|(data, index)| {
+                    data.resident(index)
+                        .expect("lookup graph admission requires a resident preprocessed LDE")
+                });
                 crate::cuda::lookup_graph_lde_resident(
                     &self.pcs.dft,
                     &input.circuit.graph,
@@ -912,6 +972,7 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
             // retained matrix remains owned by the prover data.
             if let Some(main) = main {
                 unsafe { main.release_trace() };
+                main.release_generator_device();
             }
             result
         };
@@ -919,22 +980,32 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         for (index, output_bytes, direct_temporary_bytes, graph_temporary_bytes, _) in lookup_jobs {
             let job_started = std::time::Instant::now();
             let input = &inputs[index];
-            let graph_path = self
-                .pcs
-                .mmcs
-                .is_matrix_cuda_resident(input.stage_1.0, input.stage_1.1)
-                && graph_temporary_bytes.is_some()
-                && input.preprocessed.is_none_or(|(data, matrix)| {
-                    self.pcs.mmcs.is_matrix_cuda_resident(data, matrix)
-                });
-            let temporary_bytes = if graph_path {
-                graph_temporary_bytes.unwrap()
-            } else {
-                direct_temporary_bytes
+            // The graph kernel reads the trace through `resident_with_trace`,
+            // which also serves spilled LDEs that regenerate from a generator
+            // or a retained host trace. Admit it under the same predicate so
+            // the budget matches the kernel that runs.
+            let admits_graph = || {
+                graph_temporary_bytes.is_some()
+                    && input.stage_1.0.has_resident_with_trace(input.stage_1.1)
+                    && input
+                        .preprocessed
+                        .is_none_or(|(data, matrix)| data.resident(matrix).is_some())
             };
-            let target = output_bytes
-                .saturating_add(temporary_bytes)
-                .saturating_add(total_device_bytes / 64);
+            let target_for = |graph_path: bool| {
+                let temporary_bytes = if graph_path {
+                    graph_temporary_bytes.unwrap()
+                } else {
+                    direct_temporary_bytes
+                };
+                (
+                    temporary_bytes,
+                    output_bytes
+                        .saturating_add(temporary_bytes)
+                        .saturating_add(total_device_bytes / 64),
+                )
+            };
+            let mut graph_path = admits_graph();
+            let (mut temporary_bytes, mut target) = target_for(graph_path);
             if target > total_device_bytes {
                 return None;
             }
@@ -942,15 +1013,28 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                 input.stage_1.0,
                 target,
                 Some(input.stage_1.1),
+                "lookup",
             );
             if free_bytes < target {
                 // This circuit alone does not fit beside its resident trace.
-                // Spill it as a last resort and use the direct lookup-values
-                // path, which remains protocol-identical.
-                free_bytes = self
-                    .pcs
-                    .mmcs
-                    .ensure_device_headroom(input.stage_1.0, target, None);
+                // Spill it as a last resort. If the spilled LDE can still
+                // regenerate its trace it stays on the graph path; otherwise
+                // re-budget for the direct lookup-values path, which remains
+                // protocol-identical.
+                free_bytes =
+                    self.pcs
+                        .mmcs
+                        .ensure_device_headroom(input.stage_1.0, target, None, "lookup");
+                graph_path = admits_graph();
+                (temporary_bytes, target) = target_for(graph_path);
+                if free_bytes < target {
+                    free_bytes = self.pcs.mmcs.ensure_device_headroom(
+                        input.stage_1.0,
+                        target,
+                        None,
+                        "lookup",
+                    );
+                }
             }
             if free_bytes < target {
                 return None;
@@ -965,7 +1049,7 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                 && output_bytes >= (8usize << 30)
                 && num_lookups >= 64
                 && arg_offsets.last().copied().unwrap_or(0) >= 256;
-            results[index] = Some(evaluate(&inputs[index], cooperative)?);
+            results[index] = Some(evaluate(&inputs[index], graph_path, cooperative)?);
             if crate::cuda::memory_diagnostics_enabled() {
                 eprintln!(
                     "[multi-stark/cuda] lookup job {index} complete: {:.3}s",
@@ -977,10 +1061,12 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
             .saturating_mul(96)
             .saturating_add(total_device_bytes / 64);
         if let Some(input) = inputs.first() {
-            let free_bytes =
-                self.pcs
-                    .mmcs
-                    .ensure_device_headroom(input.stage_1.0, tree_headroom, None);
+            let free_bytes = self.pcs.mmcs.ensure_device_headroom(
+                input.stage_1.0,
+                tree_headroom,
+                None,
+                "lookup_tree",
+            );
             if free_bytes < tree_headroom {
                 return None;
             }
@@ -1032,6 +1118,20 @@ pub(crate) type Blake3CompressionFunction = CompressionFunctionFromHasher<Blake3
 
 #[cfg(feature = "cuda")]
 impl CudaPcsDft<Val> for CudaDft {
+    fn coset_lde_workspace_bytes(
+        &self,
+        height: usize,
+        width: usize,
+        added_bits: usize,
+        shift: Val,
+    ) -> usize {
+        if width == 0 {
+            return 0;
+        }
+        let plan = self.lde_plan(height, width, added_bits, shift);
+        plan.scratch_bytes().saturating_add(plan.constant_bytes())
+    }
+
     fn prepare_coset_lde_constants(&self, height: usize, added_bits: usize, shift: Val) {
         self.prepare_coset_lde_constants(height, added_bits, shift);
     }
@@ -1052,7 +1152,7 @@ type PcsDft = Dft;
 #[cfg(feature = "cuda")]
 type PcsDft = CudaDft;
 
-fn new_mmcs(cap_height: usize) -> Mmcs {
+fn new_mmcs(cap_height: usize, #[cfg(feature = "cuda")] device_id: i32) -> Mmcs {
     let byte_hash = Blake3;
     let field_hash = SerializingHasher::new(byte_hash);
     let compress = Blake3CompressionFunction::new(byte_hash);
@@ -1060,13 +1160,17 @@ fn new_mmcs(cap_height: usize) -> Mmcs {
     #[cfg(not(feature = "cuda"))]
     return cpu;
     #[cfg(feature = "cuda")]
-    crate::cuda::mmcs::CudaMmcs::new(cpu)
+    crate::cuda::mmcs::CudaMmcs::with_device(cpu, device_id)
 }
 
 fn new_pcs(
     commitment_parameters: CommitmentParameters,
     fri_parameters: FriParameters,
+    #[cfg(feature = "cuda")] device_id: i32,
 ) -> (Pcs, Dft) {
+    #[cfg(feature = "cuda")]
+    let val_mmcs = new_mmcs(commitment_parameters.cap_height, device_id);
+    #[cfg(not(feature = "cuda"))]
     let val_mmcs = new_mmcs(commitment_parameters.cap_height);
     let mmcs = ExtensionMmcs::new(val_mmcs.clone());
     let inner_parameters = InnerFriParameters {
@@ -1079,7 +1183,11 @@ fn new_pcs(
         mmcs,
     };
     let dft = Dft::default();
-    let pcs = Pcs::new(PcsDft::default(), val_mmcs, inner_parameters);
+    #[cfg(feature = "cuda")]
+    let pcs_dft = CudaDft::new(device_id);
+    #[cfg(not(feature = "cuda"))]
+    let pcs_dft = PcsDft::default();
+    let pcs = Pcs::new(pcs_dft, val_mmcs, inner_parameters);
     (pcs, dft)
 }
 
@@ -1273,7 +1381,11 @@ mod pcs_ref_gen {
         m1[8] = f(109); // row 2 = [107, 108, 109]
         let mut m2 = vec![f(0); 2];
         m2[1] = f(202); // row 1 = [202]
-        let mmcs = new_mmcs(0);
+        let mmcs = new_mmcs(
+            0,
+            #[cfg(feature = "cuda")]
+            0,
+        );
         let (commit, pd) = mmcs.commit(vec![
             RowMajorMatrix::new(m0.clone(), 2),
             RowMajorMatrix::new(m1.clone(), 3),
@@ -1323,7 +1435,11 @@ mod pcs_ref_gen {
             ]]
         );
 
-        let mmcs = new_mmcs(2);
+        let mmcs = new_mmcs(
+            2,
+            #[cfg(feature = "cuda")]
+            0,
+        );
         let (commit, pd) = mmcs.commit(vec![
             RowMajorMatrix::new(m0, 2),
             RowMajorMatrix::new(m1, 3),

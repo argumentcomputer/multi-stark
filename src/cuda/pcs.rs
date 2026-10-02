@@ -72,6 +72,14 @@ fn goldilocks_quadratic_inverse_denominators(
 }
 
 pub trait CudaPcsDft<T: TwoAdicField>: TwoAdicSubgroupDft<T> {
+    fn coset_lde_workspace_bytes(
+        &self,
+        height: usize,
+        width: usize,
+        added_bits: usize,
+        shift: T,
+    ) -> usize;
+
     fn prepare_coset_lde_constants(&self, height: usize, added_bits: usize, shift: T);
 
     fn coset_lde_batch_resident(
@@ -263,6 +271,59 @@ pub struct CudaTwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs> {
     _phantom: PhantomData<Val>,
 }
 
+/// The coset `GENERATOR * <g>` in bit-reversed order, as the opening's
+/// denominators and interpolation index it, with at least `2^log_height`
+/// elements. Element `i` of the bit-reversed coset of size `2^k` is the
+/// shift times `g_k^{rev_k(i)}`, and `rev_{k+1}(i) = 2 rev_k(i)` for
+/// `i < 2^k`, so every smaller coset is a prefix of a larger one: one vector
+/// per process serves every height, and grows only when a larger height is
+/// opened. Every shard of a proof opens on the same coset.
+fn bit_reversed_coset<Val: TwoAdicField + PrimeField64>(
+    log_height: usize,
+) -> std::sync::Arc<Vec<Goldilocks>> {
+    static CACHE: std::sync::Mutex<Option<std::sync::Arc<Vec<Goldilocks>>>> =
+        std::sync::Mutex::new(None);
+    if let Some(coset) = cache_at_least(&CACHE, 1 << log_height) {
+        return coset;
+    }
+    let to_gold = |v: Val| Goldilocks::from_u64(v.as_canonical_u64());
+    let generator: Goldilocks = TwoAdicField::two_adic_generator(log_height);
+    let shift = <Goldilocks as p3_field::Field>::GENERATOR;
+    assert_eq!(to_gold(Val::two_adic_generator(log_height)), generator);
+    assert_eq!(to_gold(Val::GENERATOR), shift);
+    let size = 1usize << log_height;
+    let mut coset = vec![Goldilocks::ZERO; size];
+    const CHUNK: usize = 1 << 14;
+    coset
+        .par_chunks_mut(CHUNK)
+        .enumerate()
+        .for_each(|(index, chunk)| {
+            let mut x: Goldilocks = shift * generator.exp_u64((index * CHUNK) as u64);
+            for value in chunk {
+                *value = x;
+                x *= generator;
+            }
+        });
+    reverse_slice_index_bits(&mut coset);
+    let mut slot = CACHE.lock().unwrap();
+    match &*slot {
+        Some(cached) if cached.len() >= size => std::sync::Arc::clone(cached),
+        _ => std::sync::Arc::clone(slot.insert(std::sync::Arc::new(coset))),
+    }
+}
+
+fn cache_at_least(
+    cache: &std::sync::Mutex<Option<std::sync::Arc<Vec<Goldilocks>>>>,
+    size: usize,
+) -> Option<std::sync::Arc<Vec<Goldilocks>>> {
+    cache
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|coset| coset.len() >= size)
+        .map(std::sync::Arc::clone)
+}
+
 fn prove_fri_cuda_resident<Val, Challenge, InputMmcs, FriMmcs, Challenger>(
     params: &FriParameters<FriMmcs>,
     mut inputs: Vec<CudaReducedOpening>,
@@ -341,10 +402,14 @@ where
             params.max_log_arity,
         );
         let arity = 1 << log_arity;
-        let (commitment, round) = params.mmcs.commit_cuda_fri(codeword, log_arity);
+        let (commitment, round) = tracing::info_span!("stark/fri_round_commit")
+            .in_scope(|| params.mmcs.commit_cuda_fri(codeword, log_arity));
         challenger.observe(commitment.clone());
         commits.push(commitment);
-        commit_pow_witnesses.push(challenger.grind(params.commit_proof_of_work_bits));
+        commit_pow_witnesses.push(
+            tracing::info_span!("stark/fri_commit_grind")
+                .in_scope(|| challenger.grind(params.commit_proof_of_work_bits)),
+        );
         let beta: Challenge = challenger.sample_algebra_element();
         let mut beta_step = beta;
         let betas = (0..log_arity)
@@ -396,10 +461,13 @@ where
     for &log_arity in &log_arities {
         challenger.observe(Val::from_usize(log_arity));
     }
-    let query_pow_witness = challenger.grind(params.query_proof_of_work_bits);
+    let _query_span = tracing::info_span!("stark/fri_queries").entered();
+    let query_pow_witness = tracing::info_span!("stark/fri_query_grind")
+        .in_scope(|| challenger.grind(params.query_proof_of_work_bits));
     let query_indices = iter::repeat_with(|| challenger.sample_bits(log_global_max_height))
         .take(params.num_queries)
         .collect_vec();
+    let input_openings_span = tracing::info_span!("stark/fri_input_openings").entered();
     let input_openings = prover_data_with_opening_points
         .iter()
         .map(|(data, _)| {
@@ -415,6 +483,7 @@ where
             }
         })
         .collect_vec();
+    drop(input_openings_span);
     let mut current_indices = query_indices;
     let commit_phase_openings = rounds
         .iter()
@@ -430,7 +499,8 @@ where
                 .map(|&index| index >> log_arity)
                 .collect_vec();
             let (opened_rows, opening_proof) =
-                params.mmcs.open_cuda_fri_batch(round, &group_indices);
+                tracing::info_span!("stark/fri_commit_phase_opening")
+                    .in_scope(|| params.mmcs.open_cuda_fri_batch(round, &group_indices));
             current_indices = group_indices;
             let sibling_values = positions
                 .into_iter()
@@ -548,12 +618,21 @@ where
             .sum::<usize>();
         let dft = &self.dft;
         let log_blowup = self.fri.log_blowup;
+        let transform_workspaces: Vec<_> = evaluations
+            .iter()
+            .map(|(domain, matrix)| {
+                dft.coset_lde_workspace_bytes(
+                    matrix.height(),
+                    matrix.width(),
+                    log_blowup,
+                    Val::GENERATOR / domain.shift(),
+                )
+            })
+            .collect();
+        let max_transform_workspace = transform_workspaces.iter().copied().max().unwrap_or(0);
         let (initial_free, total_bytes) =
             crate::cuda::device_memory_info(self.mmcs.cuda_device_id());
-        let minimum_free = std::env::var("MULTI_STARK_CUDA_MIN_FREE_BYTES")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(total_bytes / 4);
+        let minimum_free = crate::cuda::minimum_free_bytes(total_bytes);
         let source_bytes = source_cells.saturating_mul(size_of::<Val>());
         let lde_bytes = source_bytes
             .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
@@ -561,8 +640,13 @@ where
         let release_traces_during_construction = source_bytes
             .saturating_add(lde_bytes)
             .saturating_add(minimum_free)
+            .saturating_add(max_transform_workspace)
             > initial_free;
-        if lde_bytes.saturating_add(minimum_free) > initial_free {
+        if lde_bytes
+            .saturating_add(minimum_free)
+            .saturating_add(max_transform_workspace)
+            > initial_free
+        {
             let max_lde_height = evaluations
                 .iter()
                 .map(|(_, matrix)| matrix.height() << log_blowup)
@@ -574,7 +658,8 @@ where
             let tree_workspace_bytes = max_lde_height.saturating_mul(96);
             let gpu_lde_budget = initial_free
                 .saturating_sub(minimum_free)
-                .saturating_sub(tree_workspace_bytes);
+                .saturating_sub(tree_workspace_bytes)
+                .saturating_sub(max_transform_workspace);
             let matrix_resources = evaluations
                 .iter()
                 .map(|(_, matrix)| {
@@ -604,6 +689,19 @@ where
             // Split allocatable device capacity between persistent LDEs and
             // later phase workspace. This prevents stage one from filling VRAM
             // with values which lookup immediately has to copy back and evict.
+            // Height groups wider than the device leaf kernel can hash are
+            // neither durable nor transient: their LDEs and digests come
+            // from the host, whatever the memory budget says.
+            let wide_heights =
+                super::mmcs::host_hashed_heights(evaluations.iter().map(|(_, matrix)| {
+                    p3_matrix::Dimensions {
+                        width: matrix.width(),
+                        height: matrix.height(),
+                    }
+                }));
+            for height in &wide_heights {
+                height_groups.remove(height);
+            }
             let durable_budget = gpu_lde_budget / 2;
             // A Merkle leaf combines every matrix at a given height. Keeping
             // height groups intact avoids streaming the CPU half of a split
@@ -627,11 +725,16 @@ where
             // GPU lane during commitment. Its selected matrices are transformed
             // temporarily for hashing, then recomputed by the CPU for durable
             // host storage while CUDA moves on to the retained groups.
-            let transient_reserve = max_lde_height.saturating_mul(32).saturating_add(64 << 20);
+            let transient_reserve = max_lde_height
+                .saturating_mul(32)
+                .saturating_add(64 << 20)
+                .saturating_add(max_transform_workspace);
             let select_transient_plan = |transient_budget| {
                 height_indices
                     .iter()
-                    .filter(|(height, _)| !durable_heights.contains(height))
+                    .filter(|(height, _)| {
+                        !durable_heights.contains(height) && !wide_heights.contains(height)
+                    })
                     .filter_map(|(&height, indices)| {
                         let resources = indices
                             .iter()
@@ -891,7 +994,7 @@ where
                     .collect_vec();
                 host_digest_groups.extend(hash_host_only_height_groups(
                     &host_matrices,
-                    &resident,
+                    &resident.iter().map(Option::as_ref).collect::<Vec<_>>(),
                     &deferred_dimensions,
                     &prehashed_heights,
                 ));
@@ -954,7 +1057,11 @@ where
         let wave_size = if release_traces_during_construction {
             1
         } else {
-            CUDA_LDE_WAVE
+            let workspace_budget = initial_free
+                .saturating_sub(source_bytes)
+                .saturating_sub(lde_bytes)
+                .saturating_sub(minimum_free);
+            (workspace_budget / max_transform_workspace.max(1)).clamp(1, CUDA_LDE_WAVE)
         };
         for wave in evaluations.chunks(wave_size) {
             let transform =
@@ -1184,7 +1291,7 @@ where
             .iter()
             .all(|(data, _)| self.mmcs.is_cuda_resident(data))
         {
-            let resident_rounds = debug_span!("cuda prepare resident rounds").in_scope(|| {
+            let resident_rounds = tracing::info_span!("stark/fri_prepare_rounds").in_scope(|| {
                 commitment_data_with_opening_points
                     .iter()
                     .map(|(data, points)| (self.mmcs.resident_or_upload(data), points))
@@ -1198,7 +1305,7 @@ where
                 .unwrap_or(0);
             let final_fri_height = self.fri.blowup() * self.fri.final_poly_len();
             if resident_max_height > 1024 && resident_max_height > final_fri_height {
-                let _resident_guard = debug_span!("cuda resident fri").entered();
+                let _resident_guard = tracing::info_span!("stark/fri_resident").entered();
                 let rounds = resident_rounds;
                 let device_id = self.mmcs.cuda_device_id();
                 assert_eq!(<Challenge as BasedVectorSpace<Val>>::DIMENSION, 2);
@@ -1225,10 +1332,7 @@ where
                     .max()
                     .unwrap();
                 let log_global_max_height = log2_strict_usize(global_max_height);
-                let coset_domain =
-                    TwoAdicMultiplicativeCoset::new(Val::GENERATOR, log_global_max_height).unwrap();
-                let mut coset: Vec<Val> = coset_domain.iter().collect();
-                reverse_slice_index_bits(&mut coset);
+                let coset_gold = bit_reversed_coset::<Val>(log_global_max_height);
                 let mut max_log: LinearMap<Challenge, usize> = LinearMap::new();
                 for (ldes, points) in &rounds {
                     for (lde, ps) in ldes.iter().zip(points.iter()) {
@@ -1245,7 +1349,6 @@ where
                     Challenge::from_basis_coefficients_slice(&[Val::ZERO, Val::ONE]).unwrap();
                 let ext_w = to_pair(ext_x * ext_x)[0];
                 assert_eq!(ext_w, Goldilocks::from_u64(7));
-                let coset_gold: Vec<_> = coset.iter().copied().map(to_gold).collect();
                 let mut inv_offsets = LinearMap::new();
                 let mut inverse_points = Vec::new();
                 let mut inverse_counts = Vec::new();
@@ -1294,7 +1397,7 @@ where
                             .collect_vec()
                     })
                     .collect_vec();
-                let interpolated = debug_span!("cuda interpolate openings")
+                let interpolated = tracing::info_span!("stark/fri_interpolate")
                     .in_scope(|| workspace.interpolate(&interpolation_tasks, output_count, ext_w));
                 let all_opened_values = layouts
                     .into_iter()
@@ -1352,10 +1455,10 @@ where
                         }
                     }
                 }
-                debug_span!("cuda reduce openings")
+                tracing::info_span!("stark/fri_reduce")
                     .in_scope(|| workspace.reduce(&reduction_tasks, &alpha_pairs, ext_w));
                 let fri_input = reduced.into_iter().rev().flatten().collect_vec();
-                let fri_proof = debug_span!("cuda prove fri").in_scope(|| {
+                let fri_proof = tracing::info_span!("stark/fri_prove").in_scope(|| {
                     prove_fri_cuda_resident(
                         &self.fri,
                         fri_input,
@@ -1401,7 +1504,8 @@ where
             .expect("No Matrices Supplied?");
         let final_fri_height = self.fri.blowup() * self.fri.final_poly_len();
         if cuda_max_height > 1024 && cuda_max_height > final_fri_height {
-            let _resident_guard = debug_span!("cuda streamed fri").entered();
+            let _resident_guard = tracing::info_span!("stark/fri_streamed").entered();
+            let prepare_span = tracing::info_span!("stark/fri_prepare").entered();
             let phase_started = std::time::Instant::now();
             let device_id = self.mmcs.cuda_device_id();
             assert_eq!(<Challenge as BasedVectorSpace<Val>>::DIMENSION, 2);
@@ -1419,10 +1523,7 @@ where
                 .expect("quadratic extension element")
             };
             let log_global_max_height = log2_strict_usize(cuda_max_height);
-            let coset_domain =
-                TwoAdicMultiplicativeCoset::new(Val::GENERATOR, log_global_max_height).unwrap();
-            let mut coset: Vec<Val> = coset_domain.iter().collect();
-            reverse_slice_index_bits(&mut coset);
+            let coset_gold = bit_reversed_coset::<Val>(log_global_max_height);
 
             let mut max_log: LinearMap<Challenge, usize> = LinearMap::new();
             for ((_, points), round_dimensions) in commitment_data_with_opening_points
@@ -1445,7 +1546,6 @@ where
                 .expect("quadratic extension generator");
             let ext_w = to_pair(ext_x * ext_x)[0];
             assert_eq!(ext_w, Goldilocks::from_u64(7));
-            let coset_gold: Vec<_> = coset.iter().copied().map(to_gold).collect();
             let mut inv_offsets = LinearMap::new();
             let mut inverse_points = Vec::new();
             let mut inverse_counts = Vec::new();
@@ -1480,7 +1580,7 @@ where
                 .map(|entry| entry.0)
                 .collect_vec();
             self.mmcs
-                .ensure_device_headroom_batch(&admission_data, fri_workspace_bytes);
+                .ensure_device_headroom_batch(&admission_data, fri_workspace_bytes, "fri");
             if crate::cuda::memory_diagnostics_enabled() {
                 eprintln!(
                     "[multi-stark/cuda] FRI admission: {:.3}s",
@@ -1570,6 +1670,8 @@ where
                 );
             }
 
+            drop(prepare_span);
+            let interpolate_span = tracing::info_span!("stark/fri_interpolate").entered();
             let interpolation_started = std::time::Instant::now();
             let ((cpu_opened, cpu_interpolation_seconds), gpu_opened, gpu_interpolation_seconds) =
                 std::thread::scope(|scope| {
@@ -1699,6 +1801,8 @@ where
                 );
             }
 
+            drop(interpolate_span);
+            let observe_span = tracing::info_span!("stark/fri_observe_openings").entered();
             for round in &all_opened_values {
                 for matrix in round {
                     for values in matrix {
@@ -1735,6 +1839,8 @@ where
                 })
                 .collect_vec();
 
+            drop(observe_span);
+            let _reduce_span = tracing::info_span!("stark/fri_reduce").entered();
             let reduction_started = std::time::Instant::now();
             let ((cpu_reduced, cpu_reduction_seconds), mut gpu_reduced, gpu_reduction_seconds) =
                 std::thread::scope(|scope| {
@@ -1867,7 +1973,7 @@ where
             }
             let fri_input = gpu_reduced.into_iter().rev().flatten().collect_vec();
             let folding_started = std::time::Instant::now();
-            let fri_proof = debug_span!("cuda prove streamed fri").in_scope(|| {
+            let fri_proof = tracing::info_span!("stark/fri_prove").in_scope(|| {
                 prove_fri_cuda_resident(
                     &self.fri,
                     fri_input,
