@@ -26,6 +26,7 @@ use crate::lookup::{Lookup, logup_constraint_count, logup_max_degree, num_public
 /// preprocessed trace, base and extension constraints, and lookups. The
 /// stage-2 width and public-input count are derived (from the lookups and
 /// the challenge field's extension degree), not supplied here.
+#[derive(Clone)]
 pub struct CircuitInputs<F: Field> {
     pub main_width: usize,
     pub preprocessed: Option<RowMajorMatrix<F>>,

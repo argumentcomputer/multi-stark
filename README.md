@@ -12,6 +12,8 @@ lookup arguments for shared state.
 - **Lookup arguments** — push/pull interactions of arbitrary length between
   circuits, enforced via accumulator-based multiset checks
 - **Preprocessed tables** — commit to fixed tables once, reuse across proofs
+- **Plonkish builder** — describe a fixed computation with native-field values,
+  enforced copies, public bindings, witness hints, and fixed-table lookups
 - **Generic over field, hash, and PCS** — the protocol is parameterized by a
   `StarkGenericConfig` (base field via the PCS, challenge field, challenger);
   a batteries-included Goldilocks/Blake3 instantiation is provided
@@ -65,6 +67,8 @@ cargo run --example preprocessed_proof --release
 ```sh
 cargo run --example lookup_proof --release
 ```
+
+See the [Plonkish builder guide](docs/plonkish.md) for APIs and examples.
 
 ## Benchmarks
 
