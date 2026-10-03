@@ -6,6 +6,7 @@ mod builder;
 pub mod gadgets;
 mod hash;
 mod stark;
+pub mod verifier;
 mod witness;
 
 pub use builder::{

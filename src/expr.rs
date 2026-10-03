@@ -11,7 +11,7 @@ use p3_field::Field;
 use crate::lookup::Lookup;
 
 /// Which committed matrix a column variable refers to.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Source {
     Preprocessed,
     Main,
@@ -20,14 +20,14 @@ pub enum Source {
 }
 
 /// The evaluation window: only the current and next row are addressable.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum RowOffset {
     Current,
     Next,
 }
 
 /// A column of a committed matrix, at the current or next row.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ColRef {
     pub source: Source,
     pub offset: RowOffset,

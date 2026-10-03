@@ -68,7 +68,8 @@ cargo run --example preprocessed_proof --release
 cargo run --example lookup_proof --release
 ```
 
-See the [Plonkish builder guide](docs/plonkish.md) for APIs and examples.
+See the [Plonkish builder guide](docs/plonkish.md)
+and [FRI verifier guide](docs/plonkish-verifier.md) for APIs and examples.
 
 ## Benchmarks
 
