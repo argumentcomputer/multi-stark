@@ -695,7 +695,19 @@ impl<SC: StarkGenericConfig> System<SC> {
         }
         let mut quotient_degrees = vec![];
         for (&ci, log_degree) in active_indices.iter().zip(log_degrees) {
-            let quotient_degree = self.circuits[ci].quotient_degree();
+            let circuit = &self.circuits[ci];
+            // Fixed columns describe rows on the setup-time trace domain.
+            // Pin that domain here as well as in witness construction: a
+            // prover must not reinterpret fixed tables, selectors or wiring
+            // on a different-sized trace. Inactive circuits have no degree.
+            if circuit.preprocessed_height != 0 {
+                ensure_eq!(
+                    1usize.checked_shl(u32::from(*log_degree)),
+                    Some(circuit.preprocessed_height),
+                    VerificationError::InvalidProofShape
+                );
+            }
+            let quotient_degree = circuit.quotient_degree();
             // The claimed log degree must be small enough that the quotient
             // domain can still be committed and opened by the PCS. This also
             // guards the `1 << log_degree` shifts used during verification

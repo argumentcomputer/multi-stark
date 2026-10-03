@@ -273,9 +273,25 @@ pub struct GoldilocksBlake3Config {
     max_quotient_degree: usize,
     /// Log2 of the blowup the PCS applies when committing.
     log_blowup: usize,
+    cap_height: usize,
+    fri_parameters: FriParameters,
 }
 
 impl GoldilocksBlake3Config {
+    /// Public protocol-domain seed used by the reference challenger. Exposed
+    /// for constrained transcript replay; this contains no prover secrets.
+    pub fn challenger_seed(&self) -> &[u8] {
+        &self.challenger_seed
+    }
+
+    pub fn cap_height(&self) -> usize {
+        self.cap_height
+    }
+
+    pub fn fri_parameters(&self) -> FriParameters {
+        self.fri_parameters
+    }
+
     pub fn new(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Self {
         Self::with_device(commitment_parameters, fri_parameters, None)
     }
@@ -341,6 +357,8 @@ impl GoldilocksBlake3Config {
             max_log_degree,
             max_quotient_degree,
             log_blowup: commitment_parameters.log_blowup,
+            cap_height: commitment_parameters.cap_height,
+            fri_parameters,
         }
     }
 }

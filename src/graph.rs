@@ -19,7 +19,9 @@ use crate::expr::{CircuitSpec, ColRef, Expr, ExtExpr, Source};
 use crate::lookup::Lookup;
 
 /// Index of a node in the compiled vector.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(
+    serde::Serialize, serde::Deserialize, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
+)]
 pub struct NodeId(pub u32);
 
 impl NodeId {
@@ -31,7 +33,7 @@ impl NodeId {
 
 /// A compiled expression node. Base-field only: extension constraints
 /// have been coordinate-expanded away by the time nodes exist.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Node<F> {
     Const(F),
     Var(ColRef),
@@ -58,7 +60,7 @@ pub struct ExtensionParams<F> {
 
 /// A compiled constraint graph: the hash-consed DAG of expression nodes
 /// shared by all constraints and lookups of one circuit.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct ConstraintGraph<F> {
     /// The unique expression vector; all constraints and lookups share it.
     pub nodes: Vec<Node<F>>,
