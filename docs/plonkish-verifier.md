@@ -46,3 +46,7 @@ cargo run --release --example parity_recursive -- --check-only
 ```
 
 Omit `--check-only` to also prove the verifier circuit; this requires more memory.
+
+For a KZG outer proof, see [commitment backends](pcs-abstraction.md) and
+[the FRI-to-KZG example](../examples/fri_kzg.rs). Goldilocks constraints require
+explicit field translation; changing the commitment scheme alone is insufficient.

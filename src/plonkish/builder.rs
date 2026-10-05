@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use p3_field::Field;
+use crate::traits::Field;
 
 use super::{Witness, WitnessError};
 

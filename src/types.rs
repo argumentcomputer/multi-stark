@@ -5,7 +5,7 @@
 //! [`crate::prover`] and [`crate::verifier`]; this module only provides a
 //! concrete, batteries-included instantiation.
 
-use crate::config::StarkGenericConfig;
+use crate::config::ProofConfig;
 use p3_blake3::Blake3;
 use p3_challenger::{
     CanObserve, CanSample, CanSampleBits, FieldChallenger, GrindingChallenger, HashChallenger,
@@ -189,16 +189,20 @@ pub type Mmcs = CpuMmcs;
 pub type Mmcs = crate::cuda::mmcs::CudaMmcs;
 pub type ExtMmcs = ExtensionMmcs<Val, ExtVal, Mmcs>;
 #[cfg(not(feature = "cuda"))]
-pub type Pcs = TwoAdicFriPcs<Val, PcsDft, Mmcs, ExtMmcs>;
+pub type InnerPcs = TwoAdicFriPcs<Val, PcsDft, Mmcs, ExtMmcs>;
 #[cfg(feature = "cuda")]
-pub type Pcs = crate::cuda::pcs::CudaTwoAdicFriPcs<Val, PcsDft, Mmcs, ExtMmcs>;
+pub type InnerPcs = crate::cuda::pcs::CudaTwoAdicFriPcs<Val, PcsDft, Mmcs, ExtMmcs>;
 
-pub type Commitment = <Pcs as PcsTrait<ExtVal, Challenger>>::Commitment;
-pub type Domain = <Pcs as PcsTrait<ExtVal, Challenger>>::Domain;
-pub type ProverData = <Pcs as PcsTrait<ExtVal, Challenger>>::ProverData;
-pub type EvaluationsOnDomain<'a> = <Pcs as PcsTrait<ExtVal, Challenger>>::EvaluationsOnDomain<'a>;
-pub type PcsError = <Pcs as PcsTrait<ExtVal, Challenger>>::Error;
-pub type PcsProof = <Pcs as PcsTrait<ExtVal, Challenger>>::Proof;
+pub type Pcs =
+    crate::p3_adapter::pcs::FriPcs<Val, ExtVal, Challenger, Dft, Mmcs, ExtMmcs, InnerPcs>;
+
+pub type Commitment = <InnerPcs as PcsTrait<ExtVal, Challenger>>::Commitment;
+pub type Domain = <InnerPcs as PcsTrait<ExtVal, Challenger>>::Domain;
+pub type ProverData = <InnerPcs as PcsTrait<ExtVal, Challenger>>::ProverData;
+pub type EvaluationsOnDomain<'a> =
+    <InnerPcs as PcsTrait<ExtVal, Challenger>>::EvaluationsOnDomain<'a>;
+pub type PcsError = <InnerPcs as PcsTrait<ExtVal, Challenger>>::Error;
+pub type PcsProof = <InnerPcs as PcsTrait<ExtVal, Challenger>>::Proof;
 
 #[cfg(feature = "cuda")]
 fn cuda_coset_selectors(
@@ -260,9 +264,6 @@ pub(crate) fn cuda_host_pool(name: &'static str, threads: usize) -> rayon::Threa
 pub struct GoldilocksBlake3Config {
     /// The PCS used to commit polynomials and prove opening proofs.
     pcs: Pcs,
-    /// The same transform implementation used inside `pcs`, exposed for
-    /// prover-side quotient transforms which live outside the PCS API.
-    dft: Dft,
     /// Seed for fresh challengers: a domain-separation tag followed by a
     /// digest of all protocol parameters.
     challenger_seed: Vec<u8>,
@@ -317,13 +318,13 @@ impl GoldilocksBlake3Config {
             );
         }
         #[cfg(feature = "cuda")]
-        let (pcs, dft) = new_pcs(
+        let (pcs, _dft) = new_pcs(
             commitment_parameters,
             fri_parameters,
             device_id.unwrap_or_else(crate::cuda::configured_device),
         );
         #[cfg(not(feature = "cuda"))]
-        let (pcs, dft) = {
+        let (pcs, _dft) = {
             assert!(
                 device_id.is_none_or(|device| device == 0),
                 "no CUDA backend to place a prover on device {device_id:?}"
@@ -334,7 +335,7 @@ impl GoldilocksBlake3Config {
         // followed by every protocol parameter. Binding the parameters into
         // the seed means transcripts produced under different parameters
         // never collide (see the transcript contract on
-        // [`StarkGenericConfig::initialise_challenger`]).
+        // [`ProofConfig::initialise_challenger`]).
         let mut challenger_seed = b"multi-stark/v0".to_vec();
         for parameter in [
             commitment_parameters.log_blowup,
@@ -351,8 +352,7 @@ impl GoldilocksBlake3Config {
         let max_log_degree = Val::TWO_ADICITY - commitment_parameters.log_blowup;
         let max_quotient_degree = 1 << commitment_parameters.log_blowup;
         Self {
-            pcs,
-            dft,
+            pcs: Pcs::new(pcs, commitment_parameters, fri_parameters),
             challenger_seed,
             max_log_degree,
             max_quotient_degree,
@@ -363,18 +363,13 @@ impl GoldilocksBlake3Config {
     }
 }
 
-impl StarkGenericConfig for GoldilocksBlake3Config {
+impl ProofConfig for GoldilocksBlake3Config {
     type Pcs = Pcs;
-    type Dft = Dft;
     type Challenge = ExtVal;
     type Challenger = Challenger;
 
     fn pcs(&self) -> &Pcs {
         &self.pcs
-    }
-
-    fn dft(&self) -> &Dft {
-        &self.dft
     }
 
     fn initialise_challenger(&self) -> Challenger {
@@ -1185,7 +1180,7 @@ fn new_pcs(
     commitment_parameters: CommitmentParameters,
     fri_parameters: FriParameters,
     #[cfg(feature = "cuda")] device_id: i32,
-) -> (Pcs, Dft) {
+) -> (InnerPcs, Dft) {
     #[cfg(feature = "cuda")]
     let val_mmcs = new_mmcs(commitment_parameters.cap_height, device_id);
     #[cfg(not(feature = "cuda"))]
@@ -1205,7 +1200,7 @@ fn new_pcs(
     let pcs_dft = CudaDft::new(device_id);
     #[cfg(not(feature = "cuda"))]
     let pcs_dft = PcsDft::default();
-    let pcs = Pcs::new(pcs_dft, val_mmcs, inner_parameters);
+    let pcs = InnerPcs::new(pcs_dft, val_mmcs, inner_parameters);
     (pcs, dft)
 }
 

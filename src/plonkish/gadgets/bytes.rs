@@ -1,4 +1,4 @@
-use p3_field::PrimeField;
+use crate::traits::PrimeField;
 
 use crate::plonkish::{Bool, CircuitBuilder, Table, Value};
 
@@ -31,11 +31,9 @@ pub struct ByteGadgets {
 }
 
 pub(super) fn integer<F: PrimeField>(value: F) -> Result<u64, String> {
-    let limbs = value.as_canonical_biguint().to_u64_digits();
-    if limbs.len() > 1 {
-        return Err("expected an integer fitting in 64 bits".into());
-    }
-    Ok(limbs.first().copied().unwrap_or(0))
+    value
+        .canonical_u64()
+        .ok_or_else(|| "expected an integer fitting in 64 bits".into())
 }
 
 /// One constrained affine operation, used to pack bounded integer limbs.
@@ -73,7 +71,7 @@ impl ByteGadgets {
 
     pub fn new<F: PrimeField>(b: &mut CircuitBuilder<F>) -> Self {
         assert!(
-            F::order().bits() > 33,
+            F::prime_order_exceeds(1usize << 33),
             "u32 gadgets need a prime field larger than 2^33"
         );
         Self {
@@ -325,13 +323,12 @@ impl ByteGadgets {
         b: &mut CircuitBuilder<F>,
         value: Value,
     ) -> [ByteValue; 8] {
-        let order = F::order().to_u64_digits();
-        assert_eq!(order.len(), 1, "8-byte encoding requires a <=64-bit field");
+        let order = F::modulus_u64().expect("field encoding is limited to 64 bits");
         let nibbles: [Value; 16] = self.nibble_hints(b, value);
         let bytes = std::array::from_fn(|i| {
             self.byte_from_nibbles(b, [nibbles[2 * i], nibbles[2 * i + 1]])
         });
-        self.assert_at_most_u64(b, bytes, order[0] - 1);
+        self.assert_at_most_u64(b, bytes, order - 1);
         let packed = self.pack(b, &nibbles);
         b.assert_equal(value, packed);
         bytes

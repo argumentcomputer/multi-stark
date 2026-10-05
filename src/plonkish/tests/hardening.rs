@@ -356,7 +356,7 @@ fn invalid_constant_booleans_cannot_be_optimized_away() {
 
 #[test]
 fn arithmetic_matches_native_fields_at_wrapping_boundaries() {
-    fn check<F: Field>() {
+    fn check<F: crate::traits::Field>() {
         let scalars = [F::ZERO, F::ONE, F::NEG_ONE, F::TWO];
         for a in scalars {
             for c in scalars {

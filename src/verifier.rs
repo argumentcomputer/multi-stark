@@ -159,15 +159,13 @@
 //! actual low-degree-extension values of the witness. Do not use it when the
 //! witness must remain hidden from the verifier.
 
-use crate::config::{PcsError, StarkGenericConfig, Val};
+use crate::config::{PcsError, ProofConfig, Val};
 use crate::ensure_eq;
 use crate::eval::VarValues;
 use crate::prover::{Proof, claims_accumulator, observe_claims, sample_lookup_challenges};
 use crate::system::System;
+use crate::traits::{Algebra, EvaluationDomain, ExtensionOf, Field, Pcs, Transcript, TwoAdicField};
 
-use p3_challenger::{CanObserve, FieldChallenger};
-use p3_commit::{Pcs, PolynomialSpace};
-use p3_field::{BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
 use p3_util::log2_strict_usize;
 
 /// Errors that can occur during proof verification.
@@ -197,7 +195,7 @@ pub enum VerificationError<PcsErr> {
     UnbalancedBatch,
 }
 
-impl<SC: StarkGenericConfig> System<SC> {
+impl<SC: ProofConfig> System<SC> {
     /// Verifies a STARK proof against a single claim.
     pub fn verify(
         &self,
@@ -229,7 +227,7 @@ impl<SC: StarkGenericConfig> System<SC> {
         // ≤ N / |F_ext| (Schwartz-Zippel on the numerator polynomial).
         ensure_eq!(
             proof.intermediate_accumulators.last(),
-            Some(&SC::Challenge::ZERO),
+            Some(&<SC::Challenge as Algebra<SC::Challenge>>::ZERO),
             VerificationError::UnbalancedChannel
         );
 
@@ -248,18 +246,18 @@ impl<SC: StarkGenericConfig> System<SC> {
         // Bind the activation bitmap — before any commitment or challenge, so
         // every sample depends on which circuits this proof covers.
         for &is_active in &proof.active {
-            challenger.observe(Val::<SC>::from_bool(is_active));
+            challenger.observe_field(Val::<SC>::from_bool(is_active));
         }
 
         // observe preprocessed and stage_1 commitment
         if let Some(commit) = &self.preprocessed_commit {
-            challenger.observe(commit.clone());
+            challenger.observe_commitment(commit.clone());
         }
-        challenger.observe(proof.commitments.stage_1_trace.clone());
+        challenger.observe_commitment(proof.commitments.stage_1_trace.clone());
 
         // Observe trace heights to bind the proof to specific domain sizes.
         for log_degree in &proof.log_degrees {
-            challenger.observe(Val::<SC>::from_u8(*log_degree));
+            challenger.observe_field(Val::<SC>::from_u8(*log_degree));
         }
 
         // Soundness: claims must be observed BEFORE lookup challenges are sampled.
@@ -331,26 +329,26 @@ impl<SC: StarkGenericConfig> System<SC> {
             .collect();
 
         // observe stage_2 commitment
-        challenger.observe(commitments.stage_2_trace.clone());
+        challenger.observe_commitment(commitments.stage_2_trace.clone());
 
         // Observe the intermediate accumulators. They enter the constraints as
         // public values, so later challenges (α, ζ) must depend on them
         // directly rather than only through the quotient commitment.
         for acc in intermediate_accumulators {
-            challenger.observe_algebra_element(*acc);
+            challenger.observe_challenge(*acc);
         }
 
         // Soundness: constraint folding. All k constraints are combined via powers
         // of α. The folded sum has degree k-1 in α, so by Schwartz-Zippel a violated
         // constraint survives folding with probability ≥ 1 - (k-1)/|F_ext|.
-        let constraint_challenge: SC::Challenge = challenger.sample_algebra_element();
+        let constraint_challenge: SC::Challenge = challenger.sample_challenge();
 
         // observe quotient commitment
-        challenger.observe(commitments.quotient_chunks.clone());
+        challenger.observe_commitment(commitments.quotient_chunks.clone());
 
         // Soundness: OOD evaluation. ζ is sampled after all commitments are fixed.
         // A nonzero polynomial of degree ≤ D vanishes at ζ with probability ≤ D/|F_ext|.
-        let zeta: SC::Challenge = challenger.sample_algebra_element();
+        let zeta: SC::Challenge = challenger.sample_challenge();
 
         // Reconstruct the PCS opening rounds (identical to the prover).
         let mut stage_1_trace_evaluations = vec![];
@@ -359,9 +357,7 @@ impl<SC: StarkGenericConfig> System<SC> {
         for pos in 0..active_indices.len() {
             let log_degree = log_degrees[pos];
             let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
-            let zeta_next = trace_domain
-                .next_point(zeta)
-                .ok_or(VerificationError::InvalidProofShape)?;
+            let zeta_next = trace_domain.next_point(zeta);
             stage_1_trace_evaluations.push((
                 trace_domain,
                 vec![
@@ -397,9 +393,7 @@ impl<SC: StarkGenericConfig> System<SC> {
                     match active_pos[ci] {
                         Some(pos) => {
                             let trace_domain = pcs.natural_domain_for_degree(1 << log_degrees[pos]);
-                            let zeta_next = trace_domain
-                                .next_point(zeta)
-                                .ok_or(VerificationError::InvalidProofShape)?;
+                            let zeta_next = trace_domain.next_point(zeta);
                             let preprocessed_opened_values =
                                 preprocessed_opened_values.as_ref().unwrap();
                             preprocessed_trace_evaluations.push((
@@ -451,7 +445,7 @@ impl<SC: StarkGenericConfig> System<SC> {
         // use the opened values to compute the composition polynomial for each circuit
         // and check that the evaluation of the composition polynomial equals the
         // product of the zerofier with the quotient
-        let extension_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
+        let extension_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
         let empty: [SC::Challenge; 0] = [];
         for (pos, &ci) in active_indices.iter().enumerate() {
             let circuit = &self.circuits[ci];
@@ -531,11 +525,10 @@ impl<SC: StarkGenericConfig> System<SC> {
             debug_assert_eq!(constraint_values.len(), circuit.constraint_count());
             // Fold with α (Horner): Σ_i α^{k-1-i} · value_i, matching the
             // prover's reversed α-power weighting.
-            let composition = constraint_values
-                .iter()
-                .fold(SC::Challenge::ZERO, |acc, &v| {
-                    acc * constraint_challenge + v
-                });
+            let composition = constraint_values.iter().fold(
+                <SC::Challenge as Algebra<SC::Challenge>>::ZERO,
+                |acc, &v| acc * constraint_challenge + v,
+            );
 
             // Recombine the quotient from its coefficient slices:
             // `Q(ζ) = Σᵢ ζ^{i·n}·cᵢ(ζ)`, with each slice's value read from
@@ -547,7 +540,9 @@ impl<SC: StarkGenericConfig> System<SC> {
                 .chunks_exact(extension_d)
                 .zip(zeta_pow_n.powers())
                 .map(|(chunk, zeta_pow)| zeta_pow * from_ext_basis::<Val<SC>, SC::Challenge>(chunk))
-                .sum::<SC::Challenge>();
+                .fold(<SC::Challenge as Algebra<SC::Challenge>>::ZERO, |a, b| {
+                    a + b
+                });
 
             // Soundness: OOD check. If any constraint is violated on the trace
             // domain, the composition polynomial is not divisible by the vanishing
@@ -713,8 +708,10 @@ impl<SC: StarkGenericConfig> System<SC> {
             // guards the `1 << log_degree` shifts used during verification
             // against overflow on adversarial proofs.
             crate::ensure!(
-                usize::from(*log_degree) + log2_strict_usize(quotient_degree)
-                    <= self.config.max_log_degree(),
+                usize::from(*log_degree) <= self.config.max_log_degree()
+                    && usize::from(*log_degree) < usize::BITS as usize
+                    && usize::from(*log_degree) + log2_strict_usize(quotient_degree)
+                        <= self.config.max_log_quotient_domain(),
                 VerificationError::InvalidProofShape
             );
             quotient_degrees.push(quotient_degree);
@@ -726,7 +723,7 @@ impl<SC: StarkGenericConfig> System<SC> {
             num_active,
             VerificationError::InvalidProofShape
         );
-        let extension_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
+        let extension_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
         for (pos, quotient_degree) in quotient_degrees.iter().enumerate() {
             ensure_eq!(
                 quotient_opened_values[pos].len(),
@@ -749,12 +746,14 @@ impl<SC: StarkGenericConfig> System<SC> {
 }
 
 /// Reassembles an extension element from its base coordinates.
-fn from_ext_basis<F: Field, EF: ExtensionField<F>>(coeffs: &[EF]) -> EF {
+fn from_ext_basis<F: Field, EF: ExtensionOf<F>>(coeffs: &[EF]) -> EF {
     coeffs
         .iter()
         .enumerate()
-        .map(|(i, c)| *c * <EF as BasedVectorSpace<F>>::ith_basis_element(i).unwrap())
-        .sum()
+        .fold(<EF as Algebra<EF>>::ZERO, |acc, (i, c)| {
+            let basis = EF::from_basis_coefficients_fn(|j| if j == i { F::ONE } else { F::ZERO });
+            acc + *c * basis
+        })
 }
 
 #[cfg(test)]
@@ -905,6 +904,45 @@ mod tests {
         system.verify_multiple_claims(no_claims, &proof2).unwrap();
     }
 
+    /// Byte-identity gate for the PCS-abstraction refactor: the serialized
+    /// proof of a fixed system + witness must not change while the core is
+    /// ported onto the crate-owned traits (docs/pcs-abstraction.md, Phase 0).
+    /// Serial builds are deterministic (the `parallel` feature is what
+    /// introduces run-to-run byte drift), so the pin only runs without it.
+    /// If a deliberate protocol change moves this hash, bump it in the same
+    /// commit with the reasoning — never as a refactor side effect.
+    #[cfg(not(feature = "parallel"))]
+    #[test]
+    fn proof_bytes_pin() {
+        use p3_symmetric::CryptographicHasher;
+        let (system, key) = system();
+        let f = Val::from_u32;
+        let mut pythagorean_trace = [3, 4, 5].map(f).to_vec();
+        let mut complex_trace = [4, 2, 3, 1, 10, 10].map(f).to_vec();
+        for _ in 0..4 {
+            pythagorean_trace.extend(pythagorean_trace.clone());
+            complex_trace.extend(complex_trace.clone());
+        }
+        let witness = SystemWitness::from_stage_1(
+            vec![
+                RowMajorMatrix::new(pythagorean_trace, 3),
+                RowMajorMatrix::new(complex_trace, 6),
+            ],
+            &system,
+        );
+        let claim = [f(3), f(4), f(5)];
+        let proof = system.prove_multiple_claims(&key, &[&claim], witness);
+        let bytes = proof.to_bytes().expect("serialize");
+        let hash: [u8; 32] = p3_blake3::Blake3.hash_iter(bytes.iter().copied());
+        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "20e5e4d4ddf9e9c16aa3e47749b3d80e638981e3bb72a4d493697a74736df8d8",
+            "serialized proof bytes changed ({} bytes)",
+            bytes.len()
+        );
+    }
+
     // -- Negative / adversarial tests --
 
     /// Helper: creates a small system and valid proof for negative tests.
@@ -942,7 +980,7 @@ mod tests {
     fn test_tampered_stage_1_values_rejected() {
         let (system, mut proof) = small_system_and_proof();
         // Mutate a value in the stage 1 opened values — FRI should catch this.
-        proof.stage_1_opened_values[0][0][0] += ExtVal::ONE;
+        proof.stage_1_opened_values[0][0][0] += <ExtVal as Algebra<ExtVal>>::ONE;
         let no_claims: &[&[Val]] = &[];
         let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(result.is_err());
@@ -953,7 +991,7 @@ mod tests {
         let (system, mut proof) = small_system_and_proof();
         // The context-building helper deliberately does not consume the PCS
         // proof, but the public verifier must pass it to FRI verification.
-        proof.opening_proof.final_poly[0] += ExtVal::ONE;
+        proof.opening_proof.final_poly[0] += <ExtVal as p3_field::PrimeCharacteristicRing>::ONE;
         let no_claims: &[&[Val]] = &[];
         let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(matches!(
@@ -967,7 +1005,7 @@ mod tests {
         let (system, mut proof) = small_system_and_proof();
         // Set the last intermediate accumulator to non-zero.
         let last = proof.intermediate_accumulators.len() - 1;
-        proof.intermediate_accumulators[last] = ExtVal::ONE;
+        proof.intermediate_accumulators[last] = <ExtVal as Algebra<ExtVal>>::ONE;
         let no_claims: &[&[Val]] = &[];
         let result = system.verify_multiple_claims(no_claims, &proof);
         assert!(result.is_err());

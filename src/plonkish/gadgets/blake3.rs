@@ -1,4 +1,4 @@
-use p3_field::PrimeField;
+use crate::traits::PrimeField;
 
 use super::bytes::Word;
 use super::{ByteGadgets, ByteValue};

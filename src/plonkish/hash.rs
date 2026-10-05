@@ -18,6 +18,7 @@
 //! pull from generic wires; digest bindings push back. Channel 4 contains
 //! this entire vocabulary, disjoint from generic copy/public/table channels.
 use super::{Value, WitnessError};
+use crate::traits::Field;
 use crate::{
     eval::{VarValues, eval_expr},
     expr::Expr,
@@ -25,7 +26,6 @@ use crate::{
     system::CircuitInputs,
 };
 use p3_blake3::Blake3;
-use p3_field::Field;
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_symmetric::CryptographicHasher;
 use std::collections::HashMap;
@@ -308,7 +308,7 @@ impl Compact {
                 }
             }
         }
-        assert!(<F::PrimeSubfield as Field>::order() > label.into());
+        assert!(F::prime_order_exceeds(label));
         for uses in occurrences {
             for (i, &(t, r, slot, _)) in uses.iter().enumerate() {
                 fixed[t][r * fw(t) + 2 + slots(t) + slot] = f(uses[(i + 1) % uses.len()].3);

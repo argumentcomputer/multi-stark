@@ -3,6 +3,8 @@
 //! constraints. See `examples/plonkish_proof.rs` for a complete example.
 
 mod builder;
+#[cfg(feature = "kzg")]
+pub mod foreign;
 pub mod gadgets;
 mod hash;
 mod stark;

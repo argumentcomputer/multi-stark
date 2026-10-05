@@ -1,6 +1,6 @@
 use std::fmt;
 
-use p3_field::Field;
+use crate::traits::Field;
 
 use super::builder::Recipe;
 use super::{Circuit, Value};

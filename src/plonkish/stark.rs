@@ -21,7 +21,7 @@
 
 use std::fmt;
 
-use p3_field::Field;
+use crate::traits::Field;
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 use crate::expr::Expr;
@@ -40,6 +40,7 @@ pub enum LoweringError {
     CustomTraceExceedsHeight,
     /// Integer labels/counts must embed injectively in the prime subfield.
     FieldTooSmall,
+    QuotientBudgetTooSmall,
 }
 
 impl fmt::Display for LoweringError {
@@ -152,7 +153,7 @@ impl<F: Field> Circuit<F> {
             .max(self.tables.len())
             .max(self.publics.len() + 1)
             .max(4);
-        if <F::PrimeSubfield as Field>::order() <= largest_count.into() {
+        if !F::prime_order_exceeds(largest_count) {
             return Err(LoweringError::FieldTooSmall);
         }
         let mut table_heights = Vec::with_capacity(self.tables.len());

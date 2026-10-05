@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use p3_field::{Field, PrimeCharacteristicRing};
+use p3_field::PrimeCharacteristicRing;
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 use super::*;
@@ -30,7 +30,7 @@ fn config() -> GoldilocksBlake3Config {
 
 /// Independently check the emitted AIR and exact lookup multiset, bypassing
 /// every frontend witness check. Used to attack the physical trace directly.
-fn relations_hold<F: Field>(
+fn relations_hold<F: crate::traits::Field>(
     inputs: &[CircuitInputs<F>],
     traces: &[RowMajorMatrix<F>],
     claims: &[Vec<F>],

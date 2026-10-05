@@ -5,7 +5,7 @@
 //! trees also get a direct recursive evaluator, used as the reference in
 //! tests (with genuine extension-field arithmetic for `ExtExpr`).
 
-use p3_field::{Algebra, Field};
+use crate::traits::{Algebra, Field};
 
 use crate::expr::{ColRef, Expr, ExtExpr, RowOffset, Source};
 use crate::graph::{ConstraintGraph, ExtensionParams, Node, NodeId};
@@ -50,26 +50,17 @@ impl<W: Copy> VarValues<'_, W> {
 impl<F: Field> ConstraintGraph<F> {
     /// Dense forward sweep over the whole node vector, in working type `W`;
     /// fills `buf` with one value per node.
-    pub fn sweep<W: Algebra<F> + Copy>(&self, values: &VarValues<'_, W>, buf: &mut Vec<W>) {
+    pub fn sweep<W: Algebra<F>>(&self, values: &VarValues<'_, W>, buf: &mut Vec<W>) {
         self.sweep_range(values, buf, self.nodes.len());
     }
 
     /// Sweeps only the lookup prefix (partial evaluation for the lookup
     /// witness).
-    pub fn sweep_lookup_prefix<W: Algebra<F> + Copy>(
-        &self,
-        values: &VarValues<'_, W>,
-        buf: &mut Vec<W>,
-    ) {
+    pub fn sweep_lookup_prefix<W: Algebra<F>>(&self, values: &VarValues<'_, W>, buf: &mut Vec<W>) {
         self.sweep_range(values, buf, self.lookup_prefix_len);
     }
 
-    fn sweep_range<W: Algebra<F> + Copy>(
-        &self,
-        values: &VarValues<'_, W>,
-        buf: &mut Vec<W>,
-        len: usize,
-    ) {
+    fn sweep_range<W: Algebra<F>>(&self, values: &VarValues<'_, W>, buf: &mut Vec<W>, len: usize) {
         buf.clear();
         buf.reserve(len);
         // Raw pointer into the reserved storage; captured by the `child`
@@ -122,7 +113,7 @@ impl<F: Field> ConstraintGraph<F> {
     }
 
     /// Convenience: sweep and return the constraint values.
-    pub fn evaluate_constraints<W: Algebra<F> + Copy>(&self, values: &VarValues<'_, W>) -> Vec<W> {
+    pub fn evaluate_constraints<W: Algebra<F>>(&self, values: &VarValues<'_, W>) -> Vec<W> {
         let mut buf = Vec::new();
         self.sweep(values, &mut buf);
         self.constraint_values(&buf)

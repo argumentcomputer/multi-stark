@@ -44,7 +44,7 @@ impl AlgebraicInputs {
     /// Allocate inputs using only fixed circuit metadata and claim lengths.
     /// Claims are public. Openings and challenges are private boundary wires
     /// which a complete verifier MUST bind to its PCS and transcript gadgets.
-    pub fn allocate<F: Field>(
+    pub fn allocate<F: Field + crate::traits::Field>(
         builder: &mut CircuitBuilder<F>,
         circuits: &[impl Borrow<Circuit<F>>],
         claim_lengths: &[usize],
@@ -63,7 +63,7 @@ impl AlgebraicInputs {
 
     /// Compose verification with caller-owned statement wires. Public exposure
     /// is the caller's choice; claims may be derived by other gadgets.
-    pub fn with_claims<F: Field>(
+    pub fn with_claims<F: Field + crate::traits::Field>(
         builder: &mut CircuitBuilder<F>,
         circuits: &[impl Borrow<Circuit<F>>],
         claims: Vec<Vec<Value>>,
@@ -134,7 +134,7 @@ pub struct AlgebraicOutputs {
     pub circuits: Vec<CircuitEvaluation>,
 }
 
-fn sweep<F: BinomiallyExtendable<2>>(
+fn sweep<F: BinomiallyExtendable<2> + crate::traits::Field>(
     builder: &mut CircuitBuilder<F>,
     graph: &ConstraintGraph<F>,
     view: &VarValues<'_, Q>,
@@ -142,7 +142,9 @@ fn sweep<F: BinomiallyExtendable<2>>(
     let mut values: Vec<Q> = Vec::with_capacity(graph.nodes.len());
     for node in &graph.nodes {
         let value = match *node {
-            Node::Const(c) => Q::constant(builder, [c, F::ZERO]),
+            Node::Const(c) => {
+                Q::constant(builder, [c, <F as p3_field::PrimeCharacteristicRing>::ZERO])
+            }
             Node::Var(col) => {
                 let rows = match col.source {
                     Source::Preprocessed => view.preprocessed,
@@ -172,7 +174,7 @@ fn sweep<F: BinomiallyExtendable<2>>(
 /// Multiply pairs of coordinate-polynomial evaluations. Each coordinate is
 /// itself in the OOD challenge field. This is NOT ordinary multiplication
 /// after recombining the two stage-2 columns into one extension value.
-fn coordinate_mul<F: BinomiallyExtendable<2>>(
+fn coordinate_mul<F: BinomiallyExtendable<2> + crate::traits::Field>(
     builder: &mut CircuitBuilder<F>,
     a: [Q; 2],
     b: [Q; 2],
@@ -197,20 +199,22 @@ fn coordinate_mul<F: BinomiallyExtendable<2>>(
 ///
 /// This is NOT a proof verifier: callers must additionally constrain exact
 /// Fiat-Shamir replay and PCS verification before making that claim.
-pub fn constrain_algebraic_checks<F: TwoAdicField + BinomiallyExtendable<2>>(
+pub fn constrain_algebraic_checks<
+    F: TwoAdicField + BinomiallyExtendable<2> + crate::traits::Field,
+>(
     builder: &mut CircuitBuilder<F>,
     circuits: &[impl Borrow<Circuit<F>>],
     log_degrees: &[u8],
     inputs: &AlgebraicInputs,
 ) -> AlgebraicOutputs {
-    let zero = Q::constant(builder, [F::ZERO; 2]);
+    let zero = Q::constant(builder, [<F as p3_field::PrimeCharacteristicRing>::ZERO; 2]);
     constrain_algebraic_checks_with_residual(builder, circuits, log_degrees, inputs, zero)
 }
 
 /// Batch shards can end in a nonzero residual; the batch caller must constrain
 /// its value against the verifier-side messages (and any other shard residuals).
 pub(super) fn constrain_algebraic_checks_with_residual<
-    F: TwoAdicField + BinomiallyExtendable<2>,
+    F: TwoAdicField + BinomiallyExtendable<2> + crate::traits::Field,
 >(
     builder: &mut CircuitBuilder<F>,
     circuits: &[impl Borrow<Circuit<F>>],
@@ -243,8 +247,14 @@ pub(super) fn constrain_algebraic_checks_with_residual<
         }
         assert_eq!(opening.quotient.len(), circuit.quotient_degree() * 2);
     }
-    let zero = Q::constant(builder, [F::ZERO; 2]);
-    let one = Q::constant(builder, [F::ONE, F::ZERO]);
+    let zero = Q::constant(builder, [<F as p3_field::PrimeCharacteristicRing>::ZERO; 2]);
+    let one = Q::constant(
+        builder,
+        [
+            <F as p3_field::PrimeCharacteristicRing>::ONE,
+            <F as p3_field::PrimeCharacteristicRing>::ZERO,
+        ],
+    );
     let AlgebraicChallenges {
         beta,
         gamma,
@@ -275,7 +285,13 @@ pub(super) fn constrain_algebraic_checks_with_residual<
     {
         let log_degree = usize::from(log_degree);
         let g = F::two_adic_generator(log_degree);
-        let last = Q::constant(builder, [g.inverse(), F::ZERO]);
+        let last = Q::constant(
+            builder,
+            [
+                Field::inverse(&g),
+                <F as p3_field::PrimeCharacteristicRing>::ZERO,
+            ],
+        );
         let zeta_pow_n = zeta.exp_power_of_2(builder, log_degree);
         let vanishing = zeta_pow_n.sub(builder, one);
         let inv_vanishing = vanishing.inverse(builder);
@@ -314,7 +330,8 @@ pub(super) fn constrain_algebraic_checks_with_residual<
             .iter()
             .map(|id| nodes[id.index()])
             .collect();
-        let injection_norm = (F::from_usize(1 << log_degree) * g).inverse();
+        let injection_norm =
+            Field::inverse(&(<F as crate::traits::Field>::from_usize(1 << log_degree) * g));
         let injection: [Q; 2] = std::array::from_fn(|k| {
             let delta = publics[6 + k].sub(builder, publics[4 + k]);
             let delta = delta.scale(builder, injection_norm);
@@ -377,7 +394,13 @@ pub(super) fn constrain_algebraic_checks_with_residual<
         }
         // Unlike stage 2, quotient coefficient slices MUST be recombined
         // with the extension basis before summing powers of zeta^n.
-        let basis = Q::constant(builder, [F::ZERO, F::ONE]);
+        let basis = Q::constant(
+            builder,
+            [
+                <F as p3_field::PrimeCharacteristicRing>::ZERO,
+                <F as p3_field::PrimeCharacteristicRing>::ONE,
+            ],
+        );
         let mut quotient = zero;
         let mut power = one;
         for chunk in opening.quotient.as_chunks::<2>().0 {

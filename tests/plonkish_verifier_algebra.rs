@@ -13,8 +13,9 @@ use multi_stark::plonkish::verifier::{
 use multi_stark::plonkish::{Assignment, Circuit, CircuitBuilder, WitnessError};
 use multi_stark::prover::Proof;
 use multi_stark::system::{System, SystemWitness};
+use multi_stark::traits::Pcs;
 use multi_stark::types::{ExtVal, GoldilocksBlake3Config, Val};
-use p3_commit::{Pcs, PolynomialSpace};
+use p3_commit::PolynomialSpace;
 
 fn value(assignment: &Assignment<Val>, wire: Q) -> ExtVal {
     ExtVal::from_basis_coefficients_fn(|i| assignment.value(wire.0[i]).unwrap())
@@ -56,10 +57,7 @@ fn check_intermediates(
     assert_eq!(value(assignment, outputs.claims_accumulator), acc);
     for (i, circuit) in system.circuits.iter().enumerate() {
         let output = &outputs.circuits[i];
-        let domain = <_ as Pcs<ExtVal, multi_stark::types::Challenger>>::natural_domain_for_degree(
-            system.config.pcs(),
-            parity::HEIGHT,
-        );
+        let domain = <_ as Pcs>::natural_domain_for_degree(system.config.pcs(), parity::HEIGHT);
         let sels = domain.selectors_at_point(zeta);
         assert_eq!(
             value(assignment, output.selectors.is_first_row),

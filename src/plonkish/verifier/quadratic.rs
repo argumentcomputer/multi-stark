@@ -9,47 +9,80 @@ use crate::plonkish::{Bool, CircuitBuilder, Value};
 pub struct QuadraticValue(pub [Value; 2]);
 
 impl QuadraticValue {
-    pub fn select<F: Field>(b: &mut CircuitBuilder<F>, bit: Bool, yes: Self, no: Self) -> Self {
+    pub fn select<F: Field + crate::traits::Field>(
+        b: &mut CircuitBuilder<F>,
+        bit: Bool,
+        yes: Self,
+        no: Self,
+    ) -> Self {
         Self(std::array::from_fn(|i| b.select(bit, yes.0[i], no.0[i])))
     }
 
-    pub fn mul_base<F: Field>(self, b: &mut CircuitBuilder<F>, value: Value) -> Self {
+    pub fn mul_base<F: Field + crate::traits::Field>(
+        self,
+        b: &mut CircuitBuilder<F>,
+        value: Value,
+    ) -> Self {
         Self(self.0.map(|coordinate| b.mul(coordinate, value)))
     }
 
-    pub fn input<F: Field>(builder: &mut CircuitBuilder<F>, name: &str) -> Self {
+    pub fn input<F: Field + crate::traits::Field>(
+        builder: &mut CircuitBuilder<F>,
+        name: &str,
+    ) -> Self {
         Self(std::array::from_fn(|i| {
             builder.input(format!("{name}[{i}]"))
         }))
     }
 
-    pub fn constant<F: Field>(builder: &mut CircuitBuilder<F>, coordinates: [F; 2]) -> Self {
+    pub fn constant<F: Field + crate::traits::Field>(
+        builder: &mut CircuitBuilder<F>,
+        coordinates: [F; 2],
+    ) -> Self {
         Self(coordinates.map(|c| builder.constant(c)))
     }
 
-    pub fn from_base<F: Field>(builder: &mut CircuitBuilder<F>, value: Value) -> Self {
-        Self([value, builder.constant(F::ZERO)])
+    pub fn from_base<F: Field + crate::traits::Field>(
+        builder: &mut CircuitBuilder<F>,
+        value: Value,
+    ) -> Self {
+        Self([
+            value,
+            builder.constant(<F as p3_field::PrimeCharacteristicRing>::ZERO),
+        ])
     }
 
-    pub fn add<F: Field>(self, builder: &mut CircuitBuilder<F>, rhs: Self) -> Self {
+    pub fn add<F: Field + crate::traits::Field>(
+        self,
+        builder: &mut CircuitBuilder<F>,
+        rhs: Self,
+    ) -> Self {
         Self(std::array::from_fn(|i| builder.add(self.0[i], rhs.0[i])))
     }
 
-    pub fn sub<F: Field>(self, builder: &mut CircuitBuilder<F>, rhs: Self) -> Self {
+    pub fn sub<F: Field + crate::traits::Field>(
+        self,
+        builder: &mut CircuitBuilder<F>,
+        rhs: Self,
+    ) -> Self {
         Self(std::array::from_fn(|i| builder.sub(self.0[i], rhs.0[i])))
     }
 
-    pub fn neg<F: Field>(self, builder: &mut CircuitBuilder<F>) -> Self {
-        let zero = builder.constant(F::ZERO);
+    pub fn neg<F: Field + crate::traits::Field>(self, builder: &mut CircuitBuilder<F>) -> Self {
+        let zero = builder.constant(<F as p3_field::PrimeCharacteristicRing>::ZERO);
         Self(self.0.map(|v| builder.sub(zero, v)))
     }
 
-    pub fn scale<F: Field>(self, builder: &mut CircuitBuilder<F>, scalar: F) -> Self {
+    pub fn scale<F: Field + crate::traits::Field>(
+        self,
+        builder: &mut CircuitBuilder<F>,
+        scalar: F,
+    ) -> Self {
         let scalar = builder.constant(scalar);
         Self(self.0.map(|v| builder.mul(v, scalar)))
     }
 
-    pub fn mul<F: BinomiallyExtendable<2>>(
+    pub fn mul<F: BinomiallyExtendable<2> + crate::traits::Field>(
         self,
         builder: &mut CircuitBuilder<F>,
         rhs: Self,
@@ -68,7 +101,10 @@ impl QuadraticValue {
 
     /// Constrained inverse through the norm: `(a - bX)/(a² - W*b²)`.
     /// The base inverse relation rejects zero, including malicious hints.
-    pub fn inverse<F: BinomiallyExtendable<2>>(self, builder: &mut CircuitBuilder<F>) -> Self {
+    pub fn inverse<F: BinomiallyExtendable<2> + crate::traits::Field>(
+        self,
+        builder: &mut CircuitBuilder<F>,
+    ) -> Self {
         let aa = builder.mul(self.0[0], self.0[0]);
         let bb = builder.mul(self.0[1], self.0[1]);
         let w = builder.constant(F::W);
@@ -77,11 +113,11 @@ impl QuadraticValue {
         let inv_norm = builder.inverse(norm);
         let real = builder.mul(self.0[0], inv_norm);
         let imag = builder.mul(self.0[1], inv_norm);
-        let zero = builder.constant(F::ZERO);
+        let zero = builder.constant(<F as p3_field::PrimeCharacteristicRing>::ZERO);
         Self([real, builder.sub(zero, imag)])
     }
 
-    pub fn exp_power_of_2<F: BinomiallyExtendable<2>>(
+    pub fn exp_power_of_2<F: BinomiallyExtendable<2> + crate::traits::Field>(
         mut self,
         builder: &mut CircuitBuilder<F>,
         log_power: usize,
@@ -92,7 +128,11 @@ impl QuadraticValue {
         self
     }
 
-    pub fn assert_equal<F: Field>(self, builder: &mut CircuitBuilder<F>, rhs: Self) {
+    pub fn assert_equal<F: Field + crate::traits::Field>(
+        self,
+        builder: &mut CircuitBuilder<F>,
+        rhs: Self,
+    ) {
         for (a, b) in self.0.into_iter().zip(rhs.0) {
             builder.assert_equal(a, b);
         }
