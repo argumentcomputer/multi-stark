@@ -22,10 +22,12 @@
 //!
 //! [`ProofConfig`]: crate::config::ProofConfig
 
+pub mod compact;
 pub mod config;
 pub mod domain;
 pub mod field;
 pub mod pcs;
+pub mod sharded;
 pub mod srs;
 pub mod transcript;
 

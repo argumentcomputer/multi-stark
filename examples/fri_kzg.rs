@@ -10,6 +10,7 @@ fn main() {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use multi_stark::{
         ark_adapter::{config::KzgConfig, field::Scalar, srs::Srs},
+        batch::{BatchProof, Retention},
         expr::Expr,
         lookup::Lookup,
         plonkish::{foreign::GoldilocksCircuit, verifier::*},
@@ -22,12 +23,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let generic = !args.iter().any(|s| s == "--compact");
     let check_only = args.iter().any(|s| s == "--check-only");
+    let estimate = args.iter().any(|s| s == "--estimate");
     let compare = args.iter().any(|s| s == "--compare");
-    if args
+    let merge_tables = args.iter().any(|s| s == "--merge-tables");
+    let batch = args.iter().any(|s| s == "--batch");
+    let stream = args.iter().any(|s| s == "--stream-preprocessing");
+    if stream && !batch {
+        return Err("--stream-preprocessing requires --batch".into());
+    }
+    let partition_log = args
         .iter()
-        .any(|s| !["--compact", "--check-only", "--compare"].contains(&s.as_str()))
-    {
-        return Err("usage: fri_kzg [--compact] [--check-only] [--compare]".into());
+        .filter_map(|s| s.strip_prefix("--partition-log="))
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()?;
+    if partition_log.len() > 1 {
+        return Err("supply --partition-log only once".into());
+    }
+    let partition_height = partition_log
+        .first()
+        .map(|&log| 1usize.checked_shl(log).ok_or("invalid partition log"))
+        .transpose()?;
+    if args.iter().any(|s| {
+        ![
+            "--compact",
+            "--check-only",
+            "--estimate",
+            "--compare",
+            "--merge-tables",
+            "--batch",
+            "--stream-preprocessing",
+        ]
+        .contains(&s.as_str())
+            && !s.starts_with("--partition-log=")
+    }) {
+        return Err(
+            "usage: fri_kzg [--compact] [--check-only] [--estimate] [--compare] [--merge-tables] [--partition-log=N] [--batch] [--stream-preprocessing]"
+                .into(),
+        );
     }
     let start = Instant::now();
     let config = GoldilocksBlake3Config::new(
@@ -88,6 +120,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             compact_blake3: !generic,
         },
     )?;
+    if estimate {
+        println!(
+            "source={:?}, scalar={:?}",
+            circuit.stats(),
+            GoldilocksCircuit::estimate(&circuit)
+        );
+        return Ok(());
+    }
     let prepared = plan.expand_witness(ProofEnvelope::Ordinary {
         proof: &proof,
         claims: &statement.claims,
@@ -107,14 +147,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         foreign.circuit.stats(),
         start.elapsed()
     );
-    let compiled = foreign.circuit.lower_to_multi_stark(Scalar::from_u8(93))?;
-    let definitions = compiled.circuit_inputs();
-    let max_height = definitions
-        .iter()
+    let compiled = if stream {
+        foreign.circuit.lower_to_multi_stark_sharded(
+            Scalar::from_u8(93),
+            partition_height.unwrap_or(1 << 18),
+        )?
+    } else if let Some(height) = partition_height {
+        foreign
+            .circuit
+            .lower_to_multi_stark_with_max_height(Scalar::from_u8(93), height)?
+    } else {
+        foreign.circuit.lower_to_multi_stark(Scalar::from_u8(93))?
+    };
+    let compiled = if merge_tables {
+        compiled.merge_table_traces(1 << 22)?
+    } else {
+        compiled
+    };
+    let max_height = (0..compiled.num_circuits())
+        .map(|i| compiled.circuit_input(i).unwrap())
         .map(|c| c.preprocessed.as_ref().unwrap().height())
         .max()
         .unwrap();
-    println!("max_height={max_height}, traces={}", definitions.len());
+    println!(
+        "max_height={max_height}, traces={}",
+        compiled.num_circuits()
+    );
     if check_only {
         return Ok(());
     }
@@ -124,10 +182,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let claims = compiled.claims(&[Scalar::from_u8(13)])?;
     let refs: Vec<_> = claims.iter().map(Vec::as_slice).collect();
     for &group in if compare { &[1, 0][..] } else { &[0][..] } {
+        if stream {
+            use multi_stark::ark_adapter::sharded::ShardedKzg;
+            let definition = |i| {
+                if group == 0 {
+                    compiled
+                        .kzg_circuit_input(i, max_height, 8)
+                        .unwrap()
+                        .unwrap()
+                } else {
+                    let mut input = compiled.circuit_input(i).unwrap();
+                    input.lookup_group_size = group;
+                    input
+                }
+            };
+            let start = Instant::now();
+            let mut prover = ShardedKzg::new(
+                KzgConfig::new(srs.clone(), 8),
+                (0..compiled.num_circuits()).map(definition),
+            );
+            let shards = compiled.trace_shards(&assignment)?;
+            let mut schedule: Vec<_> = (0..compiled.main_heights().len())
+                .map(|i| vec![i])
+                .collect();
+            if schedule.len() < shards.len() {
+                schedule.push((compiled.main_heights().len()..compiled.num_circuits()).collect());
+            }
+            let mut shard_claims = vec![vec![]; shards.len()];
+            shard_claims[0] = claims.clone();
+            let proof = prover.prove(&shard_claims, &schedule, definition, |i| {
+                shards.traces(i).unwrap()
+            })?;
+            prover.verify(&proof, &shard_claims, &schedule)?;
+            let bytes = proof.to_bytes()?;
+            let mut decoded = BatchProof::<KzgConfig>::from_bytes(&bytes)?;
+            prover.verify(&decoded, &shard_claims, &schedule)?;
+            decoded.preamble.headers[0].claims[1][3] += Scalar::ONE;
+            assert!(prover.verify(&decoded, &shard_claims, &schedule).is_err());
+            assert!(
+                prover
+                    .system
+                    .circuits
+                    .iter()
+                    .all(|c| c.preprocessed.is_none())
+            );
+            println!(
+                "group={group}, shards={}, partition_heights={:?}, batch_bytes={}, setup_and_prove={:?}; verified, altered claim rejected, preprocessing and witnesses regenerated",
+                shards.len(),
+                compiled.main_heights(),
+                bytes.len(),
+                start.elapsed()
+            );
+            continue;
+        }
         let mut circuits = if group == 0 {
             compiled.kzg_circuit_inputs(max_height, 8)?
         } else {
-            definitions.clone()
+            compiled.circuit_inputs()
         };
         if group != 0 {
             for c in &mut circuits {
@@ -148,12 +259,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             })
             .collect();
+        if batch {
+            let shards = compiled.trace_shards(&assignment)?;
+            let mut shard_claims = vec![vec![]; shards.len()];
+            shard_claims[0] = claims.clone();
+            let mut calls = vec![0; shards.len()];
+            let proof = outer.prove_batch_with(
+                &pk,
+                &shard_claims,
+                vec![],
+                Retention::Regenerate,
+                |shard| {
+                    calls[shard] += 1;
+                    SystemWitness::from_stage_1(
+                        shards.traces(shard).expect("validated assignment"),
+                        &outer,
+                    )
+                },
+            );
+            assert!(calls.iter().all(|&n| n == 2));
+            // Application policy is trusted independently of the proof:
+            // every partition once, fixed claims, no extra balance messages.
+            let accepts = |proof: &BatchProof<KzgConfig>| {
+                proof.preamble.headers.len() == shards.len()
+                    && proof.preamble.messages.is_empty()
+                    && proof
+                        .preamble
+                        .headers
+                        .iter()
+                        .enumerate()
+                        .all(|(shard, header)| {
+                            let active: Vec<_> = (0..outer.circuits.len())
+                                .map(|ci| {
+                                    if shard < compiled.main_heights().len() {
+                                        ci == shard
+                                    } else {
+                                        ci >= compiled.main_heights().len()
+                                    }
+                                })
+                                .collect();
+                            let logs: Vec<_> = outer
+                                .circuits
+                                .iter()
+                                .zip(&active)
+                                .filter(|(_, on)| **on)
+                                .map(|(c, _)| u8::try_from(c.preprocessed_height.ilog2()).unwrap())
+                                .collect();
+                            header.active == active
+                                && header.log_degrees == logs
+                                && header.claims == shard_claims[shard]
+                        })
+                    && outer.verify_batch(proof).is_ok()
+            };
+            assert!(accepts(&proof));
+            let bytes = proof.to_bytes()?;
+            let mut decoded = BatchProof::<KzgConfig>::from_bytes(&bytes)?;
+            assert!(accepts(&decoded));
+            decoded.preamble.headers[0].claims[1][3] += Scalar::ONE;
+            assert!(!accepts(&decoded));
+            println!(
+                "group={group}, shards={}, partition_heights={:?}, batch_bytes={}, setup_and_prove={:?}; verified, altered claim rejected, witnesses regenerated",
+                shards.len(),
+                compiled.main_heights(),
+                bytes.len(),
+                start.elapsed()
+            );
+            continue;
+        }
         let proof = outer.prove_multiple_claims(
             &pk,
             &refs,
             SystemWitness::from_stage_1(compiled.traces(&assignment)?, &outer),
         );
         outer.verify_multiple_claims(&refs, &proof).unwrap();
+        let codec =
+            multi_stark::ark_adapter::compact::FixedProofCodec::new(&outer, &proof.log_degrees)?;
+        let compact_bytes = codec.encode(&proof)?;
+        let decoded = codec.decode(&compact_bytes)?;
+        outer.verify_multiple_claims(&refs, &decoded).unwrap();
+        assert_eq!(decoded.to_bytes()?, proof.to_bytes()?);
         let mut wrong = claims.clone();
         wrong[1][3] += Scalar::ONE;
         assert!(
@@ -165,8 +349,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .is_err()
         );
         println!(
-            "group={group}, columns(main,fixed,lookup,quotient)={widths:?}, proof_bytes={}, setup_and_prove={:?}; verified, altered claim rejected",
+            "group={group}, columns(main,fixed,lookup,quotient)={widths:?}, proof_bytes={}, compact_bytes={}, setup_and_prove={:?}; verified, altered claim rejected",
             proof.to_bytes()?.len(),
+            compact_bytes.len(),
             start.elapsed()
         );
     }

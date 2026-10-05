@@ -5,7 +5,9 @@ use num_bigint::{BigInt, BigUint, Sign};
 use p3_field::PrimeField64;
 
 use super::builder::Recipe;
-use super::{Assignment, Circuit, CircuitBuilder, Gate, Table, Value, Witness, WitnessError};
+use super::{
+    Assignment, Circuit, CircuitBuilder, CircuitStats, Gate, Table, Value, Witness, WitnessError,
+};
 use super::{LoweringError, MultiStarkCircuit};
 use crate::ark_adapter::field::Scalar;
 use crate::system::CircuitInputs;
@@ -24,61 +26,81 @@ impl MultiStarkCircuit<Scalar> {
         srs_len: usize,
         quotient_budget: usize,
     ) -> Result<Vec<CircuitInputs<Scalar>>, LoweringError> {
-        use crate::{
-            expr::CircuitSpec,
-            graph::{ExtensionParams, compile},
-            lookup::{MAX_LOOKUP_GROUP, logup_max_degree, stage2_width},
-        };
         let mut inputs = self.circuit_inputs();
         for input in &mut inputs {
-            let fixed = input
-                .preprocessed
-                .as_ref()
-                .expect("lowering has fixed columns");
-            if fixed.height() > srs_len {
-                return Err(LoweringError::InvalidTraceHeight);
-            }
-            let graph = compile(
-                &CircuitSpec {
-                    main_width: input.main_width,
-                    preprocessed_width: fixed.width(),
-                    stage2_width: stage2_width(input.lookups.len(), 1, 1),
-                    num_publics: 4,
-                    constraints: input.constraints.clone(),
-                    ext_constraints: input.ext_constraints.clone(),
-                    lookups: input.lookups.clone(),
-                },
-                &ExtensionParams {
-                    degree: 1,
-                    w: Scalar::ZERO,
-                    karatsuba: false,
-                },
-            )
-            .expect("valid lowering");
-            let commitment_bytes = if fixed.height() == srs_len { 48 } else { 96 };
-            let best = (1..=MAX_LOOKUP_GROUP)
-                .filter_map(|group| {
-                    let degree = graph
-                        .max_constraint_degree
-                        .max(logup_max_degree(&graph, group))
-                        as usize;
-                    let quotient = (degree.max(2) - 1).next_power_of_two();
-                    if quotient > quotient_budget {
-                        return None;
-                    }
-                    let width = stage2_width(input.lookups.len(), group, 1);
-                    let bytes =
-                        width * (commitment_bytes + 64) + quotient * (commitment_bytes + 32);
-                    Some(((bytes, quotient, group), group))
-                })
-                .min_by_key(|(cost, _)| *cost)
-                .ok_or(LoweringError::QuotientBudgetTooSmall)?;
-            input.lookup_group_size = best.1;
+            tune_kzg_input(input, srs_len, quotient_budget)?;
         }
         Ok(inputs)
     }
+
+    /// Generate and tune one circuit's preprocessing, without materializing the others.
+    pub fn kzg_circuit_input(
+        &self,
+        index: usize,
+        srs_len: usize,
+        quotient_budget: usize,
+    ) -> Result<Option<CircuitInputs<Scalar>>, LoweringError> {
+        let Some(mut input) = self.circuit_input(index) else {
+            return Ok(None);
+        };
+        tune_kzg_input(&mut input, srs_len, quotient_budget)?;
+        Ok(Some(input))
+    }
 }
 
+fn tune_kzg_input(
+    input: &mut CircuitInputs<Scalar>,
+    srs_len: usize,
+    quotient_budget: usize,
+) -> Result<(), LoweringError> {
+    use crate::{
+        expr::CircuitSpec,
+        graph::{ExtensionParams, compile},
+        lookup::{MAX_LOOKUP_GROUP, logup_max_degree, stage2_width},
+    };
+    let fixed = input
+        .preprocessed
+        .as_ref()
+        .expect("lowering has fixed columns");
+    if fixed.height() > srs_len {
+        return Err(LoweringError::InvalidTraceHeight);
+    }
+    let graph = compile(
+        &CircuitSpec {
+            main_width: input.main_width,
+            preprocessed_width: fixed.width(),
+            stage2_width: stage2_width(input.lookups.len(), 1, 1),
+            num_publics: 4,
+            constraints: input.constraints.clone(),
+            ext_constraints: input.ext_constraints.clone(),
+            lookups: input.lookups.clone(),
+        },
+        &ExtensionParams {
+            degree: 1,
+            w: Scalar::ZERO,
+            karatsuba: false,
+        },
+    )
+    .expect("valid lowering");
+    let commitment_bytes = if fixed.height() == srs_len { 48 } else { 96 };
+    let best = (1..=MAX_LOOKUP_GROUP)
+        .filter_map(|group| {
+            let degree = graph
+                .max_constraint_degree
+                .max(logup_max_degree(&graph, group)) as usize;
+            let quotient = (degree.max(2) - 1).next_power_of_two();
+            if quotient > quotient_budget {
+                return None;
+            }
+            let width = stage2_width(input.lookups.len(), group, 1);
+            let bytes = width * (commitment_bytes + 64) + quotient * (commitment_bytes + 32);
+            Some(((bytes, quotient, group), group))
+        })
+        .min_by_key(|(cost, _)| *cost)
+        .ok_or(LoweringError::QuotientBudgetTooSmall)?;
+    input.lookup_group_size = best.1;
+    Ok(())
+}
 /// A fixed translation. Public values retain their original order and canonical encoding.
 pub struct GoldilocksCircuit {
     pub circuit: Circuit<Scalar>,
@@ -122,9 +144,9 @@ fn integer(value: Scalar) -> BigInt {
 
 fn interval(coefficients: [i128; 5], bounds: [u64; 3]) -> (BigInt, BigInt) {
     let [a, b, c] = bounds.map(BigInt::from);
-    let maxima = [&a * &b, a, b, c, BigInt::from(1)];
-    let mut low = BigInt::from(0);
-    let mut high = BigInt::from(0);
+    let maxima = [&a * &b, a, b, c];
+    let mut low = BigInt::from(coefficients[4]);
+    let mut high = low.clone();
     for (coefficient, maximum) in coefficients.into_iter().zip(maxima) {
         let term = coefficient * maximum;
         if coefficient < 0 {
@@ -134,6 +156,147 @@ fn interval(coefficients: [i128; 5], bounds: [u64; 3]) -> (BigInt, BigInt) {
         }
     }
     (low, high)
+}
+
+fn small_interval(coefficients: [i128; 5], bounds: [u64; 3]) -> Option<(i128, i128)> {
+    let [a, b, c] = bounds.map(i128::from);
+    let maxima = [
+        if coefficients[0] == 0 {
+            0
+        } else {
+            a.checked_mul(b)?
+        },
+        a,
+        b,
+        c,
+    ];
+    let (mut low, mut high) = (coefficients[4], coefficients[4]);
+    for (coefficient, maximum) in coefficients.into_iter().zip(maxima) {
+        let term = coefficient.checked_mul(maximum)?;
+        if coefficient < 0 {
+            low = low.checked_add(term)?;
+        } else {
+            high = high.checked_add(term)?;
+        }
+    }
+    Some((low, high))
+}
+
+fn boolean_gate(gate: &Gate<Val>) -> bool {
+    gate.wires[0] == gate.wires[1]
+        && gate.coefficients == [Val::ONE, Val::NEG_ONE, Val::ZERO, Val::ZERO, Val::ZERO]
+}
+
+fn signed_scalar(n: i128) -> Scalar {
+    let value =
+        Scalar::from_u64(u64::try_from(n.unsigned_abs()).expect("signed Goldilocks coefficient"));
+    if n < 0 { -value } else { value }
+}
+
+fn arithmetic_range(gate: &Gate<Val>, bounds: [u64; 3]) -> Option<(i128, i128)> {
+    let mut coefficients = gate.coefficients.map(signed);
+    coefficients[3] = 0;
+    if coefficients == [-1, 1, 0, 0, 0] && bounds[1] <= 1 {
+        Some((0, i128::from(bounds[0])))
+    } else {
+        small_interval(coefficients, bounds)
+    }
+}
+
+fn selection_range(
+    source: &Circuit<Val>,
+    gate: &Gate<Val>,
+    bounds: &[u64],
+) -> Option<(i128, i128)> {
+    if gate.coefficients != [Val::ZERO, Val::ONE, Val::ONE, Val::NEG_ONE, Val::ZERO] {
+        return None;
+    }
+    let Recipe::Arithmetic(yes) = source.recipes[gate.wires[0].index] else {
+        return None;
+    };
+    let Recipe::Arithmetic(no) = source.recipes[gate.wires[1].index] else {
+        return None;
+    };
+    let yes = &source.gates[yes];
+    let no = &source.gates[no];
+    if yes.coefficients != [Val::ONE, Val::ZERO, Val::ZERO, Val::NEG_ONE, Val::ZERO]
+        || no.coefficients != [Val::NEG_ONE, Val::ONE, Val::ZERO, Val::NEG_ONE, Val::ZERO]
+        || yes.wires[0] != no.wires[1]
+        || bounds[yes.wires[0].index] > 1
+    {
+        return None;
+    }
+    // bit*a + (1-bit)*b lies in [0,max(a,b)], not [0,a+b].
+    Some((
+        0,
+        i128::from(bounds[yes.wires[1].index].max(bounds[no.wires[0].index])),
+    ))
+}
+
+fn root(parents: &mut [usize], mut i: usize) -> usize {
+    while parents[i] != i {
+        parents[i] = parents[parents[i]];
+        i = parents[i];
+    }
+    i
+}
+
+/// Propagate only independently enforced bounds through equality and acyclic
+/// integer arithmetic. An unbounded equality cycle cannot justify its own range.
+fn propagate_bounds(
+    source: &Circuit<Val>,
+    bounds: &mut [u64],
+    checked: &mut [bool],
+    integer_gates: &mut [bool],
+) {
+    let mut parents: Vec<_> = (0..source.num_values()).collect();
+    for gate in &source.gates {
+        if gate.coefficients == [Val::ZERO, Val::ONE, Val::NEG_ONE, Val::ZERO, Val::ZERO] {
+            let a = root(&mut parents, gate.wires[0].index);
+            let b = root(&mut parents, gate.wires[1].index);
+            parents[a.max(b)] = a.min(b);
+        }
+    }
+    for (i, recipe) in source.recipes.iter().enumerate() {
+        if let Recipe::Constant(value) = recipe {
+            bounds[i] = value.as_canonical_u64();
+            checked[i] = true;
+        }
+        let r = root(&mut parents, i);
+        parents[i] = r;
+        if checked[i] {
+            bounds[r] = bounds[r].min(bounds[i]);
+            checked[r] = true;
+        }
+    }
+    for (i, recipe) in source.recipes.iter().enumerate() {
+        let Recipe::Arithmetic(index) = recipe else {
+            continue;
+        };
+        let gate = &source.gates[*index];
+        let [a, b, c] = gate.wires.map(|w| parents[w.index]);
+        let [qm, qa, qb, _, _] = gate.coefficients;
+        if (qm != Val::ZERO || qa != Val::ZERO) && !checked[a]
+            || (qm != Val::ZERO || qb != Val::ZERO) && !checked[b]
+        {
+            continue;
+        }
+        if let Some((low, high)) = arithmetic_range(gate, [bounds[a], bounds[b], bounds[c]])
+            && low >= 0
+            && high < i128::from(P)
+        {
+            let r = parents[i];
+            bounds[r] = bounds[r].min(u64::try_from(high).unwrap());
+            checked[r] = true;
+            integer_gates[*index] = true;
+        }
+    }
+    // Roots have the smallest index in their component, so this in-place
+    // expansion never overwrites another component's root.
+    for (i, &r) in parents.iter().enumerate() {
+        bounds[i] = bounds[r];
+        checked[i] = checked[r];
+    }
 }
 
 /// Range checks use one shared 16-bit table. Rounding up the bit count remains
@@ -197,22 +360,71 @@ fn canonical(b: &mut CircuitBuilder<Scalar>, table: Table, value: Value) {
 impl GoldilocksCircuit {
     pub fn new(source: &Circuit<Val>) -> Self {
         let mut b = CircuitBuilder::<Scalar>::new();
+        let inputs = Self::translate(source, &mut b);
+        Self {
+            circuit: b.finish(),
+            inputs,
+        }
+    }
+
+    /// Count first, then reserve the exact IR lengths to avoid geometric growth
+    /// during large translations. This runs the translation twice.
+    pub fn new_preallocated(source: &Circuit<Val>) -> Self {
+        let stats = Self::estimate(source);
+        let mut b = CircuitBuilder::<Scalar>::new();
+        b.reserve(stats);
+        let inputs = Self::translate(source, &mut b);
+        debug_assert_eq!(b.stats(), stats);
+        Self {
+            circuit: b.finish(),
+            inputs,
+        }
+    }
+
+    /// Exact translated frontend counts without storing the expanded circuit.
+    /// Retains a wire mapping and range bounds proportional to source values.
+    pub fn estimate(source: &Circuit<Val>) -> CircuitStats {
+        let mut b = CircuitBuilder::<Scalar>::counting();
+        Self::translate(source, &mut b);
+        b.stats()
+    }
+
+    fn translate(source: &Circuit<Val>, b: &mut CircuitBuilder<Scalar>) -> GoldilocksInputs {
         let range_table = b.fixed_table(
             "u16",
             (0..=u16::MAX).map(|v| vec![Scalar::from_u16(v)]).collect(),
         );
         let mut bounds = vec![P - 1; source.num_values()];
         let mut checked = vec![false; source.num_values()];
+        let mut integer_gates = vec![false; source.gates.len()];
+        // x²-x=0 has exactly the same roots in both fields. These gates are
+        // lifted directly below, independently enforcing this bound.
+        for gate in &source.gates {
+            if boolean_gate(gate) {
+                bounds[gate.wires[0].index] = 1;
+                checked[gate.wires[0].index] = true;
+            }
+        }
+        let table_bounds: Vec<Vec<u64>> = source
+            .tables
+            .iter()
+            .map(|table| {
+                (0..table.width())
+                    .map(|column| {
+                        table
+                            .rows
+                            .iter()
+                            .map(|row| row[column].as_canonical_u64())
+                            .max()
+                            .unwrap()
+                    })
+                    .collect()
+            })
+            .collect();
         // Membership checks give independently enforced bounds.
         for lookup in &source.lookups {
-            let table = &source.tables[lookup.table.index];
             for (column, value) in lookup.values.iter().enumerate() {
-                let maximum = table
-                    .rows
-                    .iter()
-                    .map(|r| r[column].as_canonical_u64())
-                    .max()
-                    .unwrap();
+                let maximum = table_bounds[lookup.table.index][column];
                 bounds[value.index] = bounds[value.index].min(maximum);
                 checked[value.index] = true;
             }
@@ -225,6 +437,7 @@ impl GoldilocksCircuit {
                 }
             }
         }
+        propagate_bounds(source, &mut bounds, &mut checked, &mut integer_gates);
         let mut wires = Vec::with_capacity(source.num_values());
         let mut inputs = Vec::with_capacity(source.num_values());
         for (i, recipe) in source.recipes.iter().enumerate() {
@@ -238,19 +451,22 @@ impl GoldilocksCircuit {
                 // Acyclic arithmetic with no modular wrap derives a range from
                 // earlier wires. The translated gate enforces that equality.
                 if let Recipe::Arithmetic(gate) = recipe {
-                    let gate = &source.gates[*gate];
-                    let mut coefficients = gate.coefficients.map(signed);
-                    coefficients[3] = 0;
-                    let (low, high) = interval(coefficients, gate.wires.map(|w| bounds[w.index]));
-                    if low >= BigInt::from(0) && high < BigInt::from(P) {
-                        let (_, digits) = high.to_u64_digits();
-                        bounds[i] = bounds[i].min(digits.first().copied().unwrap_or(0));
+                    let gate_index = *gate;
+                    let gate = &source.gates[gate_index];
+                    let output_range = selection_range(source, gate, &bounds)
+                        .or_else(|| arithmetic_range(gate, gate.wires.map(|w| bounds[w.index])));
+                    if let Some((low, high)) = output_range
+                        && low >= 0
+                        && high < i128::from(P)
+                    {
+                        bounds[i] = bounds[i].min(u64::try_from(high).unwrap());
                         checked[i] = true;
+                        integer_gates[gate_index] = true;
                     }
                 }
                 let value = b.input(format!("goldilocks[{i}]"));
                 if !checked[i] {
-                    canonical(&mut b, range_table, value);
+                    canonical(b, range_table, value);
                 }
                 wires.push(value);
                 inputs.push(true);
@@ -293,19 +509,16 @@ impl GoldilocksCircuit {
                 );
             }
         }
-        for gate in &source.gates {
-            constrain_gate(&mut b, range_table, gate, &wires, &bounds);
+        for (gate, integer) in source.gates.iter().zip(integer_gates) {
+            constrain_gate(b, range_table, gate, &wires, &bounds, integer);
         }
         for value in &source.publics {
             b.expose_public(wires[value.index]);
         }
-        Self {
-            circuit: b.finish(),
-            inputs: GoldilocksInputs {
-                source_owner: source.owner,
-                wires,
-                is_input: inputs,
-            },
+        GoldilocksInputs {
+            source_owner: source.owner,
+            wires,
+            is_input: inputs,
         }
     }
 
@@ -345,9 +558,18 @@ fn constrain_gate(
     gate: &Gate<Val>,
     wires: &[Value],
     bounds: &[u64],
+    integer_relation: bool,
 ) {
     let coefficients = gate.coefficients.map(signed);
     let values = gate.wires.map(|v| wires[v.index]);
+    if integer_relation
+        || boolean_gate(gate)
+        || small_interval(coefficients, gate.wires.map(|v| bounds[v.index]))
+            .is_some_and(|(low, high)| low > -i128::from(P) && high < i128::from(P))
+    {
+        b.constrain_gate(values, coefficients.map(signed_scalar));
+        return;
+    }
     let (low, high) = interval(coefficients, gate.wires.map(|v| bounds[v.index]));
     let p = BigInt::from(P);
     if low > -&p && high < p {
@@ -393,6 +615,171 @@ fn constrain_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn census_matches_materialized_translation() {
+        for compact in [false, true] {
+            let mut b = CircuitBuilder::<Val>::new();
+            if compact {
+                b.enable_compact_blake3();
+            }
+            let x = b.input("x");
+            let y = b.input("y");
+            let bit = b.is_zero(x);
+            let product = b.mul(x, y);
+            let selected = b.select(bit, product, y);
+            let five = b.constant(Val::from_u8(5));
+            let folded = b.add(five, five);
+            let output = b.add(selected, folded);
+            let table = b.fixed_table("byte", (0..=255).map(|i| vec![Val::from_u16(i)]).collect());
+            b.lookup(table, &[y]);
+            if compact {
+                for len in [0, 1, 64, 65, 1024, 1025, 2049] {
+                    b.record_hash(vec![y; len], &[y; 32]);
+                }
+            }
+            b.expose_public(output);
+            let source = b.finish();
+            let regular = GoldilocksCircuit::new(&source);
+            let reserved = GoldilocksCircuit::new_preallocated(&source);
+            assert_eq!(
+                GoldilocksCircuit::estimate(&source),
+                regular.circuit.stats()
+            );
+            assert_eq!(regular.circuit.stats(), reserved.circuit.stats());
+            for (a, b) in regular.circuit.gates.iter().zip(&reserved.circuit.gates) {
+                assert_eq!(a.coefficients, b.coefficients);
+                assert_eq!(a.wires.map(|v| v.index), b.wires.map(|v| v.index));
+            }
+        }
+    }
+
+    #[test]
+    fn selection_preserves_integer_bounds_and_rejects_aliases() {
+        for maximum in [255, P - 1] {
+            let mut b = CircuitBuilder::<Val>::new();
+            let bit = b.input("bit");
+            let yes = b.input("yes");
+            let no = b.input("no");
+            if maximum == 255 {
+                let table =
+                    b.fixed_table("byte", (0..=255).map(|v| vec![Val::from_u16(v)]).collect());
+                b.lookup(table, &[yes]);
+                b.lookup(table, &[no]);
+            }
+            let bit_handle = b.assert_bool(bit);
+            let out = b.select(bit_handle, yes, no);
+            b.expose_public(out);
+            let source = b.finish();
+            let mapped = GoldilocksCircuit::new(&source);
+            if maximum == 255 {
+                assert_eq!(mapped.circuit.stats().lookups, 2);
+                assert_eq!(mapped.circuit.stats().gates, source.stats().gates + 1);
+            } else {
+                // Only the two branches need canonical checks; selection
+                // intermediates and output inherit their enforced ranges.
+                assert_eq!(mapped.circuit.stats().lookups, 8);
+            }
+            for choice in [0, 1] {
+                for (a, c) in [(0, maximum), (maximum, 0), (maximum, maximum - 1)] {
+                    let mut witness = source.witness();
+                    witness.set(bit, Val::from_u8(choice)).unwrap();
+                    witness.set(yes, Val::from_u64(a)).unwrap();
+                    witness.set(no, Val::from_u64(c)).unwrap();
+                    let assignment = witness.generate().unwrap();
+                    let mut witness = mapped.circuit.witness();
+                    mapped.assign(&assignment, &mut witness).unwrap();
+                    let assignment = witness.generate().unwrap();
+                    assert_eq!(
+                        assignment.public_values(),
+                        [Scalar::from_u64(if choice == 1 { a } else { c })]
+                    );
+                    // Alter each source wire by p, preserving its Goldilocks
+                    // residue. Scalar constraints must still reject it.
+                    for (i, &is_input) in mapped.inputs.is_input.iter().enumerate() {
+                        if is_input {
+                            let mut forged = assignment.values.clone();
+                            forged[mapped.inputs.wires[i].index] += Scalar::from_u64(P);
+                            assert!(mapped.circuit.check_values(&forged).is_err());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn boolean_bounds_are_enforced_without_integer_range_gadgets() {
+        let mut b = CircuitBuilder::<Val>::new();
+        let x = b.input("bit");
+        b.assert_bool(x);
+        let y = b.affine([x, x], [Val::from_u8(15), Val::ZERO], Val::from_u8(3));
+        b.expose_public(y);
+        let source = b.finish();
+        let mapped = GoldilocksCircuit::new(&source);
+        assert_eq!(mapped.circuit.stats().lookups, 0);
+        for bit in [0, 1] {
+            let mut witness = source.witness();
+            witness.set(x, Val::from_u8(bit)).unwrap();
+            let assignment = witness.generate().unwrap();
+            let mut witness = mapped.circuit.witness();
+            mapped.assign(&assignment, &mut witness).unwrap();
+            let output = witness.generate().unwrap();
+            assert_eq!(output.public_values(), [Scalar::from_u8(bit * 15 + 3)]);
+        }
+        for invalid in [2, P, P + 1, u64::MAX] {
+            let mut witness = mapped.circuit.witness();
+            for (i, &is_input) in mapped.inputs.is_input.iter().enumerate() {
+                if is_input {
+                    witness
+                        .set(
+                            mapped.inputs.wires[i],
+                            Scalar::from_u64(if i == x.index { invalid } else { 3 }),
+                        )
+                        .unwrap();
+                }
+            }
+            assert!(witness.generate().is_err());
+        }
+    }
+
+    #[test]
+    fn equality_ranges_need_an_independent_bound() {
+        for bounded in [false, true] {
+            let mut b = CircuitBuilder::<Val>::new();
+            let x = b.input("x");
+            let bit = b.input("bit");
+            b.assert_bool(bit);
+            let y = b.mul(x, bit);
+            b.assert_equal(x, y); // At bit=1 this cycle implies no range.
+            if bounded {
+                let byte = b.input("byte");
+                let table =
+                    b.fixed_table("byte", (0..=255).map(|v| vec![Val::from_u16(v)]).collect());
+                b.lookup(table, &[byte]);
+                b.assert_equal(y, byte);
+            }
+            let source = b.finish();
+            let mapped = GoldilocksCircuit::new(&source);
+            if bounded {
+                assert_eq!(mapped.circuit.stats().lookups, 1);
+            }
+            for n in [7, P, P + 7] {
+                let mut witness = mapped.circuit.witness();
+                for (i, &is_input) in mapped.inputs.is_input.iter().enumerate() {
+                    if is_input {
+                        witness
+                            .set(
+                                mapped.inputs.wires[i],
+                                Scalar::from_u64(if i == bit.index { 1 } else { n }),
+                            )
+                            .unwrap();
+                    }
+                }
+                assert_eq!(witness.generate().is_ok(), n == 7);
+            }
+        }
+    }
 
     #[test]
     fn modular_arithmetic_and_canonical_boundaries() {

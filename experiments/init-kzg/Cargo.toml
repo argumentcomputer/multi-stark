@@ -1,0 +1,14 @@
+[package]
+name = "init-kzg-run"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[dependencies]
+multi-stark = { path = "../..", features = ["kzg", "parallel"] }
+p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-blake3 = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+serde = { version = "1", features = ["derive"] }
+bincode = { version = "2", features = ["serde"] }
+tracing-subscriber = "0.3"

@@ -19,12 +19,7 @@
 //! this entire vocabulary, disjoint from generic copy/public/table channels.
 use super::{Value, WitnessError};
 use crate::traits::Field;
-use crate::{
-    eval::{VarValues, eval_expr},
-    expr::Expr,
-    lookup::Lookup,
-    system::CircuitInputs,
-};
+use crate::{expr::Expr, lookup::Lookup, system::CircuitInputs};
 use p3_blake3::Blake3;
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_symmetric::CryptographicHasher;
@@ -453,8 +448,28 @@ impl Compact {
         values: &[F],
         defs: &[CircuitInputs<F>],
     ) -> Result<Vec<RowMajorMatrix<F>>, WitnessError> {
+        self.selected_traces(values, defs, None)
+    }
+
+    pub(super) fn trace<F: Field>(
+        &self,
+        values: &[F],
+        defs: &[CircuitInputs<F>],
+        index: usize,
+    ) -> Result<RowMajorMatrix<F>, WitnessError> {
+        Ok(self
+            .selected_traces(values, defs, Some(index))?
+            .remove(index))
+    }
+
+    fn selected_traces<F: Field>(
+        &self,
+        values: &[F],
+        defs: &[CircuitInputs<F>],
+        selected: Option<usize>,
+    ) -> Result<Vec<RowMajorMatrix<F>>, WitnessError> {
         let messages = self.messages(values)?;
-        let mut words: Vec<u32> = vec![];
+        let mut words: Vec<u32> = Vec::with_capacity(self.recipes.len());
         for recipe in &self.recipes {
             let value = match *recipe {
                 Recipe::Input(call, offset, len) => {
@@ -471,90 +486,71 @@ impl Compact {
         }
         let mut traces: Vec<_> = defs
             .iter()
-            .map(|d| {
-                RowMajorMatrix::new(
-                    vec![F::ZERO; d.preprocessed.as_ref().unwrap().height() * d.main_width],
-                    d.main_width,
-                )
+            .enumerate()
+            .map(|(i, d)| {
+                let height = if selected.is_none_or(|s| s == i) {
+                    d.preprocessed.as_ref().unwrap().height()
+                } else {
+                    0
+                };
+                RowMajorMatrix::new(vec![F::ZERO; height * d.main_width], d.main_width)
             })
             .collect();
         for t in 0..6 {
+            if selected.is_some_and(|s| s < 6 && s != t) {
+                continue;
+            }
             for (r, slots) in self.rows[t].iter().enumerate() {
-                let row = &mut traces[t].values[r * mw(t)..(r + 1) * mw(t)];
-                for (slot, &word) in slots.iter().enumerate() {
-                    for (i, b) in words[word].to_le_bytes().into_iter().enumerate() {
-                        row[slot * 4 + i] = F::from_u8(b);
+                if selected.is_none_or(|s| s == t) {
+                    let row = &mut traces[t].values[r * mw(t)..(r + 1) * mw(t)];
+                    for (slot, &word) in slots.iter().enumerate() {
+                        for (i, b) in words[word].to_le_bytes().into_iter().enumerate() {
+                            row[slot * 4 + i] = F::from_u8(b);
+                        }
                     }
-                }
-                if t < 4 {
-                    let mut carry = 0u16;
-                    for i in 0..4 {
-                        let sum = u16::from(words[slots[0]].to_le_bytes()[i])
-                            + u16::from(words[slots[1]].to_le_bytes()[i])
-                            + u16::from(words[slots[2]].to_le_bytes()[i])
-                            + carry;
-                        carry = sum >> 8;
-                        row[24 + i] = F::from_u16(carry);
-                        let x = words[slots[3]].to_le_bytes()[i] ^ words[slots[4]].to_le_bytes()[i];
-                        row[28 + i] = F::from_u8(x);
-                        let bits = ROT[t] % 8;
-                        if bits != 0 {
-                            row[32 + i] = F::from_u8(x & ((1 << bits) - 1));
-                            row[36 + i] = F::from_u8(x >> bits);
+                    if t < 4 {
+                        let mut carry = 0u16;
+                        for i in 0..4 {
+                            let sum = u16::from(words[slots[0]].to_le_bytes()[i])
+                                + u16::from(words[slots[1]].to_le_bytes()[i])
+                                + u16::from(words[slots[2]].to_le_bytes()[i])
+                                + carry;
+                            carry = sum >> 8;
+                            row[24 + i] = F::from_u16(carry);
+                            let x =
+                                words[slots[3]].to_le_bytes()[i] ^ words[slots[4]].to_le_bytes()[i];
+                            row[28 + i] = F::from_u8(x);
+                            let bits = ROT[t] % 8;
+                            if bits != 0 {
+                                row[32 + i] = F::from_u8(x & ((1 << bits) - 1));
+                                row[36 + i] = F::from_u8(x >> bits);
+                            }
                         }
                     }
                 }
-            }
-        }
-        let indices: Vec<HashMap<Vec<F>, usize>> = defs[6..]
-            .iter()
-            .map(|d| {
-                d.preprocessed
-                    .as_ref()
-                    .unwrap()
-                    .rows()
-                    .enumerate()
-                    .map(|(i, r)| (r.collect(), i))
-                    .collect()
-            })
-            .collect();
-        for t in 0..6 {
-            // Only table queries contribute to table multiplicity advice.
-            // Avoid allocating/evaluating every copy-binding tuple per row.
-            let table_lookups: Vec<_> = defs[t]
-                .lookups
-                .iter()
-                .filter(|l| matches!(l.args.get(2), Some(Expr::Const(v)) if *v == F::TWO))
-                .collect();
-            for r in 0..self.rows[t].len() {
-                let main = traces[t].row_slice(r).unwrap();
-                let prep = defs[t].preprocessed.as_ref().unwrap().row_slice(r).unwrap();
-                let view = view(&main, &prep, r, traces[t].height());
-                let mut increments = vec![];
-                for lookup in &table_lookups {
-                    let args: Vec<_> = lookup.args.iter().map(|e| eval_expr(e, &view)).collect();
-                    if args[2] == f(2) {
-                        let id = (0..3).find(|&i| args[3] == f(i)).unwrap();
-                        increments.push((id, indices[id][&args[4..]]));
+                // The three fixed tables use canonical byte-indexed row order.
+                // Count directly from word recipes without materializing other traces.
+                for i in 0..4 {
+                    if t < 5 {
+                        let (a, b) = if t < 4 {
+                            (slots[3], slots[4])
+                        } else {
+                            (slots[0], slots[1])
+                        };
+                        let (a, b) = (words[a].to_le_bytes()[i], words[b].to_le_bytes()[i]);
+                        if selected.is_none_or(|s| s == 6) {
+                            traces[6].values[usize::from(a) * 256 + usize::from(b)] += F::ONE;
+                        }
+                        if (t == 1 || t == 3) && selected.is_none_or(|s| s == 7) {
+                            let offset = if t == 1 { 0 } else { 256 };
+                            traces[7].values[offset + usize::from(a ^ b)] += F::ONE;
+                        }
+                    } else if selected.is_none_or(|s| s == 8) {
+                        traces[8].values[usize::from(words[slots[0]].to_le_bytes()[i])] += F::ONE;
                     }
-                }
-                drop(main);
-                for (id, index) in increments {
-                    traces[6 + id].values[index] += F::ONE;
                 }
             }
         }
         Ok(traces)
-    }
-}
-fn view<'a, F: Field>(main: &'a [F], prep: &'a [F], r: usize, height: usize) -> VarValues<'a, F> {
-    VarValues {
-        main: [main, main],
-        preprocessed: [prep, prep],
-        stage2: [&[], &[]],
-        publics: &[],
-        is_first_row: F::from_bool(r == 0),
-        is_last_row: F::from_bool(r + 1 == height),
-        is_transition: F::from_bool(r + 1 < height),
     }
 }

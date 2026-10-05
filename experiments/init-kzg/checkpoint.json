@@ -1,0 +1,15 @@
+{
+  "scope": "Stopped full Init KZG experiment; development SRS only. No completed full Init outer proof.",
+  "runtime_directory": "target/init-kzg-run",
+  "inputs": "/home/arthur/ix/measurements/init16-root-verifier-main-20261002",
+  "staged_data": "target/init-kzg-run/data",
+  "status": "52/74 setup checkpoints; stopped at user request",
+  "validation": "150 release tests passed, 1 ignored; Clippy passed with kzg,parallel and parallel alone",
+  "size_estimates_bytes": {
+    "batch_74": 245390,
+    "single_compact_74_circuits": 125301,
+    "single_compact_unpartitioned_main": 36469,
+    "hypothetical_generic_hash_merged_tables": 1989
+  },
+  "limits": "Sizes are templates, not full Init proofs. Generic hash rows and memory are extrapolations. Scripts preserve the original local runtime paths."
+}

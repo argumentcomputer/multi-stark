@@ -212,6 +212,12 @@ impl<F: Field> Circuit<F> {
 pub struct CircuitBuilder<F: Field> {
     circuit: Circuit<F>,
     constants: HashMap<F, Value>,
+    census: Option<Census<F>>,
+}
+
+struct Census<F> {
+    stats: CircuitStats,
+    constants: HashMap<usize, F>,
 }
 
 impl<F: Field> Default for CircuitBuilder<F> {
@@ -244,7 +250,36 @@ impl<F: Field> CircuitBuilder<F> {
                 zero,
             },
             constants: HashMap::from([(F::ZERO, zero)]),
+            census: None,
         }
+    }
+
+    /// Executes the same builder operations without retaining constraints or recipes.
+    #[cfg(feature = "kzg")]
+    pub(super) fn counting() -> Self {
+        let mut builder = Self::new();
+        builder.census = Some(Census {
+            stats: builder.stats(),
+            constants: HashMap::from([(0, F::ZERO)]),
+        });
+        builder
+    }
+
+    #[cfg(feature = "kzg")]
+    pub(super) fn reserve(&mut self, stats: CircuitStats) {
+        let c = &mut self.circuit;
+        c.recipes
+            .reserve_exact(stats.values.saturating_sub(c.recipes.len()));
+        c.gates
+            .reserve_exact(stats.gates.saturating_sub(c.gates.len()));
+        c.lookups
+            .reserve_exact(stats.lookups.saturating_sub(c.lookups.len()));
+        c.hints
+            .reserve_exact(stats.hint_calls.saturating_sub(c.hints.len()));
+        c.input_names
+            .reserve_exact(stats.inputs.saturating_sub(c.input_names.len()));
+        c.publics
+            .reserve_exact(stats.publics.saturating_sub(c.publics.len()));
     }
 
     fn check(&self, value: Value) {
@@ -252,10 +287,7 @@ impl<F: Field> CircuitBuilder<F> {
             value.owner, self.circuit.owner,
             "value belongs to another circuit"
         );
-        assert!(
-            value.index < self.circuit.recipes.len(),
-            "invalid value handle"
-        );
+        assert!(value.index < self.stats().values, "invalid value handle");
     }
 
     /// Opt into fixed custom-gate BLAKE3 traces. The lowering binds their
@@ -273,6 +305,13 @@ impl<F: Field> CircuitBuilder<F> {
         for &v in input.iter().chain(output) {
             self.check(v);
         }
+        if let Some(census) = &mut self.census {
+            assert!(self.circuit.hashes.is_some(), "compact hash enabled");
+            census.stats.hash_calls += 1;
+            census.stats.hash_compressions +=
+                input.len().max(1).div_ceil(64) + input.len().max(1).div_ceil(1024) - 1;
+            return;
+        }
         self.circuit
             .hashes
             .as_mut()
@@ -286,14 +325,23 @@ impl<F: Field> CircuitBuilder<F> {
     fn allocate(&mut self, recipe: Recipe<F>) -> Value {
         let value = Value {
             owner: self.circuit.owner,
-            index: self.circuit.recipes.len(),
+            index: self.stats().values,
         };
-        self.circuit.recipes.push(recipe);
+        if let Some(census) = &mut self.census {
+            census.stats.values += 1;
+            if let Recipe::Constant(c) = recipe {
+                census.constants.insert(value.index, c);
+            }
+        } else {
+            self.circuit.recipes.push(recipe);
+        }
         value
     }
 
     pub fn stats(&self) -> CircuitStats {
-        self.circuit.stats()
+        self.census
+            .as_ref()
+            .map_or_else(|| self.circuit.stats(), |c| c.stats)
     }
 
     /// Measure an ordinary gadget call without retaining profiling metadata.
@@ -310,6 +358,9 @@ impl<F: Field> CircuitBuilder<F> {
     }
 
     fn known_constant(&self, value: Value) -> Option<F> {
+        if let Some(census) = &self.census {
+            return census.constants.get(&value.index).copied();
+        }
         match self.circuit.recipes[value.index] {
             Recipe::Constant(c) => Some(c),
             _ => None,
@@ -317,7 +368,7 @@ impl<F: Field> CircuitBuilder<F> {
     }
 
     fn arithmetic(&mut self, a: Value, b: Value, qm: F, qa: F, qb: F, k: F) -> Value {
-        let out = self.allocate(Recipe::Arithmetic(self.circuit.gates.len()));
+        let out = self.allocate(Recipe::Arithmetic(self.stats().gates));
         self.constrain_gate([a, b, out], [qm, qa, qb, F::NEG_ONE, k]);
         out
     }
@@ -325,8 +376,12 @@ impl<F: Field> CircuitBuilder<F> {
     /// Allocates an externally assigned private input. Expose it separately if
     /// it is part of the public statement.
     pub fn input(&mut self, name: impl Into<String>) -> Value {
-        let slot = self.circuit.input_names.len();
-        self.circuit.input_names.push(name.into());
+        let slot = self.stats().inputs;
+        if let Some(census) = &mut self.census {
+            census.stats.inputs += 1;
+        } else {
+            self.circuit.input_names.push(name.into());
+        }
         self.allocate(Recipe::Input(slot))
     }
 
@@ -356,10 +411,14 @@ impl<F: Field> CircuitBuilder<F> {
         for value in wires {
             self.check(value);
         }
-        self.circuit.gates.push(Gate {
-            wires,
-            coefficients,
-        });
+        if let Some(census) = &mut self.census {
+            census.stats.gates += 1;
+        } else {
+            self.circuit.gates.push(Gate {
+                wires,
+                coefficients,
+            });
+        }
     }
 
     pub fn add(&mut self, a: Value, b: Value) -> Value {
@@ -532,9 +591,15 @@ impl<F: Field> CircuitBuilder<F> {
         ) {
             return self.affine([bit.0, self.circuit.zero], [yes - no, F::ZERO], no);
         }
-        let difference = self.sub(when_true, when_false);
-        let selected = self.mul(bit.0, difference);
-        self.add(when_false, selected)
+        // Keep intermediates nonnegative for bounded integer branches. This
+        // uses three gates and avoids a modular subtraction before selection.
+        let yes = self.mul(bit.0, when_true);
+        let no = if let Some(c) = self.known_constant(when_false) {
+            self.affine([bit.0, self.circuit.zero], [-c, F::ZERO], c)
+        } else {
+            self.arithmetic(when_false, bit.0, F::NEG_ONE, F::ONE, F::ZERO, F::ZERO)
+        };
+        self.add(yes, no)
     }
 
     /// Records a witness-only computation. **This does not constrain its
@@ -562,9 +627,14 @@ impl<F: Field> CircuitBuilder<F> {
         for &value in dependencies {
             self.check(value);
         }
-        let index = self.circuit.hints.len();
-        let start = self.circuit.recipes.len();
+        let index = self.stats().hint_calls;
+        let start = self.stats().values;
         let outputs = std::array::from_fn(|_| self.allocate(Recipe::Hint(index)));
+        if let Some(census) = &mut self.census {
+            census.stats.hint_calls += 1;
+            census.stats.hint_outputs += N;
+            return outputs;
+        }
         self.circuit.hints.push(HintDefinition {
             name: name.into(),
             dependencies: dependencies.iter().map(|v| v.index).collect(),
@@ -615,8 +685,12 @@ impl<F: Field> CircuitBuilder<F> {
     /// Repeated exposure is allowed and produces separate indexed bindings.
     pub fn expose_public(&mut self, value: Value) -> usize {
         self.check(value);
-        let index = self.circuit.publics.len();
-        self.circuit.publics.push(value);
+        let index = self.stats().publics;
+        if let Some(census) = &mut self.census {
+            census.stats.publics += 1;
+        } else {
+            self.circuit.publics.push(value);
+        }
         index
     }
 
@@ -642,6 +716,9 @@ impl<F: Field> CircuitBuilder<F> {
             rows,
             indices,
         });
+        if let Some(census) = &mut self.census {
+            census.stats.tables += 1;
+        }
         table
     }
 
@@ -658,13 +735,21 @@ impl<F: Field> CircuitBuilder<F> {
         for &value in values {
             self.check(value);
         }
-        self.circuit.lookups.push(LookupConstraint {
-            table,
-            values: values.to_vec(),
-        });
+        if let Some(census) = &mut self.census {
+            census.stats.lookups += 1;
+        } else {
+            self.circuit.lookups.push(LookupConstraint {
+                table,
+                values: values.to_vec(),
+            });
+        }
     }
 
     pub fn finish(self) -> Circuit<F> {
+        assert!(
+            self.census.is_none(),
+            "a counting builder cannot produce a circuit"
+        );
         self.circuit
     }
 }

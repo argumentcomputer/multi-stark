@@ -97,6 +97,19 @@ pub trait ProofConfig {
     /// Largest log2 length of a committed polynomial.
     fn max_log_degree(&self) -> usize;
 
+    /// Omit next-row openings of main/fixed matrices when no graph node reads
+    /// them. Configurations enabling this must bind it in their transcript tag.
+    fn omit_unused_next_row_openings(&self) -> bool {
+        false
+    }
+
+    /// Permit empty opening lists for inactive fixed matrices. The PCS must
+    /// authenticate matrix boundaries without opening their values. Bind this
+    /// choice in the transcript; row-batched Merkle commitments cannot use it.
+    fn omit_inactive_preprocessed_openings(&self) -> bool {
+        false
+    }
+
     /// Largest log2 domain for computing the unsliced quotient.
     fn max_log_quotient_domain(&self) -> usize {
         self.max_log_degree()

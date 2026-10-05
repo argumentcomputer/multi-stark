@@ -50,7 +50,8 @@
 //! - ρ = 2^(-log_blowup) — FRI rate parameter (inverse of the blowup factor)
 //! - n — number of FRI queries (`num_queries`)
 //! - k — number of constraints (after lookup expansion)
-//! - N — total number of lookup rows across all circuits
+//! - N — total lookup terms across all rows, including public messages
+//! - W — maximum lookup message width
 //! - D — maximum degree of the quotient polynomial (trace_degree × quotient_degree)
 //!
 //! ## FRI proximity test
@@ -98,12 +99,14 @@
 //!
 //! The accumulator-based lookup argument uses two random challenges (β, γ) to
 //! compress lookup messages into field elements. For each lookup interaction, the
-//! message `m = β + fingerprint(γ, args)` is a random affine function of the
-//! challenges. If the multiset of "pushed" values differs from the multiset of
+//! message `m = β + fingerprint(γ, args)` is affine in β and polynomial in γ.
+//! If the multiset of "pushed" values differs from the multiset of
 //! "pulled" values, the running accumulator `Σ multiplicity_i / m_i` is a nonzero
 //! rational function of the challenges. By Schwartz-Zippel (applied to the
 //! numerator after clearing denominators), the accumulator evaluates to zero with
-//! probability at most **N / |F_ext|**. Crucially, the challenges are sampled
+//! probability conservatively bounded by **(W + 2) N / |F_ext|**, including
+//! zero denominators. Thus a 128-bit challenge field does not itself establish
+//! 128-bit soundness for a large trace. Crucially, the challenges are sampled
 //! *after* the prover has committed to the stage-1 traces and the claims have been
 //! observed, so the prover cannot adapt them.
 //!
@@ -224,7 +227,7 @@ impl<SC: ProofConfig> System<SC> {
         // under challenges (β, γ) that were sampled after the traces and claims were
         // committed. If the pushed and pulled multisets differ, the accumulator is a
         // nonzero rational function of (β, γ) and evaluates to zero with probability
-        // ≤ N / |F_ext| (Schwartz-Zippel on the numerator polynomial).
+        // bounded by a degree/width-dependent multiple of N / |F_ext|.
         ensure_eq!(
             proof.intermediate_accumulators.last(),
             Some(&<SC::Challenge as Algebra<SC::Challenge>>::ZERO),
@@ -269,8 +272,8 @@ impl<SC: ProofConfig> System<SC> {
 
         // Soundness: lookup argument. The challenges are random elements of F_ext.
         // The message m_i = lookup_challenge + fingerprint(fingerprint_challenge, args_i)
-        // is an affine function of the challenges, ensuring that distinct argument
-        // tuples produce distinct messages with probability ≥ 1 - 1/|F_ext|.
+        // is affine in β and polynomial in γ; fingerprint collision bounds
+        // depend on the message width, not just the field size.
         let (lookup_argument_challenge, fingerprint_challenge) =
             sample_lookup_challenges::<SC>(&mut challenger);
 
@@ -360,10 +363,10 @@ impl<SC: ProofConfig> System<SC> {
             let zeta_next = trace_domain.next_point(zeta);
             stage_1_trace_evaluations.push((
                 trace_domain,
-                vec![
-                    (zeta, stage_1_opened_values[pos][0].clone()),
-                    (zeta_next, stage_1_opened_values[pos][1].clone()),
-                ],
+                [zeta, zeta_next]
+                    .into_iter()
+                    .zip(stage_1_opened_values[pos].iter().cloned())
+                    .collect(),
             ));
             stage_2_trace_evaluations.push((
                 trace_domain,
@@ -380,8 +383,7 @@ impl<SC: ProofConfig> System<SC> {
             ));
         }
         // The preprocessed commitment covers ALL preprocessed matrices, in
-        // canonical slot order; inactive circuits' matrices are opened at no
-        // points (mirroring the prover's round construction).
+        // canonical slot order. Inactive openings follow the PCS boundary policy.
         let mut preprocessed_trace_evaluations = vec![];
         {
             let mut active_pos: Vec<Option<usize>> = vec![None; active.len()];
@@ -398,10 +400,10 @@ impl<SC: ProofConfig> System<SC> {
                                 preprocessed_opened_values.as_ref().unwrap();
                             preprocessed_trace_evaluations.push((
                                 trace_domain,
-                                vec![
-                                    (zeta, preprocessed_opened_values[slot][0].clone()),
-                                    (zeta_next, preprocessed_opened_values[slot][1].clone()),
-                                ],
+                                [zeta, zeta_next]
+                                    .into_iter()
+                                    .zip(preprocessed_opened_values[slot].iter().cloned())
+                                    .collect(),
                             ));
                         }
                         None => {
@@ -414,7 +416,11 @@ impl<SC: ProofConfig> System<SC> {
                                 preprocessed_opened_values.as_ref().unwrap();
                             preprocessed_trace_evaluations.push((
                                 domain,
-                                vec![(zeta, preprocessed_opened_values[slot][0].clone())],
+                                if self.config.omit_inactive_preprocessed_openings() {
+                                    vec![]
+                                } else {
+                                    vec![(zeta, preprocessed_opened_values[slot][0].clone())]
+                                },
                             ));
                         }
                     }
@@ -478,7 +484,10 @@ impl<SC: ProofConfig> System<SC> {
             let (preprocessed_cur, preprocessed_next): (&[SC::Challenge], &[SC::Challenge]) =
                 if let Some(slot) = self.preprocessed_indices[ci] {
                     let values = preprocessed_opened_values.as_ref().unwrap();
-                    (&values[slot][0], &values[slot][1])
+                    (
+                        &values[slot][0],
+                        values[slot].get(1).map_or(&[][..], Vec::as_slice),
+                    )
                 } else {
                     (&empty, &empty)
                 };
@@ -486,7 +495,9 @@ impl<SC: ProofConfig> System<SC> {
                 preprocessed: [preprocessed_cur, preprocessed_next],
                 main: [
                     &stage_1_opened_values[pos][0],
-                    &stage_1_opened_values[pos][1],
+                    stage_1_opened_values[pos]
+                        .get(1)
+                        .map_or(&[][..], Vec::as_slice),
                 ],
                 stage2: [
                     &stage_2_opened_values[pos][0],
@@ -609,9 +620,8 @@ impl<SC: ProofConfig> System<SC> {
         );
         // Stage 0 round: the preprocessed commitment is built once over ALL
         // preprocessed traces at system construction, so its round carries one
-        // entry per preprocessed matrix regardless of activation; an inactive
-        // circuit's matrix is opened at exactly one point, with the full
-        // preprocessed width (the width pin the PCS relies on).
+        // entry per preprocessed matrix. Inactive matrices need one full-width
+        // opening unless the PCS authenticates their boundaries independently.
         ensure_eq!(
             preprocessed_opened_values
                 .as_ref()
@@ -626,12 +636,15 @@ impl<SC: ProofConfig> System<SC> {
                 && !is_active
             {
                 let opened = &preprocessed_opened_values.as_ref().unwrap()[slot];
-                ensure_eq!(opened.len(), 1, VerificationError::InvalidProofShape);
-                ensure_eq!(
-                    opened[0].len(),
-                    self.circuits[ci].preprocessed_width,
-                    VerificationError::InvalidProofShape
-                );
+                let count = usize::from(!self.config.omit_inactive_preprocessed_openings());
+                ensure_eq!(opened.len(), count, VerificationError::InvalidProofShape);
+                for row in opened {
+                    ensure_eq!(
+                        row.len(),
+                        self.circuits[ci].preprocessed_width,
+                        VerificationError::InvalidProofShape
+                    );
+                }
             }
         }
         ensure_eq!(
@@ -651,7 +664,7 @@ impl<SC: ProofConfig> System<SC> {
             let num_openings = 2;
             ensure_eq!(
                 stage_1_opened_values[pos].len(),
-                num_openings,
+                1 + usize::from(self.opens_next_row(ci, crate::expr::Source::Main)),
                 VerificationError::InvalidProofShape
             );
             ensure_eq!(
@@ -662,27 +675,31 @@ impl<SC: ProofConfig> System<SC> {
             if let Some(slot) = preprocessed_i {
                 ensure_eq!(
                     preprocessed_opened_values.as_ref().unwrap()[slot].len(),
-                    num_openings,
+                    1 + usize::from(self.opens_next_row(ci, crate::expr::Source::Preprocessed)),
                     VerificationError::InvalidProofShape
                 );
             }
-            for j in 0..num_openings {
-                if let Some(slot) = preprocessed_i {
+            if let Some(slot) = preprocessed_i {
+                for row in &preprocessed_opened_values.as_ref().unwrap()[slot] {
                     ensure_eq!(
-                        preprocessed_opened_values.as_ref().unwrap()[slot][j].len(),
+                        row.len(),
                         circuit.preprocessed_width,
                         VerificationError::InvalidProofShape
                     );
                 }
+            }
+            for row in &stage_1_opened_values[pos] {
                 ensure_eq!(
-                    stage_1_opened_values[pos][j].len(),
+                    row.len(),
                     circuit.main_width,
                     VerificationError::InvalidProofShape
                 );
+            }
+            for row in &stage_2_opened_values[pos] {
                 // Stage-2 is committed as flattened base columns, so the
                 // opened width is already the flattened width.
                 ensure_eq!(
-                    stage_2_opened_values[pos][j].len(),
+                    row.len(),
                     circuit.stage_2_width,
                     VerificationError::InvalidProofShape
                 );

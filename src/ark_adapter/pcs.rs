@@ -120,6 +120,36 @@ pub struct KzgProverData {
     pub matrices: Vec<CommittedMatrix>,
 }
 
+impl KzgProverData {
+    pub(crate) fn sparse(commitment: KzgCommitment, domains: Vec<Radix2Coset>) -> Self {
+        assert_eq!(commitment.0.len(), domains.len());
+        Self {
+            commitment,
+            matrices: domains
+                .into_iter()
+                .map(|domain| CommittedMatrix {
+                    domain,
+                    columns: vec![],
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn insert(&mut self, slot: usize, mut data: Self) -> Result<(), &'static str> {
+        if data.matrices.len() != 1
+            || data.commitment.0.len() != 1
+            || data.commitment.1.len() != 1
+            || data.commitment.0[0] != self.commitment.0[slot]
+            || data.commitment.1[0] != self.commitment.1[slot]
+            || data.matrices[0].domain != self.matrices[slot].domain
+        {
+            return Err("regenerated preprocessing differs from the committed key");
+        }
+        self.matrices[slot] = data.matrices.remove(0);
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub enum KzgError {
     /// Commitment/opened-value dimensions disagree with the rounds.
@@ -130,6 +160,7 @@ pub enum KzgError {
 }
 
 /// See the module docs.
+#[derive(Clone)]
 pub struct KzgPcs {
     srs: Arc<Srs>,
     max_quotient_degree: usize,
@@ -168,7 +199,14 @@ impl KzgPcs {
         if coeffs.is_empty() {
             return G1Projective::zero();
         }
-        G1Projective::msm(&self.srs.g1[..coeffs.len()], coeffs).expect("equal lengths")
+        self.msm_at(coeffs, 0)
+    }
+
+    fn msm_at(&self, coeffs: &[Fr], shift: usize) -> G1Projective {
+        if coeffs.iter().skip(1).all(Zero::is_zero) {
+            return self.srs.g1[shift] * coeffs.first().copied().unwrap_or(Fr::ZERO);
+        }
+        G1Projective::msm(&self.srs.g1[shift..shift + coeffs.len()], coeffs).expect("equal lengths")
     }
 
     /// Interpolate each column of `matrix` over `domain`.
@@ -184,7 +222,19 @@ impl KzgPcs {
             evals[i % width].push(value.0);
         }
         let ark = Self::ark_domain(domain);
-        evals.into_iter().map(|col| ark.ifft(&col)).collect()
+        evals
+            .into_iter()
+            .map(|mut col| {
+                let first = col[0];
+                if col.iter().all(|&v| v == first) {
+                    col.fill(Fr::ZERO);
+                    col[0] = first;
+                    col
+                } else {
+                    ark.ifft(&col)
+                }
+            })
+            .collect()
     }
 }
 
@@ -233,14 +283,7 @@ impl Pcs for KzgPcs {
                     if shift == 0 {
                         return vec![];
                     }
-                    let points: Vec<_> = m
-                        .columns
-                        .iter()
-                        .map(|c| {
-                            G1Projective::msm(&self.srs.g1[shift..shift + c.len()], c)
-                                .expect("equal lengths")
-                        })
-                        .collect();
+                    let points: Vec<_> = m.columns.iter().map(|c| self.msm_at(c, shift)).collect();
                     G1Projective::normalize_batch(&points)
                 })
                 .collect(),
@@ -297,14 +340,7 @@ impl Pcs for KzgPcs {
                     if shift == 0 {
                         return vec![];
                     }
-                    let points: Vec<_> = m
-                        .columns
-                        .iter()
-                        .map(|c| {
-                            G1Projective::msm(&self.srs.g1[shift..shift + c.len()], c)
-                                .expect("equal lengths")
-                        })
-                        .collect();
+                    let points: Vec<_> = m.columns.iter().map(|c| self.msm_at(c, shift)).collect();
                     G1Projective::normalize_batch(&points)
                 })
                 .collect(),
@@ -333,7 +369,17 @@ impl Pcs for KzgPcs {
             self.max_quotient_degree
         );
         let ark = Self::ark_domain(domain);
-        let column_evals: Vec<Vec<Fr>> = matrix.columns.iter().map(|c| ark.fft(c)).collect();
+        let column_evals: Vec<Vec<Fr>> = matrix
+            .columns
+            .iter()
+            .map(|c| {
+                if c.iter().skip(1).all(Zero::is_zero) {
+                    vec![c.first().copied().unwrap_or(Fr::ZERO); domain.size()]
+                } else {
+                    ark.fft(c)
+                }
+            })
+            .collect();
         let width = column_evals.len();
         let height = domain.size();
         let mut values = Vec::with_capacity(width * height);
@@ -366,7 +412,15 @@ impl Pcs for KzgPcs {
         for (data, points_per_matrix) in &rounds {
             debug_assert_eq!(data.matrices.len(), points_per_matrix.len());
             let mut round_values = Vec::new();
-            for (matrix, points) in data.matrices.iter().zip(points_per_matrix) {
+            for (index, (matrix, points)) in data.matrices.iter().zip(points_per_matrix).enumerate()
+            {
+                if !points.is_empty() {
+                    assert_eq!(
+                        matrix.columns.len(),
+                        data.commitment.0[index].len(),
+                        "missing polynomial data for requested openings"
+                    );
+                }
                 let mut matrix_values = Vec::new();
                 for &z in points {
                     let row: Vec<Scalar> = matrix

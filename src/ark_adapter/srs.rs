@@ -1,16 +1,9 @@
-//! The KZG structured reference string: powers of a secret τ in G1,
-//! plus the two G2 points verification pairs against.
-//!
-//! Public parameters are the LIBRARY USER'S to supply: [`Srs`] is plain
-//! data (public fields), loadable from any perpetual-powers-of-tau
-//! ceremony — nothing in the library assumes a particular one, only a
-//! power-of-two G1 length (enforced by the config). The library's side
-//! of the contract is transparency: the config binds `τ·G1`/`τ·G2` into
-//! every transcript, [`Srs::validate`] lets untrusted loads be checked
-//! for consistency, and deserialization of proofs/commitments uses the
-//! validated arkworks decoders. [`Srs::unsafe_dev_setup`] generates
-//! parameters from a seed for tests and development ONLY — its "secret"
-//! is derived in the clear, so proofs under it carry no security.
+//! KZG parameters: G1 powers, G2 anchors and G2 powers for degree checks.
+//! Imported parameters need validated point decoding, [`Srs::validate`] and
+//! trusted provenance. Consistency does not establish an unknown trapdoor.
+//! The full available G1 degree range and every required G2 degree key must
+//! be represented; truncating public parameters does not reduce that range.
+//! [`Srs::unsafe_dev_setup`] reveals its trapdoor and is only for tests.
 
 use ark_bls12_381::{Bls12_381, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{AffineRepr, CurveGroup, PrimeGroup, VariableBaseMSM, pairing::Pairing};

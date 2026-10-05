@@ -16,6 +16,7 @@ pub enum WitnessError {
     UnsatisfiedGate { index: usize },
     LookupMissing { table: String },
     ForeignAssignment,
+    ShardIndex { index: usize, count: usize },
     PublicCount { expected: usize, actual: usize },
 }
 

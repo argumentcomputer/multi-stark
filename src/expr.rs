@@ -35,7 +35,7 @@ pub struct ColRef {
 }
 
 /// A base-field expression.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Expr<F> {
     Const(F),
     Var(ColRef),
@@ -52,7 +52,7 @@ pub enum Expr<F> {
 
 /// An extension-field expression. The primitive is `Coords`: an array of
 /// D base-field coordinates representing `Σ_j coord_j · b_j`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ExtExpr<F> {
     /// The D-tuple primitive; length is checked at compile time.
     Coords(Vec<Expr<F>>),

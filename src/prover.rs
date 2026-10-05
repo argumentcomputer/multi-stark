@@ -733,10 +733,14 @@ where
         let mut round1_openings = vec![];
         let mut round2_openings = vec![];
         let mut round3_openings = vec![];
-        for &log_degree in log_degrees.iter() {
+        for (&ci, &log_degree) in active_indices.iter().zip(&log_degrees) {
             let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
             let zeta_next = trace_domain.next_point(zeta);
-            round1_openings.push(vec![zeta, zeta_next]);
+            round1_openings.push(if self.opens_next_row(ci, crate::expr::Source::Main) {
+                vec![zeta, zeta_next]
+            } else {
+                vec![zeta]
+            });
             round2_openings.push(vec![zeta, zeta_next]);
             // One wide matrix per circuit holds all its quotient slices.
             round3_openings.push(vec![zeta]);
@@ -744,21 +748,39 @@ where
         // The preprocessed commitment is built once over ALL preprocessed
         // traces at system construction, so its round must carry one entry
         // per preprocessed matrix regardless of activation. An inactive
-        // circuit's preprocessed matrix is opened at ζ alone: no constraint
+        // circuit's preprocessed matrix is normally opened at ζ alone: no constraint
         // reads the value, but the PCS pins every matrix's width to the
         // claimed values at its first opening point (the leaf hash flattens
         // same-height rows into one stream, so a matrix opened nowhere would
         // leave its row boundary unauthenticated) and rejects a matrix with
-        // no opening points.
-        for (prep_index, &pos) in self.preprocessed_indices.iter().zip(&active_pos) {
+        // no opening points. A PCS with independent column commitments can
+        // explicitly opt out of these otherwise-unused openings.
+        for (ci, (prep_index, &pos)) in self
+            .preprocessed_indices
+            .iter()
+            .zip(&active_pos)
+            .enumerate()
+        {
             if prep_index.is_some() {
                 match pos {
                     Some(pos) => {
                         let trace_domain = pcs.natural_domain_for_degree(1 << log_degrees[pos]);
                         let zeta_next = trace_domain.next_point(zeta);
-                        round0_openings.push(vec![zeta, zeta_next]);
+                        round0_openings.push(
+                            if self.opens_next_row(ci, crate::expr::Source::Preprocessed) {
+                                vec![zeta, zeta_next]
+                            } else {
+                                vec![zeta]
+                            },
+                        );
                     }
-                    None => round0_openings.push(vec![zeta]),
+                    None => {
+                        round0_openings.push(if self.config.omit_inactive_preprocessed_openings() {
+                            vec![]
+                        } else {
+                            vec![zeta]
+                        })
+                    }
                 }
             }
         }

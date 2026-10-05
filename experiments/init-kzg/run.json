@@ -1,0 +1,33 @@
+{
+  "scope": "Proof of verification of the unchanged fully aggregated Init root",
+  "status": "stopped_at_user_request",
+  "security": "Development SRS; no production-security claim",
+  "inner_artifacts": {
+    "root-vk.bin": "c5ba16f0baedddba8f950a95bb26b8a551049f65f0a6f4c235f6a85a37a09424",
+    "root-proof.bin": "d51596984b5a9aaa52f411d931108927d3fedb8c0a2175bfc613c508d8eea215",
+    "root-claims.bin": "dfb8b96191a556e5ef5b6999aceaffbcc5d5d9b90b79d275f547adc0f71dd4fa"
+  },
+  "root_address": "608307acecf8cef1d9d188fb571343e45baeb3f907ff954c9feaaf01eecc5391",
+  "circuits": 74,
+  "main_partitions": 61,
+  "rayon_threads": 32,
+  "memory_limit_gib": 440,
+  "prover": "one canonical circuit per KZG batch shard; fixed expected claims, no additional balance messages",
+  "logs": {
+    "stage": "stage.log",
+    "setup_sample": "preflight.log",
+    "prove": "prove.log"
+  },
+  "git_head": "8b7b863bb0612068b4c8265d0213b1d03a32c092",
+  "workers": 2,
+  "worker_virtual_memory_limit_gib": 220,
+  "serial_retry_virtual_memory_limit_gib": 440,
+  "fixture_checkpoint_and_parallel_proof_bytes_identical": true,
+  "phase": "setup",
+  "updated_utc": "2026-10-05T21:26:25Z",
+  "completed_setup": 52,
+  "completed_headers": 0,
+  "completed_proofs": 0,
+  "stopped_utc": "2026-10-05T21:27:27.223279+00:00",
+  "stop_reason": "Switching to a single narrow proof; checkpoints preserved"
+}

@@ -14,6 +14,7 @@ use super::pcs::KzgPcs;
 use super::srs::Srs;
 use super::transcript::Blake3Transcript;
 
+#[derive(Clone)]
 pub struct KzgConfig {
     pcs: KzgPcs,
     /// Bytes observed into every fresh challenger: a domain tag plus a
@@ -36,7 +37,7 @@ impl KzgConfig {
             "SRS length must be a power of two"
         );
         let max_log_degree = p3_util::log2_strict_usize(srs.max_len());
-        let mut transcript_seed = b"multi-stark/kzg/v1".to_vec();
+        let mut transcript_seed = b"multi-stark/kzg/v3".to_vec();
         for parameter in [max_log_degree, max_quotient_degree] {
             transcript_seed.extend(u64::try_from(parameter).unwrap().to_le_bytes());
         }
@@ -62,6 +63,13 @@ impl KzgConfig {
 }
 
 impl ProofConfig for KzgConfig {
+    fn omit_inactive_preprocessed_openings(&self) -> bool {
+        true
+    }
+    fn omit_unused_next_row_openings(&self) -> bool {
+        true
+    }
+
     type Pcs = KzgPcs;
     type Challenge = Scalar;
     type Challenger = Blake3Transcript;
@@ -140,6 +148,95 @@ mod tests {
         system
             .verify_multiple_claims(no_claims, &proof)
             .expect("KZG proof failed to verify");
+    }
+
+    #[test]
+    fn opens_next_rows_only_when_the_graph_reads_them() {
+        let f = Scalar::from_u8;
+        let (system, key) = System::new(
+            KzgConfig::new(Arc::new(Srs::unsafe_dev_setup(8, b"next-rows")), 4),
+            [
+                CircuitInputs {
+                    main_width: 1,
+                    preprocessed: Some(RowMajorMatrix::new_col(vec![f(7); 4])),
+                    constraints: vec![Expr::main_next(0) - Expr::preprocessed_next(0)],
+                    ..Default::default()
+                },
+                CircuitInputs {
+                    main_width: 1,
+                    preprocessed: Some(RowMajorMatrix::new_col(vec![f(9); 2])),
+                    constraints: vec![Expr::main(0) - Expr::preprocessed(0)],
+                    ..Default::default()
+                },
+            ],
+        );
+        let proof = system.prove_multiple_claims(
+            &key,
+            &[],
+            SystemWitness::from_stage_1(
+                vec![
+                    RowMajorMatrix::new_col(vec![f(7); 4]),
+                    RowMajorMatrix::new_col(vec![f(9); 2]),
+                ],
+                &system,
+            ),
+        );
+        system.verify_multiple_claims(&[], &proof).unwrap();
+        assert_eq!(
+            proof
+                .stage_1_opened_values
+                .iter()
+                .map(Vec::len)
+                .collect::<Vec<_>>(),
+            [2, 1]
+        );
+        assert_eq!(
+            proof
+                .preprocessed_opened_values
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(Vec::len)
+                .collect::<Vec<_>>(),
+            [2, 1]
+        );
+        let codec =
+            super::super::compact::FixedProofCodec::new(&system, &proof.log_degrees).unwrap();
+        let decoded = codec.decode(&codec.encode(&proof).unwrap()).unwrap();
+        system.verify_multiple_claims(&[], &decoded).unwrap();
+        let mut bad = proof.clone();
+        bad.stage_1_opened_values[0].pop();
+        assert!(system.verify_multiple_claims(&[], &bad).is_err());
+        let mut bad = proof.clone();
+        bad.preprocessed_opened_values.as_mut().unwrap()[0][1][0] += Scalar::ONE;
+        assert!(system.verify_multiple_claims(&[], &bad).is_err());
+        let mut bad = proof.clone();
+        bad.stage_1_opened_values[1].push(vec![Scalar::ZERO]);
+        assert!(system.verify_multiple_claims(&[], &bad).is_err());
+        // KZG commits columns separately, so inactive fixed matrices need no openings.
+        let partial = system.prove_multiple_claims(
+            &key,
+            &[],
+            SystemWitness::from_stage_1(
+                vec![
+                    RowMajorMatrix::new(vec![], 1),
+                    RowMajorMatrix::new_col(vec![f(9); 2]),
+                ],
+                &system,
+            ),
+        );
+        system.verify_multiple_claims(&[], &partial).unwrap();
+        assert_eq!(partial.active, [false, true]);
+        assert_eq!(
+            partial.preprocessed_opened_values.as_ref().unwrap()[0].len(),
+            0
+        );
+        let mut bad = partial.clone();
+        bad.preprocessed_opened_values.as_mut().unwrap()[1].clear();
+        assert!(system.verify_multiple_claims(&[], &bad).is_err());
+        let mut bad = partial;
+        bad.preprocessed_opened_values.as_mut().unwrap()[0].push(vec![f(7)]);
+        assert!(system.verify_multiple_claims(&[], &bad).is_err());
     }
 
     #[test]

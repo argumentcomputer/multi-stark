@@ -25,7 +25,8 @@ use crate::traits::{Pcs, Transcript};
 /// preprocessed trace, base and extension constraints, and lookups. The
 /// stage-2 width and public-input count are derived (from the lookups and
 /// the challenge field's extension degree), not supplied here.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(bound = "")]
 pub struct CircuitInputs<F: Field> {
     pub main_width: usize,
     pub preprocessed: Option<RowMajorMatrix<F>>,
@@ -58,6 +59,8 @@ impl<F: Field> Default for CircuitInputs<F> {
 /// A compiled circuit within the system, with the metadata the prover and
 /// verifier need. The preprocessed trace is retained for witness-time
 /// lookup evaluation (it is also committed at setup).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound = "")]
 pub struct Circuit<F: Field> {
     pub graph: ConstraintGraph<F>,
     pub main_width: usize,
@@ -118,6 +121,12 @@ pub struct ProverKey<SC: ProofConfig> {
 }
 
 impl<SC: ProofConfig> System<SC> {
+    pub(crate) fn opens_next_row(&self, circuit: usize, source: crate::expr::Source) -> bool {
+        !self.config.omit_unused_next_row_openings() || self.circuits[circuit].graph.nodes.iter().any(|node| {
+            matches!(node, crate::graph::Node::Var(col) if col.source == source && col.offset == crate::expr::RowOffset::Next)
+        })
+    }
+
     /// Builds the system from per-circuit inputs.
     ///
     /// # Panics

@@ -15,7 +15,7 @@ pub use builder::{
     Bool, Circuit, CircuitBuilder, CircuitStats, Gate, LookupConstraint, Table, TableDefinition,
     Value,
 };
-pub use stark::{LoweringError, MultiStarkCircuit, MultiStarkLayout};
+pub use stark::{LoweringError, MultiStarkCircuit, MultiStarkLayout, TraceShards};
 pub use witness::{Assignment, Witness, WitnessError};
 
 #[cfg(test)]

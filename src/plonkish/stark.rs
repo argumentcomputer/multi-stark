@@ -64,7 +64,87 @@ pub struct MultiStarkCircuit<F: Field> {
     wires: Vec<Value>,
     fixed: RowMajorMatrix<F>,
     main_heights: Vec<usize>,
+    successors: Option<Vec<usize>>,
+    hash_row_ends: Vec<usize>,
     hash_definitions: Vec<CircuitInputs<F>>,
+    merged_table_height: Option<usize>,
+}
+
+/// Validated witness source: one computation partition per shard, followed by
+/// one shard for shared tables and custom gates. Does not retain generated traces.
+pub struct TraceShards<'a, F: Field> {
+    compiled: &'a MultiStarkCircuit<F>,
+    assignment: &'a Assignment<F>,
+}
+
+impl<F: Field> TraceShards<'_, F> {
+    pub fn len(&self) -> usize {
+        self.compiled.main_heights.len()
+            + usize::from(self.compiled.auxiliary_widths().next().is_some())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Generate a single canonical circuit, including an individual hash trace.
+    pub fn trace(&self, index: usize) -> Result<RowMajorMatrix<F>, WitnessError> {
+        let c = self.compiled;
+        if index >= c.num_circuits() {
+            return Err(WitnessError::ShardIndex {
+                index,
+                count: c.num_circuits(),
+            });
+        }
+        if index < c.main_heights.len() {
+            return Ok(c.main_trace(self.assignment, index));
+        }
+        let aux = index - c.main_heights.len();
+        let tables = if c.merged_table_height.is_some() {
+            1
+        } else {
+            c.circuit.tables.len()
+        };
+        if aux < tables {
+            return Ok(c.table_traces(self.assignment).remove(aux));
+        }
+        c.circuit.hashes.as_ref().unwrap().trace(
+            &self.assignment.values,
+            &c.hash_definitions,
+            aux - tables,
+        )
+    }
+
+    pub fn traces(&self, shard: usize) -> Result<Vec<RowMajorMatrix<F>>, WitnessError> {
+        if shard >= self.len() {
+            return Err(WitnessError::ShardIndex {
+                index: shard,
+                count: self.len(),
+            });
+        }
+        let c = self.compiled;
+        let mut traces: Vec<_> = c
+            .main_heights
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                if index == shard {
+                    c.main_trace(self.assignment, index)
+                } else {
+                    RowMajorMatrix::new(vec![], c.width)
+                }
+            })
+            .collect();
+        if shard == c.main_heights.len() {
+            traces.extend(c.auxiliary_traces(self.assignment)?);
+        } else {
+            traces.extend(
+                c.auxiliary_widths()
+                    .map(|width| RowMajorMatrix::new(vec![], width)),
+            );
+        }
+        Ok(traces)
+    }
 }
 
 /// Exact dimensions of this backend's initial row layout, without allocating
@@ -245,6 +325,68 @@ impl<F: Field> Circuit<F> {
         Ok(self.lower(namespace, layout))
     }
 
+    /// Keep integer copy links instead of dense main fixed matrices and wires.
+    /// Generate each partition's setup and witness with `circuit_input` and
+    /// `trace_shards`. The logical circuit and custom fixed traces stay resident.
+    pub fn lower_to_multi_stark_sharded(
+        self,
+        namespace: F,
+        max_height: usize,
+    ) -> Result<MultiStarkCircuit<F>, LoweringError> {
+        let layout = self.multi_stark_layout_with_max_height(max_height)?;
+        let hash_definitions = self
+            .hashes
+            .as_ref()
+            .filter(|h| !h.calls.is_empty())
+            .map_or_else(Vec::new, |h| h.definitions(namespace));
+        let mut end = 0;
+        let hash_row_ends = self.hashes.as_ref().map_or_else(Vec::new, |h| {
+            h.calls
+                .iter()
+                .map(|call| {
+                    end += call.input.len() + call.output.len();
+                    end
+                })
+                .collect()
+        });
+        let mut compiled = MultiStarkCircuit {
+            circuit: self,
+            namespace,
+            width: layout.main_width,
+            wires: vec![],
+            fixed: RowMajorMatrix::new(vec![], layout.preprocessed_width),
+            main_heights: layout.main_heights,
+            successors: None,
+            hash_row_ends,
+            hash_definitions,
+            merged_table_height: None,
+        };
+        let mut successors = vec![0; layout.main_height * compiled.width];
+        let mut endpoints = vec![(usize::MAX, usize::MAX); compiled.circuit.num_values()];
+        let mut wires = vec![compiled.circuit.zero; compiled.width];
+        let mut fixed = vec![F::ZERO; compiled.fixed.width()];
+        for row in 0..layout.main_height {
+            compiled.layout_row(row, &mut wires, &mut fixed);
+            for (col, value) in wires.iter().enumerate() {
+                let cell = row * compiled.width + col;
+                let (first, last) = &mut endpoints[value.index];
+                if *first == usize::MAX {
+                    *first = cell;
+                } else {
+                    successors[*last] = cell;
+                }
+                *last = cell;
+            }
+        }
+        for (first, last) in endpoints {
+            if first != usize::MAX {
+                successors[last] = first;
+            }
+        }
+        compiled.successors = Some(successors);
+        Ok(compiled)
+    }
+
     fn lower(self, namespace: F, layout: MultiStarkLayout) -> MultiStarkCircuit<F> {
         let width = layout.main_width;
         let fixed_width = layout.preprocessed_width;
@@ -336,12 +478,43 @@ impl<F: Field> Circuit<F> {
             wires,
             fixed: RowMajorMatrix::new(fixed, fixed_width),
             main_heights: layout.main_heights,
+            successors: None,
+            hash_row_ends: vec![],
             hash_definitions,
+            merged_table_height: None,
         }
     }
 }
 
 impl<F: Field> MultiStarkCircuit<F> {
+    /// Combine fixed tables in one trace, retaining a fixed table-ID column.
+    /// This saves commitments/openings at the cost of a taller table domain.
+    pub fn merge_table_traces(mut self, max_height: usize) -> Result<Self, LoweringError> {
+        if max_height < 2 || !max_height.is_power_of_two() {
+            return Err(LoweringError::InvalidTraceHeight);
+        }
+        if !self.circuit.tables.is_empty() {
+            let rows = self
+                .circuit
+                .tables
+                .iter()
+                .try_fold(0usize, |n, table| n.checked_add(table.rows.len()))
+                .ok_or(LoweringError::SizeOverflow)?;
+            let height = rows
+                .max(2)
+                .checked_next_power_of_two()
+                .ok_or(LoweringError::SizeOverflow)?;
+            if height > max_height {
+                return Err(LoweringError::TableExceedsTraceHeight);
+            }
+            height
+                .checked_mul(self.width + 1)
+                .ok_or(LoweringError::SizeOverflow)?;
+            self.merged_table_height = Some(height);
+        }
+        Ok(self)
+    }
+
     pub fn circuit(&self) -> &Circuit<F> {
         &self.circuit
     }
@@ -352,12 +525,16 @@ impl<F: Field> MultiStarkCircuit<F> {
 
     /// Total padded computation rows, not an individual FFT domain size.
     pub fn main_height(&self) -> usize {
-        self.fixed.height()
+        self.main_heights.iter().sum()
     }
 
     /// Individual computation domains, before FRI blowup.
     pub fn main_heights(&self) -> &[usize] {
         &self.main_heights
+    }
+
+    pub fn num_circuits(&self) -> usize {
+        self.main_heights.len() + self.auxiliary_widths().count()
     }
 
     pub fn witness(&self) -> Witness<'_, F> {
@@ -366,6 +543,15 @@ impl<F: Field> MultiStarkCircuit<F> {
 
     /// Setup data in canonical order: computation partitions, then fixed tables.
     pub fn circuit_inputs(&self) -> Vec<CircuitInputs<F>> {
+        self.selected_inputs(None)
+    }
+
+    /// Generate setup data for one circuit, without cloning the other fixed matrices.
+    pub fn circuit_input(&self, index: usize) -> Option<CircuitInputs<F>> {
+        self.selected_inputs(Some(index)).pop()
+    }
+
+    fn selected_inputs(&self, selected: Option<usize>) -> Vec<CircuitInputs<F>> {
         // Widths were checked against u32 during lowering.
         let main = |i| Expr::main(u32::try_from(i).expect("checked column"));
         let prep = |i| Expr::preprocessed(u32::try_from(i).expect("checked column"));
@@ -430,9 +616,10 @@ impl<F: Field> MultiStarkCircuit<F> {
             ));
         }
         let mut inputs = Vec::new();
-        let mut offset = 0;
-        for (index, &height) in self.main_heights.iter().enumerate() {
-            let end = offset + height * self.fixed.width();
+        for index in 0..self.main_heights.len() {
+            if selected.is_some_and(|i| i != index) {
+                continue;
+            }
             let mut local_lookups = lookups.clone();
             if self.main_heights.len() > 1 {
                 // Separate channel from COPY=0, PUBLIC=1 and TABLE=2.
@@ -448,38 +635,75 @@ impl<F: Field> MultiStarkCircuit<F> {
             }
             inputs.push(CircuitInputs {
                 main_width: self.width,
-                preprocessed: Some(RowMajorMatrix::new(
-                    self.fixed.values[offset..end].to_vec(),
-                    self.fixed.width(),
-                )),
+                preprocessed: Some(self.fixed_partition(index)),
                 constraints: vec![relation.clone()],
                 lookups: local_lookups,
                 ..Default::default()
             });
-            offset = end;
         }
-        for (index, table) in self.circuit.tables.iter().enumerate() {
-            let height = table.rows.len().max(2).next_power_of_two();
-            let mut rows = Vec::with_capacity(height * self.width);
-            for i in 0..height {
-                let row = table.rows.get(i).unwrap_or(&table.rows[0]);
-                rows.extend_from_slice(row);
-                rows.resize(rows.len() + self.width - row.len(), F::ZERO);
+        if let Some(height) = self.merged_table_height {
+            if selected.is_none_or(|i| i == self.main_heights.len()) {
+                let width = self.width + 1;
+                let mut rows = Vec::with_capacity(height * width);
+                for (index, table) in self.circuit.tables.iter().enumerate() {
+                    for row in &table.rows {
+                        rows.push(F::from_usize(index));
+                        rows.extend_from_slice(row);
+                        rows.resize(rows.len() + self.width - row.len(), F::ZERO);
+                    }
+                }
+                // Padding repeats a genuine tagged row, never a new table entry.
+                while rows.len() < height * width {
+                    rows.extend_from_within(..width);
+                }
+                let mut args = vec![constant(self.namespace), constant(F::TWO)];
+                args.extend((0..width).map(prep));
+                inputs.push(CircuitInputs {
+                    main_width: 1,
+                    preprocessed: Some(RowMajorMatrix::new(rows, width)),
+                    lookups: vec![Lookup::push(main(0), args)],
+                    ..Default::default()
+                });
             }
-            let mut args = vec![
-                constant(self.namespace),
-                constant(F::TWO),
-                constant(F::from_usize(index)),
-            ];
-            args.extend((0..self.width).map(prep));
-            inputs.push(CircuitInputs {
-                main_width: 1,
-                preprocessed: Some(RowMajorMatrix::new(rows, self.width)),
-                lookups: vec![Lookup::push(main(0), args)],
-                ..Default::default()
-            });
+        } else {
+            for (index, table) in self.circuit.tables.iter().enumerate() {
+                if selected.is_some_and(|i| i != self.main_heights.len() + index) {
+                    continue;
+                }
+                let height = table.rows.len().max(2).next_power_of_two();
+                let mut rows = Vec::with_capacity(height * self.width);
+                for i in 0..height {
+                    let row = table.rows.get(i).unwrap_or(&table.rows[0]);
+                    rows.extend_from_slice(row);
+                    rows.resize(rows.len() + self.width - row.len(), F::ZERO);
+                }
+                let mut args = vec![
+                    constant(self.namespace),
+                    constant(F::TWO),
+                    constant(F::from_usize(index)),
+                ];
+                args.extend((0..self.width).map(prep));
+                inputs.push(CircuitInputs {
+                    main_width: 1,
+                    preprocessed: Some(RowMajorMatrix::new(rows, self.width)),
+                    lookups: vec![Lookup::push(main(0), args)],
+                    ..Default::default()
+                });
+            }
         }
-        inputs.extend(self.hash_definitions.clone());
+        let hash_start = self.main_heights.len()
+            + if self.merged_table_height.is_some() {
+                1
+            } else {
+                self.circuit.tables.len()
+            };
+        inputs.extend(
+            self.hash_definitions
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| selected.is_none_or(|i| i == hash_start + index))
+                .map(|(_, d)| d.clone()),
+        );
         inputs
     }
 
@@ -488,23 +712,159 @@ impl<F: Field> MultiStarkCircuit<F> {
         &self,
         assignment: &Assignment<F>,
     ) -> Result<Vec<RowMajorMatrix<F>>, WitnessError> {
+        self.trace_shards(assignment)?;
+        let mut traces: Vec<_> = (0..self.main_heights.len())
+            .map(|index| self.main_trace(assignment, index))
+            .collect();
+        traces.extend(self.auxiliary_traces(assignment)?);
+        Ok(traces)
+    }
+
+    /// Check the assignment once, then generate shards on demand for batch
+    /// proving with `Retention::Regenerate`. The circuit, fixed data and logical
+    /// assignment remain resident; this only bounds generated witness traces.
+    pub fn trace_shards<'a>(
+        &'a self,
+        assignment: &'a Assignment<F>,
+    ) -> Result<TraceShards<'a, F>, WitnessError> {
         if assignment.owner != self.circuit.owner {
             return Err(WitnessError::ForeignAssignment);
         }
         self.circuit.check_values(&assignment.values)?;
-        let mut traces = Vec::new();
-        let mut offset = 0;
-        for &height in &self.main_heights {
-            let end = offset + height * self.width;
-            traces.push(RowMajorMatrix::new(
-                self.wires[offset..end]
-                    .iter()
-                    .map(|v| assignment.values[v.index])
-                    .collect(),
-                self.width,
-            ));
-            offset = end;
+        Ok(TraceShards {
+            compiled: self,
+            assignment,
+        })
+    }
+
+    fn layout_row(&self, row: usize, wires: &mut [Value], fixed: &mut [F]) {
+        wires.fill(self.circuit.zero);
+        fixed.fill(F::ZERO);
+        let c = &self.circuit;
+        let public_enable = 5 + 2 * self.width;
+        let public_index = public_enable + 1;
+        let table_enable = public_enable + 2;
+        let table_index = public_enable + 3;
+        if let Some(gate) = c.gates.get(row) {
+            wires[..3].copy_from_slice(&gate.wires);
+            fixed[..5].copy_from_slice(&gate.coefficients);
+        } else if row < c.gates.len() + 1 + c.publics.len() {
+            let index = row - c.gates.len();
+            wires[0] = if index == 0 {
+                c.zero
+            } else {
+                c.publics[index - 1]
+            };
+            fixed[public_enable] = F::ONE;
+            fixed[public_index] = F::from_usize(index);
+        } else {
+            let index = row - c.gates.len() - 1 - c.publics.len();
+            if let Some(lookup) = c.lookups.get(index) {
+                wires[..lookup.values.len()].copy_from_slice(&lookup.values);
+                fixed[table_enable] = F::ONE;
+                fixed[table_index] = F::from_usize(lookup.table.index);
+            } else {
+                let index = index - c.lookups.len();
+                let call_index = self.hash_row_ends.partition_point(|&end| end <= index);
+                if let Some(call) = c.hashes.as_ref().and_then(|h| h.calls.get(call_index)) {
+                    let offset = index
+                        - call_index
+                            .checked_sub(1)
+                            .map_or(0, |i| self.hash_row_ends[i]);
+                    wires[0] = if offset < call.input.len() {
+                        call.input[offset]
+                    } else {
+                        call.output[offset - call.input.len()]
+                    };
+                    fixed[table_index] = F::from_usize(call_index);
+                    fixed[public_index] = F::from_usize(offset);
+                    fixed[table_index + 1] = if offset < call.input.len() {
+                        F::ONE
+                    } else {
+                        F::NEG_ONE
+                    };
+                }
+            }
         }
+    }
+
+    fn fixed_partition(&self, index: usize) -> RowMajorMatrix<F> {
+        let start = self.main_heights[..index].iter().sum::<usize>();
+        let height = self.main_heights[index];
+        let width = self.fixed.width();
+        let Some(successors) = &self.successors else {
+            return RowMajorMatrix::new(
+                self.fixed.values[start * width..(start + height) * width].to_vec(),
+                width,
+            );
+        };
+        let mut values = vec![F::ZERO; height * width];
+        let mut wires = vec![self.circuit.zero; self.width];
+        for (local_row, fixed) in values.chunks_exact_mut(width).enumerate() {
+            let row = start + local_row;
+            self.layout_row(row, &mut wires, fixed);
+            for col in 0..self.width {
+                let cell = row * self.width + col;
+                fixed[5 + col] = F::from_usize(cell);
+                fixed[5 + self.width + col] = F::from_usize(successors[cell]);
+            }
+        }
+        if self.main_heights.len() > 1 {
+            values[width - 1] = F::ONE;
+        }
+        RowMajorMatrix::new(values, width)
+    }
+
+    fn main_trace(&self, assignment: &Assignment<F>, index: usize) -> RowMajorMatrix<F> {
+        let start = self.main_heights[..index].iter().sum::<usize>() * self.width;
+        let end = start + self.main_heights[index] * self.width;
+        if self.successors.is_some() {
+            let mut values = Vec::with_capacity(end - start);
+            let mut wires = vec![self.circuit.zero; self.width];
+            let mut fixed = vec![F::ZERO; self.fixed.width()];
+            for row in start / self.width..end / self.width {
+                self.layout_row(row, &mut wires, &mut fixed);
+                values.extend(wires.iter().map(|v| assignment.values[v.index]));
+            }
+            return RowMajorMatrix::new(values, self.width);
+        }
+        RowMajorMatrix::new(
+            self.wires[start..end]
+                .iter()
+                .map(|v| assignment.values[v.index])
+                .collect(),
+            self.width,
+        )
+    }
+
+    fn auxiliary_widths(&self) -> impl Iterator<Item = usize> + '_ {
+        let tables = if self.merged_table_height.is_some() {
+            1
+        } else {
+            self.circuit.tables.len()
+        };
+        std::iter::repeat_n(1, tables).chain(self.hash_definitions.iter().map(|d| d.main_width))
+    }
+
+    fn auxiliary_traces(
+        &self,
+        assignment: &Assignment<F>,
+    ) -> Result<Vec<RowMajorMatrix<F>>, WitnessError> {
+        let mut traces = self.table_traces(assignment);
+        if !self.hash_definitions.is_empty() {
+            traces.extend(
+                self.circuit
+                    .hashes
+                    .as_ref()
+                    .unwrap()
+                    .traces(&assignment.values, &self.hash_definitions)?,
+            );
+        }
+        Ok(traces)
+    }
+
+    fn table_traces(&self, assignment: &Assignment<F>) -> Vec<RowMajorMatrix<F>> {
+        let mut traces = Vec::new();
         let mut multiplicities: Vec<Vec<F>> = self
             .circuit
             .tables
@@ -519,17 +879,17 @@ impl<F: Field> MultiStarkCircuit<F> {
             let row = table.indices[&args];
             multiplicities[lookup.table.index][row] += F::ONE;
         }
-        traces.extend(multiplicities.into_iter().map(RowMajorMatrix::new_col));
-        if !self.hash_definitions.is_empty() {
-            traces.extend(
-                self.circuit
-                    .hashes
-                    .as_ref()
-                    .unwrap()
-                    .traces(&assignment.values, &self.hash_definitions)?,
-            );
+        if let Some(height) = self.merged_table_height {
+            let mut merged = Vec::with_capacity(height);
+            for (counts, table) in multiplicities.into_iter().zip(&self.circuit.tables) {
+                merged.extend_from_slice(&counts[..table.rows.len()]);
+            }
+            merged.resize(height, F::ZERO);
+            traces.push(RowMajorMatrix::new_col(merged));
+        } else {
+            traces.extend(multiplicities.into_iter().map(RowMajorMatrix::new_col));
         }
-        Ok(traces)
+        traces
     }
 
     /// Encodes the expected public statement, including the mandatory anchor.
@@ -589,6 +949,131 @@ fn partition_heights(used_rows: usize, cap: Option<usize>) -> Result<Vec<usize>,
 #[cfg(test)]
 mod partition_tests {
     use super::*;
+    use crate::traits::Algebra;
+    use crate::{plonkish::CircuitBuilder, types::Val};
+
+    #[test]
+    fn merged_tables_keep_ids_and_unpadded_multiplicities() {
+        let mut b = CircuitBuilder::<Val>::new();
+        let a = b.fixed_table(
+            "a",
+            vec![vec![Val::ONE], vec![Val::TWO], vec![Val::from_u8(3)]],
+        );
+        let c = b.fixed_table("c", vec![vec![Val::ONE, Val::ZERO]]);
+        let one = b.constant(Val::ONE);
+        let zero = b.constant(Val::ZERO);
+        b.lookup(a, &[one]);
+        b.lookup(a, &[one]);
+        b.lookup(c, &[one, zero]);
+        let compiled = b
+            .finish()
+            .lower_to_multi_stark(Val::from_u8(93))
+            .unwrap()
+            .merge_table_traces(4)
+            .unwrap();
+        let assignment = compiled.witness().generate().unwrap();
+        let definitions = compiled.circuit_inputs();
+        let traces = compiled.traces(&assignment).unwrap();
+        assert_eq!(definitions.len(), 2);
+        let fixed = definitions[1].preprocessed.as_ref().unwrap();
+        assert_eq!(fixed.width(), 4);
+        assert_eq!(fixed.height(), 4);
+        assert_eq!(
+            &fixed.values[..4],
+            &[Val::ZERO, Val::ONE, Val::ZERO, Val::ZERO]
+        );
+        assert_eq!(
+            &fixed.values[12..],
+            &[Val::ONE, Val::ONE, Val::ZERO, Val::ZERO]
+        );
+        assert_eq!(traces[1].values, [Val::TWO, Val::ZERO, Val::ZERO, Val::ONE]);
+        assert!(matches!(
+            compiled.merge_table_traces(2),
+            Err(LoweringError::TableExceedsTraceHeight)
+        ));
+    }
+
+    #[test]
+    fn generated_fixed_partitions_match_dense_layout() {
+        use crate::plonkish::gadgets::{ByteGadgets, blake3};
+        let build = || {
+            let mut b = CircuitBuilder::<Val>::new();
+            b.enable_compact_blake3();
+            let one = b.constant(Val::ONE);
+            let two = b.add(one, one);
+            b.expose_public(two);
+            let table = b.fixed_table("wide", vec![vec![Val::ONE; 5]]);
+            b.lookup(table, &[one; 5]);
+            let gadgets = ByteGadgets::new(&mut b);
+            let bytes: Vec<_> = (0..3).map(|i| gadgets.constant(&mut b, i)).collect();
+            blake3(&mut b, &gadgets, &bytes);
+            b.finish()
+        };
+        // Custom hash tables need 2^16 rows. Multiple main partitions and a
+        // partial final partition are exercised separately below.
+        let dense = build()
+            .lower_to_multi_stark_with_max_height(Val::ONE, 1 << 16)
+            .unwrap();
+        let lazy = build()
+            .lower_to_multi_stark_sharded(Val::ONE, 1 << 16)
+            .unwrap();
+        compare_layouts(&dense, &lazy);
+        let build = || {
+            let mut b = CircuitBuilder::<Val>::new();
+            let one = b.constant(Val::ONE);
+            let table = b.fixed_table("wide", vec![vec![Val::ONE; 5]]);
+            for _ in 0..9 {
+                b.lookup(table, &[one; 5]);
+            }
+            b.expose_public(one);
+            b.finish()
+        };
+        compare_layouts(
+            &build()
+                .lower_to_multi_stark_with_max_height(Val::ONE, 8)
+                .unwrap()
+                .merge_table_traces(8)
+                .unwrap(),
+            &build()
+                .lower_to_multi_stark_sharded(Val::ONE, 8)
+                .unwrap()
+                .merge_table_traces(8)
+                .unwrap(),
+        );
+    }
+
+    fn compare_layouts(dense: &MultiStarkCircuit<Val>, lazy: &MultiStarkCircuit<Val>) {
+        assert!(lazy.fixed.values.is_empty());
+        assert!(lazy.wires.is_empty());
+        assert_eq!(dense.main_heights(), lazy.main_heights());
+        assert_eq!(dense.main_height(), lazy.main_height());
+        assert_eq!(dense.num_circuits(), lazy.num_circuits());
+        for i in 0..dense.num_circuits() {
+            let a = dense.circuit_input(i).unwrap();
+            let b = lazy.circuit_input(i).unwrap();
+            assert_eq!(a.preprocessed, b.preprocessed);
+            assert_eq!(
+                format!("{:?}", a.constraints),
+                format!("{:?}", b.constraints)
+            );
+            assert_eq!(format!("{:?}", a.lookups), format!("{:?}", b.lookups));
+        }
+        assert!(lazy.circuit_input(lazy.num_circuits()).is_none());
+        let a = dense.witness().generate().unwrap();
+        let b = lazy.witness().generate().unwrap();
+        let expected = dense.traces(&a).unwrap();
+        assert_eq!(expected, lazy.traces(&b).unwrap());
+        let shards = lazy.trace_shards(&b).unwrap();
+        for (index, trace) in expected.iter().enumerate() {
+            assert_eq!(*trace, shards.trace(index).unwrap());
+        }
+        assert!(shards.trace(expected.len()).is_err());
+        assert_eq!(
+            dense.claims(a.public_values()).unwrap(),
+            lazy.claims(b.public_values()).unwrap()
+        );
+    }
+
     #[test]
     fn root_dimensions_fit_goldilocks_domains() {
         let heights = partition_heights(1_723_866_138, Some(1 << 24)).unwrap();
