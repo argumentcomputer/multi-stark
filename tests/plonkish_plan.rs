@@ -44,6 +44,77 @@ fn setup() -> (System<Config>, multi_stark::system::ProverKey<Config>) {
 fn trace(system: &System<Config>, value: Val) -> SystemWitness<Val> {
     SystemWitness::from_stage_1(vec![RowMajorMatrix::new(vec![value; 2], 1)], system)
 }
+
+#[cfg(feature = "groth16")]
+#[test]
+fn query_partition_binds_context_and_checks_each_assigned_query() {
+    let (system, pk) = setup();
+    let value = Val::from_u8(13);
+    let messages = vec![BatchMessage::push(vec![value])];
+    let batch = system.prove_batch(
+        &pk,
+        vec![ShardInput {
+            claims: vec![],
+            witness: trace(&system, value),
+        }],
+        messages.clone(),
+    );
+    system.verify_batch(&batch).unwrap();
+    let key = VerifierKey::from_system(&system);
+    let plan = VerifierPlan::validate(
+        &key,
+        profile(Envelope::SingleBatch),
+        VerifierLimits::default(),
+    )
+    .unwrap();
+    let schema = Statement {
+        claims: vec![],
+        messages: vec![Message {
+            args: vec![StatementSlot::Public],
+            multiplicity: StatementSlot::Public,
+        }],
+    };
+    let options = ImplementationOptions::default();
+    assert!(QueryShardPlan::new(&plan, schema.clone(), options, 0).is_err());
+    let partition = QueryShardPlan::new(&plan, schema, options, 1).unwrap();
+    assert_eq!(partition.shard_count(), 3);
+    assert!(partition.build(3).is_err());
+    let expanded = expand_single_batch_witness(&system, plan.shape(), &batch, &messages).unwrap();
+    let statement = Statement {
+        claims: vec![],
+        messages: vec![Message {
+            args: vec![value],
+            multiplicity: Val::ONE,
+        }],
+    };
+    let mut context = None;
+    for shard in 0..partition.shard_count() {
+        let (circuit, inputs) = partition.build(shard).unwrap();
+        assert_eq!(partition.estimate(shard).unwrap(), circuit.stats());
+        let assign = |e: &ExpandedPcsWitness| {
+            let mut w = circuit.witness();
+            inputs.assign_statement(&mut w, &statement).unwrap();
+            e.assign_proof(&mut w, inputs.proof()).unwrap();
+            w.generate()
+        };
+        let a = assign(&expanded).unwrap();
+        let digest = a.public_values()[2..34].to_vec();
+        if let Some(previous) = &context {
+            assert_eq!(&digest, previous);
+        } else {
+            context = Some(digest);
+        }
+        assert_eq!(a.public_values()[34], Val::from_u64(shard as u64));
+        for query in 0..2 {
+            let mut bad = expanded.clone();
+            bad.proof.opening_proof.input_openings[0].opened_values[query][0][0] += Val::ONE;
+            assert_eq!(
+                assign(&bad).is_err(),
+                partition.query_range(shard).unwrap().contains(&query)
+            );
+        }
+    }
+}
 fn profile(envelope: Envelope) -> ProofProfile {
     ProofProfile {
         envelope,
@@ -60,6 +131,62 @@ fn profile(envelope: Envelope) -> ProofProfile {
             vec![]
         },
         max_field_retries: 2,
+    }
+}
+
+#[cfg(feature = "groth16")]
+#[test]
+fn ordinary_query_partition_checks_queries_and_preserves_claim_binding() {
+    let (system, pk) = setup();
+    let claims = vec![vec![Val::from_u8(13)]];
+    let proof = system.prove_multiple_claims(&pk, &[&claims[0]], trace(&system, claims[0][0]));
+    system
+        .verify_multiple_claims(&[&claims[0]], &proof)
+        .unwrap();
+    let key = VerifierKey::from_system(&system);
+    let plan = VerifierPlan::validate(&key, profile(Envelope::Ordinary), VerifierLimits::default())
+        .unwrap();
+    let schema = Statement {
+        claims: vec![vec![StatementSlot::Public]],
+        messages: vec![],
+    };
+    let partition =
+        QueryShardPlan::new(&plan, schema, ImplementationOptions::default(), 1).unwrap();
+    let expanded = expand_pcs_witness(&system, plan.shape(), &proof, &[&claims[0]]).unwrap();
+    let statement = Statement {
+        claims,
+        messages: vec![],
+    };
+    let mut context = None;
+    for shard in 0..partition.shard_count() {
+        let (circuit, inputs) = partition.build(shard).unwrap();
+        assert_eq!(partition.estimate(shard).unwrap(), circuit.stats());
+        let assign = |e: &ExpandedPcsWitness, s: &Statement<Val>| {
+            let mut w = circuit.witness();
+            inputs.assign_statement(&mut w, s).unwrap();
+            e.assign_proof(&mut w, inputs.proof()).unwrap();
+            w.generate()
+        };
+        let a = assign(&expanded, &statement).unwrap();
+        assert_eq!(a.public_values()[0], Val::from_u8(13));
+        let digest = a.public_values()[1..33].to_vec();
+        if let Some(expected) = &context {
+            assert_eq!(&digest, expected);
+        } else {
+            context = Some(digest);
+        }
+        assert_eq!(a.public_values()[33], Val::from_usize(shard));
+        let mut wrong = statement.clone();
+        wrong.claims[0][0] += Val::ONE;
+        assert!(assign(&expanded, &wrong).is_err());
+        for query in 0..2 {
+            let mut bad = expanded.clone();
+            bad.proof.opening_proof.input_openings[0].opened_values[query][0][0] += Val::ONE;
+            assert_eq!(
+                assign(&bad, &statement).is_err(),
+                partition.query_range(shard).unwrap().contains(&query)
+            );
+        }
     }
 }
 

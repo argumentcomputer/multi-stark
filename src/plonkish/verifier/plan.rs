@@ -608,6 +608,56 @@ impl<'a> VerifierPlan<'a> {
         })
     }
 
+    #[cfg(feature = "groth16")]
+    pub(super) fn constrain_query_shard(
+        &self,
+        b: &mut CircuitBuilder<Val>,
+        statement: Statement<StatementBinding>,
+        options: ImplementationOptions,
+        queries: std::ops::Range<usize>,
+        check_algebra: bool,
+    ) -> Result<VerifierInputs, VerifierError> {
+        self.check_statement(&statement)?;
+        if options.compact_blake3 {
+            b.enable_compact_blake3();
+        } else if b.compact_blake3_enabled() {
+            return Err(VerifierError::Unsupported(
+                "builder already uses compact hashes",
+            ));
+        }
+        let wires = map_statement(statement.clone(), |v| match v {
+            StatementBinding::Constant(c) => b.constant(c),
+            StatementBinding::Wire(w) => w,
+        });
+        let bytes = ByteGadgets::new(b);
+        let proof = match self.profile.envelope {
+            Envelope::Ordinary => super::pcs::constrain_fixed_queries(
+                b,
+                &bytes,
+                self.key.system(),
+                &self.shape,
+                wires.claims,
+                queries,
+                check_algebra,
+            ),
+            Envelope::SingleBatch => super::batch::constrain_bound_batch_queries(
+                b,
+                &bytes,
+                self.key.system(),
+                &self.shape,
+                wires.claims,
+                &wires.messages,
+                queries,
+                check_algebra,
+            ),
+        };
+        Ok(VerifierInputs {
+            proof,
+            statement,
+            plan_id: self.id,
+        })
+    }
+
     /// Standalone public order: claims in order, then each message's arguments
     /// followed by its multiplicity. Constant slots are omitted from publics.
     pub fn build(
@@ -681,6 +731,29 @@ impl<'a> VerifierPlan<'a> {
             expanded,
             plan_id: self.id,
         })
+    }
+
+    /// Count frontend operations without retaining their constraints or recipes.
+    /// This is not an estimate of foreign-field or R1CS expansion.
+    #[cfg(feature = "kzg")]
+    pub fn estimate(
+        &self,
+        schema: Statement<StatementSlot>,
+        options: ImplementationOptions,
+    ) -> Result<crate::plonkish::CircuitStats, VerifierError> {
+        self.check_statement(&schema)?;
+        let mut b = CircuitBuilder::counting();
+        let mut index = 0;
+        let bindings = map_statement(schema, |s| match s {
+            StatementSlot::Constant(c) => StatementBinding::Constant(c),
+            StatementSlot::Public => {
+                let w = b.public_input(format!("statement[{index}]"));
+                index += 1;
+                StatementBinding::Wire(w)
+            }
+        });
+        self.constrain(&mut b, bindings, options)?;
+        Ok(b.stats())
     }
 }
 

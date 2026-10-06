@@ -7,6 +7,8 @@ mod builder;
 pub mod foreign;
 pub mod gadgets;
 mod hash;
+#[cfg(feature = "groth16")]
+pub mod r1cs;
 mod stark;
 pub mod verifier;
 mod witness;

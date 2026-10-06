@@ -360,7 +360,7 @@ fn canonical(b: &mut CircuitBuilder<Scalar>, table: Table, value: Value) {
 impl GoldilocksCircuit {
     pub fn new(source: &Circuit<Val>) -> Self {
         let mut b = CircuitBuilder::<Scalar>::new();
-        let inputs = Self::translate(source, &mut b);
+        let inputs = Self::translate(source, &mut b, false);
         Self {
             circuit: b.finish(),
             inputs,
@@ -373,7 +373,7 @@ impl GoldilocksCircuit {
         let stats = Self::estimate(source);
         let mut b = CircuitBuilder::<Scalar>::new();
         b.reserve(stats);
-        let inputs = Self::translate(source, &mut b);
+        let inputs = Self::translate(source, &mut b, false);
         debug_assert_eq!(b.stats(), stats);
         Self {
             circuit: b.finish(),
@@ -385,11 +385,33 @@ impl GoldilocksCircuit {
     /// Retains a wire mapping and range bounds proportional to source values.
     pub fn estimate(source: &Circuit<Val>) -> CircuitStats {
         let mut b = CircuitBuilder::<Scalar>::counting();
-        Self::translate(source, &mut b);
+        Self::translate(source, &mut b, false);
         b.stats()
     }
 
-    fn translate(source: &Circuit<Val>, b: &mut CircuitBuilder<Scalar>) -> GoldilocksInputs {
+    /// Count the scalar translation with generic hash gates, without storing it.
+    pub fn estimate_with_expanded_hashes(source: &Circuit<Val>) -> CircuitStats {
+        let mut b = CircuitBuilder::<Scalar>::counting();
+        Self::translate(source, &mut b, true);
+        b.stats()
+    }
+
+    /// Expand compact hash calls only after translating the surrounding
+    /// Goldilocks arithmetic. The original hash bytes remain constrained.
+    pub fn new_with_expanded_hashes(source: &Circuit<Val>) -> Self {
+        let mut b = CircuitBuilder::<Scalar>::new();
+        let inputs = Self::translate(source, &mut b, true);
+        Self {
+            circuit: b.finish(),
+            inputs,
+        }
+    }
+
+    pub(super) fn translate(
+        source: &Circuit<Val>,
+        b: &mut CircuitBuilder<Scalar>,
+        expand_hashes: bool,
+    ) -> GoldilocksInputs {
         let range_table = b.fixed_table(
             "u16",
             (0..=u16::MAX).map(|v| vec![Scalar::from_u16(v)]).collect(),
@@ -501,12 +523,28 @@ impl GoldilocksCircuit {
             );
         }
         if let Some(hashes) = &source.hashes {
-            b.enable_compact_blake3();
-            for call in &hashes.calls {
-                b.record_hash(
-                    call.input.iter().map(|v| wires[v.index]).collect(),
-                    &call.output.map(|v| wires[v.index]),
-                );
+            if expand_hashes {
+                use super::gadgets::{ByteGadgets, blake3};
+                let bytes = ByteGadgets::new(b);
+                for call in &hashes.calls {
+                    let input: Vec<_> = call
+                        .input
+                        .iter()
+                        .map(|v| bytes.constrain_byte(b, wires[v.index]))
+                        .collect();
+                    let digest = blake3(b, &bytes, &input);
+                    for (actual, expected) in digest.iter().zip(call.output) {
+                        b.assert_equal(actual.value(), wires[expected.index]);
+                    }
+                }
+            } else {
+                b.enable_compact_blake3();
+                for call in &hashes.calls {
+                    b.record_hash(
+                        call.input.iter().map(|v| wires[v.index]).collect(),
+                        &call.output.map(|v| wires[v.index]),
+                    );
+                }
             }
         }
         for (gate, integer) in source.gates.iter().zip(integer_gates) {
@@ -647,6 +685,12 @@ mod tests {
                 regular.circuit.stats()
             );
             assert_eq!(regular.circuit.stats(), reserved.circuit.stats());
+            assert_eq!(
+                GoldilocksCircuit::estimate_with_expanded_hashes(&source),
+                GoldilocksCircuit::new_with_expanded_hashes(&source)
+                    .circuit
+                    .stats()
+            );
             for (a, b) in regular.circuit.gates.iter().zip(&reserved.circuit.gates) {
                 assert_eq!(a.coefficients, b.coefficients);
                 assert_eq!(a.wires.map(|v| v.index), b.wires.map(|v| v.index));

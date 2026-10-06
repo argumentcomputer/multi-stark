@@ -36,3 +36,10 @@ pub use plan::{
     ResourceEstimate, Statement, StatementBinding, StatementSlot, VerifierError, VerifierInputs,
     VerifierKey, VerifierLimits, VerifierPlan,
 };
+
+#[cfg(feature = "groth16")]
+mod query_shards;
+#[cfg(feature = "groth16")]
+pub use query_shards::{
+    QueryShardPlan, encode_query_bundle, verify_encoded_query_bundle, verify_query_bundle,
+};

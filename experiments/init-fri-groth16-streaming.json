@@ -1,0 +1,202 @@
+{
+  "status": "Complete: all eleven Init Groth16 shard proofs generated; encoded 2324-byte bundle independently verified.",
+  "partition": {
+    "queries_per_shard": 10,
+    "proof_count": 11,
+    "packet_bytes": 2324
+  },
+  "preflight": {
+    "constraints": 255974791,
+    "elapsed_seconds": 303.18,
+    "peak_rss_bytes": 82844930048,
+    "address_space_limit_kib": 320520521,
+    "satisfied_constraints": true,
+    "qap_quotient_checked": true,
+    "log": "target/init-fri-wrap/stream-check/run.log"
+  },
+  "compatibility_checks": [
+    "QAP instance vectors equal Arkworks",
+    "QAP quotient and assignments equal Arkworks",
+    "Setup keys equal Arkworks with matching randomness",
+    "Proofs equal Arkworks with matching randomness",
+    "Changed public claim rejected",
+    "Corrupted assignment rejected",
+    "Incorrect dimensions rejected",
+    "Fixed-base multiplication agrees at scalar limb boundaries"
+  ],
+  "changes": [
+    "Shared R1CS emitter for dense and streaming backends",
+    "Constraint rows consumed directly into QAP accumulators/evaluations",
+    "Bounded curve-operation scratch",
+    "Scalar bit extraction avoids per-point allocation"
+  ],
+  "proving_artifacts": "target/init-fri-wrap/stream-11",
+  "security": "Insecure deterministic development setup; no production setup or security audit.",
+  "runner": "INIT_GROTH16_STREAMING=1 python3 experiments/run-init-fri-groth16.py target/init-fri-wrap/stream-11",
+  "source_sha256": {
+    "src/plonkish/r1cs.rs": "6699fcfe8b79ccf9c0d2a556a8388238208aea7f9d37adf4be7ba20bc0fdcb00",
+    "src/plonkish/r1cs/streaming.rs": "a130aed4d946af9cad5d54ed846b74de409ebbd2ae686a67dda7758ff19fc80c",
+    "examples/init_fri_wrap.rs": "65996186716497df2cf373c3cf7ad0ba1caa0df54d2f8ffb2a331a17412acde9",
+    "experiments/run-init-fri-groth16.py": "4fb1b2d3cb5c89a3a27f5e6d359fe11227bf460a6591763e4a5db2eae68dc961"
+  },
+  "first_query_proof": {
+    "shard": 1,
+    "constraints": 255974791,
+    "setup_seconds": 611.299006505,
+    "prove_and_verify_seconds": 690.935075174,
+    "elapsed_seconds": 1352.01,
+    "peak_rss_bytes": 240119148544,
+    "proof_bytes": 192,
+    "proof_sha256": "cc529bb12cdae8ae50eb7b9ecdd147c7edd48ce6bc27cca8c8439178815b188f",
+    "verified": true,
+    "changed_public_claim_rejected": true,
+    "log": "target/init-fri-wrap/stream-11/shard-1/run.log"
+  },
+  "parallel_retry": {
+    "secondary_shards": [
+      10,
+      9,
+      8,
+      7
+    ],
+    "threads_per_worker": 32,
+    "secondary_address_space_limit_gib": 260,
+    "script": "target/init-fri-wrap/prove-high-shards.py",
+    "publication": "Completed checkpoints atomically moved into the main runner directory; final bundle re-verifies every proof."
+  },
+  "resume": {
+    "command": "INIT_GROTH16_STREAMING=1 python3 experiments/run-init-fri-groth16.py target/init-fri-wrap/stream-11",
+    "completed_shards": [
+      0,
+      1
+    ],
+    "interrupted_shards": [
+      2,
+      10
+    ],
+    "note": "Run complete; --bundle rechecks every saved proof. Interrupted logs remain preserved."
+  },
+  "resumed_utc": "20261006T142027Z",
+  "running_shards": [],
+  "completed_shards": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "updated_utc": "2026-10-06T17:29:09.132014+00:00",
+  "completed_shard_timings": [
+    {
+      "shard": 0,
+      "proof_bytes": 192,
+      "proof_sha256": "3b7e7b881f2afdafe6c21518316d20fe2fde1c931077156d20f3b8ef37208894",
+      "setup_seconds": 849.338849872,
+      "prove_and_verify_seconds": 239.508283961,
+      "peak_rss_bytes": 112432349184
+    },
+    {
+      "shard": 1,
+      "proof_bytes": 192,
+      "proof_sha256": "cc529bb12cdae8ae50eb7b9ecdd147c7edd48ce6bc27cca8c8439178815b188f",
+      "setup_seconds": 611.299006505,
+      "prove_and_verify_seconds": 690.935075174,
+      "peak_rss_bytes": 240119148544
+    },
+    {
+      "shard": 2,
+      "proof_bytes": 192,
+      "proof_sha256": "010a03d6351c63150f96aa3cd5fd331ecce8d5de8ee6346f77bc50bf148d81c7",
+      "setup_seconds": 726.869383681,
+      "prove_and_verify_seconds": 790.973700524,
+      "peak_rss_bytes": 239937220608
+    },
+    {
+      "shard": 3,
+      "proof_bytes": 192,
+      "proof_sha256": "7c7e17b4103e76566900c5607b3a8ecb160b9df440ad3fa894f0f546ebca8f00",
+      "setup_seconds": 718.521551661,
+      "prove_and_verify_seconds": 776.609116616,
+      "peak_rss_bytes": 239935275008
+    },
+    {
+      "shard": 4,
+      "proof_bytes": 192,
+      "proof_sha256": "7c80c10d95b5f239365b6338038709285ad050c424718fb75adf85360531fb33",
+      "setup_seconds": 722.736712956,
+      "prove_and_verify_seconds": 768.409692953,
+      "peak_rss_bytes": 237857406976
+    },
+    {
+      "shard": 5,
+      "proof_bytes": 192,
+      "proof_sha256": "e8f49051803a2625ea797ae6f6711080c765d74af053ef223ee8cb2aeb5dc127",
+      "setup_seconds": 710.076449023,
+      "prove_and_verify_seconds": 753.798434618,
+      "peak_rss_bytes": 240060190720
+    },
+    {
+      "shard": 6,
+      "proof_bytes": 192,
+      "proof_sha256": "9e3e3a4680db47cb961abb440b994bc93aeef3bf69c62555733f309eeea0f98a",
+      "setup_seconds": 612.803260839,
+      "prove_and_verify_seconds": 699.230826804,
+      "peak_rss_bytes": 237858009088
+    },
+    {
+      "shard": 7,
+      "proof_bytes": 192,
+      "proof_sha256": "0542679c4cf79edf90ff761a92830e8b7569337fac8c3d7877b28df1a1762a57",
+      "setup_seconds": 700.525369835,
+      "prove_and_verify_seconds": 735.258408055,
+      "peak_rss_bytes": 240106602496
+    },
+    {
+      "shard": 8,
+      "proof_bytes": 192,
+      "proof_sha256": "a63b2e45e440a77446b2e33113c94a87506c96c38f126fd4c7185fe470829546",
+      "setup_seconds": 718.511165401,
+      "prove_and_verify_seconds": 739.783320181,
+      "peak_rss_bytes": 240164220928
+    },
+    {
+      "shard": 9,
+      "proof_bytes": 192,
+      "proof_sha256": "e574a11a54ca0c8e2df0abc1304bf437d280242b0eb69072d595e79807d022c2",
+      "setup_seconds": 715.874704112,
+      "prove_and_verify_seconds": 759.849319438,
+      "peak_rss_bytes": 240070823936
+    },
+    {
+      "shard": 10,
+      "proof_bytes": 192,
+      "proof_sha256": "7b8df9b7483ca25ea0b057637c12e63c8d053d210876a37ce0fc0b03bfe9f4a0",
+      "setup_seconds": 727.097686395,
+      "prove_and_verify_seconds": 783.155399549,
+      "peak_rss_bytes": 239934922752
+    }
+  ],
+  "completed_utc": "2026-10-06T16:27:27.688287+00:00",
+  "bundle": {
+    "path": "target/init-fri-wrap/stream-11/development-bundle.bin",
+    "bytes": 2324,
+    "sha256": "4a0f2c165b992e5cc39735b79334f116391d5ed7ee7a3a0b4544dbc6ff21dbb5",
+    "verified": true,
+    "public_claim_words": 18,
+    "trusted_verifying_keys_external": true,
+    "checkpoint_directory": "experiments/init-fri-groth16-artifacts",
+    "standalone_verification": "cargo run --release --features groth16,parallel --example verify_init_bundle",
+    "negative_checks": [
+      "Each of 18 claim words altered in both packet and expected statement",
+      "Altered version, keyset, context and proof",
+      "Reordered and duplicated proofs",
+      "Truncated packet and trailing bytes"
+    ]
+  }
+}

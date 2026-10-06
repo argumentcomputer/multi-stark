@@ -1,0 +1,18 @@
+{
+  "security": "Insecure deterministic development setup; not production keys.",
+  "bundle_sha256": "4a0f2c165b992e5cc39735b79334f116391d5ed7ee7a3a0b4544dbc6ff21dbb5",
+  "files": {
+    "development-bundle.bin": "4a0f2c165b992e5cc39735b79334f116391d5ed7ee7a3a0b4544dbc6ff21dbb5",
+    "development-vk-0.bin": "315a8e6c43ecb30589c6680633ef8ce689695deeda0d78bd93cf9ee191ef2a2d",
+    "development-vk-1.bin": "8be113d6d7a444a6a73fab1260d63671a7658112904f348dde89b557b2f22eb1",
+    "development-vk-10.bin": "aafcad25b25e0f5bf92e3f02986294f22936f9310f3879751bdfee2e1300167b",
+    "development-vk-2.bin": "012cf7b983754dafc3dfb350fbb3a4734d2ef4395b3510ac3f18fc843bb78a22",
+    "development-vk-3.bin": "cd43e056d2b37ad16ca91339a685857a865ffe3230b2d2497cf9a1ac896613f6",
+    "development-vk-4.bin": "12d9eb7b633004866d9b861469c685d71d98e063d89961b7cfa016fad3595de6",
+    "development-vk-5.bin": "66410c28afb9672ff6fa886ffaa69851f4f84ebac9f9bea6533760d4fe7dac39",
+    "development-vk-6.bin": "e599ba44ffa31cb2164c110b3c9796f44cf67ae29e85450976cfeb44003d3734",
+    "development-vk-7.bin": "b01b2be3ab8439454816ac9699a0f4562b7cc3910cda5d4f88e90ab65123737d",
+    "development-vk-8.bin": "5d8a2860210fb3b1554a2c9297eadd72afdbcc3461b14308d6a6649b74540666",
+    "development-vk-9.bin": "c43f60e4d7d2301158438fa026325aa1a1957ecb82b5b3c8844a761aa824fa74"
+  }
+}

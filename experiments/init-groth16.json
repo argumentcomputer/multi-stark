@@ -1,0 +1,102 @@
+{
+  "status": "Direct Groth16 fixture verified; full Init counted but not proved",
+  "checkpoint": "de581d2",
+  "branch": "ap/init-groth16",
+  "init_artifacts": "/home/arthur/ix/measurements/init16-root-verifier-main-20261002",
+  "init_native_verification": "passed",
+  "init_generic_frontend": {
+    "values": 1727095441,
+    "gates": 1064931463,
+    "lookups": 658933088,
+    "publics": 18
+  },
+  "counts_scope": "Exact frontend and R1CS census for unchanged Init profile; counts are not a full Init proof",
+  "ordinary_fixture": {
+    "r1cs_constraints": 2186320,
+    "r1cs_witnesses": 1762139,
+    "proof_bytes": 192,
+    "verification": "passed, serialized roundtrip passed, altered expected claim rejected"
+  },
+  "security": "Deterministic development setup; no production-security claim",
+  "init_prototype_limit": "--prove refuses more than 10000000 frontend values to avoid allocating the full Init frontend and R1CS in memory",
+  "single_batch_fixture": {
+    "r1cs_constraints": 2227191,
+    "r1cs_witnesses": 1794783,
+    "proof_bytes": 192,
+    "verification": "passed, serialized roundtrip passed, altered expected claim rejected"
+  },
+  "validation": {
+    "release_tests_passed": 154,
+    "ignored": 1,
+    "clippy": "all targets, groth16+parallel: passed",
+    "non_groth16": "cargo check --all-targets --features parallel: passed",
+    "format_and_diff_checks": "passed"
+  },
+  "init_r1cs_baseline": {
+    "r1cs": {
+      "constraints": 9705957963,
+      "witnesses": 8531979794,
+      "public_inputs": 18,
+      "scalar_values": 2505861378,
+      "scalar_gates": 1733270915,
+      "scalar_lookups": 884994454,
+      "bit_variables": 6026118800
+    },
+    "qap_domain": 12884901888
+  },
+  "init_r1cs_boolean_reuse": {
+    "r1cs": {
+      "constraints": 8758707531,
+      "witnesses": 8531979794,
+      "public_inputs": 18,
+      "scalar_values": 2505861378,
+      "scalar_gates": 1733270915,
+      "scalar_lookups": 884994454,
+      "bit_variables": 6026118800
+    },
+    "qap_domain": 12884901888
+  },
+  "init_r1cs_optimized": {
+    "r1cs": {
+      "constraints": 7637125222,
+      "witnesses": 7410397485,
+      "public_inputs": 18,
+      "scalar_values": 2505861378,
+      "scalar_gates": 1733270915,
+      "scalar_lookups": 884994454,
+      "bit_variables": 6026118800,
+      "inlined_linear_gates": 1121582309
+    },
+    "qap_domain": 12884901888,
+    "census_peak_rss_kib": 38326868,
+    "census_translation_seconds": 190.104818749,
+    "dense_compressed_proving_key_query_bytes": 2396970690624,
+    "proving_key_estimate_scope": "Current arkworks A, B_G1, B_G2, L, H query vectors; excludes metadata; actual RAM is larger",
+    "one_domain_scalar_vector_bytes": 412316860416,
+    "constraint_reduction_fraction": 0.21315080375235296
+  },
+  "optimized_single_batch_fixture": {
+    "r1cs_constraints": 1549892,
+    "r1cs_witnesses": 1500033,
+    "proof_bytes": 192,
+    "development_setup_seconds": 27.198303118,
+    "prove_and_verify_seconds": 7.967795929,
+    "peak_rss_kib": 4598884,
+    "verification": "passed; compressed roundtrip verified; altered expected claim rejected"
+  },
+  "commands": {
+    "fixture": "cargo run --release --features groth16,parallel --example fri_groth16",
+    "init_census": "cargo run --release --features groth16,parallel --example init_groth16 -- /home/arthur/ix/measurements/init16-root-verifier-main-20261002 target/init-groth16-inline --r1cs-estimate"
+  },
+  "remaining_blocker": "Stock in-memory setup/proving exceeds available RAM and disk. Full Init witness/R1CS satisfaction and Groth16 proof remain unvalidated. All setups so far are insecure deterministic development setups.",
+  "source_sha256": {
+    "Cargo.toml": "552aa2fc21825e7c5699620870b3eee7d5f660f6c9ac9cc6a657b081ccb57584",
+    "Cargo.lock": "796a4800be7813229521fb02fd16d1929cc6cf944f08d436b197f7c0184e8716",
+    "src/plonkish/r1cs.rs": "64f43468d4e22f3b3d5cb2f547023d02a8d0ef2ab47573ee775f4a9e1e86a986",
+    "src/plonkish/builder.rs": "f05780e3bd8623a4894e777203485d29efb6069743f4bcf27d5cd0069664a042",
+    "src/plonkish/foreign.rs": "501f4a974678f60e4aa0e2156246d7278fd366632ca5101f091401033fe5fb84",
+    "src/plonkish/verifier/plan.rs": "be79582966fcb11577848eb5002094f00d8ebf5f6d297c2dbb7ad9e54169164e",
+    "examples/init_groth16.rs": "efa4f0495db6f199c27486258e31b3fe4be31abea9a819aec646e4fe65b49366",
+    "examples/fri_groth16.rs": "4e906ca8cc41ede9e5adcf985d5dd9016262f548494b52beb0ccdb839ed96643"
+  }
+}

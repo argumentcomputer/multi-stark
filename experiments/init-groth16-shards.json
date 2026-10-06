@@ -1,0 +1,190 @@
+{
+  "status": "Sharded Groth16 fixture proved and verified; full Init censused, not proved",
+  "branch": "ap/init-groth16",
+  "init_artifacts": "/home/arthur/ix/measurements/init16-root-verifier-main-20261002",
+  "inner_proof_changed": false,
+  "partition": "Global algebra shard plus fixed query groups. Every shard replays the full transcript and constrains the same BLAKE3 digest of all non-query inputs, statement, plan identity and partition. Trusted ordered key set requires full query coverage; public shard index rejects reorder/duplication.",
+  "encoding": {
+    "version_bytes": 4,
+    "trusted_keyset_digest_bytes": 32,
+    "statement_bytes_per_public_goldilocks_value": 8,
+    "shared_context_bytes": 32,
+    "compressed_proof_bytes_per_shard": 192,
+    "counts": "From the trusted key set and independently expected statement; no proof-controlled lengths",
+    "verification_keys": "Installed separately, not in QR"
+  },
+  "fixture": {
+    "queries": 2,
+    "shards": 3,
+    "proof_bytes": 576,
+    "complete_packet_bytes": 652,
+    "encoded_packet": "target/fri-groth16-shards.bin",
+    "verification": "passed, including compressed roundtrip",
+    "rejected": [
+      "missing shard",
+      "duplicate shard",
+      "reordered shards",
+      "valid shard of different inner proof with same public claim",
+      "wrong expected claim",
+      "wrong common context",
+      "modified packet version, key identifier, statement, context or curve point",
+      "truncated and trailing packet data"
+    ],
+    "peak_rss_kib": 7533808
+  },
+  "init_measurements": {
+    "global10": {
+      "r1cs": {
+        "constraints": 251819770,
+        "witnesses": 243747204,
+        "public_inputs": 51,
+        "scalar_values": 99321320,
+        "scalar_gates": 64046782,
+        "scalar_lookups": 37603299,
+        "bit_variables": 190620568,
+        "inlined_linear_gates": 46194306
+      },
+      "qap_domain": 268435456,
+      "dense_key_compressed_bytes": 71384240784,
+      "dense_key_resident_bytes": 152715876984,
+      "one_domain_scalar_array_bytes": 8589934592,
+      "census_peak_rss_kib": 1771532
+    },
+    "queries10": {
+      "r1cs": {
+        "constraints": 942395756,
+        "witnesses": 913733594,
+        "public_inputs": 51,
+        "scalar_values": 332565910,
+        "scalar_gates": 223358643,
+        "scalar_lookups": 120988463,
+        "bit_variables": 732483672,
+        "inlined_linear_gates": 151315729
+      },
+      "qap_domain": 1073741824,
+      "dense_key_compressed_bytes": 270835680048,
+      "dense_key_resident_bytes": 579500770936,
+      "one_domain_scalar_array_bytes": 34359738368,
+      "census_peak_rss_kib": 5376028
+    },
+    "last10": {
+      "r1cs": {
+        "constraints": 942395756,
+        "witnesses": 913733594,
+        "public_inputs": 51,
+        "scalar_values": 332565910,
+        "scalar_gates": 223358643,
+        "scalar_lookups": 120988463,
+        "bit_variables": 732483672,
+        "inlined_linear_gates": 151315729
+      },
+      "qap_domain": 1073741824,
+      "dense_key_compressed_bytes": 270835680048,
+      "dense_key_resident_bytes": 579500770936,
+      "one_domain_scalar_array_bytes": 34359738368,
+      "census_peak_rss_kib": 5376892
+    },
+    "global": {
+      "r1cs": {
+        "constraints": 251819770,
+        "witnesses": 243747204,
+        "public_inputs": 51,
+        "scalar_values": 99321320,
+        "scalar_gates": 64046782,
+        "scalar_lookups": 37603299,
+        "bit_variables": 190620568,
+        "inlined_linear_gates": 46194306
+      },
+      "qap_domain": 268435456,
+      "dense_key_compressed_bytes": 71384240784,
+      "dense_key_resident_bytes": 152715876984,
+      "one_domain_scalar_array_bytes": 8589934592,
+      "census_peak_rss_kib": 1770876
+    },
+    "queries12": {
+      "r1cs": {
+        "constraints": 1091981576,
+        "witnesses": 1058883414,
+        "public_inputs": 51,
+        "scalar_values": 381547476,
+        "scalar_gates": 257264933,
+        "scalar_lookups": 138272283,
+        "bit_variables": 850564888,
+        "inlined_linear_gates": 173228691
+      },
+      "qap_domain": 2147483648,
+      "dense_key_compressed_bytes": 357211244400,
+      "dense_key_resident_bytes": 765486628472,
+      "one_domain_scalar_array_bytes": 68719476736,
+      "census_peak_rss_kib": 6121712
+    },
+    "queries8": {
+      "r1cs": {
+        "constraints": 792809936,
+        "witnesses": 768583774,
+        "public_inputs": 51,
+        "scalar_values": 283584344,
+        "scalar_gates": 189452353,
+        "scalar_lookups": 103704643,
+        "bit_variables": 614402456,
+        "inlined_linear_gates": 129402767
+      },
+      "qap_domain": 1073741824,
+      "dense_key_compressed_bytes": 235999723248,
+      "dense_key_resident_bytes": 505184063096,
+      "one_domain_scalar_array_bytes": 34359738368,
+      "census_peak_rss_kib": 4631488
+    }
+  },
+  "layout_comparison": [
+    {
+      "queries_per_shard": 12,
+      "shards": 10,
+      "projected_binary_bytes": 2132,
+      "largest_measured_constraints": 1091981576,
+      "largest_measured_domain": 2147483648,
+      "largest_measured_dense_key_resident_bytes": 765486628472
+    },
+    {
+      "queries_per_shard": 10,
+      "shards": 11,
+      "projected_binary_bytes": 2324,
+      "largest_measured_constraints": 942395756,
+      "largest_measured_domain": 1073741824,
+      "largest_measured_dense_key_resident_bytes": 579500770936
+    },
+    {
+      "queries_per_shard": 8,
+      "shards": 14,
+      "projected_binary_bytes": 2900,
+      "largest_measured_constraints": 792809936,
+      "largest_measured_domain": 1073741824,
+      "largest_measured_dense_key_resident_bytes": 505184063096
+    }
+  ],
+  "resource_scope": "Dense stock arkworks query vectors; 104-byte G1Affine and 200-byte G2Affine. Excludes witness, R1CS, frontend, FFT scratch, and allocation overhead. Only first/last query groups measured for 10-query layout; no full Init Groth16 setup attempted.",
+  "remaining_blocker": "Even QR-compatible partitioning exceeds available proving memory with the stock in-memory backend. Need streamed/compressed key handling and bounded-memory lowering/proving, or more constraint reductions.",
+  "security": "Deterministic development setup only. Production setup and full Init proving remain outstanding.",
+  "validation": {
+    "release_tests_passed": 155,
+    "ignored": 1,
+    "clippy": "all targets, groth16+parallel passed",
+    "check_without_groth16": "all targets, parallel passed",
+    "format_and_diff": "passed"
+  },
+  "commands": {
+    "fixture": "cargo run --release --features groth16,parallel --example fri_groth16 -- --shards",
+    "init_census": "cargo run --release --features groth16,parallel --example init_groth16 -- /home/arthur/ix/measurements/init16-root-verifier-main-20261002 target/init-groth16-shards/queries10 --shard-estimate 10 1"
+  },
+  "source_sha256": {
+    "src/plonkish/verifier/query_shards.rs": "dd77ede63acfa45543c6a51143f7cbc439c8150d32bbd6d038ae4f0667c39e49",
+    "src/plonkish/verifier/pcs.rs": "0c80da24c100f27a1d3dccf2f9155faabae751e633da788fffe54a65175b34a6",
+    "src/plonkish/verifier/pcs_witness.rs": "4c14b9dadbdb5a695709ebf549cb15984aa9b77ca9c10dd114a5f4e946a0a396",
+    "src/plonkish/verifier/batch.rs": "33fc9bc111b2fdacfc2ca3464e56221caf7af142b526b293bf7df3a344b35c21",
+    "src/plonkish/verifier/plan.rs": "6a3ae6b08f24f989e8fbccd635730e6a66039b6ae7d3a4f5a36be3c940d876b8",
+    "src/plonkish/r1cs.rs": "64f43468d4e22f3b3d5cb2f547023d02a8d0ef2ab47573ee775f4a9e1e86a986",
+    "examples/fri_groth16.rs": "3e3612a5909e052f4a30244c1d25a7a860c64fc640cfbf7a526f5ba58516cb0d",
+    "examples/init_groth16.rs": "9d76a0dc70df9b8234f874db94f61788efd56c126a11b0d82d8e7e0cf98c91c5",
+    "tests/plonkish_plan.rs": "db640582db83e6879ed34e66fd677e1411ee7bf53919f3c740ded41b45025a94"
+  }
+}

@@ -537,7 +537,8 @@ impl ExpandedPcsWitness {
         {
             return Err("path query count mismatch".into());
         }
-        for (query, wires) in inputs.pcs.queries.iter().enumerate() {
+        for (offset, wires) in inputs.pcs.queries.iter().enumerate() {
+            let query = inputs.pcs.query_start + offset;
             for batch in 0..4 {
                 for (wires, values) in wires.input_rows[batch]
                     .iter()

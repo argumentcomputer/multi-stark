@@ -127,14 +127,17 @@ pub struct PcsInputs {
     pub query_pow: Value,
     pub final_poly: Q,
     pub queries: Vec<PcsQuery>,
+    pub(super) query_start: usize,
 }
 
 impl PcsInputs {
-    pub(super) fn allocate(
+    pub(super) fn allocate_queries(
         b: &mut CircuitBuilder<Val>,
         bytes: &ByteGadgets,
         shape: &FixedPcsShape,
+        queries: std::ops::Range<usize>,
     ) -> Self {
+        assert!(queries.start <= queries.end && queries.end <= shape.queries);
         fn digest(b: &mut CircuitBuilder<Val>, bytes: &ByteGadgets) -> Digest {
             std::array::from_fn(|_| bytes.input(b, "Merkle digest byte"))
         }
@@ -146,7 +149,8 @@ impl PcsInputs {
                 .collect(),
             query_pow: b.input("query grinding witness"),
             final_poly: Q::input(b, "FRI final constant"),
-            queries: (0..shape.queries)
+            query_start: queries.start,
+            queries: queries
                 .map(|_| PcsQuery {
                     input_rows: std::array::from_fn(|batch| {
                         shape.widths[batch]
@@ -224,6 +228,19 @@ pub fn constrain_fixed_verifier(
     shape: &FixedPcsShape,
     claims: Vec<Vec<Value>>,
 ) -> FixedVerifierInputs {
+    constrain_fixed_queries(b, bytes, system, shape, claims, 0..shape.queries, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn constrain_fixed_queries(
+    b: &mut CircuitBuilder<Val>,
+    bytes: &ByteGadgets,
+    system: &System<GoldilocksBlake3Config>,
+    shape: &FixedPcsShape,
+    claims: Vec<Vec<Value>>,
+    queries: std::ops::Range<usize>,
+    check_algebra: bool,
+) -> FixedVerifierInputs {
     // Re-derive dimensions: callers cannot smuggle inconsistent public fields.
     let mut checked_shape = FixedPcsShape::from_profile(system, &shape.active, &shape.log_degrees);
     checked_shape.max_field_retries = shape.max_field_retries;
@@ -246,8 +263,10 @@ pub fn constrain_fixed_verifier(
         &commitments,
         shape.max_field_retries,
     );
-    constrain_algebraic_checks(b, &circuits, &shape.log_degrees, &algebra);
-    let pcs = PcsInputs::allocate(b, bytes, &shape);
+    if check_algebra {
+        constrain_algebraic_checks(b, &circuits, &shape.log_degrees, &algebra);
+    }
+    let pcs = PcsInputs::allocate_queries(b, bytes, &shape, queries);
     let query_bits = constrain_pcs(
         b,
         bytes,
@@ -404,7 +423,9 @@ pub(super) fn constrain_pcs(
     let zeta = algebra.challenges.zeta;
     let zero = Q::constant(b, [Val::ZERO; 2]);
     let one = Q::constant(b, [Val::ONE, Val::ZERO]);
-    for (query_index, (query, bits)) in pcs.queries.iter().zip(&queries).enumerate() {
+    for (offset, query) in pcs.queries.iter().enumerate() {
+        let query_index = pcs.query_start + offset;
+        let bits = &queries[query_index];
         let mut reductions = BTreeMap::new();
         let mut denominators = BTreeMap::new();
         for &height in &shape.heights[0] {

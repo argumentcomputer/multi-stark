@@ -68,6 +68,29 @@ pub(super) fn constrain_bound_batch_verifier(
     claims: Vec<Vec<Value>>,
     messages: &[super::plan::Message<Value>],
 ) -> FixedVerifierInputs {
+    constrain_bound_batch_queries(
+        b,
+        bytes,
+        system,
+        shape,
+        claims,
+        messages,
+        0..shape.queries,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn constrain_bound_batch_queries(
+    b: &mut CircuitBuilder<Val>,
+    bytes: &ByteGadgets,
+    system: &System<Config>,
+    shape: &FixedPcsShape,
+    claims: Vec<Vec<Value>>,
+    messages: &[super::plan::Message<Value>],
+    queries: std::ops::Range<usize>,
+    check_algebra: bool,
+) -> FixedVerifierInputs {
     let mut checked = FixedPcsShape::from_profile(system, &shape.active, &shape.log_degrees);
     checked.max_field_retries = shape.max_field_retries;
     let shape = checked;
@@ -148,25 +171,33 @@ pub(super) fn constrain_bound_batch_verifier(
     zeta.assert_equal(b, algebra.challenges.zeta);
     tracing::info!(stats = ?b.stats(), "Plonkish batch transcript built");
 
-    let zero = Q::constant(b, [Val::ZERO; 2]);
-    let mut message_sum = zero;
-    for message in messages {
-        let mut fingerprint = zero;
-        for &value in message.args.iter().rev() {
-            fingerprint = fingerprint.mul(b, gamma);
-            let arg = Q::from_base(b, value);
-            fingerprint = fingerprint.add(b, arg);
+    if check_algebra {
+        let zero = Q::constant(b, [Val::ZERO; 2]);
+        let mut message_sum = zero;
+        for message in messages {
+            let mut fingerprint = zero;
+            for &value in message.args.iter().rev() {
+                fingerprint = fingerprint.mul(b, gamma);
+                let arg = Q::from_base(b, value);
+                fingerprint = fingerprint.add(b, arg);
+            }
+            let term = beta
+                .add(b, fingerprint)
+                .inverse(b)
+                .mul_base(b, message.multiplicity);
+            message_sum = message_sum.add(b, term);
         }
-        let term = beta
-            .add(b, fingerprint)
-            .inverse(b)
-            .mul_base(b, message.multiplicity);
-        message_sum = message_sum.add(b, term);
+        let residual = message_sum.neg(b);
+        constrain_algebraic_checks_with_residual(
+            b,
+            &circuits,
+            &shape.log_degrees,
+            &algebra,
+            residual,
+        );
+        tracing::info!(stats = ?b.stats(), "Plonkish batch algebra built");
     }
-    let residual = message_sum.neg(b);
-    constrain_algebraic_checks_with_residual(b, &circuits, &shape.log_degrees, &algebra, residual);
-    tracing::info!(stats = ?b.stats(), "Plonkish batch algebra built");
-    let pcs = PcsInputs::allocate(b, bytes, &shape);
+    let pcs = PcsInputs::allocate_queries(b, bytes, &shape, queries);
     let query_bits = constrain_pcs(b, bytes, system, &shape, &algebra, &commitments, &pcs, ch);
     FixedVerifierInputs {
         shape,

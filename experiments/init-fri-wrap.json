@@ -1,0 +1,303 @@
+{
+  "status": "Native verification and full compact witnesses passed. Full-size Groth16 costs counted, not proved.",
+  "historical_circuit_revision": "296316c852ee71d383305c7f33e53524dc980e26",
+  "artifacts": {
+    "outer-vk.bin": {
+      "bytes": 7107,
+      "sha256": "ce5c425571edfe396f601963337c4d8c3875b5663ba37a542c972d6a3ba840e2"
+    },
+    "outer-claims.bin": {
+      "bytes": 1328,
+      "sha256": "3d3d66873cbef47724c3e1df4583d9e8c5e9cc9f03d6e15e9c226e4d7a4ab9ed"
+    },
+    "outer-proof.bin": {
+      "bytes": 1530149,
+      "sha256": "ac654d6fa64b217863a9f5f8b1b9bc3510101564a657c6eadecc71994eddd0f6"
+    }
+  },
+  "claim": "18 independently expected Init words; lookup labels and activation anchors fixed as constants",
+  "profile": {
+    "queries": 100,
+    "log_blowup": 2,
+    "query_pow_bits": 20,
+    "circuits": 22
+  },
+  "measurements": {
+    "census": {
+      "frontend": {
+        "hash_calls": 52171,
+        "hash_compressions": 60297,
+        "values": 50577748,
+        "inputs": 1454641,
+        "gates": 43357244,
+        "lookups": 8930080,
+        "tables": 3,
+        "publics": 18,
+        "hint_calls": 6038785,
+        "hint_outputs": 12033573
+      },
+      "r1cs": {
+        "constraints": 2251106891,
+        "witnesses": 2183153743,
+        "public_inputs": 18,
+        "scalar_values": 915402381,
+        "scalar_gates": 585399247,
+        "scalar_lookups": 343930000,
+        "bit_variables": 1695728432,
+        "inlined_linear_gates": 427976934
+      },
+      "qap_domain": 4294967296,
+      "compressed_key_query_bytes": 730115332128,
+      "resident_key_query_bytes": 1564451322848,
+      "one_qap_field_array_bytes": 137438953472,
+      "log": "target/init-fri-wrap/census.log",
+      "census_seconds": 55.780402667,
+      "census_process_peak_rss_bytes": 14678396928
+    },
+    "shard10-global": {
+      "frontend": {
+        "hash_calls": 172,
+        "hash_compressions": 1110,
+        "values": 871341,
+        "inputs": 3741,
+        "gates": 778684,
+        "lookups": 231040,
+        "tables": 6,
+        "publics": 51,
+        "hint_calls": 234867,
+        "hint_outputs": 350413
+      },
+      "r1cs": {
+        "constraints": 39181811,
+        "witnesses": 37913465,
+        "public_inputs": 51,
+        "scalar_values": 16290425,
+        "scalar_gates": 10310111,
+        "scalar_lookups": 6253885,
+        "bit_variables": 29282936,
+        "inlined_linear_gates": 7659748
+      },
+      "qap_domain": 67108864,
+      "compressed_key_query_bytes": 12320467008,
+      "resident_key_query_bytes": 26391037048,
+      "one_qap_field_array_bytes": 2147483648,
+      "log": "target/init-fri-wrap/shard10-global.log",
+      "census_seconds": 1.001582014,
+      "bundle_proofs": 11,
+      "shard_index": 0,
+      "query_range": [
+        0,
+        0
+      ],
+      "projected_bundle_bytes": 2324,
+      "census_process_peak_rss_bytes": 313667584
+    },
+    "shard10-first": {
+      "frontend": {
+        "hash_calls": 5372,
+        "hash_compressions": 7080,
+        "values": 5826724,
+        "inputs": 148831,
+        "gates": 5016221,
+        "lookups": 1113280,
+        "tables": 6,
+        "publics": 51,
+        "hint_calls": 827876,
+        "hint_outputs": 1537132
+      },
+      "r1cs": {
+        "constraints": 255974791,
+        "witnesses": 248151363,
+        "public_inputs": 51,
+        "scalar_values": 105692724,
+        "scalar_gates": 67188818,
+        "scalar_lookups": 39983440,
+        "bit_variables": 192023336,
+        "inlined_linear_gates": 49564550
+      },
+      "qap_domain": 268435456,
+      "compressed_key_query_bytes": 72441238944,
+      "resident_key_query_bytes": 154970806392,
+      "one_qap_field_array_bytes": 8589934592,
+      "log": "target/init-fri-wrap/shard10-first.log",
+      "census_seconds": 6.469096212,
+      "bundle_proofs": 11,
+      "shard_index": 1,
+      "query_range": [
+        0,
+        10
+      ],
+      "projected_bundle_bytes": 2324,
+      "census_process_peak_rss_bytes": 1739735040
+    },
+    "shard10-10": {
+      "frontend": {
+        "hash_calls": 5372,
+        "hash_compressions": 7080,
+        "values": 5826724,
+        "inputs": 148831,
+        "gates": 5016221,
+        "lookups": 1113280,
+        "tables": 6,
+        "publics": 51,
+        "hint_calls": 827876,
+        "hint_outputs": 1537132
+      },
+      "r1cs": {
+        "constraints": 255974791,
+        "witnesses": 248151363,
+        "public_inputs": 51,
+        "scalar_values": 105692724,
+        "scalar_gates": 67188818,
+        "scalar_lookups": 39983440,
+        "bit_variables": 192023336,
+        "inlined_linear_gates": 49564550
+      },
+      "qap_domain": 268435456,
+      "compressed_key_query_bytes": 72441238944,
+      "resident_key_query_bytes": 154970806392,
+      "one_qap_field_array_bytes": 8589934592,
+      "log": "target/init-fri-wrap/shard10-10.log",
+      "census_seconds": 6.61965644,
+      "bundle_proofs": 11,
+      "shard_index": 10,
+      "query_range": [
+        90,
+        100
+      ],
+      "projected_bundle_bytes": 2324,
+      "census_process_peak_rss_bytes": 1739190272
+    },
+    "shard20-1": {
+      "frontend": {
+        "hash_calls": 10572,
+        "hash_compressions": 13050,
+        "values": 10837064,
+        "inputs": 293921,
+        "gates": 9308761,
+        "lookups": 1995520,
+        "tables": 6,
+        "publics": 51,
+        "hint_calls": 1420986,
+        "hint_outputs": 2723952
+      },
+      "r1cs": {
+        "constraints": 478707601,
+        "witnesses": 464164193,
+        "public_inputs": 51,
+        "scalar_values": 196302774,
+        "scalar_gates": 125125978,
+        "scalar_lookups": 74027190,
+        "bit_variables": 359790856,
+        "inlined_linear_gates": 91929290
+      },
+      "qap_domain": 536870912,
+      "compressed_key_query_bytes": 137169220032,
+      "resident_key_query_bytes": 293486662776,
+      "one_qap_field_array_bytes": 17179869184,
+      "log": "target/init-fri-wrap/shard20-1.log",
+      "census_seconds": 13.752042553,
+      "bundle_proofs": 6,
+      "shard_index": 1,
+      "query_range": [
+        0,
+        20
+      ],
+      "projected_bundle_bytes": 1364,
+      "census_process_peak_rss_bytes": 3188862976
+    },
+    "shard25-1": {
+      "frontend": {
+        "hash_calls": 13172,
+        "hash_compressions": 16035,
+        "values": 13342235,
+        "inputs": 366466,
+        "gates": 11455032,
+        "lookups": 2436640,
+        "tables": 6,
+        "publics": 51,
+        "hint_calls": 1717541,
+        "hint_outputs": 3317362
+      },
+      "r1cs": {
+        "constraints": 590074007,
+        "witnesses": 572170608,
+        "public_inputs": 51,
+        "scalar_values": 241607799,
+        "scalar_gates": 154094559,
+        "scalar_lookups": 91049065,
+        "bit_variables": 443674616,
+        "inlined_linear_gates": 113111660
+      },
+      "qap_domain": 1073741824,
+      "compressed_key_query_bytes": 188860563408,
+      "resident_key_query_bytes": 404620522104,
+      "one_qap_field_array_bytes": 34359738368,
+      "log": "target/init-fri-wrap/shard25-1.log",
+      "census_seconds": 19.963903536,
+      "bundle_proofs": 5,
+      "shard_index": 1,
+      "query_range": [
+        0,
+        25
+      ],
+      "projected_bundle_bytes": 1172,
+      "census_process_peak_rss_bytes": 3914199040
+    }
+  },
+  "direct_init_baseline_constraints": 7637125222,
+  "security": "128-bit target; no production security audit or trusted setup. Small Groth16 fixtures use insecure deterministic development setup. BLAKE3 throughout.",
+  "memory": "Dense key-query arrays are a lower bound, not total peak RAM; excludes circuit IR, witness, R1CS matrices and FFT workspaces.",
+  "payload": "Raw binary: 4 version + 32 trusted key-set identifier + 144 expected claim + 32 context + 192 per proof. Verifying keys distributed separately. Sizes are projected for Init, not generated proofs.",
+  "validation": {
+    "altered_init_words_rejected": 18,
+    "group10_global_first_last_contexts_equal": true,
+    "release_tests_passed": 156,
+    "release_tests_ignored": 1,
+    "clippy_all_targets": "passed",
+    "check_without_groth16": "passed",
+    "small_ordinary_groth16": {
+      "proof_bytes": 192,
+      "verified": true,
+      "altered_claim_rejected": true
+    },
+    "small_ordinary_sharded_groth16": {
+      "proofs": 3,
+      "proof_bytes": 576,
+      "packet_bytes": 652,
+      "verified": true,
+      "rejects": [
+        "missing shard",
+        "reordered shards",
+        "duplicate shard",
+        "mixed-proof shard",
+        "altered statement",
+        "altered context",
+        "malformed packet"
+      ],
+      "packet_sha256": "4f5eae6083a88d3c73c60b888ba3fd7127ad16278422359c1f0d1e2bf51826d8"
+    }
+  },
+  "commands": [
+    "python3 experiments/recover-init-fri-key.py",
+    "cargo build --offline --release --features parallel --manifest-path target/init-fri-wrap/historical/Cargo.toml --example ix_root",
+    "cp <saved-artifacts>/outer-proof.bin target/init-fri-wrap/outer-proof.bin",
+    "RAYON_NUM_THREADS=32 target/init-fri-wrap/historical/target/release/examples/ix_root <original-init-artifacts> target/init-fri-wrap --prove-outer",
+    "cargo run --offline --release --features groth16,parallel --example init_fri_wrap -- target/init-fri-wrap target/init-fri-wrap/census",
+    "cargo run --offline --release --features groth16,parallel --example init_fri_wrap -- target/init-fri-wrap target/init-fri-wrap/shard10-first 10 1",
+    "cargo run --offline --release --features groth16,parallel --example fri_groth16 -- --ordinary --shards"
+  ],
+  "constraint_reduction_factor": 3.3926088772298995,
+  "source_sha256": {
+    "examples/init_fri_wrap.rs": "819bdb4e6dde26aa1ff329c674e8c5dad9759c2bf120a62d3dcb20ba1176eca9",
+    "examples/fri_groth16.rs": "0e9dc4cb4a91fe6ec3572841a048afc10ff7d61b45c63949c80218394cda48ca",
+    "experiments/recover-init-fri-key.py": "7b212f5b62b3262a2ea46524ab289b8eff69e942c1b0e818fa3c00d7f0212bbf",
+    "src/plonkish/r1cs.rs": "64f43468d4e22f3b3d5cb2f547023d02a8d0ef2ab47573ee775f4a9e1e86a986",
+    "src/plonkish/foreign.rs": "501f4a974678f60e4aa0e2156246d7278fd366632ca5101f091401033fe5fb84",
+    "src/plonkish/verifier/query_shards.rs": "b9f8cbfb1acc62cac40f20e52caf2771a3125496438efc8fad3d90e7b310f5d5",
+    "src/plonkish/verifier/pcs.rs": "7d652e9a71b83a0316379bc8c55baa358cc10ed588306bde572584a04532d0e3",
+    "src/plonkish/verifier/plan.rs": "23da9a2e877029147691612b28cd20a9678685d9541027c302e6c68a96dae39e",
+    "tests/plonkish_plan.rs": "0ad92686406edf482393e8a293ffcc028945a1fccb8958c857be65bab1ff4db7"
+  },
+  "subsequent_proving_attempt": "experiments/init-fri-groth16-proving.json"
+}

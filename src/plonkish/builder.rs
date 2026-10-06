@@ -218,7 +218,16 @@ pub struct CircuitBuilder<F: Field> {
 struct Census<F> {
     stats: CircuitStats,
     constants: HashMap<usize, F>,
+    #[cfg(feature = "groth16")]
+    lookup_observer: Option<LookupObserver<F>>,
+    #[cfg(feature = "groth16")]
+    linear_observer: Option<LinearObserver<F>>,
 }
+
+#[cfg(feature = "groth16")]
+type LookupObserver<F> = Box<dyn FnMut(usize, &TableDefinition<F>, &[Value])>;
+#[cfg(feature = "groth16")]
+type LinearObserver<F> = Box<dyn FnMut(Value, [Value; 2], [F; 3])>;
 
 impl<F: Field> Default for CircuitBuilder<F> {
     fn default() -> Self {
@@ -261,8 +270,38 @@ impl<F: Field> CircuitBuilder<F> {
         builder.census = Some(Census {
             stats: builder.stats(),
             constants: HashMap::from([(0, F::ZERO)]),
+            #[cfg(feature = "groth16")]
+            lookup_observer: None,
+            #[cfg(feature = "groth16")]
+            linear_observer: None,
         });
         builder
+    }
+
+    #[cfg(feature = "groth16")]
+    pub(super) fn observe_counted_lookups(&mut self, observer: LookupObserver<F>) {
+        self.census
+            .as_mut()
+            .expect("counting builder")
+            .lookup_observer = Some(observer);
+    }
+
+    #[cfg(feature = "groth16")]
+    pub(super) fn observe_counted_linear(&mut self, observer: LinearObserver<F>) {
+        self.census
+            .as_mut()
+            .expect("counting builder")
+            .linear_observer = Some(observer);
+    }
+
+    #[cfg(feature = "groth16")]
+    pub(super) fn constant_count(&self) -> usize {
+        self.constants.len()
+    }
+
+    #[cfg(feature = "groth16")]
+    pub(super) fn tables(&self) -> &[TableDefinition<F>] {
+        &self.circuit.tables
     }
 
     #[cfg(feature = "kzg")]
@@ -369,6 +408,15 @@ impl<F: Field> CircuitBuilder<F> {
 
     fn arithmetic(&mut self, a: Value, b: Value, qm: F, qa: F, qb: F, k: F) -> Value {
         let out = self.allocate(Recipe::Arithmetic(self.stats().gates));
+        #[cfg(feature = "groth16")]
+        if qm == F::ZERO
+            && let Some(observer) = self
+                .census
+                .as_mut()
+                .and_then(|c| c.linear_observer.as_mut())
+        {
+            observer(out, [a, b], [qa, qb, k]);
+        }
         self.constrain_gate([a, b, out], [qm, qa, qb, F::NEG_ONE, k]);
         out
     }
@@ -737,6 +785,10 @@ impl<F: Field> CircuitBuilder<F> {
         }
         if let Some(census) = &mut self.census {
             census.stats.lookups += 1;
+            #[cfg(feature = "groth16")]
+            if let Some(observer) = &mut census.lookup_observer {
+                observer(table.index, &self.circuit.tables[table.index], values);
+            }
         } else {
             self.circuit.lookups.push(LookupConstraint {
                 table,

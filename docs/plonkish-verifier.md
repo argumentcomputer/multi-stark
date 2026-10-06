@@ -50,3 +50,40 @@ Omit `--check-only` to also prove the verifier circuit; this requires more memor
 For a KZG outer proof, see [commitment backends](pcs-abstraction.md) and
 [the FRI-to-KZG example](../examples/fri_kzg.rs). Goldilocks constraints require
 explicit field translation; changing the commitment scheme alone is insufficient.
+
+With `groth16`, `QueryShardPlan` splits an ordinary or single-batch verifier into one global
+shard and fixed query groups. All shards constrain the same BLAKE3 context;
+only the complete ordered bundle under trusted keys verifies the statement.
+`verify_encoded_query_bundle` checks the compact binary packet against an
+independently expected statement. Development setup example:
+
+```sh
+cargo run --release --features groth16,parallel --example fri_groth16 -- --shards
+```
+
+Add `--ordinary` to exercise ordinary FRI proofs. `init_fri_wrap` checks the
+saved recursive Init proof and counts its R1CS. Append `10 <shard> --prove`
+to prove one shard with a development setup; `--bundle` verifies all 11 saved
+shards. `experiments/run-init-fri-groth16.py` runs them sequentially with a memory
+cap and checkpoints. Measurements are in `experiments/init-fri-wrap.json`.
+
+`r1cs::streaming` consumes rows directly into the standard Groth16 QAP, without
+retaining constraint matrices. `--stream-check` checks the full QAP witness;
+`--stream-prove` uses this path for setup and proving. Set
+`INIT_GROTH16_STREAMING=1` for the runner and give it a fresh output directory.
+
+The saved 2,324-byte Init bundle and its development verifying keys are in
+`experiments/init-fri-groth16-artifacts`. Verify it and reject altered statements
+and packets with:
+
+```sh
+cargo run --release --features groth16,parallel --example verify_init_bundle
+```
+
+These deterministic setup keys are insecure. Completed CPU measurements are in
+`experiments/init-fri-groth16-streaming.json`.
+
+`init_fri_kzg <recovered-artifacts> <output-dir>` (features `kzg,parallel`)
+counts KZG layouts for the same saved proof. `experiments/measure-init-fri-kzg.py`
+records sizes and dense-array memory estimates; it does not run full-size setup
+or proving. Results: `experiments/init-fri-kzg.json`.

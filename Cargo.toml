@@ -41,6 +41,9 @@ ark-poly = { version = "0.5", optional = true }
 ark-serialize = { version = "0.5", optional = true }
 blake3 = { version = "1", optional = true }
 num-bigint = { version = "0.4", optional = true }
+ark-groth16 = { version = "0.5", optional = true }
+ark-relations = { version = "0.5", optional = true }
+ark-std = { version = "0.5", optional = true }
 
 # The CUDA transform engine. The fork supplies column batching, borrowed
 # streams and a runtime compatible with the Lean executable's C++ linkage.
@@ -63,6 +66,7 @@ harness = false
 
 [features]
 parallel = ["p3-maybe-rayon/parallel", "ark-ec?/parallel", "ark-poly?/parallel", "ark-ff?/parallel"]
+groth16 = ["kzg", "dep:ark-groth16", "dep:ark-relations", "dep:ark-std"]
 kzg = [
   "dep:ark-bls12-381",
   "ark-ff/asm",

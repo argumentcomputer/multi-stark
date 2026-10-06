@@ -1,0 +1,62 @@
+{
+  "status": "Stopped: global shard proved and verified; first query shard exhausted the R1CS preflight address-space budget.",
+  "partition": {
+    "queries_per_shard": 10,
+    "shards": 11,
+    "projected_packet_bytes": 2324
+  },
+  "global_shard": {
+    "proof_bytes": 192,
+    "setup_seconds": 849.338849872,
+    "prove_verify_seconds": 239.508283961,
+    "peak_rss_bytes": 112432349184,
+    "proof_sha256": "3b7e7b881f2afdafe6c21518316d20fe2fde1c931077156d20f3b8ef37208894",
+    "vk_sha256": "315a8e6c43ecb30589c6680633ef8ce689695deeda0d78bd93cf9ee191ef2a2d",
+    "wrong_init_claim_rejected": true,
+    "verified": true,
+    "elapsed_seconds": 1098.31,
+    "verification_key_bytes": 2840
+  },
+  "query_preflight": {
+    "budget_kib": 320520521,
+    "reserved_key_array_bytes": 154970806392,
+    "r1cs_constraints": 255974791,
+    "expanded_scalar_values": 105692724,
+    "expanded_witness_check": "passed",
+    "status": "failed",
+    "failure": "192-byte allocation failed; SIGABRT during R1CS construction",
+    "peak_rss_bytes": 301630775296,
+    "elapsed_seconds": 387.49,
+    "setup_attempted": false,
+    "proof_generated": false
+  },
+  "resource_policy": "450 GiB address-space cap; query R1CS preflight receives the remaining address-space budget after measured key arrays, before expensive setup.",
+  "security": "Insecure deterministic development setup. This is a feasibility experiment, not a production-secure proof.",
+  "artifacts": "target/init-fri-wrap/prove-11",
+  "runner": "python3 experiments/run-init-fri-groth16.py",
+  "complete_bundle_generated": false,
+  "limitations": "The failed preflight used an address-space reservation for key arrays; it is not a measurement of an unrestricted full proving run. All subsequent shards were skipped.",
+  "next_step": "Reduce materialized R1CS/linear-combination storage, or stream the R1CS-to-QAP computation before retrying the same partition.",
+  "checks": {
+    "clippy_all_targets": "passed",
+    "rustfmt": "passed",
+    "diff_whitespace": "passed",
+    "global_groth16_proof": "verified including serialized roundtrip and changed-claim rejection",
+    "query_expanded_witness": "all constraints satisfied before R1CS construction"
+  },
+  "executables": {
+    "shard-0": {
+      "path": "target/init-fri-wrap/prove-11/initial-init_fri_wrap",
+      "sha256": "2a14fb9f8c33dbf49e7084207091c3829beb90175ad66e593296f68dcd6c9000"
+    },
+    "subsequent-shards": {
+      "path": "target/init-fri-wrap/prove-11/init_fri_wrap",
+      "sha256": "d8e9bfd9443beda0db1092e9844f1f1c340fab6153ac7e3e1a4b9dea5c81f9a2",
+      "change": "Adds R1CS memory preflight before setup; circuit and proof generation unchanged."
+    }
+  },
+  "source_sha256": {
+    "examples/init_fri_wrap.rs": "af3e348939193ee4385dabde53c6cc1e118c63610c4a1750d44fa08fb0fa5ba6",
+    "experiments/run-init-fri-groth16.py": "a8600afd2b121fe05af94b28d9577feb915bc7fdfae7f92648c196b147196ea0"
+  }
+}
