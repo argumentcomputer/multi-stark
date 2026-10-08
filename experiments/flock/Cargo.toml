@@ -1,0 +1,42 @@
+[package]
+name = "init-flock"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+default = ["counters"]
+counters = ["flock-prover/hash-count", "flock-prover/mul-count"]
+terminal = ["dep:flock-terminal-exporter", "dep:ix-stage4-trace", "dep:ix-terminal-circuit", "dep:ix-fflonk", "dep:anyhow"]
+
+[dependencies]
+flock-terminal-exporter = { path = "../../target/flock-terminal/exporter", optional = true }
+ix-stage4-trace = { path = "../../target/flock-terminal/trace", optional = true }
+ix-terminal-circuit = { path = "../../target/flock-terminal/circuit", optional = true }
+ix-fflonk = { path = "../../target/flock-terminal/fflonk", optional = true }
+anyhow = { version = "1", optional = true }
+flock-prover = { git = "https://github.com/succinctlabs/flock", rev = "b684b1258e4b1f202bec24afd660ace851b09e5e" }
+flock-hash = { git = "https://github.com/succinctlabs/flock", rev = "b684b1258e4b1f202bec24afd660ace851b09e5e" }
+ark-bls12-381 = "0.5"
+ark-ec = "0.5"
+ark-ff = "0.5"
+ark-relations = "0.5"
+ark-groth16 = "0.5"
+ark-serialize = "0.5"
+ark-std = "0.5"
+bincode = "1.3"
+blake3 = "1"
+serde_json = "1"
+rayon = "1"
+multi-stark = { path = "../..", features = ["parallel"] }
+p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+
+[profile.release]
+debug = "line-tables-only"
+
+[patch."https://github.com/succinctlabs/flock"]
+flock-core = { path = "../../target/flock-core-patched" }
+flock-prover = { path = "../../target/flock-prover-patched" }

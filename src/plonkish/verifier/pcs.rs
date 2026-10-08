@@ -77,6 +77,13 @@ impl FixedPcsShape {
         }
         let mut preprocessed = vec![];
         for (i, (c, &log)) in circuits.iter().zip(logs).enumerate() {
+            assert!(
+                c.quotient_degree() <= system.config.max_quotient_degree()
+                    && usize::from(log) <= system.config.max_log_degree()
+                    && usize::from(log) + c.quotient_degree().ilog2() as usize
+                        <= system.config.max_log_quotient_domain(),
+                "trace/quotient domain exceeds PCS limits"
+            );
             if c.preprocessed_width != 0 {
                 assert_eq!(c.preprocessed_height, 1usize << log);
                 preprocessed.push(i);
@@ -228,7 +235,9 @@ pub fn constrain_fixed_verifier(
     shape: &FixedPcsShape,
     claims: Vec<Vec<Value>>,
 ) -> FixedVerifierInputs {
-    constrain_fixed_queries(b, bytes, system, shape, claims, 0..shape.queries, true)
+    // The caller's redundant shape fields must never reduce authentication.
+    let queries = system.config.fri_parameters().num_queries;
+    constrain_fixed_queries(b, bytes, system, shape, claims, 0..queries, true)
 }
 
 #[allow(clippy::too_many_arguments)]

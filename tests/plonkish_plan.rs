@@ -732,3 +732,120 @@ fn height_one_only_profile_checks_zero_round_fri() {
         assert!(w.generate().is_err());
     }
 }
+
+#[test]
+fn complete_helpers_cannot_drop_queries_through_modified_shape() {
+    let (system, pk) = setup();
+    let value = Val::from_u8(13);
+    let claims = vec![vec![value]];
+    let ordinary = system.prove(&pk, &claims[0], trace(&system, value));
+    let batch = system.prove_batch(
+        &pk,
+        vec![ShardInput {
+            claims: claims.clone(),
+            witness: trace(&system, value),
+        }],
+        vec![],
+    );
+    for envelope in [Envelope::Ordinary, Envelope::SingleBatch] {
+        let mut shape = FixedPcsShape::new(&system, 1);
+        // Public shape fields are redundant metadata, never permission to
+        // weaken the protocol selected by the trusted system configuration.
+        shape.queries = 0;
+        let mut builder = CircuitBuilder::new();
+        builder.enable_compact_blake3();
+        let claim = builder.public_input("claim");
+        let bytes = ByteGadgets::new(&mut builder);
+        let inputs = match envelope {
+            Envelope::Ordinary => {
+                constrain_fixed_verifier(&mut builder, &bytes, &system, &shape, vec![vec![claim]])
+            }
+            Envelope::SingleBatch => constrain_single_batch_verifier(
+                &mut builder,
+                &bytes,
+                &system,
+                &shape,
+                vec![vec![claim]],
+                &[],
+            ),
+        };
+        let circuit = builder.finish();
+        let expanded = match envelope {
+            Envelope::Ordinary => {
+                expand_pcs_witness(&system, &inputs.shape, &ordinary, &[&claims[0]])
+            }
+            Envelope::SingleBatch => {
+                expand_single_batch_witness(&system, &inputs.shape, &batch, &[])
+            }
+        }
+        .unwrap();
+        let mut witness = circuit.witness();
+        expanded.assign(&mut witness, &inputs).unwrap();
+        witness.generate().unwrap();
+        for query in 0..system.config.fri_parameters().num_queries {
+            let mut bad = expanded.clone();
+            bad.proof.opening_proof.input_openings[0].opened_values[query][0][0] += Val::ONE;
+            let mut witness = circuit.witness();
+            bad.assign(&mut witness, &inputs).unwrap();
+            assert!(
+                witness.generate().is_err(),
+                "{envelope:?}: omitted query {query}"
+            );
+        }
+        assert_eq!(
+            inputs.pcs.queries.len(),
+            system.config.fri_parameters().num_queries
+        );
+    }
+}
+
+#[test]
+fn profile_enforces_native_quotient_domain_bound() {
+    let x = Expr::main(0);
+    let (system, pk) = System::new(
+        config(),
+        [
+            CircuitInputs {
+                main_width: 1,
+                preprocessed: Some(RowMajorMatrix::new_col(vec![Val::ZERO; 2])),
+                ..Default::default()
+            },
+            CircuitInputs {
+                main_width: 1,
+                constraints: vec![x.clone() * x.clone() * x.clone() - x],
+                ..Default::default()
+            },
+        ],
+    );
+    assert_eq!(system.circuits[1].quotient_degree(), 2);
+    let mut proof = system.prove_multiple_claims(
+        &pk,
+        &[],
+        SystemWitness::from_stage_1(
+            vec![RowMajorMatrix::new_col(vec![Val::ZERO; 2]); 2],
+            &system,
+        ),
+    );
+    system.verify_multiple_claims(&[], &proof).unwrap();
+    proof.log_degrees[1] = 30;
+    assert!(matches!(
+        system.verify_shape(&proof),
+        Err(multi_stark::verifier::VerificationError::InvalidProofShape)
+    ));
+    let key = VerifierKey::from_system(&system);
+    let profile = ProofProfile {
+        envelope: Envelope::Ordinary,
+        active: vec![true, true],
+        log_degrees: vec![1, 30], // LDE fits 2^32, but quotient exceeds native limit 2^30.
+        claim_lengths: vec![],
+        message_lengths: vec![],
+        max_field_retries: 0,
+    };
+    assert!(VerifierPlan::validate(&key, profile, VerifierLimits::default()).is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            FixedPcsShape::from_profile(&system, &[true, true], &[1, 30])
+        }))
+        .is_err()
+    );
+}

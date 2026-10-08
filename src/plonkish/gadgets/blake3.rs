@@ -47,17 +47,18 @@ struct Output {
 }
 
 impl Output {
-    fn compress<F: PrimeField>(
+    fn state<F: PrimeField>(
         &self,
         b: &mut CircuitBuilder<F>,
         bytes: &ByteGadgets,
         root: bool,
-    ) -> [Word; 8] {
+        counter: u64,
+    ) -> [Word; 16] {
         let mut state = std::array::from_fn(|i| match i {
             0..8 => self.cv[i],
             8..12 => bytes.word_constant(b, IV[i - 8]),
-            12 => bytes.word_constant(b, u32::try_from(self.counter & 0xffff_ffff).unwrap()),
-            13 => bytes.word_constant(b, u32::try_from(self.counter >> 32).unwrap()),
+            12 => bytes.word_constant(b, u32::try_from(counter & 0xffff_ffff).unwrap()),
+            13 => bytes.word_constant(b, u32::try_from(counter >> 32).unwrap()),
             14 => bytes.word_constant(b, self.len),
             _ => bytes.word_constant(b, self.flags | if root { ROOT } else { 0 }),
         });
@@ -87,6 +88,16 @@ impl Output {
             }
             message = PERMUTATION.map(|i| message[i]);
         }
+        state
+    }
+
+    fn compress<F: PrimeField>(
+        &self,
+        b: &mut CircuitBuilder<F>,
+        bytes: &ByteGadgets,
+        root: bool,
+    ) -> [Word; 8] {
+        let state = self.state(b, bytes, root, self.counter);
         std::array::from_fn(|i| bytes.xor(b, state[i], state[i + 8]))
     }
 }
@@ -181,4 +192,67 @@ pub fn blake3<F: PrimeField>(
     let output = subtree(b, bytes, input, 0).compress(b, bytes, true);
     let words = output.map(|w| bytes.word_bytes(b, w));
     std::array::from_fn(|i| words[i / 4][i % 4])
+}
+
+/// Standard BLAKE3 XOF with fixed input and output lengths. Uses generic
+/// arithmetic even when compact 32-byte hashing is enabled.
+pub fn blake3_xof<F: PrimeField>(
+    b: &mut CircuitBuilder<F>,
+    bytes: &ByteGadgets,
+    input: &[ByteValue],
+    length: usize,
+) -> Vec<ByteValue> {
+    if length == 0 {
+        return vec![];
+    }
+    let root = subtree(b, bytes, input, 0);
+    let mut result = Vec::with_capacity(length);
+    for counter in 0..length.div_ceil(64) {
+        let state = root.state(b, bytes, true, counter as u64);
+        let words = (length - result.len()).min(64).div_ceil(4);
+        for i in 0..words {
+            let word = if i < 8 {
+                bytes.xor(b, state[i], state[i + 8])
+            } else {
+                bytes.xor(b, state[i], root.cv[i - 8])
+            };
+            result.extend(bytes.word_bytes(b, word));
+        }
+    }
+    result.truncate(length);
+    result
+}
+
+#[cfg(all(test, feature = "kzg"))]
+mod xof_tests {
+    use super::*;
+    use crate::{ark_adapter::Scalar, traits::Field};
+    #[test]
+    fn xof_matches_native_across_chunk_boundaries() {
+        for length in [0usize, 1, 64, 65, 1024, 1025, 2049] {
+            let mut b = CircuitBuilder::<Scalar>::new();
+            let bytes = ByteGadgets::new(&mut b);
+            let input: Vec<_> = (0..length)
+                .map(|i| bytes.input(&mut b, &format!("byte{i}")))
+                .collect();
+            let output = blake3_xof(&mut b, &bytes, &input, 129);
+            let c = b.finish();
+            let data: Vec<_> = (0..length)
+                .map(|i| u8::try_from((i * 17 + 3) % 256).unwrap())
+                .collect();
+            let mut w = c.witness();
+            for (v, &n) in input.iter().zip(&data) {
+                w.set(v.value(), Scalar::from_u8(n)).unwrap();
+            }
+            let a = w.generate().unwrap();
+            let mut expected = [0u8; 129];
+            ::blake3::Hasher::new()
+                .update(&data)
+                .finalize_xof()
+                .fill(&mut expected);
+            for (v, n) in output.iter().zip(expected) {
+                assert_eq!(a.value(v.value()).unwrap(), Scalar::from_u8(n));
+            }
+        }
+    }
 }

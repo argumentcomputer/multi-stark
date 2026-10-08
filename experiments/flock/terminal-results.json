@@ -1,0 +1,238 @@
+{
+  "pipeline_complete": false,
+  "scope": "KZG feasibility. Terminal counts omit deferred discharges and do not constitute an Init KZG proof.",
+  "source_revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+  "tests": {
+    "local_passed": 15,
+    "fflonk_passed": 88,
+    "terminal_circuit_passed": 43,
+    "terminal_circuit_ignored": 1,
+    "primitive_kzg_proof_bytes": 992,
+    "primitive_setup": "development, known tau; not an Init proof"
+  },
+  "runs": {
+    "small_slim": {
+      "artifacts": "target/flock-experiment/terminal-small-1",
+      "terminal": {
+        "domain": 1073741824,
+        "elapsed_seconds": 819.249994294,
+        "export_seconds": 0.032153581,
+        "file_srs_key_and_fft_minimum_bytes": 420923572256,
+        "flock_proof_blake3": "125fdf51524ae469eab47aa90e5f485dd5bd629fc9406246dd4f7e76657e2290",
+        "flock_proof_bytes": 227251,
+        "flock_transcript": "chained-blake3",
+        "pending_claims": {
+          "jagged": 3,
+          "matrix": 78,
+          "structure": 3
+        },
+        "phase_seconds": {
+          "boolean_piop": 29.943854696,
+          "inner_ligerito": 422.556728091,
+          "merged_pcs": 13.000455328,
+          "multipoint": 284.787475705,
+          "statement": 0.967052953,
+          "transcript": 41.536793032,
+          "wiring": 26.422243867
+        },
+        "plonk_rows": 552976774,
+        "product_fft_domain": 4294967296,
+        "public_words": [
+          13
+        ],
+        "r1cs_constraints": 337495688,
+        "r1cs_variables": 334566704,
+        "scope": "lower bound: fixed matrix, circuit structure and jagged layout evaluations still need in-circuit discharge",
+        "source_revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+        "srs_degree": 9663676433,
+        "status": "lower_bound_projected",
+        "supported_fft_domain": true,
+        "terminal_proof_generated": false
+      },
+      "resources": {
+        "elapsed_seconds": 822.13,
+        "peak_rss_bytes": 1072893952,
+        "source": "/usr/bin/time -v, stderr.log"
+      }
+    },
+    "init_fast": {
+      "artifacts": "target/flock-experiment/terminal-init-1",
+      "terminal": {
+        "domain": 2147483648,
+        "elapsed_seconds": 2456.190367228,
+        "export_seconds": 2.740281434,
+        "file_srs_key_and_fft_minimum_bytes": 841845047328,
+        "flock_proof_blake3": "3f5990a8489ac4d6e5c1856d3bd9678b0ca0bb4575137045aa862658a965d4d9",
+        "flock_proof_bytes": 712099,
+        "flock_transcript": "chained-blake3",
+        "pending_claims": {
+          "jagged": 3,
+          "matrix": 176,
+          "structure": 3
+        },
+        "phase_seconds": {
+          "boolean_piop": 52.377929221,
+          "inner_ligerito": 1563.64518907,
+          "merged_pcs": 60.666369475,
+          "multipoint": 350.982325706,
+          "statement": 10.558250233999999,
+          "transcript": 170.992926699,
+          "wiring": 244.198102849
+        },
+        "plonk_rows": 1815541310,
+        "product_fft_domain": 8589934592,
+        "public_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "r1cs_constraints": 1085774108,
+        "r1cs_variables": 1075719415,
+        "scope": "lower bound: fixed matrix, circuit structure and jagged layout evaluations still need in-circuit discharge",
+        "source_revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+        "srs_degree": 19327352849,
+        "status": "lower_bound_projected",
+        "supported_fft_domain": false,
+        "terminal_proof_generated": false
+      },
+      "flock": {
+        "status": "verified",
+        "source_proof_blake3": "f0fa026a149dd1c8c450fe55ceed38b006003cb0f9aa60339082f3ba3abb1613",
+        "source_proof_bytes": 5738492,
+        "source_vk_blake3": "f0c635f096bb2b9ff8fbeaf947c406978c11ce3bc447df94e43d6e9fe3cc6fbc",
+        "profile": "fast",
+        "proof_and_commitment_bytes": 712099,
+        "proof_blake3": "3f5990a8489ac4d6e5c1856d3bd9678b0ca0bb4575137045aa862658a965d4d9",
+        "prove_seconds": 110.772652305,
+        "verify_seconds": 2.552883849,
+        "serialized_roundtrip_verified": true,
+        "altered_claim_rejected": true
+      },
+      "resources": {
+        "status": "completed",
+        "elapsed_seconds": 2863.635621256999,
+        "peak_rss_bytes": 345147777024,
+        "sampled_peak_process_tree_rss_bytes": 345166950400,
+        "binary_sha256": "4f6c9ba3fd416816f5272f18bb063da7b3d68d76958778229b7e021c40941b88",
+        "threads": 32
+      }
+    },
+    "init_slim": {
+      "artifacts": "target/flock-experiment/terminal-init-slim-1",
+      "terminal": {
+        "compressed_srs_bytes": 927712937016,
+        "domain": 2147483648,
+        "elapsed_seconds": 1468.058404903,
+        "export_seconds": 2.748640817,
+        "file_key_polynomial_bytes": 1305670057984,
+        "file_srs_key_and_fft_minimum_bytes": 841845047328,
+        "flock_circuit_digest": "190f716a3e7ddf8dd38d4849a7779a5222e0d503f23fa9cc69ee52834558c986",
+        "flock_proof_blake3": "4b233ce5f5a712a7fd0a570461b755793840bef7ebbcc15f10c1c8fc2b329367",
+        "flock_proof_bytes": 503579,
+        "flock_transcript": "chained-blake3",
+        "pcs_profile": "slim",
+        "phase_seconds": {
+          "boolean_piop": 51.914725385,
+          "merged_pcs": 60.28848521,
+          "multipoint": 364.310560444,
+          "statement": 10.590753795,
+          "transcript": 166.817757803,
+          "wiring": 240.950998928
+        },
+        "plonk_rows": 1073741823,
+        "plonk_rows_by_phase": {
+          "Lincheck": 35645102,
+          "Pcs": 666476228,
+          "Statement": 261386,
+          "Transcript": 149045130,
+          "Wiring": 214821892,
+          "Zerocheck": 7492067
+        },
+        "product_fft_domain": 8589934592,
+        "public_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "r1cs_constraints": 622785895,
+        "r1cs_constraints_by_phase": {
+          "Lincheck": 21975165,
+          "Pcs": 385167525,
+          "Statement": 132868,
+          "Transcript": 79294788,
+          "Wiring": 131583298,
+          "Zerocheck": 4632251
+        },
+        "r1cs_projection_digest": "c0ab8f5caf8843770e5a48e20fcb8423fa97ad9d794e977213d54aec09d62cde",
+        "r1cs_variables": 615933202,
+        "scope": "lower bound: fixed matrix, circuit structure and jagged layout evaluations still need in-circuit discharge",
+        "source_revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+        "srs_degree": 19327352849,
+        "status": "blocked_fft_domain",
+        "stopped_at_fft_limit": true,
+        "supported_fft_domain": false,
+        "terminal_proof_generated": false
+      },
+      "flock": {
+        "status": "verified",
+        "source_proof_blake3": "f0fa026a149dd1c8c450fe55ceed38b006003cb0f9aa60339082f3ba3abb1613",
+        "source_proof_bytes": 5738492,
+        "source_vk_blake3": "f0c635f096bb2b9ff8fbeaf947c406978c11ce3bc447df94e43d6e9fe3cc6fbc",
+        "profile": "slim",
+        "proof_and_commitment_bytes": 503579,
+        "proof_blake3": "4b233ce5f5a712a7fd0a570461b755793840bef7ebbcc15f10c1c8fc2b329367",
+        "prove_seconds": 141.344023889,
+        "verify_seconds": 2.526838783,
+        "serialized_roundtrip_verified": true,
+        "altered_claim_rejected": true
+      },
+      "resources": {
+        "status": "completed",
+        "elapsed_seconds": 1905.0046024030016,
+        "peak_rss_bytes": 346360229888,
+        "sampled_peak_process_tree_rss_bytes": 346376404992,
+        "binary_sha256": "e0ab6c1dedf892b7652538ed4b2f2277a6cac0aa14fc55358a32c311ee98b8c2",
+        "threads": 32
+      },
+      "interpretation": "Stopped as soon as complete constraints plus required blinding rows exceeded the supported KZG domain. The remaining PCS replay and deferred discharges are excluded; counts are lower bounds."
+    }
+  },
+  "status": "blocked_current_kzg_backend",
+  "maximum_product_fft_domain": 4294967296,
+  "blockers": [
+    "Both Init profiles require at least a 2^33 product FFT; this KZG implementation supports at most 2^32.",
+    "The partial circuit already requires at least 784 GiB resident SRS/key/FFT payload in the file-backed implementation; this excludes additional overhead.",
+    "Fixed-matrix, circuit-structure and jagged-layout claims remain unresolved in the terminal circuit.",
+    "No full Init terminal proof or composed 128-bit production security validation has been completed."
+  ]
+}

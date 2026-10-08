@@ -1,0 +1,596 @@
+{
+  "threads": 32,
+  "started_utc": "20261006T203326Z",
+  "runs": {
+    "field": {
+      "elapsed_seconds": 0.48,
+      "peak_rss_bytes": 32833536,
+      "exit_code": 0,
+      "measurement": {
+        "altered_inputs_and_output_rejected": true,
+        "constraints": 3317,
+        "method": "bounded integer convolution, deterministic 255-point identity",
+        "proof_bytes": 192,
+        "prove_seconds": 0.153817844,
+        "public_inputs": 3,
+        "scope": "One constrained GF(2^128) multiplication; not a Flock verifier",
+        "setup": "insecure development randomness",
+        "setup_seconds": 0.196549951,
+        "verified": true,
+        "witnesses": 3059
+      }
+    },
+    "chain-256": {
+      "elapsed_seconds": 2.15,
+      "peak_rss_bytes": 664338432,
+      "exit_code": 0,
+      "measurement": {
+        "altered_public_values_rejected": 7,
+        "corrupted_lincheck_rejected": true,
+        "deferred_f128_inversions": 427,
+        "deferred_f128_multiplications": 118694,
+        "deferred_scope": "Comparison only: leaves matrix, wiring and layout assertions outstanding; not complete verification",
+        "dense_m": 22,
+        "flock_rev": "b684b1258e4b1f202bec24afd660ace851b09e5e",
+        "hashes": 256,
+        "merkle_leaf_calls": 221,
+        "merkle_leaf_compressions": 1834,
+        "merkle_pair_calls": 1059,
+        "pow_checks": 200,
+        "prepare_seconds": 1.787390657,
+        "profile": "slim",
+        "proof_and_commitment_bytes": 176307,
+        "prove_seconds": 0.315071766,
+        "public_words": 7,
+        "scope": "Public-bound BLAKE3 chain prototype; not an Init FRI verifier or a Groth16 wrapper",
+        "transcript_shape_digest": "b953971f91c447789ad0cb53657d8881d70a654e80dfdfd5f8dfe0bca62b0554",
+        "transcript_squeezed_bytes": 15328,
+        "transcript_squeezes": 430,
+        "verified": true,
+        "verifier_f128_inversions": 491,
+        "verifier_f128_multiplications": 165423,
+        "verify_seconds": 0.004264389,
+        "warning": "Native operation counters are not a complete Groth16 constraint count. Full verifier used; no deferred checks omitted.",
+        "wrong_domain_rejected": true
+      }
+    },
+    "chain-4096": {
+      "elapsed_seconds": 2.54,
+      "peak_rss_bytes": 765800448,
+      "exit_code": 0,
+      "measurement": {
+        "altered_public_values_rejected": 7,
+        "corrupted_lincheck_rejected": true,
+        "deferred_f128_inversions": 502,
+        "deferred_f128_multiplications": 168776,
+        "deferred_scope": "Comparison only: leaves matrix, wiring and layout assertions outstanding; not complete verification",
+        "dense_m": 26,
+        "flock_rev": "b684b1258e4b1f202bec24afd660ace851b09e5e",
+        "hashes": 4096,
+        "merkle_leaf_calls": 253,
+        "merkle_leaf_compressions": 1962,
+        "merkle_pair_calls": 2163,
+        "pow_checks": 287,
+        "prepare_seconds": 1.798746035,
+        "profile": "slim",
+        "proof_and_commitment_bytes": 225219,
+        "prove_seconds": 0.677139133,
+        "public_words": 7,
+        "scope": "Public-bound BLAKE3 chain prototype; not an Init FRI verifier or a Groth16 wrapper",
+        "transcript_shape_digest": "9c6999404e8cd25c930b24b00f8a85ce0cba6d5aaa643d8051719a809e5974b0",
+        "transcript_squeezed_bytes": 20832,
+        "transcript_squeezes": 610,
+        "verified": true,
+        "verifier_f128_inversions": 566,
+        "verifier_f128_multiplications": 263849,
+        "verify_seconds": 0.006226654,
+        "warning": "Native operation counters are not a complete Groth16 constraint count. Full verifier used; no deferred checks omitted.",
+        "wrong_domain_rejected": true
+      }
+    },
+    "fold": {
+      "elapsed_seconds": 0.29,
+      "peak_rss_bytes": 104673280,
+      "exit_code": 0,
+      "measurement": {
+        "addition_bits_per_row": 1411,
+        "altered_public_values_rejected": 7,
+        "dense_m": 22,
+        "flock_rev": "b684b1258e4b1f202bec24afd660ace851b09e5e",
+        "multiplication_bits_per_row": 26212,
+        "prepare_seconds": 0.011797222,
+        "profile": "slim",
+        "proof_and_commitment_bytes": 152523,
+        "prove_seconds": 0.265936244,
+        "scope": "16 quadratic Goldilocks Horner steps, not a complete FRI verifier",
+        "verified": true,
+        "verify_seconds": 0.005293771
+      }
+    },
+    "fri": {
+      "elapsed_seconds": 5.49,
+      "peak_rss_bytes": 1212137472,
+      "exit_code": 0,
+      "measurement": {
+        "altered_claim_rejected": true,
+        "altered_obligations_rejected": true,
+        "corrupted_lincheck_rejected": true,
+        "counter_scope": "Instrumented native operations, not a Groth16 constraint census. Deferred verification alone leaves obligations outstanding.",
+        "deferred_obligations_discharged": true,
+        "deferred_verifier_f128_inversions": 580,
+        "deferred_verifier_f128_multiplications": 362596,
+        "dense_m": 27,
+        "discharge_f128_inversions": {
+          "layout": 0,
+          "matrix": 3968,
+          "wiring": 0
+        },
+        "discharge_f128_multiplications": {
+          "layout": 91404,
+          "matrix": 564162,
+          "wiring": 4863740
+        },
+        "expected_claim": 13,
+        "flock_rev": "b684b1258e4b1f202bec24afd660ace851b09e5e",
+        "full_verifier_f128_inversions": 4548,
+        "full_verifier_f128_multiplications": 1179785,
+        "geometry": {
+          "dense_m": 27,
+          "live_packed_witness_bytes": 13110128,
+          "memory_scope": "Named array sizes, not a peak-RAM prediction; excludes frontend, layout, PCS and other scratch",
+          "one_wiring_field_array_bytes": 16777216,
+          "packed_rows": true,
+          "padded_witness_array_bytes": 134217728,
+          "pcs_buffers": {
+            "fast": {
+              "codeword_bytes": 26738688,
+              "dense_message_allocation_bytes": 16777216,
+              "merkle_tree_bytes": 2097152
+            },
+            "slim": {
+              "codeword_bytes": 53477376,
+              "dense_message_allocation_bytes": 16777216,
+              "merkle_tree_bytes": 4194304
+            }
+          },
+          "strict_slim_profile_available": true,
+          "three_padded_witness_arrays_bytes": 402653184,
+          "uniform_row_log": 12,
+          "wiring_cell_log": 20
+        },
+        "groth16_flock_verifier_implemented": false,
+        "lowering": {
+          "constant_multiplications": 2334,
+          "dense_m_lower_bound": 27,
+          "equalities": 30198,
+          "memory_scope": "One packed witness only; excludes a/b, PCS, wiring, frontend and padding",
+          "most_frequent_scalars": [
+            [
+              16,
+              1630
+            ],
+            [
+              15,
+              593
+            ],
+            [
+              7,
+              48
+            ],
+            [
+              9223372034707292160,
+              8
+            ],
+            [
+              2,
+              2
+            ],
+            [
+              281474976710655,
+              2
+            ],
+            [
+              3,
+              1
+            ],
+            [
+              4,
+              1
+            ],
+            [
+              5,
+              1
+            ],
+            [
+              6,
+              1
+            ],
+            [
+              8,
+              1
+            ],
+            [
+              9,
+              1
+            ],
+            [
+              10,
+              1
+            ],
+            [
+              11,
+              1
+            ],
+            [
+              12,
+              1
+            ],
+            [
+              13,
+              1
+            ],
+            [
+              14,
+              1
+            ],
+            [
+              25,
+              1
+            ],
+            [
+              29,
+              1
+            ],
+            [
+              33,
+              1
+            ]
+          ],
+          "packed_witness_bytes_before_padding": 13110128,
+          "publics": 1,
+          "steps": 111649,
+          "tables": {
+            "Blake3": 52,
+            "Gold(Add)": 15717,
+            "Gold(Canonical)": 24224,
+            "Gold(Equal)": 30139,
+            "Gold(Linear { a: 1, b: 1, a_bits: 4, b_bits: 1 })": 750,
+            "Gold(Linear { a: 1, b: 1, a_bits: 4, b_bits: 4 })": 50,
+            "Gold(Linear { a: 1, b: 1, a_bits: 5, b_bits: 4 })": 750,
+            "Gold(Linear { a: 16, b: 1, a_bits: 12, b_bits: 4 })": 38,
+            "Gold(Linear { a: 16, b: 1, a_bits: 16, b_bits: 4 })": 38,
+            "Gold(Linear { a: 16, b: 1, a_bits: 20, b_bits: 4 })": 38,
+            "Gold(Linear { a: 16, b: 1, a_bits: 24, b_bits: 4 })": 38,
+            "Gold(Linear { a: 16, b: 1, a_bits: 28, b_bits: 4 })": 38,
+            "Gold(Linear { a: 16, b: 1, a_bits: 32, b_bits: 4 })": 38,
+            "Gold(Linear { a: 16, b: 1, a_bits: 4, b_bits: 4 })": 2198,
+            "Gold(Linear { a: 16, b: 1, a_bits: 8, b_bits: 4 })": 38,
+            "Gold(Linear { a: 2, b: 1, a_bits: 1, b_bits: 1 })": 1,
+            "Gold(Linear { a: 2, b: 1, a_bits: 2, b_bits: 1 })": 1,
+            "Gold(Linear { a: 2, b: 1, a_bits: 3, b_bits: 1 })": 1,
+            "Gold(Linear { a: 2, b: 1, a_bits: 4, b_bits: 1 })": 1,
+            "Gold(Linear { a: 2, b: 1, a_bits: 5, b_bits: 1 })": 1,
+            "Gold(Linear { a: 2, b: 1, a_bits: 6, b_bits: 1 })": 1,
+            "Gold(Linear { a: 2, b: 1, a_bits: 7, b_bits: 1 })": 1,
+            "Gold(Mask)": 14252,
+            "Gold(Mul)": 157,
+            "Gold(MulSmall(2))": 1,
+            "Gold(MulSmall(4))": 47,
+            "Gold(MulSmall(8))": 1630,
+            "Gold(Pack(16))": 890,
+            "Gold(Pack(32))": 446,
+            "Gold(Pack(64))": 226,
+            "Gold(Pack(8))": 1776,
+            "Gold(Range(1))": 2814,
+            "Gold(Range(12))": 38,
+            "Gold(Range(16))": 38,
+            "Gold(Range(2))": 1,
+            "Gold(Range(20))": 38,
+            "Gold(Range(24))": 38,
+            "Gold(Range(28))": 38,
+            "Gold(Range(3))": 1,
+            "Gold(Range(32))": 38,
+            "Gold(Range(36))": 38,
+            "Gold(Range(4))": 11009,
+            "Gold(Range(40))": 38,
+            "Gold(Range(44))": 38,
+            "Gold(Range(48))": 38,
+            "Gold(Range(5))": 801,
+            "Gold(Range(52))": 38,
+            "Gold(Range(56))": 38,
+            "Gold(Range(6))": 751,
+            "Gold(Range(60))": 38,
+            "Gold(Range(7))": 1,
+            "Gold(Range(8))": 2199
+          },
+          "words": 147261
+        },
+        "prepare_seconds": 1.982704477,
+        "profile": "slim",
+        "proof_and_commitment_bytes": 252795,
+        "prove_seconds": 3.274127171,
+        "scope": "Complete single-batch FRI verifier fixture in Flock; inner fixture has development security, not Init",
+        "serialized_roundtrip_verified": true,
+        "source": "CircuitStats { hash_calls: 45, hash_compressions: 52, values: 35400, inputs: 459, gates: 33402, lookups: 5504, tables: 3, publics: 1, hint_calls: 4315, hint_outputs: 8143 }",
+        "verified": true,
+        "verify_seconds": 0.021585732
+      }
+    },
+    "init": {
+      "elapsed_seconds": 64.65,
+      "peak_rss_bytes": 26648293376,
+      "exit_code": 0,
+      "measurement": {
+        "frontend": "CircuitStats { hash_calls: 53066, hash_compressions: 127593, values: 132013262, inputs: 1859170, gates: 117687732, lookups: 25385056, tables: 3, publics: 18, hint_calls: 23102862, hint_outputs: 36833298 }",
+        "frontend_seconds": 11.74596451,
+        "geometry": {
+          "dense_m": 40,
+          "live_packed_witness_bytes": 80659578032,
+          "memory_scope": "Named array sizes, not a peak-RAM prediction; excludes frontend, layout, PCS and other scratch",
+          "one_wiring_field_array_bytes": 549755813888,
+          "packed_rows": false,
+          "padded_witness_array_bytes": 2199023255552,
+          "pcs_buffers": {
+            "fast": {
+              "codeword_bytes": 163208757248,
+              "dense_message_allocation_bytes": 137438953472,
+              "merkle_tree_bytes": 17179869184
+            },
+            "slim": {
+              "codeword_bytes": 326417514496,
+              "dense_message_allocation_bytes": 137438953472,
+              "merkle_tree_bytes": 34359738368
+            }
+          },
+          "strict_slim_profile_available": true,
+          "three_padded_witness_arrays_bytes": 6597069766656,
+          "uniform_row_log": 27,
+          "wiring_cell_log": 35
+        },
+        "lowering": {
+          "constant_multiplications": 22347554,
+          "dense_m_lower_bound": 40,
+          "equalities": 107431865,
+          "memory_scope": "One packed witness only; excludes a/b, PCS, wiring, frontend and padding",
+          "most_frequent_scalars": [
+            [
+              16,
+              14001738
+            ],
+            [
+              15,
+              4870293
+            ],
+            [
+              7,
+              3398976
+            ],
+            [
+              9223372034707292160,
+              9218
+            ],
+            [
+              281474976710655,
+              4200
+            ],
+            [
+              16777217,
+              4100
+            ],
+            [
+              1152921504606846977,
+              3900
+            ],
+            [
+              70368744161279,
+              3700
+            ],
+            [
+              549755813887,
+              3600
+            ],
+            [
+              576451956076183553,
+              3500
+            ],
+            [
+              4649662884198176412,
+              3300
+            ],
+            [
+              1803076106186727245,
+              3100
+            ],
+            [
+              7093403778535204496,
+              2900
+            ],
+            [
+              455906449640507598,
+              2700
+            ],
+            [
+              953828971695440716,
+              2500
+            ],
+            [
+              1532612707718625686,
+              2400
+            ],
+            [
+              2238841433216015904,
+              2300
+            ],
+            [
+              670244699813528918,
+              2200
+            ],
+            [
+              2,
+              2001
+            ],
+            [
+              6115771955107415309,
+              2000
+            ]
+          ],
+          "packed_witness_bytes_before_padding": 80659578032,
+          "publics": 18,
+          "steps": 403989024,
+          "tables": {
+            "Blake3": 127593,
+            "Gold(Add)": 45410856,
+            "Gold(Canonical)": 61060347,
+            "Gold(Equal)": 107431508,
+            "Gold(Linear { a: 1, b: 1, a_bits: 4, b_bits: 1 })": 9130065,
+            "Gold(Linear { a: 1, b: 1, a_bits: 4, b_bits: 4 })": 608671,
+            "Gold(Linear { a: 1, b: 1, a_bits: 5, b_bits: 4 })": 9130065,
+            "Gold(Linear { a: 16, b: 1, a_bits: 12, b_bits: 4 })": 608615,
+            "Gold(Linear { a: 16, b: 1, a_bits: 16, b_bits: 4 })": 608615,
+            "Gold(Linear { a: 16, b: 1, a_bits: 20, b_bits: 4 })": 608615,
+            "Gold(Linear { a: 16, b: 1, a_bits: 24, b_bits: 4 })": 608615,
+            "Gold(Linear { a: 16, b: 1, a_bits: 28, b_bits: 4 })": 608615,
+            "Gold(Linear { a: 16, b: 1, a_bits: 32, b_bits: 4 })": 608615,
+            "Gold(Linear { a: 16, b: 1, a_bits: 4, b_bits: 4 })": 8430879,
+            "Gold(Linear { a: 16, b: 1, a_bits: 8, b_bits: 4 })": 608615,
+            "Gold(Linear { a: 2, b: 1, a_bits: 1, b_bits: 1 })": 403,
+            "Gold(Linear { a: 2, b: 1, a_bits: 2, b_bits: 1 })": 403,
+            "Gold(Linear { a: 2, b: 1, a_bits: 3, b_bits: 1 })": 403,
+            "Gold(Linear { a: 2, b: 1, a_bits: 4, b_bits: 1 })": 403,
+            "Gold(Linear { a: 2, b: 1, a_bits: 5, b_bits: 1 })": 403,
+            "Gold(Linear { a: 2, b: 1, a_bits: 6, b_bits: 1 })": 403,
+            "Gold(Linear { a: 2, b: 1, a_bits: 7, b_bits: 1 })": 403,
+            "Gold(Mask)": 15121544,
+            "Gold(Mul)": 10324578,
+            "Gold(MulSmall(16))": 984,
+            "Gold(MulSmall(2))": 2290,
+            "Gold(MulSmall(4))": 3399525,
+            "Gold(MulSmall(8))": 14004203,
+            "Gold(Pack(16))": 2360346,
+            "Gold(Pack(32))": 1180174,
+            "Gold(Pack(64))": 590588,
+            "Gold(Pack(8))": 4720688,
+            "Gold(Range(1))": 20706386,
+            "Gold(Range(12))": 608615,
+            "Gold(Range(16))": 608615,
+            "Gold(Range(2))": 403,
+            "Gold(Range(20))": 608615,
+            "Gold(Range(24))": 608615,
+            "Gold(Range(28))": 608615,
+            "Gold(Range(3))": 403,
+            "Gold(Range(32))": 608615,
+            "Gold(Range(36))": 608615,
+            "Gold(Range(4))": 50770515,
+            "Gold(Range(40))": 608615,
+            "Gold(Range(44))": 608615,
+            "Gold(Range(48))": 608615,
+            "Gold(Range(5))": 9739139,
+            "Gold(Range(52))": 608615,
+            "Gold(Range(56))": 608615,
+            "Gold(Range(6))": 9130468,
+            "Gold(Range(60))": 608615,
+            "Gold(Range(7))": 403,
+            "Gold(Range(8))": 8431282
+          },
+          "words": 536385695
+        },
+        "lowering_seconds": 45.428295229,
+        "packed_geometry": {
+          "dense_m": 40,
+          "live_packed_witness_bytes": 80659578032,
+          "memory_scope": "Named array sizes, not a peak-RAM prediction; excludes frontend, layout, PCS and other scratch",
+          "one_wiring_field_array_bytes": 34359738368,
+          "packed_rows": true,
+          "padded_witness_array_bytes": 137438953472,
+          "pcs_buffers": {
+            "fast": {
+              "codeword_bytes": 163208757248,
+              "dense_message_allocation_bytes": 137438953472,
+              "merkle_tree_bytes": 17179869184
+            },
+            "slim": {
+              "codeword_bytes": 326417514496,
+              "dense_message_allocation_bytes": 137438953472,
+              "merkle_tree_bytes": 34359738368
+            }
+          },
+          "strict_slim_profile_available": true,
+          "three_padded_witness_arrays_bytes": 412316860416,
+          "uniform_row_log": 17,
+          "wiring_cell_log": 31
+        },
+        "public_claim_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "queries": 100,
+        "scope": "Exact Flock lowering census for unchanged Init; no full Init Flock proof generated",
+        "source_proof_blake3": "f0fa026a149dd1c8c450fe55ceed38b006003cb0f9aa60339082f3ba3abb1613",
+        "source_proof_bytes": 5738492,
+        "source_vk_blake3": "f0c635f096bb2b9ff8fbeaf947c406978c11ce3bc447df94e43d6e9fe3cc6fbc"
+      }
+    }
+  },
+  "pipeline_complete": false,
+  "missing_stages": [
+    "full Init Flock proof",
+    "complete Flock verifier in Groth16",
+    "composed 128-bit security validation"
+  ],
+  "binary_sha256": "4198e61120b4649db97ec4dbc31d90cba9e41977751d44ac8e62b12a0b893486",
+  "source_sha256": {
+    "experiments/flock/Cargo.lock": "6165736889249d18e71aa8e9a569ee0327cecec0a088e484d6a08e7387e5eb55",
+    "experiments/flock/Cargo.toml": "7178510ca38ba5a5f37bb758b4ca73983be23892b32f98ba09cca16e2a57bf37",
+    "experiments/flock/configs/m36_fast.toml": "341aaa6efca8fea738b5380cc85479543b714fa0e9929e2eeca7222cdd258fbc",
+    "experiments/flock/configs/m36_slim.toml": "c825b265eac92c7bbb5437c49ef49980b76ee0708c9272f39473e4a428024921",
+    "experiments/flock/configs/m37_fast.toml": "cc8562c3cd55aa9a9a36c016f5543e277b8074c42924675d5a1edc8b2d91eccb",
+    "experiments/flock/configs/m37_slim.toml": "9c85165f0ffb14452145f6c1a5538e2ca6d3f26d36d0353a01c03dbbc7995fb5",
+    "experiments/flock/configs/m38_fast.toml": "5797ef17f26cbf2b068920a3ce902139095717ab443cf9e318c2b545b6b22c28",
+    "experiments/flock/configs/m38_slim.toml": "06ffa4f553c0ccf9782fec51c7e548f5b00c01da89e7c2dcde70c0597e1abc78",
+    "experiments/flock/configs/m39_fast.toml": "0696d86480dcc09c28ea94f51a7bf72e3a2c46e2036640152800484af27ef2df",
+    "experiments/flock/configs/m39_slim.toml": "37c342d5e640f9e914f95eed4b4ae707a2bb77f0cf309312c7cc519601e81b47",
+    "experiments/flock/configs/m40_fast.toml": "7ced90622bdc8ee0032f3a0585ec82589213b56f6a3aa466dbc9d947c9a7374d",
+    "experiments/flock/configs/m40_slim.toml": "f25738ed5992b8f2b5ddafec048e3036855b8b37827c0cbd1e9f9bb251a6ac0d",
+    "experiments/flock/flock-core.patch": "7fc74fd8520289383a0401c534a1a2ee7a740a93283dea82c17e12b061653df3",
+    "experiments/flock/prepare.py": "2368207d95b2898b4978458c1da63d4ecdd66fa63f4ef4458ad9e3228f457ac2",
+    "experiments/flock/run.py": "5c2e2b20fcdab08aac311f262b0063c46db69d6a21ad992398af5d745f5ff06b",
+    "experiments/flock/src/adapter.rs": "8d594ce16ebcace64d8fd88b237928f6c352553e94d59b546c08c509484fc054",
+    "experiments/flock/src/binary.rs": "fbe7c7a5d3b14f452ad30efe4b246ae4d0ed911438a5aebcd82bc19b9be763c6",
+    "experiments/flock/src/fold.rs": "c86feb3f60d391532b565daf897b02779d0be3e31038698267059ab1bebb798b",
+    "experiments/flock/src/fri.rs": "d8da67f9c7eb11b3fa98394e53233fe9b223e441bc66cadbb82c697331fdcdf6",
+    "experiments/flock/src/goldilocks.rs": "87c043672a64ff4321eb87a7ca5075ef04fbbf944dc72da604e9565bf6d309bd",
+    "experiments/flock/src/hash_chain.rs": "cc680dd6241341c77165bd821ad89abc3acf46780e2973e6484793e0b0aefc2f",
+    "experiments/flock/src/init.rs": "aeb495fea54e028c9cbd9f88d330817b7b637198b688af9dec12e7ea1e3ba81f",
+    "experiments/flock/src/main.rs": "0c381185416f793a8fe293bc3fddabed8a4e39947a4c85e889bb1d5a230fe33a",
+    "experiments/flock/src/packed.rs": "7a8eb48ae0420903b37c1fbac5cf163ddd0286f3f54516e3641e94126b7fb6cf",
+    "experiments/flock/src/parameters.rs": "d28a0125c01e1bbe6ceada70df5e0a94fbd2b58d28bd7e404695624dd3fff300",
+    "src/plonkish/builder.rs": "536a3c44a5d6245e0a656e015a356c50fc5450df9d3734b8e188db7747dbd42d"
+  },
+  "artifact_sha256": {
+    "target/flock-experiment/validated-layout/chain-256/proof.bin": "23d1fc1fcba2b5a42f0f055bee296f5d133c56757288635db41abe46cb155f62",
+    "target/flock-experiment/validated-layout/chain-4096/proof.bin": "30d132e8008107a2c0b1f867682382041cd80b647662833e0215f8a11c9e5b1c",
+    "target/flock-experiment/validated-layout/fold/proof.bin": "a3dae74998b7cc52da8110419194ce1b2a4e39d4f72371afd23f92d091776fb1",
+    "target/flock-experiment/validated-layout/fri/proof.bin": "6ab138d72083f86a1472c169a6652a3ef6a236038ad47b23390fc4be7907a2e2"
+  },
+  "validation": {
+    "release_tests_passed": 8,
+    "clippy_all_targets_deny_warnings": "passed",
+    "format_check": "passed"
+  }
+}

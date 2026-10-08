@@ -1,0 +1,452 @@
+{
+  "threads": 32,
+  "started_utc": "20261006T184800Z",
+  "runs": {
+    "field": {
+      "elapsed_seconds": 0.47,
+      "peak_rss_bytes": 32948224,
+      "exit_code": 0,
+      "measurement": {
+        "altered_inputs_and_output_rejected": true,
+        "constraints": 3317,
+        "method": "bounded integer convolution, deterministic 255-point identity",
+        "proof_bytes": 192,
+        "prove_seconds": 0.145382815,
+        "public_inputs": 3,
+        "scope": "One constrained GF(2^128) multiplication; not a Flock verifier",
+        "setup": "insecure development randomness",
+        "setup_seconds": 0.193895814,
+        "verified": true,
+        "witnesses": 3059
+      }
+    },
+    "chain-256": {
+      "elapsed_seconds": 2.16,
+      "peak_rss_bytes": 663764992,
+      "exit_code": 0,
+      "measurement": {
+        "altered_public_values_rejected": 7,
+        "corrupted_lincheck_rejected": true,
+        "deferred_f128_inversions": 427,
+        "deferred_f128_multiplications": 118694,
+        "deferred_scope": "Comparison only: leaves matrix, wiring and layout assertions outstanding; not complete verification",
+        "dense_m": 22,
+        "flock_rev": "b684b1258e4b1f202bec24afd660ace851b09e5e",
+        "hashes": 256,
+        "merkle_leaf_calls": 221,
+        "merkle_leaf_compressions": 1834,
+        "merkle_pair_calls": 1059,
+        "pow_checks": 200,
+        "prepare_seconds": 1.7883331500000001,
+        "profile": "slim",
+        "proof_and_commitment_bytes": 176307,
+        "prove_seconds": 0.314055116,
+        "public_words": 7,
+        "scope": "Public-bound BLAKE3 chain prototype; not an Init FRI verifier or a Groth16 wrapper",
+        "transcript_shape_digest": "b953971f91c447789ad0cb53657d8881d70a654e80dfdfd5f8dfe0bca62b0554",
+        "transcript_squeezed_bytes": 15328,
+        "transcript_squeezes": 430,
+        "verified": true,
+        "verifier_f128_inversions": 491,
+        "verifier_f128_multiplications": 165423,
+        "verify_seconds": 0.004445764,
+        "warning": "Native operation counters are not a complete Groth16 constraint count. Full verifier used; no deferred checks omitted.",
+        "wrong_domain_rejected": true
+      },
+      "artifact": {
+        "path": "target/flock-experiment/final/chain-256/proof.bin",
+        "sha256": "23d1fc1fcba2b5a42f0f055bee296f5d133c56757288635db41abe46cb155f62"
+      }
+    },
+    "chain-4096": {
+      "elapsed_seconds": 2.56,
+      "peak_rss_bytes": 766242816,
+      "exit_code": 0,
+      "measurement": {
+        "altered_public_values_rejected": 7,
+        "corrupted_lincheck_rejected": true,
+        "deferred_f128_inversions": 502,
+        "deferred_f128_multiplications": 168776,
+        "deferred_scope": "Comparison only: leaves matrix, wiring and layout assertions outstanding; not complete verification",
+        "dense_m": 26,
+        "flock_rev": "b684b1258e4b1f202bec24afd660ace851b09e5e",
+        "hashes": 4096,
+        "merkle_leaf_calls": 253,
+        "merkle_leaf_compressions": 1962,
+        "merkle_pair_calls": 2163,
+        "pow_checks": 287,
+        "prepare_seconds": 1.7940210109999999,
+        "profile": "slim",
+        "proof_and_commitment_bytes": 225219,
+        "prove_seconds": 0.698179119,
+        "public_words": 7,
+        "scope": "Public-bound BLAKE3 chain prototype; not an Init FRI verifier or a Groth16 wrapper",
+        "transcript_shape_digest": "9c6999404e8cd25c930b24b00f8a85ce0cba6d5aaa643d8051719a809e5974b0",
+        "transcript_squeezed_bytes": 20832,
+        "transcript_squeezes": 610,
+        "verified": true,
+        "verifier_f128_inversions": 566,
+        "verifier_f128_multiplications": 263849,
+        "verify_seconds": 0.006091102,
+        "warning": "Native operation counters are not a complete Groth16 constraint count. Full verifier used; no deferred checks omitted.",
+        "wrong_domain_rejected": true
+      },
+      "artifact": {
+        "path": "target/flock-experiment/final/chain-4096/proof.bin",
+        "sha256": "30d132e8008107a2c0b1f867682382041cd80b647662833e0215f8a11c9e5b1c"
+      }
+    },
+    "fold": {
+      "elapsed_seconds": 0.29,
+      "peak_rss_bytes": 104517632,
+      "exit_code": 0,
+      "measurement": {
+        "addition_bits_per_row": 1411,
+        "altered_public_values_rejected": 7,
+        "dense_m": 22,
+        "flock_rev": "b684b1258e4b1f202bec24afd660ace851b09e5e",
+        "multiplication_bits_per_row": 26212,
+        "prepare_seconds": 0.011992922,
+        "profile": "slim",
+        "proof_and_commitment_bytes": 152523,
+        "prove_seconds": 0.269188307,
+        "scope": "16 quadratic Goldilocks Horner steps, not a complete FRI verifier",
+        "verified": true,
+        "verify_seconds": 0.005211378
+      },
+      "artifact": {
+        "path": "target/flock-experiment/final/fold/proof.bin",
+        "sha256": "a3dae74998b7cc52da8110419194ce1b2a4e39d4f72371afd23f92d091776fb1"
+      }
+    },
+    "fri": {
+      "elapsed_seconds": 5.73,
+      "peak_rss_bytes": 3577446400,
+      "exit_code": 0,
+      "measurement": {
+        "altered_claim_rejected": true,
+        "corrupted_lincheck_rejected": true,
+        "counter_scope": "Instrumented native operations, not a Groth16 constraint census. Deferred verification alone leaves obligations outstanding.",
+        "deferred_verifier_f128_inversions": 602,
+        "deferred_verifier_f128_multiplications": 349818,
+        "dense_m": 27,
+        "expected_claim": 13,
+        "flock_rev": "b684b1258e4b1f202bec24afd660ace851b09e5e",
+        "full_verifier_f128_inversions": 1562,
+        "full_verifier_f128_multiplications": 1019136,
+        "geometry": {
+          "dense_m": 27,
+          "live_packed_witness_bytes": 14931024,
+          "memory_scope": "Named array sizes, not a peak-RAM prediction; excludes frontend, layout, PCS and other scratch",
+          "one_wiring_field_array_bytes": 33554432,
+          "padded_witness_array_bytes": 536870912,
+          "strict_slim_profile_available": true,
+          "three_padded_witness_arrays_bytes": 1610612736,
+          "uniform_row_log": 15,
+          "wiring_cell_log": 21
+        },
+        "lowering": {
+          "constant_multiplications": 4805,
+          "dense_m_lower_bound": 27,
+          "equalities": 30198,
+          "memory_scope": "One packed witness only; excludes a/b, PCS, wiring, frontend and padding",
+          "most_frequent_scalars": [
+            [
+              16,
+              4094
+            ],
+            [
+              15,
+              593
+            ],
+            [
+              7,
+              48
+            ],
+            [
+              2,
+              9
+            ],
+            [
+              9223372034707292160,
+              8
+            ],
+            [
+              281474976710655,
+              2
+            ],
+            [
+              3,
+              1
+            ],
+            [
+              4,
+              1
+            ],
+            [
+              5,
+              1
+            ],
+            [
+              6,
+              1
+            ],
+            [
+              8,
+              1
+            ],
+            [
+              9,
+              1
+            ],
+            [
+              10,
+              1
+            ],
+            [
+              11,
+              1
+            ],
+            [
+              12,
+              1
+            ],
+            [
+              13,
+              1
+            ],
+            [
+              14,
+              1
+            ],
+            [
+              25,
+              1
+            ],
+            [
+              29,
+              1
+            ],
+            [
+              33,
+              1
+            ]
+          ],
+          "packed_witness_bytes_before_padding": 14931024,
+          "publics": 1,
+          "steps": 114120,
+          "tables": {
+            "Blake3": 52,
+            "Gold(Add)": 19738,
+            "Gold(Canonical)": 28473,
+            "Gold(Equal)": 30139,
+            "Gold(Mask)": 14252,
+            "Gold(Mul)": 157,
+            "Gold(MulSmall(2))": 8,
+            "Gold(MulSmall(4))": 47,
+            "Gold(MulSmall(8))": 4094,
+            "Gold(Pack(16))": 890,
+            "Gold(Pack(32))": 446,
+            "Gold(Pack(64))": 226,
+            "Gold(Pack(8))": 1776,
+            "Gold(Range(1))": 2814,
+            "Gold(Range(4))": 11008
+          },
+          "words": 149732
+        },
+        "prepare_seconds": 1.970961456,
+        "profile": "slim",
+        "proof_and_commitment_bytes": 260531,
+        "prove_seconds": 3.561825266,
+        "scope": "Complete single-batch FRI verifier fixture in Flock; inner fixture has development security, not Init",
+        "serialized_roundtrip_verified": true,
+        "source": "CircuitStats { hash_calls: 45, hash_compressions: 52, values: 35400, inputs: 459, gates: 33402, lookups: 5504, tables: 3, publics: 1, hint_calls: 4315, hint_outputs: 8143 }",
+        "verified": true,
+        "verify_seconds": 0.015834528
+      },
+      "artifact": {
+        "path": "target/flock-experiment/final/fri/proof.bin",
+        "sha256": "33d9eebdd283ae5bb85391d1d8ce326165b4449511cd92c11e3cca1013ae2274"
+      }
+    },
+    "init": {
+      "elapsed_seconds": 64.13,
+      "peak_rss_bytes": 25844588544,
+      "exit_code": 0,
+      "measurement": {
+        "frontend": "CircuitStats { hash_calls: 53066, hash_compressions: 127593, values: 132013262, inputs: 1859170, gates: 117687732, lookups: 25385056, tables: 3, publics: 18, hint_calls: 23102862, hint_outputs: 36833298 }",
+        "frontend_seconds": 11.722196404,
+        "geometry": {
+          "dense_m": 40,
+          "live_packed_witness_bytes": 91459621296,
+          "memory_scope": "Named array sizes, not a peak-RAM prediction; excludes frontend, layout, PCS and other scratch",
+          "one_wiring_field_array_bytes": 137438953472,
+          "padded_witness_array_bytes": 2199023255552,
+          "strict_slim_profile_available": false,
+          "three_padded_witness_arrays_bytes": 6597069766656,
+          "uniform_row_log": 27,
+          "wiring_cell_log": 33
+        },
+        "lowering": {
+          "constant_multiplications": 35041559,
+          "dense_m_lower_bound": 40,
+          "equalities": 107431865,
+          "memory_scope": "One packed witness only; excludes a/b, PCS, wiring, frontend and padding",
+          "most_frequent_scalars": [
+            [
+              16,
+              26692922
+            ],
+            [
+              15,
+              4870293
+            ],
+            [
+              7,
+              3398976
+            ],
+            [
+              9223372034707292160,
+              9218
+            ],
+            [
+              2,
+              4822
+            ],
+            [
+              281474976710655,
+              4200
+            ],
+            [
+              16777217,
+              4100
+            ],
+            [
+              1152921504606846977,
+              3900
+            ],
+            [
+              70368744161279,
+              3700
+            ],
+            [
+              549755813887,
+              3600
+            ],
+            [
+              576451956076183553,
+              3500
+            ],
+            [
+              4649662884198176412,
+              3300
+            ],
+            [
+              1803076106186727245,
+              3100
+            ],
+            [
+              7093403778535204496,
+              2900
+            ],
+            [
+              455906449640507598,
+              2700
+            ],
+            [
+              953828971695440716,
+              2500
+            ],
+            [
+              1532612707718625686,
+              2400
+            ],
+            [
+              2238841433216015904,
+              2300
+            ],
+            [
+              670244699813528918,
+              2200
+            ],
+            [
+              6115771955107415309,
+              2000
+            ]
+          ],
+          "packed_witness_bytes_before_padding": 91459621296,
+          "publics": 18,
+          "steps": 416683029,
+          "tables": {
+            "Blake3": 127593,
+            "Gold(Add)": 76973662,
+            "Gold(Canonical)": 96274843,
+            "Gold(Equal)": 107431508,
+            "Gold(Mask)": 15121544,
+            "Gold(Mul)": 10324578,
+            "Gold(MulSmall(16))": 984,
+            "Gold(MulSmall(2))": 5111,
+            "Gold(MulSmall(4))": 3399525,
+            "Gold(MulSmall(8))": 26695387,
+            "Gold(Pack(16))": 2360346,
+            "Gold(Pack(32))": 1180174,
+            "Gold(Pack(64))": 590588,
+            "Gold(Pack(8))": 4720688,
+            "Gold(Range(1))": 20706386,
+            "Gold(Range(4))": 50770112
+          },
+          "words": 549079700
+        },
+        "lowering_seconds": 45.85466015,
+        "public_claim_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "queries": 100,
+        "scope": "Exact Flock lowering census for unchanged Init; no full Init Flock proof generated",
+        "source_proof_blake3": "f0fa026a149dd1c8c450fe55ceed38b006003cb0f9aa60339082f3ba3abb1613",
+        "source_proof_bytes": 5738492,
+        "source_vk_blake3": "f0c635f096bb2b9ff8fbeaf947c406978c11ce3bc447df94e43d6e9fe3cc6fbc"
+      }
+    }
+  },
+  "binary_sha256": "15310f1266b1ce34f32a228f6c0e7e16f241f5fae15a008c48d6086bceb24209",
+  "source_sha256": {
+    "experiments/flock/src/adapter.rs": "5655e142e137010f08df743b3c232b0e65ae0374ab81d7b1d73c6687b8918c66",
+    "experiments/flock/src/binary.rs": "fbe7c7a5d3b14f452ad30efe4b246ae4d0ed911438a5aebcd82bc19b9be763c6",
+    "experiments/flock/src/fold.rs": "c86feb3f60d391532b565daf897b02779d0be3e31038698267059ab1bebb798b",
+    "experiments/flock/src/fri.rs": "c80f6a75c5422d9423344c8a1ed53de76fb3f0fb2958ac2a1f7ffb42a061bcc5",
+    "experiments/flock/src/goldilocks.rs": "8a491db9c876c686b3009868790a98c22893432cf22f20be72b85deb315918da",
+    "experiments/flock/src/hash_chain.rs": "cc680dd6241341c77165bd821ad89abc3acf46780e2973e6484793e0b0aefc2f",
+    "experiments/flock/src/init.rs": "5de961208deda14201cb170bb763445cca13e05324061f3fbb11acc1d27de086",
+    "experiments/flock/src/main.rs": "3ab2a9e3af47dc7e014f76da21f281c7c35cef8b2be911fd0276becbb93f5ef3",
+    "src/plonkish/builder.rs": "536a3c44a5d6245e0a656e015a356c50fc5450df9d3734b8e188db7747dbd42d",
+    "experiments/flock/Cargo.toml": "21978f5951d2820549fb9c963b9483a58c7616141fd5492b8b077eaac907913f",
+    "experiments/flock/Cargo.lock": "66f43a55bc138d5d4813daa8c4db2ee537fd176733dcceed5691f95028031dee"
+  },
+  "completed_utc": "2026-10-06T18:50:48.154968+00:00",
+  "status": "Complete small FRI-to-Flock proof validated; full Init remains blocked by padding memory and unsupported m40 strict profile. No complete Flock-to-Groth16 wrapper.",
+  "validation": {
+    "unit_tests_passed": 5,
+    "clippy": "all targets, warnings denied: passed",
+    "full_fri_proof": "verified, serialized roundtrip verified, altered claim and corrupted lincheck rejected",
+    "init": "unchanged original aggregate verified natively; exact Flock layout census only",
+    "root_check": "all targets, parallel: passed"
+  }
+}

@@ -110,7 +110,7 @@ serde_via_canonical!(KzgProof, Vec<G1Affine>);
 /// A committed matrix on the prover side: its domain and each column
 /// polynomial in coefficient form (length = domain size).
 pub struct CommittedMatrix {
-    domain: Radix2Coset,
+    pub(crate) domain: Radix2Coset,
     columns: Vec<Vec<Fr>>,
 }
 
@@ -121,6 +121,82 @@ pub struct KzgProverData {
 }
 
 impl KzgProverData {
+    /// Save a local prover checkpoint. This is not a verifier-key format.
+    pub fn write_checkpoint(
+        &self,
+        mut out: impl std::io::Write,
+    ) -> Result<(), ark_serialize::SerializationError> {
+        self.commitment.0.serialize_compressed(&mut out)?;
+        self.commitment.1.serialize_compressed(&mut out)?;
+        (self.matrices.len() as u64).serialize_compressed(&mut out)?;
+        for matrix in &self.matrices {
+            (matrix.domain.log_size as u64).serialize_compressed(&mut out)?;
+            matrix.domain.shift.0.serialize_compressed(&mut out)?;
+            matrix.columns.serialize_compressed(&mut out)?;
+        }
+        Ok(())
+    }
+
+    /// Load a trusted, locally produced prover checkpoint.
+    pub fn read_checkpoint(
+        mut input: impl std::io::Read,
+    ) -> Result<Self, ark_serialize::SerializationError> {
+        let commitment = KzgCommitment(
+            Vec::deserialize_compressed(&mut input)?,
+            Vec::deserialize_compressed(&mut input)?,
+        );
+        let count = usize::try_from(u64::deserialize_compressed(&mut input)?)
+            .map_err(|_error| ark_serialize::SerializationError::InvalidData)?;
+        if count != commitment.0.len() || count != commitment.1.len() {
+            return Err(ark_serialize::SerializationError::InvalidData);
+        }
+        let mut matrices = Vec::with_capacity(count);
+        for i in 0..count {
+            let log_size = usize::try_from(u64::deserialize_compressed(&mut input)?)
+                .map_err(|_error| ark_serialize::SerializationError::InvalidData)?;
+            if log_size > 32 {
+                return Err(ark_serialize::SerializationError::InvalidData);
+            }
+            let shift = Scalar(Fr::deserialize_compressed(&mut input)?);
+            let columns: Vec<Vec<Fr>> = Vec::deserialize_compressed(&mut input)?;
+            if columns.len() != commitment.0[i].len()
+                || columns.iter().any(|c| c.len() != 1usize << log_size)
+            {
+                return Err(ark_serialize::SerializationError::InvalidData);
+            }
+            matrices.push(CommittedMatrix {
+                domain: Radix2Coset { log_size, shift },
+                columns,
+            });
+        }
+        let mut tail = [0];
+        if input.read(&mut tail)? != 0 {
+            return Err(ark_serialize::SerializationError::InvalidData);
+        }
+        Ok(Self {
+            commitment,
+            matrices,
+        })
+    }
+
+    /// Combine independently committed matrices in canonical circuit order.
+    pub fn concatenate(parts: impl IntoIterator<Item = Self>) -> (KzgCommitment, Self) {
+        let mut commitment = KzgCommitment(vec![], vec![]);
+        let mut matrices = Vec::new();
+        for mut part in parts {
+            commitment.0.append(&mut part.commitment.0);
+            commitment.1.append(&mut part.commitment.1);
+            matrices.append(&mut part.matrices);
+        }
+        (
+            commitment.clone(),
+            Self {
+                commitment,
+                matrices,
+            },
+        )
+    }
+
     pub(crate) fn sparse(commitment: KzgCommitment, domains: Vec<Radix2Coset>) -> Self {
         assert_eq!(commitment.0.len(), domains.len());
         Self {

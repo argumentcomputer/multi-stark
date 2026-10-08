@@ -378,6 +378,16 @@ where
         witness: SystemWitness<Val<SC>>,
     ) -> Proof<SC> {
         let stage_1 = self.prove_stage_1(witness);
+        self.prove_committed(key, claims, stage_1)
+    }
+
+    /// Continue an ordinary proof from independently prepared stage-one data.
+    pub fn prove_committed(
+        &self,
+        key: &ProverKey<SC>,
+        claims: &[&[Val<SC>]],
+        stage_1: Stage1<SC>,
+    ) -> Proof<SC> {
         let mut challenger = self.config.initialise_challenger();
 
         // Bind the system shape into the transcript. The protocol parameters
@@ -821,7 +831,7 @@ where
 /// Evaluates the folded constraints on the quotient domain and divides by
 /// the vanishing polynomial, producing the quotient values.
 #[allow(clippy::too_many_arguments)]
-fn quotient_values<SC>(
+pub(crate) fn quotient_values<SC>(
     circuit: &crate::system::Circuit<Val<SC>>,
     lookup_publics: &[Val<SC>],
     trace_domain: Domain<SC>,

@@ -1,0 +1,183 @@
+{
+  "status": "paused_by_user",
+  "pipeline_complete": false,
+  "changes": [
+    "Goldilocks canonical-byte checks simplified with adversarial tests",
+    "Redundant Flock canonicality gates removed",
+    "Optional coalesced packing reduces tables from 93 to 39 at unchanged padded domains",
+    "Reused packed witness partial-group padding fixed",
+    "Terminal phase row accounting added"
+  ],
+  "validation": {
+    "flock_tests_passed": 18,
+    "root_plonkish_tests_passed": 33,
+    "hash_transcript_tests_passed": 6,
+    "root_and_flock_clippy": "passed"
+  },
+  "runs": [
+    {
+      "directory": "target/flock-experiment/terminal-init-bounds-slim-1",
+      "run": {
+        "build_info": {
+          "counters_enabled": false,
+          "terminal_enabled": true
+        },
+        "low_memory": true,
+        "command": [
+          "/usr/bin/time",
+          "-f",
+          "%e %M %x",
+          "-o",
+          "/home/arthur/multi-stark/target/flock-experiment/terminal-init-bounds-slim-1/time.txt",
+          "/home/arthur/multi-stark/experiments/flock/target/release/init-flock",
+          "terminal-init",
+          "/home/arthur/ix/measurements/init16-root-verifier-main-20261002",
+          "/home/arthur/multi-stark/target/flock-experiment/terminal-init-bounds-slim-1",
+          "slim"
+        ],
+        "profile": "slim",
+        "threads": 32,
+        "rss_limit_bytes": 429496729600,
+        "status": "stopped",
+        "started_unix": 1791335033.1150062,
+        "binary_sha256": "9ae7006049e95d280fc29aef84a8d9f988315fc42108d87b79fb5be194833fe3",
+        "sampled_peak_process_tree_rss_bytes": 307761819648,
+        "pid": 5,
+        "elapsed_seconds": 1138.914056116002,
+        "current_process_tree_rss_bytes": 62642044928,
+        "exit_code": -15
+      },
+      "source_hashes": "run-status.json",
+      "projection-progress.json": {
+        "constraints": 285000000,
+        "elapsed_seconds": 756.402064866,
+        "phase": "Pcs",
+        "plonk_rows": 475461331
+      },
+      "report.json": {
+        "altered_claim_rejected": true,
+        "proof_and_commitment_bytes": 485283,
+        "proof_blake3": "4fc3b50c4220aa086de51e5dff9ef7ff2bc2eb07ad1292e8700d6d7dbd12ba6e",
+        "prove_seconds": 129.106342142,
+        "scope": "Full unchanged Init Flock proof; Groth16 wrapper and composed security validation outstanding",
+        "serialized_roundtrip_verified": true,
+        "status": "verified",
+        "verify_seconds": 2.325969297
+      }
+    },
+    {
+      "directory": "target/flock-experiment/terminal-init-canonical-slim-1",
+      "run": {
+        "build_info": {
+          "counters_enabled": false,
+          "terminal_enabled": true
+        },
+        "low_memory": true,
+        "command": [
+          "/usr/bin/time",
+          "-f",
+          "%e %M %x",
+          "-o",
+          "/home/arthur/multi-stark/target/flock-experiment/terminal-init-canonical-slim-1/time.txt",
+          "/home/arthur/multi-stark/experiments/flock/target/release/init-flock",
+          "terminal-init",
+          "/home/arthur/ix/measurements/init16-root-verifier-main-20261002",
+          "/home/arthur/multi-stark/target/flock-experiment/terminal-init-canonical-slim-1",
+          "slim"
+        ],
+        "profile": "slim",
+        "threads": 32,
+        "rss_limit_bytes": 429496729600,
+        "status": "stopped",
+        "started_unix": 1791335405.1836457,
+        "binary_sha256": "96d15bacdd095b83b8c8384c717f8b87adc8ce3eabaa87b59d1b3b852ee9232a",
+        "sampled_peak_process_tree_rss_bytes": 276147625984,
+        "pid": 5,
+        "elapsed_seconds": 766.6068731299965,
+        "current_process_tree_rss_bytes": 48624889856,
+        "exit_code": -15
+      },
+      "source_hashes": "run-status.json",
+      "projection-progress.json": {
+        "constraints": 210000000,
+        "elapsed_seconds": 447.92928787,
+        "phase": "Lincheck",
+        "plonk_rows": 359096591
+      },
+      "phase-progress.json": {
+        "statement": {
+          "cumulative_plonk_rows_excluding_public_bindings": 132638481,
+          "plonk_rows": 8524434,
+          "seconds": 9.997407174
+        },
+        "transcript": {
+          "cumulative_plonk_rows_excluding_public_bindings": 124114047,
+          "plonk_rows": 124114047,
+          "seconds": 145.270735779
+        },
+        "wiring": {
+          "cumulative_plonk_rows_excluding_public_bindings": 328767257,
+          "plonk_rows": 196128776,
+          "seconds": 248.442761382
+        }
+      },
+      "report.json": {
+        "altered_claim_rejected": true,
+        "proof_and_commitment_bytes": 465059,
+        "proof_blake3": "a35181a39b46fa2f50defc1fea1f859542bcdf1fedd5f954b5c8893588d70e19",
+        "prove_seconds": 126.398248461,
+        "scope": "Full unchanged Init Flock proof; Groth16 wrapper and composed security validation outstanding",
+        "serialized_roundtrip_verified": true,
+        "status": "verified",
+        "verify_seconds": 1.793544147
+      }
+    },
+    {
+      "directory": "target/flock-experiment/terminal-init-coalesced-slim-1",
+      "run": {
+        "build_info": {
+          "counters_enabled": false,
+          "terminal_enabled": true
+        },
+        "low_memory": true,
+        "coalesced": true,
+        "command": [
+          "/usr/bin/time",
+          "-f",
+          "%e %M %x",
+          "-o",
+          "/home/arthur/multi-stark/target/flock-experiment/terminal-init-coalesced-slim-1/time.txt",
+          "/home/arthur/multi-stark/experiments/flock/target/release/init-flock",
+          "terminal-init",
+          "/home/arthur/ix/measurements/init16-root-verifier-main-20261002",
+          "/home/arthur/multi-stark/target/flock-experiment/terminal-init-coalesced-slim-1",
+          "slim",
+          "--coalesced"
+        ],
+        "profile": "slim",
+        "threads": 32,
+        "rss_limit_bytes": 429496729600,
+        "status": "stopped",
+        "started_unix": 1791335930.7460082,
+        "binary_sha256": "b1797cb35e8a385899c3f839059f5efba6f8cd9b5ff6e7340b3b573bfb8d86ad",
+        "sampled_peak_process_tree_rss_bytes": 272833396736,
+        "pid": 5,
+        "elapsed_seconds": 241.18301403100486,
+        "current_process_tree_rss_bytes": 242477101056,
+        "exit_code": -15
+      },
+      "source_hashes": "run-status.json",
+      "report.json": {
+        "scope": "Exact Flock lowering for unchanged Init; proving not completed",
+        "status": "proving"
+      }
+    }
+  ],
+  "remaining": [
+    "Complete full Init coalesced native proof and conditional terminal census in a fresh output directory",
+    "Resolve terminal fixed matrix, wiring structure and jagged layout discharges",
+    "Reassess KZG domain capacity and memory; no full terminal proof yet"
+  ],
+  "resume": "Rebuild current sources; restart run_init.py terminal measurement with --coalesced in a fresh directory. Existing STOP files intentionally retained. Source hashes and binary snapshots are preserved per run.",
+  "measurement_note": "Interrupted terminal counts are partial lower bounds and exclude unresolved discharges. Coalesced full Init native validation remains unfinished. Final helper borrowing lint fix postdates benchmark binary snapshots without changing circuit arithmetic."
+}

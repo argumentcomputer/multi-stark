@@ -1,0 +1,69 @@
+{
+  "status": "generated_and_independently_verified",
+  "production_setup": false,
+  "security": "Known-trapdoor development SRS; correctness and cost experiment only.",
+  "layout": "One ordinary KZG proof over height-capped traces, including compact BLAKE3 and merged tables.",
+  "public_claim": "Original 18 Init root public words; all 18 altered words rejected.",
+  "phases": {
+    "stage": {
+      "phase": "stage",
+      "returncode": 0,
+      "wall_seconds": 448.3828675746918,
+      "log": "/home/arthur/multi-stark/target/init-fri-kzg-proof-full/stage-1791395380493426052.log",
+      "timing": "/home/arthur/multi-stark/target/init-fri-kzg-proof-full/stage-1791395380493426052.time",
+      "peak_rss_bytes": 77689700352
+    },
+    "prove": {
+      "phase": "prove",
+      "returncode": 0,
+      "wall_seconds": 6702.857925415039,
+      "log": "/home/arthur/multi-stark/target/init-fri-kzg-proof-full/prove-1791395828876780009.log",
+      "timing": "/home/arthur/multi-stark/target/init-fri-kzg-proof-full/prove-1791395828876780009.time",
+      "peak_rss_bytes": 219099598848
+    },
+    "verify": {
+      "phase": "verify",
+      "returncode": 0,
+      "wall_seconds": 53.2518949508667,
+      "log": "/home/arthur/multi-stark/target/init-fri-kzg-proof-full/verify-1791402531735104278.log",
+      "timing": "/home/arthur/multi-stark/target/init-fri-kzg-proof-full/verify-1791402531735104278.time",
+      "peak_rss_bytes": 4960493568
+    }
+  },
+  "artifacts": {
+    "proof.compact.bin": {
+      "bytes": 53157,
+      "sha256": "60031d908e1a07dafd42e3558aa563e0a46180c671c37ad4c5d334d9a6eac6e8"
+    },
+    "packet.bin": {
+      "bytes": 53333,
+      "sha256": "e3c2164d3d09ff2affa261055d9eb4555a32d73a06031caa422a6c0115dbb40a"
+    },
+    "profile-id.bin": {
+      "bytes": 32,
+      "sha256": "74c36ceebca446b34c79bd96e08a44fa68aeceb141aa71afd2ded24f9784e933"
+    }
+  },
+  "verification": "VERIFIED: proof_bytes=53157 packet_bytes=53333 verify_seconds=0.101705423 total_seconds=53.194657319 altered_claims_rejected=18 development_srs=true",
+  "timing_notes": "prove includes SRS generation, circuit setup, checkpoint writes, proving and verification. verify is a separate process including SRS generation; the verification line times verification of an already decoded proof.",
+  "provenance": {
+    "binary_sha256": "dd2cac9687f0eb938d6172f16d64c3dec49d60abd804681280a2ccfba4d515ba",
+    "inputs": {
+      "target/init-fri-wrap/outer-proof.bin": "ac654d6fa64b217863a9f5f8b1b9bc3510101564a657c6eadecc71994eddd0f6",
+      "target/init-fri-wrap/outer-vk.bin": "ce5c425571edfe396f601963337c4d8c3875b5663ba37a542c972d6a3ba840e2",
+      "target/init-fri-wrap/outer-claims.bin": "3d3d66873cbef47724c3e1df4583d9e8c5e9cc9f03d6e15e9c226e4d7a4ab9ed"
+    },
+    "source": {
+      "examples/init_fri_kzg_prove.rs": "28f75257b06f4ef05d67d16c21eb42a22ffeb60dcf67f973a442130aa21160cd",
+      "examples/support/init_fri.rs": "91c5a17d0ce15f2d9e55b1a7ee237ecb922a48493d33647a61dce4e3c41267f2",
+      "src/ark_adapter/config.rs": "a051bd87b5d0047f95728bebae32cb94b9ea0d147fb392f5031cca5d51a008c0",
+      "src/ark_adapter/pcs.rs": "7f6e5fafa608581faca3b5a55a5ab62a5e6a85f5f32aea897b22c260fcdbf18d",
+      "src/prover.rs": "1290c388a0f4eb31f35cf8d75c35decbd1d7044ef960e939ea10edbe2410eae3",
+      "src/system.rs": "823d825716979611296ec1f579e2cce663699a7866758de86293fe1390f84d95"
+    },
+    "development_srs": true
+  },
+  "saved_artifacts": "experiments/init-fri-kzg-artifacts",
+  "trace_count": 21,
+  "total_wall_seconds": 7204.4926879405975
+}

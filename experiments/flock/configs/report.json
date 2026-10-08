@@ -1,0 +1,85 @@
+{
+  "profiles": [
+    {
+      "config_blake3": "a072c46461705cbd163c7917bf465bfd5e1fd1da3538517f4eba17d4a6a090cb",
+      "initial_k": 6,
+      "levels": 7,
+      "m": 36,
+      "profile": "fast",
+      "queries": 483
+    },
+    {
+      "config_blake3": "d28092bae0b9491322c58c4d4f98d12869b68f5f9412417601e1617bf6472d9b",
+      "initial_k": 6,
+      "levels": 7,
+      "m": 36,
+      "profile": "slim",
+      "queries": 325
+    },
+    {
+      "config_blake3": "60b179a48233eb5ffe9e0db7e15ac5604fe7ca1b67412dc2ff0b2200b2e2c20c",
+      "initial_k": 6,
+      "levels": 8,
+      "m": 37,
+      "profile": "fast",
+      "queries": 505
+    },
+    {
+      "config_blake3": "8f50ec3790432d3860fde922b43fee879e26effd2d477224e134184ef7b172e3",
+      "initial_k": 6,
+      "levels": 8,
+      "m": 37,
+      "profile": "slim",
+      "queries": 346
+    },
+    {
+      "config_blake3": "af4b807b6ad62bfa4a4195d56d078bd1076347cbc5ef129ba12ec8a7186b0a6a",
+      "initial_k": 6,
+      "levels": 8,
+      "m": 38,
+      "profile": "fast",
+      "queries": 505
+    },
+    {
+      "config_blake3": "122a6aaa91eef6ecc3c978e2f2a7346f8bac0c993bf109b1fabeb554f01816c9",
+      "initial_k": 6,
+      "levels": 8,
+      "m": 38,
+      "profile": "slim",
+      "queries": 346
+    },
+    {
+      "config_blake3": "6278b0e6c644660d4cab44f82546890caec4b2c0fb1ea22163701c691fe70470",
+      "initial_k": 6,
+      "levels": 8,
+      "m": 39,
+      "profile": "fast",
+      "queries": 505
+    },
+    {
+      "config_blake3": "2c8a4cc0f057d077df9390f6085c8a27da3e0184da30b27ed92e454be0512e0c",
+      "initial_k": 6,
+      "levels": 8,
+      "m": 39,
+      "profile": "slim",
+      "queries": 346
+    },
+    {
+      "config_blake3": "ca7aa940ccbade24300e36e5f8785e46a56467c3921467d941c0598ab9a683ec",
+      "initial_k": 6,
+      "levels": 9,
+      "m": 40,
+      "profile": "fast",
+      "queries": 526
+    },
+    {
+      "config_blake3": "568d48f63120074f2f2eceb26752d9af1056160cb82ba19f23b30d253cc3c3e6",
+      "initial_k": 6,
+      "levels": 9,
+      "m": 40,
+      "profile": "slim",
+      "queries": 367
+    }
+  ],
+  "scope": "Derived and validated PCS profiles; not a complete pipeline security audit"
+}

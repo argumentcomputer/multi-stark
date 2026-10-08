@@ -1,6 +1,7 @@
 //! Fixed saved intermediate proof and independently expected Init claim.
 #[path = "init_claim.rs"]
 mod init_claim;
+pub(crate) use init_claim::INIT_PUBLIC_WORDS;
 use multi_stark::{
     plonkish::verifier::*,
     prover::Proof,
@@ -26,7 +27,7 @@ pub(crate) fn load(dir: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
         return Err("noncanonical proof".into());
     }
     // This experiment's independently expected Init public values.
-    let public = init_claim::INIT_PUBLIC_WORDS.map(Val::from_u64);
+    let public = INIT_PUBLIC_WORDS.map(Val::from_u64);
     // Historical lowering: namespace 107, ten arithmetic traces, six hash anchors.
     let mut claims: Vec<_> = std::iter::once(Val::ZERO)
         .chain(public)

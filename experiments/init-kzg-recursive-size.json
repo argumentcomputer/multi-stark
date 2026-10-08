@@ -1,0 +1,31 @@
+{
+  "claim_bytes": 144,
+  "g1_points": 18,
+  "opening_witnesses": 3,
+  "packet_bytes": 2757,
+  "pairing_bytes": 528,
+  "profile_bytes": 32,
+  "proof_bytes": 2053,
+  "scalar_fields": 37,
+  "status": "predicted from fixed shape; assumes distinct opening points",
+  "traces": [
+    {
+      "fixed": 15,
+      "fixed_next": false,
+      "height": 268435456,
+      "lookup": 4,
+      "main": 3,
+      "main_next": false,
+      "quotient": 2
+    },
+    {
+      "fixed": 4,
+      "fixed_next": false,
+      "height": 131072,
+      "lookup": 1,
+      "main": 1,
+      "main_next": false,
+      "quotient": 1
+    }
+  ]
+}

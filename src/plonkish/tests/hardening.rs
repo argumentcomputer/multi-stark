@@ -7,6 +7,99 @@ use std::sync::{
 use super::*;
 
 #[test]
+fn goldilocks_byte_boundary_rejects_forged_zero_tests_and_aliases() {
+    use crate::plonkish::builder::Recipe;
+    use crate::plonkish::gadgets::ByteGadgets;
+    use p3_field::PrimeField64;
+
+    let mut b = CircuitBuilder::<Val>::new();
+    let bytes = ByteGadgets::new(&mut b);
+    let input = std::array::from_fn(|_| bytes.input(&mut b, "candidate"));
+    let valid = bytes.is_at_most_u64(&mut b, input, Val::ORDER_U64 - 1);
+    let circuit = b.finish();
+    for hi in [0u32, 1, 0x7fff_ffff, u32::MAX - 1, u32::MAX] {
+        for lo in [0u32, 1, 15, 0x8000_0000, u32::MAX] {
+            let integer = (u64::from(hi) << 32) | u64::from(lo);
+            let mut w = circuit.witness();
+            for (wire, byte) in input.iter().zip(integer.to_le_bytes()) {
+                w.set(wire.value(), Val::from_u8(byte)).unwrap();
+            }
+            let assignment = w.generate().unwrap();
+            assert_eq!(
+                assignment.value(valid.value()).unwrap(),
+                Val::from_bool(integer < Val::ORDER_U64)
+            );
+            let mut forged = assignment.values.clone();
+            forged[valid.value().index()] = Val::ONE - forged[valid.value().index()];
+            assert!(circuit.check_values(&forged).is_err());
+            if integer >= Val::ORDER_U64 {
+                // Forge all inverse hints, then recompute the arithmetic so
+                // the false acceptance bit has consistent dependent advice.
+                let mut forged = assignment.values;
+                for (index, recipe) in circuit.recipes.iter().enumerate() {
+                    match recipe {
+                        Recipe::Hint(h) if circuit.hints[*h].name == "zero-test inverse" => {
+                            forged[index] = Val::ZERO
+                        }
+                        Recipe::Arithmetic(g) => {
+                            let gate = &circuit.gates[*g];
+                            let [qm, qa, qb, _, k] = gate.coefficients;
+                            let a = forged[gate.wires[0].index()];
+                            let b = forged[gate.wires[1].index()];
+                            forged[index] = qm * a * b + qa * a + qb * b + k;
+                        }
+                        _ => (),
+                    }
+                }
+                assert_eq!(forged[valid.value().index()], Val::ONE);
+                assert!(circuit.check_values(&forged).is_err());
+            }
+        }
+    }
+    // Change the encoding of 0/1 to p/p+1 and recompute honest dependent
+    // hints and arithmetic. The packed field equality alone would accept it.
+    let mut b = CircuitBuilder::<Val>::new();
+    let bytes = ByteGadgets::new(&mut b);
+    let input = b.input("field");
+    bytes.encode_field64(&mut b, input);
+    let circuit = b.finish();
+    for original in [0u64, 1] {
+        let mut w = circuit.witness();
+        w.set(input, Val::from_u64(original)).unwrap();
+        let mut forged = w.generate().unwrap().values;
+        let mut index = 0;
+        while index < forged.len() {
+            match &circuit.recipes[index] {
+                Recipe::Hint(h) => {
+                    let hint = &circuit.hints[*h];
+                    if hint.name == "nibbles" && hint.dependencies.as_ref() == [input.index()] {
+                        for i in 0..16 {
+                            forged[index + i] =
+                                Val::from_u64(((Val::ORDER_U64 + original) >> (4 * i)) & 15);
+                        }
+                    } else {
+                        let args: Vec<_> = hint.dependencies.iter().map(|&i| forged[i]).collect();
+                        (hint.compute)(&args, &mut forged[index..index + hint.len]).unwrap();
+                    }
+                    index += hint.len;
+                    continue;
+                }
+                Recipe::Arithmetic(g) => {
+                    let gate = &circuit.gates[*g];
+                    let [qm, qa, qb, _, k] = gate.coefficients;
+                    let a = forged[gate.wires[0].index()];
+                    let b = forged[gate.wires[1].index()];
+                    forged[index] = qm * a * b + qa * a + qb * b + k;
+                }
+                _ => (),
+            }
+            index += 1;
+        }
+        assert!(circuit.check_values(&forged).is_err());
+    }
+}
+
+#[test]
 fn arithmetic_folds_constants_and_has_predictable_costs() {
     let mut b = CircuitBuilder::<Val>::new();
     let x = b.input("x");

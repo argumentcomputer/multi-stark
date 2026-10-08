@@ -22,6 +22,8 @@ pub struct KzgConfig {
     /// transcript contract on [`ProofConfig::initialise_challenger`]).
     transcript_seed: Vec<u8>,
     max_log_degree: usize,
+    stream_lookups: bool,
+    stream_quotient: bool,
 }
 
 impl KzgConfig {
@@ -58,11 +60,153 @@ impl KzgConfig {
             pcs: KzgPcs::new(srs, max_quotient_degree),
             transcript_seed,
             max_log_degree,
+            stream_lookups: false,
+            stream_quotient: false,
         }
+    }
+
+    /// Reconstruct and commit one lookup trace at a time from committed columns.
+    /// This changes memory use, not the proof or its transcript.
+    pub fn with_streaming_lookups(mut self) -> Self {
+        self.stream_lookups = true;
+        self
+    }
+
+    /// Evaluate each quotient on trace-sized cosets, bounding temporary matrices.
+    pub fn with_streaming_quotient(mut self) -> Self {
+        self.stream_quotient = true;
+        self
     }
 }
 
 impl ProofConfig for KzgConfig {
+    fn accelerated_lookup_commit(
+        &self,
+        inputs: &[crate::config::LookupCommitInput<'_, Self>],
+        beta: Scalar,
+        gamma: Scalar,
+        mut acc: Scalar,
+    ) -> Option<crate::config::AcceleratedLookupCommitment<Self>> {
+        if !self.stream_lookups {
+            return None;
+        }
+        let mut parts = Vec::new();
+        let mut accumulators = Vec::new();
+        for (i, input) in inputs.iter().enumerate() {
+            let start = std::time::Instant::now();
+            let domain = input.stage_1.0.matrices[input.stage_1.1].domain;
+            let fixed = input
+                .preprocessed
+                .map(|(data, slot)| self.pcs.get_evaluations_on_domain(data, slot, domain));
+            let main = self
+                .pcs
+                .get_evaluations_on_domain(input.stage_1.0, input.stage_1.1, domain);
+            use crate::traits::{Algebra, EvaluationDomain};
+            let mut trace = Vec::with_capacity(domain.size() * input.circuit.stage_2_width);
+            let mut local = Scalar::ZERO;
+            for start in (0..domain.size()).step_by(1 << 16) {
+                let end = (start + (1 << 16)).min(domain.size());
+                let values = crate::system::compute_lookup_values_range(
+                    input.circuit,
+                    &main,
+                    fixed.as_ref(),
+                    start..end,
+                );
+                let (mut chunks, next) = crate::lookup::LookupValues::stage_2_traces(
+                    &[values],
+                    &[input.circuit.lookup_group_size],
+                    beta,
+                    &gamma,
+                    Scalar::ZERO,
+                );
+                trace.extend(chunks.remove(0).values.into_iter().map(|v| v + local));
+                local += next[0];
+            }
+            drop(main);
+            drop(fixed);
+            acc += local;
+            accumulators.push(acc);
+            let trace = p3_matrix::dense::RowMajorMatrix::new(trace, input.circuit.stage_2_width);
+            let (_, data) = self.pcs.commit(vec![(domain, trace)]);
+            parts.push(data);
+            tracing::info!(
+                circuit = i,
+                seconds = start.elapsed().as_secs_f64(),
+                "KZG lookup committed"
+            );
+        }
+        let (commitment, data) = super::pcs::KzgProverData::concatenate(parts);
+        Some((commitment, data, accumulators))
+    }
+
+    fn accelerated_quotient_commit(
+        &self,
+        inputs: &[crate::config::QuotientCommitInput<'_, Self>],
+        alpha: Scalar,
+    ) -> Option<(super::pcs::KzgCommitment, super::pcs::KzgProverData)> {
+        if !self.stream_quotient {
+            return None;
+        }
+        use crate::traits::{Algebra, EvaluationDomain, TwoAdicField};
+        let mut parts = Vec::with_capacity(inputs.len());
+        for (i, input) in inputs.iter().enumerate() {
+            let start = std::time::Instant::now();
+            let n = input.trace_domain.size();
+            let ratio = input.quotient_domain.size() / n;
+            let generator = Scalar::two_adic_generator(input.quotient_domain.log_size);
+            let mut shift = input.quotient_domain.shift;
+            let mut values = vec![Scalar::ZERO; input.quotient_domain.size()];
+            for coset in 0..ratio {
+                let domain = super::domain::Radix2Coset {
+                    log_size: input.trace_domain.log_size,
+                    shift,
+                };
+                let fixed = input
+                    .preprocessed
+                    .map(|(data, slot)| self.pcs.get_evaluations_on_domain(data, slot, domain));
+                let main =
+                    self.pcs
+                        .get_evaluations_on_domain(input.stage_1.0, input.stage_1.1, domain);
+                let stage2 =
+                    self.pcs
+                        .get_evaluations_on_domain(input.stage_2.0, input.stage_2.1, domain);
+                let chunk = crate::prover::quotient_values::<Self>(
+                    input.circuit,
+                    &input.lookup_publics,
+                    input.trace_domain,
+                    domain,
+                    &fixed,
+                    &main,
+                    &stage2,
+                    alpha,
+                    input.constraint_count,
+                );
+                for (row, value) in chunk.into_iter().enumerate() {
+                    values[row * ratio + coset] = value;
+                }
+                shift *= generator;
+                tracing::info!(
+                    circuit = i,
+                    coset,
+                    seconds = start.elapsed().as_secs_f64(),
+                    "KZG quotient coset evaluated"
+                );
+            }
+            let (_, data) = self.pcs.commit_quotient(vec![(
+                input.quotient_domain,
+                p3_matrix::dense::RowMajorMatrix::new_col(values),
+                ratio,
+            )]);
+            parts.push(data);
+            tracing::info!(
+                circuit = i,
+                seconds = start.elapsed().as_secs_f64(),
+                "KZG quotient committed"
+            );
+        }
+        Some(super::pcs::KzgProverData::concatenate(parts))
+    }
+
     fn omit_inactive_preprocessed_openings(&self) -> bool {
         true
     }

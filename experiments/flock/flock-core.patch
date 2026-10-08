@@ -1,0 +1,167 @@
+--- a/src/pcs/ligerito.rs
++++ b/src/pcs/ligerito.rs
+@@ -543,10 +543,23 @@
+ const EMBEDDED_CONFIGS: &[((usize, LigeritoProfile), &str)] =
+     profile_configs!(22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35);
+ 
++const EXTENDED_CONFIGS: &[((usize, LigeritoProfile), &str)] = &[
++    ((36, LigeritoProfile::Fast), include_str!("../../configs/ligerito/m36_fast.toml")),
++    ((36, LigeritoProfile::Slim), include_str!("../../configs/ligerito/m36_slim.toml")),
++    ((37, LigeritoProfile::Fast), include_str!("../../configs/ligerito/m37_fast.toml")),
++    ((37, LigeritoProfile::Slim), include_str!("../../configs/ligerito/m37_slim.toml")),
++    ((38, LigeritoProfile::Fast), include_str!("../../configs/ligerito/m38_fast.toml")),
++    ((38, LigeritoProfile::Slim), include_str!("../../configs/ligerito/m38_slim.toml")),
++    ((39, LigeritoProfile::Fast), include_str!("../../configs/ligerito/m39_fast.toml")),
++    ((39, LigeritoProfile::Slim), include_str!("../../configs/ligerito/m39_slim.toml")),
++    ((40, LigeritoProfile::Fast), include_str!("../../configs/ligerito/m40_fast.toml")),
++    ((40, LigeritoProfile::Slim), include_str!("../../configs/ligerito/m40_slim.toml")),
++];
++
+ /// Look up the embedded security config TOML for `(m, profile)`.
+ /// Returns `None` if no config has been derived for this combination yet.
+ pub fn embedded_security_config(m: usize, profile: LigeritoProfile) -> Option<&'static str> {
+-    EMBEDDED_CONFIGS.iter().find_map(|&(key, toml)| {
++    EMBEDDED_CONFIGS.iter().chain(EXTENDED_CONFIGS.iter()).find_map(|&(key, toml)| {
+         if key == (m, profile) {
+             Some(toml)
+         } else {
+--- a/src/circuit/builder.rs
++++ b/src/circuit/builder.rs
+@@ -619,9 +619,14 @@
+     /// The value check this used to make eagerly now happens in
+     /// [`CircuitShape::run`], because there are no values here.
+     pub fn connect(&mut self, a: Wire, b: Wire) {
+-        let (ra, rb) = (self.find(a), self.find(b));
++        let (mut ra, mut rb) = (self.find(a), self.find(b));
+         if ra == rb {
+             return;
++        }
++        // Move the smaller class: repeated joins to a shared constant must
++        // not copy the growing class on every connection.
++        if self.wires[ra].len() < self.wires[rb].len() {
++            std::mem::swap(&mut ra, &mut rb);
+         }
+         let cells = take(&mut self.wires[rb]);
+         self.wires[ra].extend(cells);
+--- a/src/scratch.rs
++++ b/src/scratch.rs
+@@ -168,6 +168,9 @@
+ /// [`give_f128`]-with-provenance: the caller vouches that `v`'s bytes are a
+ /// complete output of the layout named by `tag` (see [`take_f128_tagged`]).
+ pub fn give_f128_tagged(v: Vec<F128>, tag: u64) {
++    if var_os("FLOCK_LOW_MEMORY").is_some() {
++        return;
++    }
+     if v.capacity() == 0 {
+         return;
+     }
+@@ -300,6 +303,9 @@
+ /// those, borrow-checked), and `copy_live_region` writes exactly the live
+ /// spans its give-back re-zeros. Debug builds verify the invariant outright.
+ pub fn give_zeroed_f128(mut v: Vec<F128>, dirty: &[Range<usize>]) {
++    if var_os("FLOCK_LOW_MEMORY").is_some() {
++        return;
++    }
+     if v.capacity() == 0 {
+         return;
+     }
+@@ -375,6 +381,9 @@
+ /// Return a byte buffer for reuse. Smallest-capacity eviction, as
+ /// [`give_f128`].
+ pub fn give_u8(v: Vec<u8>) {
++    if var_os("FLOCK_LOW_MEMORY").is_some() {
++        return;
++    }
+     if v.capacity() == 0 {
+         return;
+     }
+--- a/src/pcs/ligerito.rs
++++ b/src/pcs/ligerito.rs
+@@ -35,7 +35,7 @@
+     collections::HashMap,
+     env::var,
+     mem::{replace, take},
+-    sync::atomic::AtomicU8,
++    sync::{atomic::AtomicU8, OnceLock},
+     time::{Duration, Instant},
+ };
+ 
+@@ -556,16 +556,35 @@
+     ((40, LigeritoProfile::Slim), include_str!("../../configs/ligerito/m40_slim.toml")),
+ ];
+ 
++// Frozen on first lookup: experimental profiles are trusted startup configuration.
++static SELECTED_CONFIG: OnceLock<Option<((usize, LigeritoProfile), String)>> = OnceLock::new();
++
++/// Select a rederived strict profile before any configuration lookup.
++pub fn select_initial_k(m: usize, profile: LigeritoProfile, initial_k: usize) -> Result<(), String> {
++    if embedded_config_default(m, profile).is_none() {
++        return Err("cannot override an unregistered geometry".into());
++    }
++    let config = LigeritoSecurityConfig::derive_profile_with_initial_k(m, profile, initial_k)?;
++    config.validate_profile(profile)?;
++    config.validate()?;
++    SELECTED_CONFIG.set(Some(((m, profile), config.to_toml_string()?)))
++        .map_err(|_| "PCS configuration already selected or used".into())
++}
++
++fn embedded_config_default(m: usize, profile: LigeritoProfile) -> Option<&'static str> {
++    EMBEDDED_CONFIGS.iter().chain(EXTENDED_CONFIGS.iter())
++        .find_map(|&(key, toml)| (key == (m, profile)).then_some(toml))
++}
++
+ /// Look up the embedded security config TOML for `(m, profile)`.
+ /// Returns `None` if no config has been derived for this combination yet.
+ pub fn embedded_security_config(m: usize, profile: LigeritoProfile) -> Option<&'static str> {
+-    EMBEDDED_CONFIGS.iter().chain(EXTENDED_CONFIGS.iter()).find_map(|&(key, toml)| {
+-        if key == (m, profile) {
+-            Some(toml)
+-        } else {
+-            None
+-        }
+-    })
++    if let Some((key, toml)) = SELECTED_CONFIG.get_or_init(|| None) {
++        if *key == (m, profile) {
++            return Some(toml.as_str());
++        }
++    }
++    embedded_config_default(m, profile)
+ }
+ 
+ /// The `initial_k` (L0 interleave = `log_batch_size`) the embedded config
+@@ -1798,6 +1817,23 @@
+         folds_per_level: usize,
+         rate_gain: usize,
+     ) -> Result<Self, String> {
++        Self::derive_profile_options(m, profile, folds_per_level, rate_gain, None)
++    }
++
++    /// Rederive a strict profile with an explicit opening width.
++    pub fn derive_profile_with_initial_k(
++        m: usize, profile: LigeritoProfile, initial_k: usize,
++    ) -> Result<Self, String> {
++        if !matches!(profile, LigeritoProfile::Fast | LigeritoProfile::Slim) {
++            return Err("opening-width experiments require a strict Fast or Slim profile".into());
++        }
++        Self::derive_profile_options(m, profile, 3, 2, Some(initial_k))
++    }
++
++    fn derive_profile_options(
++        m: usize, profile: LigeritoProfile, folds_per_level: usize,
++        rate_gain: usize, initial_k_override: Option<usize>,
++    ) -> Result<Self, String> {
+         /// Johnson slack below the Johnson radius, flat across levels.
+         const JOHNSON_ETA: f64 = 0.02;
+         let target_bits = profile.security_bits();
+@@ -1860,6 +1896,11 @@
+             ) => 4usize,
+             _ => 6usize,
+         };
++
++        let initial_k = initial_k_override.unwrap_or(initial_k);
++        if initial_k == 0 || initial_k >= log_n {
++            return Err(format!("initial_k ({initial_k}) must be between 1 and log_n ({log_n})"));
++        }
+ 
+         // Length-agnostic per-query estimate for ladder-shape feasibility
+         // (the per-level codeword length `n` is not known until the shape is

@@ -75,7 +75,7 @@ pub(super) fn constrain_bound_batch_verifier(
         shape,
         claims,
         messages,
-        0..shape.queries,
+        0..system.config.fri_parameters().num_queries,
         true,
     )
 }

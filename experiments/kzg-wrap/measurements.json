@@ -1,0 +1,106 @@
+{
+  "status": "subgroup_preflight_exceeds_target",
+  "complete_wrapper_implemented": false,
+  "full_intermediate_proof_generated": false,
+  "production_setup": false,
+  "primitive_measurements": [
+    {
+      "constraints": 22357,
+      "operation": "add",
+      "optimization": "constraints",
+      "plonk_rows": 169434,
+      "satisfied": true,
+      "scope": "Constrained primitive with generic affine formulas; not a complete KZG verifier.",
+      "seconds": 0.488126435,
+      "variables": 22255,
+      "elapsed_seconds": 0.5,
+      "peak_rss_bytes": 155426816
+    },
+    {
+      "constraints": 30189,
+      "operation": "add",
+      "optimization": "weight",
+      "plonk_rows": 48464,
+      "satisfied": true,
+      "scope": "Constrained primitive with generic affine formulas; not a complete KZG verifier.",
+      "seconds": 0.12470598,
+      "variables": 30087,
+      "elapsed_seconds": 0.13,
+      "peak_rss_bytes": 61923328
+    },
+    {
+      "constraints": 18137,
+      "operation": "double",
+      "optimization": "weight",
+      "plonk_rows": 29086,
+      "satisfied": true,
+      "scope": "Constrained primitive with generic affine formulas; not a complete KZG verifier.",
+      "seconds": 0.065324806,
+      "variables": 18077,
+      "elapsed_seconds": 0.06,
+      "peak_rss_bytes": 37842944
+    },
+    {
+      "constraints": 8272388,
+      "operation": "scalar",
+      "optimization": "weight",
+      "plonk_rows": 13284001,
+      "satisfied": true,
+      "scope": "Constrained primitive with generic affine formulas; not a complete KZG verifier.",
+      "seconds": 38.786664629,
+      "variables": 8245788,
+      "elapsed_seconds": 41.18,
+      "peak_rss_bytes": 16310190080
+    },
+    {
+      "constraints": 1788124,
+      "operation": "subgroup-fast",
+      "optimization": "weight",
+      "plonk_rows": 2868571,
+      "satisfied": true,
+      "scope": "Constrained primitive with generic affine formulas; not a complete KZG verifier.",
+      "seconds": 8.315859374,
+      "variables": 1782601,
+      "elapsed_seconds": 8.85,
+      "peak_rss_bytes": 3523522560
+    },
+    {
+      "constraints": 1386192,
+      "operation": "subgroup-fixed",
+      "optimization": "weight",
+      "plonk_rows": 2226655,
+      "satisfied": true,
+      "scope": "Constrained primitive with generic affine formulas; not a complete KZG verifier.",
+      "seconds": 6.347329923,
+      "variables": 1382146,
+      "elapsed_seconds": 6.77,
+      "peak_rss_bytes": 2729025536
+    }
+  ],
+  "intermediate_layout": {
+    "points": 581,
+    "packet_bytes": 51269
+  },
+  "subgroup_projection": {
+    "rows": 1293686555,
+    "domain": 2147483648,
+    "target_domain": 134217728,
+    "srs_and_key_bytes_excluding_workspace": 1477468749824,
+    "scope": "Per-point application of the tested fixed-chain gadget. Excludes transcript, MSMs, AIR, external-output encoding and bindings. Not a lower bound on all possible implementations."
+  },
+  "source_sha256": {
+    "experiments/kzg-wrap/src/curve.rs": "15653e0fafd9aa34c17b0308733da80999a19b7b0d9c9761175f85079d66e0bd",
+    "experiments/kzg-wrap/src/main.rs": "07af1fffcecfc0834dd7648ffaf6663ce756a66e6d1201048ff5d86324837f64",
+    "experiments/kzg-wrap/Cargo.lock": "66ee8bda4b17b46e49629a5013b92da991f330705ea1aa2f66372c5fd337ec01",
+    "experiments/kzg-wrap/measure.py": "3291ebaffa146e744a87fc0db6f59c54c62e64db929a244078bb0be9eb029d6f",
+    "experiments/flock/terminal.patch": "4e9ebeeab8e72424c189d87778421d454a1637199402faacc61fdad354bc0c95",
+    "experiments/init-fri-kzg.json": "41f83d23b1a6d86bdca073cec734b46310e9e20d75b032aadd6f028ab6a46cfd"
+  },
+  "binary_sha256": "fe04b206c5698bd8b00e602ba009e269beb89ebfef174edfe240ee2779e3e1e1",
+  "validation": {
+    "tests_passed": 5,
+    "clippy_all_targets": "passed with warnings denied",
+    "rustfmt": "passed",
+    "python_syntax": "passed"
+  }
+}

@@ -1,0 +1,994 @@
+{
+  "status": "native_verified_terminal_blocked",
+  "pipeline_complete": false,
+  "changes": [
+    "Unsigned Karatsuba Goldilocks multiplication; single-product borrow relation",
+    "Per-operation witness size accounting",
+    "Extended strict-profile component-floor regression checks"
+  ],
+  "tests": {
+    "local_passed": 20,
+    "clippy": "passed",
+    "raw_multiplication_witness_tampering": "all internal product/carry bits rejected",
+    "random_integer_products": 256
+  },
+  "security_scope": "Strict PCS per-component floors checked against required queries and grinding. Composed 128-bit pipeline validation and terminal fixed-table discharges remain outstanding. No terminal proof generated.",
+  "timing_scope": "Prove seconds excludes preparation and verification. Native proving overlapped a terminal projection on the same machine; timing comparisons are indicative. Sampled process-tree peak and GNU time peak are recorded separately.",
+  "runs": {
+    "terminal-init-canonical-slim-1": {
+      "artifacts": "target/flock-experiment/terminal-init-canonical-slim-1",
+      "run_status": "stopped",
+      "binary_sha256": "96d15bacdd095b83b8c8384c717f8b87adc8ce3eabaa87b59d1b3b852ee9232a",
+      "sampled_peak_rss_bytes": 276147625984,
+      "native": {
+        "status": "verified",
+        "proof_and_commitment_bytes": 465059,
+        "prove_seconds": 126.398248461,
+        "verify_seconds": 1.793544147,
+        "proof_blake3": "a35181a39b46fa2f50defc1fea1f859542bcdf1fedd5f954b5c8893588d70e19",
+        "serialized_roundtrip_verified": true,
+        "altered_claim_rejected": true,
+        "source_proof_blake3": "f0fa026a149dd1c8c450fe55ceed38b006003cb0f9aa60339082f3ba3abb1613",
+        "source_vk_blake3": "f0c635f096bb2b9ff8fbeaf947c406978c11ce3bc447df94e43d6e9fe3cc6fbc",
+        "public_claim_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "transcript": "chained-blake3"
+      },
+      "terminal.json": {
+        "export_seconds": 1.939907303,
+        "flock_circuit_digest": "c2a560c6ea56d8230353a70d552b71e634d19e863d6322f5fdc8a36def7ff6a2",
+        "flock_proof_blake3": "a35181a39b46fa2f50defc1fea1f859542bcdf1fedd5f954b5c8893588d70e19",
+        "flock_proof_bytes": 465059,
+        "flock_transcript": "chained-blake3",
+        "pcs_profile": "slim",
+        "public_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "scope": "lower bound: fixed matrix, circuit structure and jagged layout evaluations still need in-circuit discharge",
+        "source_revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+        "status": "projecting",
+        "terminal_proof_generated": false
+      },
+      "phase-progress.json": {
+        "statement": {
+          "cumulative_plonk_rows_excluding_public_bindings": 132638481,
+          "plonk_rows": 8524434,
+          "seconds": 9.997407174
+        },
+        "transcript": {
+          "cumulative_plonk_rows_excluding_public_bindings": 124114047,
+          "plonk_rows": 124114047,
+          "seconds": 145.270735779
+        },
+        "wiring": {
+          "cumulative_plonk_rows_excluding_public_bindings": 328767257,
+          "plonk_rows": 196128776,
+          "seconds": 248.442761382
+        }
+      },
+      "projection-progress.json": {
+        "constraints": 210000000,
+        "elapsed_seconds": 447.92928787,
+        "phase": "Lincheck",
+        "plonk_rows": 359096591
+      },
+      "elapsed_seconds": 766.6068731299965
+    },
+    "terminal-init-coalesced-slim-2": {
+      "artifacts": "target/flock-experiment/terminal-init-coalesced-slim-2",
+      "run_status": "completed",
+      "binary_sha256": "45ec963003dbf0d35ff17f35bc8d0196d77dd82a9ecbf177b4709ad4b6786fa0",
+      "sampled_peak_rss_bytes": 283270426624,
+      "native": {
+        "status": "verified",
+        "proof_and_commitment_bytes": 485011,
+        "prove_seconds": 122.788765434,
+        "verify_seconds": 1.8083204720000001,
+        "proof_blake3": "15b66df5e55682f2866a4859a0df78efb82fb797e4fa4575b8d87a6bd8b32bf8",
+        "serialized_roundtrip_verified": true,
+        "altered_claim_rejected": true,
+        "source_proof_blake3": "f0fa026a149dd1c8c450fe55ceed38b006003cb0f9aa60339082f3ba3abb1613",
+        "source_vk_blake3": "f0c635f096bb2b9ff8fbeaf947c406978c11ce3bc447df94e43d6e9fe3cc6fbc",
+        "public_claim_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "transcript": "chained-blake3"
+      },
+      "terminal.json": {
+        "completed_phases": {
+          "boolean_piop": {
+            "cumulative_plonk_rows_excluding_public_bindings": 401752251,
+            "plonk_rows": 30646392,
+            "seconds": 38.0640534
+          },
+          "merged_pcs": {
+            "cumulative_plonk_rows_excluding_public_bindings": 448860164,
+            "plonk_rows": 47107913,
+            "seconds": 58.7200326
+          },
+          "multipoint": {
+            "cumulative_plonk_rows_excluding_public_bindings": 586273688,
+            "plonk_rows": 137413524,
+            "seconds": 338.267596393
+          },
+          "statement": {
+            "cumulative_plonk_rows_excluding_public_bindings": 162002867,
+            "plonk_rows": 8524434,
+            "seconds": 10.608253306
+          },
+          "transcript": {
+            "cumulative_plonk_rows_excluding_public_bindings": 153478433,
+            "plonk_rows": 153478433,
+            "seconds": 174.709549345
+          },
+          "wiring": {
+            "cumulative_plonk_rows_excluding_public_bindings": 371105859,
+            "plonk_rows": 209102992,
+            "seconds": 250.844526992
+          }
+        },
+        "compressed_srs_bytes": 927712937016,
+        "domain": 2147483648,
+        "elapsed_seconds": 1452.978683121,
+        "export_seconds": 2.044002138,
+        "file_key_polynomial_bytes": 1305670057984,
+        "file_srs_key_and_fft_minimum_bytes": 841845047328,
+        "flock_circuit_digest": "d94360a2e962089663052df1b5c372a402588cb390ad03f05bb0f082310ba868",
+        "flock_proof_blake3": "15b66df5e55682f2866a4859a0df78efb82fb797e4fa4575b8d87a6bd8b32bf8",
+        "flock_proof_bytes": 485011,
+        "flock_transcript": "chained-blake3",
+        "maximum_product_fft_domain": 4294967296,
+        "pcs_profile": "slim",
+        "phase_seconds": {
+          "boolean_piop": 38.0640534,
+          "merged_pcs": 58.7200326,
+          "multipoint": 338.267596393,
+          "statement": 10.608253306,
+          "transcript": 174.709549345,
+          "wiring": 250.844526992
+        },
+        "plonk_rows": 1073741823,
+        "plonk_rows_by_phase": {
+          "Lincheck": 23154325,
+          "Pcs": 671989554,
+          "Statement": 261386,
+          "Transcript": 153478433,
+          "Wiring": 217366040,
+          "Zerocheck": 7492067
+        },
+        "product_fft_domain": 8589934592,
+        "public_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "r1cs_constraints": 623667110,
+        "r1cs_constraints_by_phase": {
+          "Lincheck": 14277968,
+          "Pcs": 389809310,
+          "Statement": 132868,
+          "Transcript": 81653111,
+          "Wiring": 133161602,
+          "Zerocheck": 4632251
+        },
+        "r1cs_projection_digest": "1277e9f5d43c5d9475a9f70ac4deb66559e81dd98f396687a8d9273120858592",
+        "r1cs_variables": 616867119,
+        "scope": "lower bound: replay stopped at the KZG FFT limit; remaining PCS constraints and fixed-table discharges are omitted",
+        "source_revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+        "srs_degree": 19327352849,
+        "status": "blocked_fft_domain",
+        "stopped_at_fft_limit": true,
+        "supported_fft_domain": false,
+        "terminal_proof_generated": false
+      },
+      "phase-progress.json": {
+        "boolean_piop": {
+          "cumulative_plonk_rows_excluding_public_bindings": 401752251,
+          "plonk_rows": 30646392,
+          "seconds": 38.0640534
+        },
+        "merged_pcs": {
+          "cumulative_plonk_rows_excluding_public_bindings": 448860164,
+          "plonk_rows": 47107913,
+          "seconds": 58.7200326
+        },
+        "multipoint": {
+          "cumulative_plonk_rows_excluding_public_bindings": 586273688,
+          "plonk_rows": 137413524,
+          "seconds": 338.267596393
+        },
+        "statement": {
+          "cumulative_plonk_rows_excluding_public_bindings": 162002867,
+          "plonk_rows": 8524434,
+          "seconds": 10.608253306
+        },
+        "transcript": {
+          "cumulative_plonk_rows_excluding_public_bindings": 153478433,
+          "plonk_rows": 153478433,
+          "seconds": 174.709549345
+        },
+        "wiring": {
+          "cumulative_plonk_rows_excluding_public_bindings": 371105859,
+          "plonk_rows": 209102992,
+          "seconds": 250.844526992
+        }
+      },
+      "projection-progress.json": {
+        "constraints": 623000000,
+        "elapsed_seconds": 1451.261191244,
+        "phase": "Pcs",
+        "plonk_rows": 1072674357
+      },
+      "peak_rss_bytes": 283251720192,
+      "time_seconds": 1771.02,
+      "elapsed_seconds": 1771.148845882
+    },
+    "terminal-init-karatsuba-slim-1": {
+      "artifacts": "target/flock-experiment/terminal-init-karatsuba-slim-1",
+      "run_status": "completed",
+      "binary_sha256": "5a1a4c695269cfd708c31bf8f0aebabbf5fd2b971b343b0d42962c31bac52807",
+      "sampled_peak_rss_bytes": 239548059648,
+      "native": {
+        "status": "verified",
+        "proof_and_commitment_bytes": 453555,
+        "prove_seconds": 102.818027474,
+        "verify_seconds": 1.768871416,
+        "proof_blake3": "98aa0c2b506be331c7d3a7543bd73b12fdc938421331b91045c280ce18ae3671",
+        "serialized_roundtrip_verified": true,
+        "altered_claim_rejected": true,
+        "source_proof_blake3": "f0fa026a149dd1c8c450fe55ceed38b006003cb0f9aa60339082f3ba3abb1613",
+        "source_vk_blake3": "f0c635f096bb2b9ff8fbeaf947c406978c11ce3bc447df94e43d6e9fe3cc6fbc",
+        "public_claim_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "transcript": "chained-blake3"
+      },
+      "terminal.json": {
+        "completed_phases": {
+          "boolean_piop": {
+            "cumulative_plonk_rows_excluding_public_bindings": 373153141,
+            "plonk_rows": 44506232,
+            "seconds": 57.998618032
+          },
+          "merged_pcs": {
+            "cumulative_plonk_rows_excluding_public_bindings": 407285456,
+            "plonk_rows": 34132315,
+            "seconds": 43.158260913
+          },
+          "multipoint": {
+            "cumulative_plonk_rows_excluding_public_bindings": 538739760,
+            "plonk_rows": 131454304,
+            "seconds": 336.104850132
+          },
+          "statement": {
+            "cumulative_plonk_rows_excluding_public_bindings": 132518133,
+            "plonk_rows": 8524434,
+            "seconds": 10.01830477
+          },
+          "transcript": {
+            "cumulative_plonk_rows_excluding_public_bindings": 123993699,
+            "plonk_rows": 123993699,
+            "seconds": 144.876754333
+          },
+          "wiring": {
+            "cumulative_plonk_rows_excluding_public_bindings": 328646909,
+            "plonk_rows": 196128776,
+            "seconds": 248.938351957
+          }
+        },
+        "compressed_srs_bytes": 927712937016,
+        "domain": 2147483648,
+        "elapsed_seconds": 1505.781984688,
+        "export_seconds": 1.910959993,
+        "file_key_polynomial_bytes": 1305670057984,
+        "file_srs_key_and_fft_minimum_bytes": 841845047328,
+        "flock_circuit_digest": "7f94cad0295bbfbbb6072d74c65f1e1f5e88aa32256ff5cd91b6790a16028fa8",
+        "flock_proof_blake3": "98aa0c2b506be331c7d3a7543bd73b12fdc938421331b91045c280ce18ae3671",
+        "flock_proof_bytes": 453555,
+        "flock_transcript": "chained-blake3",
+        "maximum_product_fft_domain": 4294967296,
+        "pcs_profile": "slim",
+        "phase_seconds": {
+          "boolean_piop": 57.998618032,
+          "merged_pcs": 43.158260913,
+          "multipoint": 336.104850132,
+          "statement": 10.01830477,
+          "transcript": 144.876754333,
+          "wiring": 248.938351957
+        },
+        "plonk_rows": 1073741823,
+        "plonk_rows_by_phase": {
+          "Lincheck": 37079625,
+          "Pcs": 700588664,
+          "Statement": 261386,
+          "Transcript": 123993699,
+          "Wiring": 204391824,
+          "Zerocheck": 7426607
+        },
+        "product_fft_domain": 8589934592,
+        "public_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "r1cs_constraints": 632643074,
+        "r1cs_constraints_by_phase": {
+          "Lincheck": 22860832,
+          "Pcs": 413978747,
+          "Statement": 132868,
+          "Transcript": 65965929,
+          "Wiring": 125112834,
+          "Zerocheck": 4591864
+        },
+        "r1cs_projection_digest": "7dcfebccf2dcea8eacbb09881c529dd71b9113660e8e6d9f2cc8522ddca644b2",
+        "r1cs_variables": 626192752,
+        "scope": "lower bound: replay stopped at the KZG FFT limit; remaining PCS constraints and fixed-table discharges are omitted",
+        "source_revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+        "srs_degree": 19327352849,
+        "status": "blocked_fft_domain",
+        "stopped_at_fft_limit": true,
+        "supported_fft_domain": false,
+        "terminal_proof_generated": false
+      },
+      "projection-progress.json": {
+        "constraints": 632000000,
+        "elapsed_seconds": 1503.927037016,
+        "phase": "Pcs",
+        "plonk_rows": 1072783955
+      },
+      "peak_rss_bytes": 243642286080,
+      "time_seconds": 1802.25,
+      "elapsed_seconds": 1803.007250996,
+      "phase-progress.json": {
+        "boolean_piop": {
+          "cumulative_plonk_rows_excluding_public_bindings": 373153141,
+          "plonk_rows": 44506232,
+          "seconds": 57.998618032
+        },
+        "merged_pcs": {
+          "cumulative_plonk_rows_excluding_public_bindings": 407285456,
+          "plonk_rows": 34132315,
+          "seconds": 43.158260913
+        },
+        "multipoint": {
+          "cumulative_plonk_rows_excluding_public_bindings": 538739760,
+          "plonk_rows": 131454304,
+          "seconds": 336.104850132
+        },
+        "statement": {
+          "cumulative_plonk_rows_excluding_public_bindings": 132518133,
+          "plonk_rows": 8524434,
+          "seconds": 10.01830477
+        },
+        "transcript": {
+          "cumulative_plonk_rows_excluding_public_bindings": 123993699,
+          "plonk_rows": 123993699,
+          "seconds": 144.876754333
+        },
+        "wiring": {
+          "cumulative_plonk_rows_excluding_public_bindings": 328646909,
+          "plonk_rows": 196128776,
+          "seconds": 248.938351957
+        }
+      }
+    }
+  },
+  "geometry": {
+    "init-operation-costs-1": {
+      "packed_geometry": {
+        "coalesced": false,
+        "dense_m": 38,
+        "live_packed_witness_bytes": 24473680992,
+        "memory_scope": "Named array sizes, not a peak-RAM prediction; excludes frontend, layout, PCS and other scratch",
+        "one_wiring_field_array_bytes": 8589934592,
+        "packed_rows": true,
+        "padded_witness_array_bytes": 68719476736,
+        "pcs_buffers": {
+          "fast": {
+            "codeword_bytes": 49392123904,
+            "dense_message_allocation_bytes": 34359738368,
+            "merkle_tree_bytes": 4294967296
+          },
+          "slim": {
+            "codeword_bytes": 98784247808,
+            "dense_message_allocation_bytes": 34359738368,
+            "merkle_tree_bytes": 8589934592
+          }
+        },
+        "strict_slim_profile_available": true,
+        "table_slots": 93,
+        "three_padded_witness_arrays_bytes": 206158430208,
+        "uniform_row_log": 17,
+        "wiring_cell_log": 29
+      },
+      "coalesced_geometry": {
+        "coalesced": true,
+        "dense_m": 38,
+        "live_packed_witness_bytes": 24473866064,
+        "memory_scope": "Named array sizes, not a peak-RAM prediction; excludes frontend, layout, PCS and other scratch",
+        "one_wiring_field_array_bytes": 8589934592,
+        "packed_rows": true,
+        "padded_witness_array_bytes": 68719476736,
+        "pcs_buffers": {
+          "fast": {
+            "codeword_bytes": 49392123904,
+            "dense_message_allocation_bytes": 34359738368,
+            "merkle_tree_bytes": 4294967296
+          },
+          "slim": {
+            "codeword_bytes": 98784247808,
+            "dense_message_allocation_bytes": 34359738368,
+            "merkle_tree_bytes": 8589934592
+          }
+        },
+        "strict_slim_profile_available": true,
+        "table_slots": 39,
+        "three_padded_witness_arrays_bytes": 206158430208,
+        "uniform_row_log": 17,
+        "wiring_cell_log": 29
+      },
+      "operation_costs": {
+        "Blake3": {
+          "bits_per_instance": 11776,
+          "instances": 127593,
+          "live_witness_bytes": 187816896
+        },
+        "Gold(Add)": {
+          "bits_per_instance": 1024,
+          "instances": 41147583,
+          "live_witness_bytes": 5266890624
+        },
+        "Gold(Canonical)": {
+          "bits_per_instance": 256,
+          "instances": 5228,
+          "live_witness_bytes": 167296
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 1, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 56,
+          "live_witness_bytes": 4480
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 10, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 1217342,
+          "live_witness_bytes": 97387360
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 4, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 1217342,
+          "live_witness_bytes": 97387360
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 5, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 1217342,
+          "live_witness_bytes": 97387360
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 6, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 1217342,
+          "live_witness_bytes": 97387360
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 7, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 1217342,
+          "live_witness_bytes": 97387360
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 8, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 1217342,
+          "live_witness_bytes": 97387360
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 9, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 1217342,
+          "live_witness_bytes": 97387360
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 12, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 608615,
+          "live_witness_bytes": 48689200
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 16, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 608615,
+          "live_witness_bytes": 48689200
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 20, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 608615,
+          "live_witness_bytes": 48689200
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 24, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 608615,
+          "live_witness_bytes": 48689200
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 28, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 608615,
+          "live_witness_bytes": 48689200
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 32, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 608615,
+          "live_witness_bytes": 48689200
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 4, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 8430879,
+          "live_witness_bytes": 674470320
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 8, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 608615,
+          "live_witness_bytes": 48689200
+        },
+        "Gold(Linear { a: 2, b: 0, a_bits: 1, b_bits: 0 })": {
+          "bits_per_instance": 640,
+          "instances": 1900,
+          "live_witness_bytes": 152000
+        },
+        "Gold(Linear { a: 2, b: 1, a_bits: 1, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 403,
+          "live_witness_bytes": 32240
+        },
+        "Gold(Linear { a: 2, b: 1, a_bits: 2, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 403,
+          "live_witness_bytes": 32240
+        },
+        "Gold(Linear { a: 2, b: 1, a_bits: 3, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 403,
+          "live_witness_bytes": 32240
+        },
+        "Gold(Linear { a: 2, b: 1, a_bits: 4, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 403,
+          "live_witness_bytes": 32240
+        },
+        "Gold(Linear { a: 2, b: 1, a_bits: 5, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 403,
+          "live_witness_bytes": 32240
+        },
+        "Gold(Linear { a: 2, b: 1, a_bits: 6, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 403,
+          "live_witness_bytes": 32240
+        },
+        "Gold(Linear { a: 2, b: 1, a_bits: 7, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 403,
+          "live_witness_bytes": 32240
+        },
+        "Gold(Mask)": {
+          "bits_per_instance": 768,
+          "instances": 16339278,
+          "live_witness_bytes": 1568570688
+        },
+        "Gold(Mul)": {
+          "bits_per_instance": 9344,
+          "instances": 10933529,
+          "live_witness_bytes": 12770361872
+        },
+        "Gold(MulSmall(16))": {
+          "bits_per_instance": 3072,
+          "instances": 984,
+          "live_witness_bytes": 377856
+        },
+        "Gold(MulSmall(2))": {
+          "bits_per_instance": 1280,
+          "instances": 390,
+          "live_witness_bytes": 62400
+        },
+        "Gold(MulSmall(4))": {
+          "bits_per_instance": 1536,
+          "instances": 3399525,
+          "live_witness_bytes": 652708800
+        },
+        "Gold(MulSmall(8))": {
+          "bits_per_instance": 2048,
+          "instances": 4263675,
+          "live_witness_bytes": 1091500800
+        },
+        "Gold(Pack(16))": {
+          "bits_per_instance": 640,
+          "instances": 2360346,
+          "live_witness_bytes": 188827680
+        },
+        "Gold(Pack(32))": {
+          "bits_per_instance": 640,
+          "instances": 1180174,
+          "live_witness_bytes": 94413920
+        },
+        "Gold(Pack(64))": {
+          "bits_per_instance": 768,
+          "instances": 590588,
+          "live_witness_bytes": 56696448
+        },
+        "Gold(Pack(8))": {
+          "bits_per_instance": 640,
+          "instances": 4720688,
+          "live_witness_bytes": 377655040
+        },
+        "Gold(Range(1))": {
+          "bits_per_instance": 256,
+          "instances": 613043,
+          "live_witness_bytes": 19617376
+        },
+        "Gold(Range(4))": {
+          "bits_per_instance": 256,
+          "instances": 15644528,
+          "live_witness_bytes": 500624896
+        }
+      }
+    },
+    "init-karatsuba-costs-1": {
+      "packed_geometry": {
+        "coalesced": false,
+        "dense_m": 38,
+        "live_packed_witness_bytes": 20974951712,
+        "memory_scope": "Named array sizes, not a peak-RAM prediction; excludes frontend, layout, PCS and other scratch",
+        "one_wiring_field_array_bytes": 8589934592,
+        "packed_rows": true,
+        "padded_witness_array_bytes": 34359738368,
+        "pcs_buffers": {
+          "fast": {
+            "codeword_bytes": 42949672960,
+            "dense_message_allocation_bytes": 34359738368,
+            "merkle_tree_bytes": 4294967296
+          },
+          "slim": {
+            "codeword_bytes": 85899345920,
+            "dense_message_allocation_bytes": 34359738368,
+            "merkle_tree_bytes": 8589934592
+          }
+        },
+        "strict_slim_profile_available": true,
+        "table_slots": 93,
+        "three_padded_witness_arrays_bytes": 103079215104,
+        "uniform_row_log": 17,
+        "wiring_cell_log": 29
+      },
+      "coalesced_geometry": {
+        "coalesced": true,
+        "dense_m": 38,
+        "live_packed_witness_bytes": 20975103824,
+        "memory_scope": "Named array sizes, not a peak-RAM prediction; excludes frontend, layout, PCS and other scratch",
+        "one_wiring_field_array_bytes": 8589934592,
+        "packed_rows": true,
+        "padded_witness_array_bytes": 68719476736,
+        "pcs_buffers": {
+          "fast": {
+            "codeword_bytes": 42949672960,
+            "dense_message_allocation_bytes": 34359738368,
+            "merkle_tree_bytes": 4294967296
+          },
+          "slim": {
+            "codeword_bytes": 85899345920,
+            "dense_message_allocation_bytes": 34359738368,
+            "merkle_tree_bytes": 8589934592
+          }
+        },
+        "strict_slim_profile_available": true,
+        "table_slots": 39,
+        "three_padded_witness_arrays_bytes": 206158430208,
+        "uniform_row_log": 17,
+        "wiring_cell_log": 29
+      },
+      "operation_costs": {
+        "Blake3": {
+          "bits_per_instance": 11776,
+          "instances": 127593,
+          "live_witness_bytes": 187816896
+        },
+        "Gold(Add)": {
+          "bits_per_instance": 1024,
+          "instances": 41147583,
+          "live_witness_bytes": 5266890624
+        },
+        "Gold(Canonical)": {
+          "bits_per_instance": 256,
+          "instances": 5228,
+          "live_witness_bytes": 167296
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 1, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 56,
+          "live_witness_bytes": 4480
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 10, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 1217342,
+          "live_witness_bytes": 97387360
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 4, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 1217342,
+          "live_witness_bytes": 97387360
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 5, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 1217342,
+          "live_witness_bytes": 97387360
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 6, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 1217342,
+          "live_witness_bytes": 97387360
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 7, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 1217342,
+          "live_witness_bytes": 97387360
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 8, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 1217342,
+          "live_witness_bytes": 97387360
+        },
+        "Gold(Linear { a: 1, b: 1, a_bits: 9, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 1217342,
+          "live_witness_bytes": 97387360
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 12, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 608615,
+          "live_witness_bytes": 48689200
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 16, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 608615,
+          "live_witness_bytes": 48689200
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 20, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 608615,
+          "live_witness_bytes": 48689200
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 24, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 608615,
+          "live_witness_bytes": 48689200
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 28, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 608615,
+          "live_witness_bytes": 48689200
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 32, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 608615,
+          "live_witness_bytes": 48689200
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 4, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 8430879,
+          "live_witness_bytes": 674470320
+        },
+        "Gold(Linear { a: 16, b: 1, a_bits: 8, b_bits: 4 })": {
+          "bits_per_instance": 640,
+          "instances": 608615,
+          "live_witness_bytes": 48689200
+        },
+        "Gold(Linear { a: 2, b: 0, a_bits: 1, b_bits: 0 })": {
+          "bits_per_instance": 640,
+          "instances": 1900,
+          "live_witness_bytes": 152000
+        },
+        "Gold(Linear { a: 2, b: 1, a_bits: 1, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 403,
+          "live_witness_bytes": 32240
+        },
+        "Gold(Linear { a: 2, b: 1, a_bits: 2, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 403,
+          "live_witness_bytes": 32240
+        },
+        "Gold(Linear { a: 2, b: 1, a_bits: 3, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 403,
+          "live_witness_bytes": 32240
+        },
+        "Gold(Linear { a: 2, b: 1, a_bits: 4, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 403,
+          "live_witness_bytes": 32240
+        },
+        "Gold(Linear { a: 2, b: 1, a_bits: 5, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 403,
+          "live_witness_bytes": 32240
+        },
+        "Gold(Linear { a: 2, b: 1, a_bits: 6, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 403,
+          "live_witness_bytes": 32240
+        },
+        "Gold(Linear { a: 2, b: 1, a_bits: 7, b_bits: 1 })": {
+          "bits_per_instance": 640,
+          "instances": 403,
+          "live_witness_bytes": 32240
+        },
+        "Gold(Mask)": {
+          "bits_per_instance": 768,
+          "instances": 16339278,
+          "live_witness_bytes": 1568570688
+        },
+        "Gold(Mul)": {
+          "bits_per_instance": 6784,
+          "instances": 10933529,
+          "live_witness_bytes": 9271632592
+        },
+        "Gold(MulSmall(16))": {
+          "bits_per_instance": 3072,
+          "instances": 984,
+          "live_witness_bytes": 377856
+        },
+        "Gold(MulSmall(2))": {
+          "bits_per_instance": 1280,
+          "instances": 390,
+          "live_witness_bytes": 62400
+        },
+        "Gold(MulSmall(4))": {
+          "bits_per_instance": 1536,
+          "instances": 3399525,
+          "live_witness_bytes": 652708800
+        },
+        "Gold(MulSmall(8))": {
+          "bits_per_instance": 2048,
+          "instances": 4263675,
+          "live_witness_bytes": 1091500800
+        },
+        "Gold(Pack(16))": {
+          "bits_per_instance": 640,
+          "instances": 2360346,
+          "live_witness_bytes": 188827680
+        },
+        "Gold(Pack(32))": {
+          "bits_per_instance": 640,
+          "instances": 1180174,
+          "live_witness_bytes": 94413920
+        },
+        "Gold(Pack(64))": {
+          "bits_per_instance": 768,
+          "instances": 590588,
+          "live_witness_bytes": 56696448
+        },
+        "Gold(Pack(8))": {
+          "bits_per_instance": 640,
+          "instances": 4720688,
+          "live_witness_bytes": 377655040
+        },
+        "Gold(Range(1))": {
+          "bits_per_instance": 256,
+          "instances": 613043,
+          "live_witness_bytes": 19617376
+        },
+        "Gold(Range(4))": {
+          "bits_per_instance": 256,
+          "instances": 15644528,
+          "live_witness_bytes": 500624896
+        }
+      }
+    }
+  },
+  "conclusions": {
+    "default_packing": "retained: coalescing increases the intermediate proof and loses the 96-GiB padded-witness layout",
+    "native_proof_bytes": 453555,
+    "terminal_status": "blocked_fft_domain",
+    "terminal_row_lower_bound": 1073741823,
+    "required_fft_domain": 8589934592,
+    "maximum_fft_domain": 4294967296,
+    "remaining": [
+      "Reduce terminal PCS verification cost or implement larger-domain quotient construction",
+      "Constrain fixed matrix, circuit structure, and jagged layout evaluations",
+      "Complete composed security validation and secure setup before calling a terminal proof production-ready"
+    ],
+    "next_experiment": "Opening-width trials are complete and remain domain-blocked. Next: direct lookup-based terminal arithmetic.",
+    "opening_width_followup": "width-results.json"
+  }
+}

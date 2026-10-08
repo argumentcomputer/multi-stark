@@ -1,0 +1,458 @@
+{
+  "pipeline_complete": false,
+  "scope": "Native proofs and conditional terminal censuses. Fixed-table discharges and composed security validation remain outstanding; no terminal proof generated.",
+  "timing_scope": "Prove time excludes preparation/verification. Runs can overlap a terminal census; RSS belongs to each run, not total host RAM.",
+  "inner_statement": {
+    "source_proof_blake3": "f0fa026a149dd1c8c450fe55ceed38b006003cb0f9aa60339082f3ba3abb1613",
+    "source_vk_blake3": "f0c635f096bb2b9ff8fbeaf947c406978c11ce3bc447df94e43d6e9fe3cc6fbc",
+    "public_claim_words": [
+      0,
+      293,
+      3008464260,
+      3936129970,
+      1088962797,
+      1141056675,
+      2347219926,
+      1176003176,
+      683533119,
+      3085659920,
+      1422858688,
+      3165160492,
+      1899567894,
+      784981652,
+      376864732,
+      1915641123,
+      2034217541,
+      2163067803
+    ]
+  },
+  "runs": [
+    {
+      "artifacts": "target/flock-experiment/terminal-init-karatsuba-slim-1",
+      "run_status": "completed",
+      "binary_sha256": "5a1a4c695269cfd708c31bf8f0aebabbf5fd2b971b343b0d42962c31bac52807",
+      "initial_k": null,
+      "native": {
+        "status": "verified",
+        "proof_and_commitment_bytes": 453555,
+        "prove_seconds": 102.818027474,
+        "verify_seconds": 1.768871416,
+        "pcs_config_blake3": null,
+        "serialized_roundtrip_verified": true,
+        "altered_claim_rejected": true
+      },
+      "elapsed_seconds": 1803.007250996,
+      "peak_rss_bytes": 243642286080,
+      "sampled_peak_rss_bytes": 239548059648,
+      "terminal.json": {
+        "completed_phases": {
+          "boolean_piop": {
+            "cumulative_plonk_rows_excluding_public_bindings": 373153141,
+            "plonk_rows": 44506232,
+            "seconds": 57.998618032
+          },
+          "merged_pcs": {
+            "cumulative_plonk_rows_excluding_public_bindings": 407285456,
+            "plonk_rows": 34132315,
+            "seconds": 43.158260913
+          },
+          "multipoint": {
+            "cumulative_plonk_rows_excluding_public_bindings": 538739760,
+            "plonk_rows": 131454304,
+            "seconds": 336.104850132
+          },
+          "statement": {
+            "cumulative_plonk_rows_excluding_public_bindings": 132518133,
+            "plonk_rows": 8524434,
+            "seconds": 10.01830477
+          },
+          "transcript": {
+            "cumulative_plonk_rows_excluding_public_bindings": 123993699,
+            "plonk_rows": 123993699,
+            "seconds": 144.876754333
+          },
+          "wiring": {
+            "cumulative_plonk_rows_excluding_public_bindings": 328646909,
+            "plonk_rows": 196128776,
+            "seconds": 248.938351957
+          }
+        },
+        "compressed_srs_bytes": 927712937016,
+        "domain": 2147483648,
+        "elapsed_seconds": 1505.781984688,
+        "export_seconds": 1.910959993,
+        "file_key_polynomial_bytes": 1305670057984,
+        "file_srs_key_and_fft_minimum_bytes": 841845047328,
+        "flock_circuit_digest": "7f94cad0295bbfbbb6072d74c65f1e1f5e88aa32256ff5cd91b6790a16028fa8",
+        "flock_proof_blake3": "98aa0c2b506be331c7d3a7543bd73b12fdc938421331b91045c280ce18ae3671",
+        "flock_proof_bytes": 453555,
+        "flock_transcript": "chained-blake3",
+        "maximum_product_fft_domain": 4294967296,
+        "pcs_profile": "slim",
+        "phase_seconds": {
+          "boolean_piop": 57.998618032,
+          "merged_pcs": 43.158260913,
+          "multipoint": 336.104850132,
+          "statement": 10.01830477,
+          "transcript": 144.876754333,
+          "wiring": 248.938351957
+        },
+        "plonk_rows": 1073741823,
+        "plonk_rows_by_phase": {
+          "Lincheck": 37079625,
+          "Pcs": 700588664,
+          "Statement": 261386,
+          "Transcript": 123993699,
+          "Wiring": 204391824,
+          "Zerocheck": 7426607
+        },
+        "product_fft_domain": 8589934592,
+        "public_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "r1cs_constraints": 632643074,
+        "r1cs_constraints_by_phase": {
+          "Lincheck": 22860832,
+          "Pcs": 413978747,
+          "Statement": 132868,
+          "Transcript": 65965929,
+          "Wiring": 125112834,
+          "Zerocheck": 4591864
+        },
+        "r1cs_projection_digest": "7dcfebccf2dcea8eacbb09881c529dd71b9113660e8e6d9f2cc8522ddca644b2",
+        "r1cs_variables": 626192752,
+        "scope": "lower bound: replay stopped at the KZG FFT limit; remaining PCS constraints and fixed-table discharges are omitted",
+        "source_revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+        "srs_degree": 19327352849,
+        "status": "blocked_fft_domain",
+        "stopped_at_fft_limit": true,
+        "supported_fft_domain": false,
+        "terminal_proof_generated": false
+      },
+      "phase-progress.json": {
+        "boolean_piop": {
+          "cumulative_plonk_rows_excluding_public_bindings": 373153141,
+          "plonk_rows": 44506232,
+          "seconds": 57.998618032
+        },
+        "merged_pcs": {
+          "cumulative_plonk_rows_excluding_public_bindings": 407285456,
+          "plonk_rows": 34132315,
+          "seconds": 43.158260913
+        },
+        "multipoint": {
+          "cumulative_plonk_rows_excluding_public_bindings": 538739760,
+          "plonk_rows": 131454304,
+          "seconds": 336.104850132
+        },
+        "statement": {
+          "cumulative_plonk_rows_excluding_public_bindings": 132518133,
+          "plonk_rows": 8524434,
+          "seconds": 10.01830477
+        },
+        "transcript": {
+          "cumulative_plonk_rows_excluding_public_bindings": 123993699,
+          "plonk_rows": 123993699,
+          "seconds": 144.876754333
+        },
+        "wiring": {
+          "cumulative_plonk_rows_excluding_public_bindings": 328646909,
+          "plonk_rows": 196128776,
+          "seconds": 248.938351957
+        }
+      },
+      "projection-progress.json": {
+        "constraints": 632000000,
+        "elapsed_seconds": 1503.927037016,
+        "phase": "Pcs",
+        "plonk_rows": 1072783955
+      }
+    },
+    {
+      "artifacts": "target/flock-experiment/terminal-init-split-products-slim-1",
+      "run_status": "completed",
+      "binary_sha256": "1300aa0c4f5f396dd620bb91b63d516be6dd784420a1e7c14ce9720649675787",
+      "initial_k": 6,
+      "native": {
+        "status": "verified",
+        "proof_and_commitment_bytes": 453555,
+        "prove_seconds": 99.188267415,
+        "verify_seconds": 1.793435656,
+        "pcs_config_blake3": "122a6aaa91eef6ecc3c978e2f2a7346f8bac0c993bf109b1fabeb554f01816c9",
+        "serialized_roundtrip_verified": true,
+        "altered_claim_rejected": true
+      },
+      "elapsed_seconds": 1073.6689993660002,
+      "peak_rss_bytes": 243746328576,
+      "sampled_peak_rss_bytes": 239267254272,
+      "terminal.json": {
+        "compact_proof_bytes_if_completed": 672,
+        "completed_phases": {
+          "boolean_piop": {
+            "cumulative_plonk_rows_excluding_public_bindings": 373113547,
+            "plonk_rows": 44471937,
+            "seconds": 22.24899308
+          },
+          "inner_ligerito": {
+            "cumulative_plonk_rows_excluding_public_bindings": 1286877129,
+            "plonk_rows": 757612237,
+            "seconds": 370.60795421
+          },
+          "merged_pcs": {
+            "cumulative_plonk_rows_excluding_public_bindings": 407240684,
+            "plonk_rows": 34127137,
+            "seconds": 15.743706142
+          },
+          "multipoint": {
+            "cumulative_plonk_rows_excluding_public_bindings": 529264892,
+            "plonk_rows": 122024208,
+            "seconds": 211.25918915
+          },
+          "statement": {
+            "cumulative_plonk_rows_excluding_public_bindings": 132518133,
+            "plonk_rows": 8524434,
+            "seconds": 4.048915005
+          },
+          "transcript": {
+            "cumulative_plonk_rows_excluding_public_bindings": 123993699,
+            "plonk_rows": 123993699,
+            "seconds": 59.311143871
+          },
+          "wiring": {
+            "cumulative_plonk_rows_excluding_public_bindings": 328641610,
+            "plonk_rows": 196123477,
+            "seconds": 95.596763887
+          }
+        },
+        "compressed_srs_bytes": 927712937016,
+        "domain": 2147483648,
+        "elapsed_seconds": 786.997420799,
+        "export_seconds": 1.906165353,
+        "file_key_polynomial_bytes": 1305670057984,
+        "file_product_fft_domain": 16777216,
+        "file_srs_key_and_fft_minimum_bytes": 635686617120,
+        "flock_circuit_digest": "7f94cad0295bbfbbb6072d74c65f1e1f5e88aa32256ff5cd91b6790a16028fa8",
+        "flock_proof_blake3": "98aa0c2b506be331c7d3a7543bd73b12fdc938421331b91045c280ce18ae3671",
+        "flock_proof_bytes": 453555,
+        "flock_transcript": "chained-blake3",
+        "maximum_product_fft_domain": 4294967296,
+        "monolithic_product_fft_supported": false,
+        "pcs_profile": "slim",
+        "pending_claims": {
+          "jagged": 3,
+          "matrix": 186,
+          "structure": 3
+        },
+        "phase_seconds": {
+          "boolean_piop": 22.24899308,
+          "inner_ligerito": 370.60795421,
+          "merged_pcs": 15.743706142,
+          "multipoint": 211.25918915,
+          "statement": 4.048915005,
+          "transcript": 59.311143871,
+          "wiring": 95.596763887
+        },
+        "plonk_rows": 1286877147,
+        "plonk_rows_by_phase": {
+          "Lincheck": 37079499,
+          "Pcs": 913763582,
+          "Statement": 261386,
+          "Transcript": 123993699,
+          "Wiring": 204386525,
+          "Zerocheck": 7392438
+        },
+        "polynomial_backend": "file-backed coefficient splitting",
+        "product_fft_domain": 8589934592,
+        "public_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "r1cs_constraints": 777174793,
+        "r1cs_constraints_by_phase": {
+          "Lincheck": 22860959,
+          "Pcs": 558523702,
+          "Statement": 132868,
+          "Transcript": 65965929,
+          "Wiring": 125116637,
+          "Zerocheck": 4574698
+        },
+        "r1cs_projection_digest": "80de1e335124f726aa3ffd889fbfe680e33afead0a9dabbbd816b64c5603f5ed",
+        "r1cs_variables": 770210216,
+        "scope": "lower bound: fixed matrix, circuit structure and jagged layout evaluations still need in-circuit discharge",
+        "source_revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+        "srs_degree": 19327352849,
+        "status": "lower_bound_projected",
+        "stopped_at_fft_limit": false,
+        "supported_fft_domain": true,
+        "terminal_proof_generated": false
+      },
+      "phase-progress.json": {
+        "boolean_piop": {
+          "cumulative_plonk_rows_excluding_public_bindings": 373113547,
+          "plonk_rows": 44471937,
+          "seconds": 22.24899308
+        },
+        "inner_ligerito": {
+          "cumulative_plonk_rows_excluding_public_bindings": 1286877129,
+          "plonk_rows": 757612237,
+          "seconds": 370.60795421
+        },
+        "merged_pcs": {
+          "cumulative_plonk_rows_excluding_public_bindings": 407240684,
+          "plonk_rows": 34127137,
+          "seconds": 15.743706142
+        },
+        "multipoint": {
+          "cumulative_plonk_rows_excluding_public_bindings": 529264892,
+          "plonk_rows": 122024208,
+          "seconds": 211.25918915
+        },
+        "statement": {
+          "cumulative_plonk_rows_excluding_public_bindings": 132518133,
+          "plonk_rows": 8524434,
+          "seconds": 4.048915005
+        },
+        "transcript": {
+          "cumulative_plonk_rows_excluding_public_bindings": 123993699,
+          "plonk_rows": 123993699,
+          "seconds": 59.311143871
+        },
+        "wiring": {
+          "cumulative_plonk_rows_excluding_public_bindings": 328641610,
+          "plonk_rows": 196123477,
+          "seconds": 95.596763887
+        }
+      },
+      "projection-progress.json": {
+        "constraints": 777000000,
+        "elapsed_seconds": 786.780639423,
+        "phase": "Pcs",
+        "plonk_rows": 1286599850
+      }
+    }
+  ],
+  "optimizations": {
+    "product_fft_limit": 16777216,
+    "file_backend_base_domain_limit": 4294967296,
+    "proof_transport": {
+      "original_bytes": 992,
+      "compressed_bytes": 672,
+      "context_reconstructed_bytes": 640,
+      "original_claim_bytes": 144,
+      "framing_excluded": true,
+      "verified_on_development_fixture": true,
+      "full_init_terminal_proof_generated": false
+    },
+    "gate_row_bytes": {
+      "before": 216,
+      "after": 32,
+      "additional_bytes_per_shared_selector_record": 160
+    },
+    "copy_cell_bytes": {
+      "before": 16,
+      "after": 8
+    },
+    "auxiliary_cache_bytes_per_wire": {
+      "before": 40,
+      "after": 8
+    },
+    "root_table_at_domain_2_32_bytes": {
+      "before": 137438953472,
+      "after": 4194304
+    },
+    "file_preprocessing_fft_roots_bounded": true,
+    "file_fft_cpu_parallelism": true,
+    "shared_constant_wires": true,
+    "direct_bit_equalities": true,
+    "full_init_domain": 2147483648,
+    "key_and_fft_lower_bound_after_storage_changes_bytes": 189010018336,
+    "memory_scope": "Storage model only, not peak RAM. Excludes shared selector records, R1CS, assignment, lowered witness, workspace metadata, buffers, allocator and OS overhead. Init census binary predates the final storage-only changes; its measured RAM is preserved."
+  },
+  "gadgets": {
+    "blake3": {
+      "constraints": 16628,
+      "gate_storage_payload_bytes": 1057856,
+      "plonk_rows": 31112,
+      "seconds": 0.036147614,
+      "selector_records": 58,
+      "variables": 16293
+    },
+    "constant_multiply": {
+      "constraints": 1499,
+      "gate_storage_payload_bytes": 66016,
+      "plonk_rows": 1499,
+      "seconds": 0.052593676,
+      "selector_records": 3,
+      "variables": 1500
+    },
+    "equality": {
+      "constraints": 384,
+      "gate_storage_payload_bytes": 16864,
+      "plonk_rows": 384,
+      "seconds": 0.000462435,
+      "selector_records": 3,
+      "variables": 257
+    },
+    "frobenius": {
+      "constraints": 454,
+      "gate_storage_payload_bytes": 16864,
+      "plonk_rows": 454,
+      "seconds": 0.029122363,
+      "selector_records": 3,
+      "variables": 455
+    },
+    "multiply": {
+      "constraints": 5952,
+      "gate_storage_payload_bytes": 541248,
+      "plonk_rows": 9516,
+      "seconds": 0.011886928,
+      "selector_records": 106,
+      "variables": 5926
+    }
+  },
+  "validation": {
+    "backend_tests": 93,
+    "circuit_tests": 43,
+    "circuit_tests_ignored": 1,
+    "experiment_tests": 23,
+    "file_and_memory_proofs_identical": true,
+    "compressed_roundtrip_and_wrong_claim_rejection": true,
+    "patch_rematerialized": true,
+    "clippy_warnings_denied": true,
+    "materialized_source_files_reproduced": 43,
+    "terminal_patch_sha256": "12e7397134f3fd0d496ef62000dabaea552da997aad4ac8f34c870a6f05bf7b0"
+  }
+}

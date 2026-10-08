@@ -417,6 +417,16 @@ impl<'a> VerifierPlan<'a> {
                     field: "quotient degree exceeds PCS",
                 });
             }
+            if let Some(log) = log
+                && (usize::from(log) > system.config.max_log_degree()
+                    || usize::from(log) + c.quotient_degree().ilog2() as usize
+                        > system.config.max_log_quotient_domain())
+            {
+                return Err(VerifierError::Circuit {
+                    index: i,
+                    field: "trace/quotient domain exceeds PCS",
+                });
+            }
             if c.preprocessed_width > 0 {
                 if log.is_none()
                     || Some(c.preprocessed_height)

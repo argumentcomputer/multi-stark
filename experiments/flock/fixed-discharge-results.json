@@ -1,0 +1,781 @@
+{
+  "pipeline_complete": false,
+  "scope": "Native proofs and terminal censuses; each run records completed checks. No terminal proof or composed security validation.",
+  "timing_scope": "Prove time excludes preparation/verification. Runs can overlap a terminal census; RSS belongs to each run, not total host RAM.",
+  "inner_statement": {
+    "source_proof_blake3": "f0fa026a149dd1c8c450fe55ceed38b006003cb0f9aa60339082f3ba3abb1613",
+    "source_vk_blake3": "f0c635f096bb2b9ff8fbeaf947c406978c11ce3bc447df94e43d6e9fe3cc6fbc",
+    "public_claim_words": [
+      0,
+      293,
+      3008464260,
+      3936129970,
+      1088962797,
+      1141056675,
+      2347219926,
+      1176003176,
+      683533119,
+      3085659920,
+      1422858688,
+      3165160492,
+      1899567894,
+      784981652,
+      376864732,
+      1915641123,
+      2034217541,
+      2163067803
+    ]
+  },
+  "runs": [
+    {
+      "artifacts": "target/flock-experiment/terminal-init-fixed-layout-slim-1",
+      "run_status": "completed",
+      "binary_sha256": "bc2ee7e8504f5c48619119506aa0537b43787455e3d30e438c719e9e813bc4de",
+      "initial_k": 6,
+      "native": {
+        "status": "verified",
+        "proof_and_commitment_bytes": 453555,
+        "prove_seconds": 99.381888602,
+        "verify_seconds": 1.72037003,
+        "pcs_config_blake3": "122a6aaa91eef6ecc3c978e2f2a7346f8bac0c993bf109b1fabeb554f01816c9",
+        "serialized_roundtrip_verified": true,
+        "altered_claim_rejected": true
+      },
+      "elapsed_seconds": 2179.432895957001,
+      "peak_rss_bytes": 243686305792,
+      "sampled_peak_rss_bytes": 239199842304,
+      "terminal.json": {
+        "compact_proof_bytes_if_completed": 672,
+        "completed_phases": {
+          "boolean_piop": {
+            "cumulative_plonk_rows_excluding_public_bindings": 373113547,
+            "plonk_rows": 44471937,
+            "seconds": 22.130120506
+          },
+          "fixed_layout": {
+            "cumulative_plonk_rows_excluding_public_bindings": 2616802916,
+            "plonk_rows": 1329925787,
+            "seconds": 1104.407286399
+          },
+          "inner_ligerito": {
+            "cumulative_plonk_rows_excluding_public_bindings": 1286877129,
+            "plonk_rows": 757612237,
+            "seconds": 372.00376055
+          },
+          "merged_pcs": {
+            "cumulative_plonk_rows_excluding_public_bindings": 407240684,
+            "plonk_rows": 34127137,
+            "seconds": 15.667720225
+          },
+          "multipoint": {
+            "cumulative_plonk_rows_excluding_public_bindings": 529264892,
+            "plonk_rows": 122024208,
+            "seconds": 212.093925
+          },
+          "statement": {
+            "cumulative_plonk_rows_excluding_public_bindings": 132518133,
+            "plonk_rows": 8524434,
+            "seconds": 4.051190902
+          },
+          "transcript": {
+            "cumulative_plonk_rows_excluding_public_bindings": 123993699,
+            "plonk_rows": 123993699,
+            "seconds": 59.498196692
+          },
+          "wiring": {
+            "cumulative_plonk_rows_excluding_public_bindings": 328641610,
+            "plonk_rows": 196123477,
+            "seconds": 95.117712729
+          }
+        },
+        "compressed_srs_bytes": 1855425872952,
+        "domain": 4294967296,
+        "elapsed_seconds": 1893.674440516,
+        "export_seconds": 2.412518134,
+        "file_key_polynomial_bytes": 2611340115968,
+        "file_product_fft_domain": 16777216,
+        "file_srs_key_and_fft_minimum_bytes": 378017939488,
+        "flock_circuit_digest": "7f94cad0295bbfbbb6072d74c65f1e1f5e88aa32256ff5cd91b6790a16028fa8",
+        "flock_proof_blake3": "98aa0c2b506be331c7d3a7543bd73b12fdc938421331b91045c280ce18ae3671",
+        "flock_proof_bytes": 453555,
+        "flock_transcript": "chained-blake3",
+        "maximum_product_fft_domain": 4294967296,
+        "monolithic_product_fft_supported": false,
+        "pcs_profile": "slim",
+        "pending_claims": {
+          "jagged": 0,
+          "matrix": 186,
+          "structure": 3
+        },
+        "phase_seconds": {
+          "boolean_piop": 22.130120506,
+          "fixed_layout": 1104.407286399,
+          "inner_ligerito": 372.00376055,
+          "merged_pcs": 15.667720225,
+          "multipoint": 212.093925,
+          "statement": 4.051190902,
+          "transcript": 59.498196692,
+          "wiring": 95.117712729
+        },
+        "plonk_rows": 2616802934,
+        "plonk_rows_by_phase": {
+          "Lincheck": 37079499,
+          "Pcs": 2243689369,
+          "Statement": 261386,
+          "Transcript": 123993699,
+          "Wiring": 204386525,
+          "Zerocheck": 7392438
+        },
+        "polynomial_backend": "file-backed coefficient splitting",
+        "product_fft_domain": 17179869184,
+        "public_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "qr_proof_bytes_if_completed": 640,
+        "r1cs_constraints": 1600663308,
+        "r1cs_constraints_by_phase": {
+          "Lincheck": 22860959,
+          "Pcs": 1382012217,
+          "Statement": 132868,
+          "Transcript": 65965929,
+          "Wiring": 125116637,
+          "Zerocheck": 4574698
+        },
+        "r1cs_projection_digest": "cc309b7e7d08d2668b390f5268d2366c7e1ffeba1d75c16fa3532dcdd48404b4",
+        "r1cs_variables": 1589861701,
+        "scope": "lower bound: fixed matrix and circuit structure evaluations still need in-circuit discharge; layout discharge runs after PCS",
+        "source_revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+        "srs_degree": 38654705681,
+        "status": "lower_bound_projected",
+        "stopped_at_fft_limit": false,
+        "supported_fft_domain": true,
+        "terminal_proof_generated": false
+      },
+      "phase-progress.json": {
+        "boolean_piop": {
+          "cumulative_plonk_rows_excluding_public_bindings": 373113547,
+          "plonk_rows": 44471937,
+          "seconds": 22.130120506
+        },
+        "fixed_layout": {
+          "cumulative_plonk_rows_excluding_public_bindings": 2616802916,
+          "plonk_rows": 1329925787,
+          "seconds": 1104.407286399
+        },
+        "inner_ligerito": {
+          "cumulative_plonk_rows_excluding_public_bindings": 1286877129,
+          "plonk_rows": 757612237,
+          "seconds": 372.00376055
+        },
+        "merged_pcs": {
+          "cumulative_plonk_rows_excluding_public_bindings": 407240684,
+          "plonk_rows": 34127137,
+          "seconds": 15.667720225
+        },
+        "multipoint": {
+          "cumulative_plonk_rows_excluding_public_bindings": 529264892,
+          "plonk_rows": 122024208,
+          "seconds": 212.093925
+        },
+        "statement": {
+          "cumulative_plonk_rows_excluding_public_bindings": 132518133,
+          "plonk_rows": 8524434,
+          "seconds": 4.051190902
+        },
+        "transcript": {
+          "cumulative_plonk_rows_excluding_public_bindings": 123993699,
+          "plonk_rows": 123993699,
+          "seconds": 59.498196692
+        },
+        "wiring": {
+          "cumulative_plonk_rows_excluding_public_bindings": 328641610,
+          "plonk_rows": 196123477,
+          "seconds": 95.117712729
+        }
+      },
+      "projection-progress.json": {
+        "constraints": 1600000000,
+        "elapsed_seconds": 1890.24673066,
+        "phase": "Pcs",
+        "plonk_rows": 2615729766
+      },
+      "fixed-layout.json": {
+        "column_variables": 64,
+        "nodes": 15004,
+        "row_variables": 14,
+        "shift": 17
+      }
+    },
+    {
+      "artifacts": "target/flock-experiment/terminal-init-complete-fixed-slim-1",
+      "run_status": "stopped",
+      "binary_sha256": "9cebe6788aeb9c0a2493e6ef76c77911a5278ec2b7ee2fc90ad2bb81641676b6",
+      "initial_k": 6,
+      "native": {
+        "status": "verified",
+        "proof_and_commitment_bytes": 453555,
+        "prove_seconds": 102.130021269,
+        "verify_seconds": 1.756487072,
+        "pcs_config_blake3": "122a6aaa91eef6ecc3c978e2f2a7346f8bac0c993bf109b1fabeb554f01816c9",
+        "serialized_roundtrip_verified": true,
+        "altered_claim_rejected": true
+      },
+      "elapsed_seconds": 675.4734109380006,
+      "peak_rss_bytes": null,
+      "sampled_peak_rss_bytes": 243760963584,
+      "terminal.json": {
+        "compact_proof_bytes_if_completed": 672,
+        "export_seconds": 26.246863287,
+        "flock_circuit_digest": "7f94cad0295bbfbbb6072d74c65f1e1f5e88aa32256ff5cd91b6790a16028fa8",
+        "flock_proof_blake3": "98aa0c2b506be331c7d3a7543bd73b12fdc938421331b91045c280ce18ae3671",
+        "flock_proof_bytes": 453555,
+        "flock_transcript": "chained-blake3",
+        "pcs_profile": "slim",
+        "public_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "qr_proof_bytes_if_completed": 640,
+        "scope": "terminal circuit census; completed_phases records fixed discharges reached; no terminal proof generated or composed security certification",
+        "source_revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+        "status": "projecting",
+        "terminal_proof_generated": false
+      },
+      "phase-progress.json": {
+        "boolean_piop": {
+          "cumulative_plonk_rows_excluding_public_bindings": 380838913,
+          "plonk_rows": 44471937,
+          "seconds": 21.584780161
+        },
+        "fixed_live_mask": {
+          "cumulative_plonk_rows_excluding_public_bindings": 336366976,
+          "plonk_rows": 7725366,
+          "seconds": 3.596462215
+        },
+        "merged_pcs": {
+          "cumulative_plonk_rows_excluding_public_bindings": 414966050,
+          "plonk_rows": 34127137,
+          "seconds": 15.699053512999999
+        },
+        "statement": {
+          "cumulative_plonk_rows_excluding_public_bindings": 132518133,
+          "plonk_rows": 8524434,
+          "seconds": 4.033842486
+        },
+        "transcript": {
+          "cumulative_plonk_rows_excluding_public_bindings": 123993699,
+          "plonk_rows": 123993699,
+          "seconds": 59.296900635
+        },
+        "wiring": {
+          "cumulative_plonk_rows_excluding_public_bindings": 328641610,
+          "plonk_rows": 196123477,
+          "seconds": 95.747074296
+        }
+      },
+      "projection-progress.json": {
+        "constraints": 266000000,
+        "elapsed_seconds": 381.326131204,
+        "phase": "Pcs",
+        "plonk_rows": 442612074
+      },
+      "fixed-sigma.json": {
+        "altered_value_rejected": true,
+        "key_blake3": "99797e3f2a214f82ad61f1c9e9c12ab15207ea350eccef4a552a3d077de170de",
+        "m": 36,
+        "proof_bytes": 376144,
+        "prove_seconds": 13.973016213,
+        "scope": "native fixed-table opening; terminal constraints measured separately",
+        "setup_seconds": 7.530709367,
+        "verified": true
+      },
+      "fixed-matrix-program.json": {
+        "claims": 186,
+        "distinct_block_products": 814866,
+        "nodes": 66180,
+        "patterns": 18279,
+        "tensor_additions": 5004996,
+        "tensor_products": 4096
+      },
+      "fixed-layout.json": {
+        "column_variables": 64,
+        "nodes": 15004,
+        "row_variables": 14,
+        "shift": 17
+      },
+      "stop_reason": "Superseded by shared boundary-product layout evaluation; see terminal-init-complete-fixed-slim-2."
+    },
+    {
+      "artifacts": "target/flock-experiment/terminal-init-complete-fixed-slim-2",
+      "run_status": "completed",
+      "binary_sha256": "49de34899d3496fd2d3ff3ce3cdc65f8fd198ab72fcb0ea1672c9b9d67fc4eba",
+      "initial_k": 6,
+      "native": {
+        "status": "verified",
+        "proof_and_commitment_bytes": 453555,
+        "prove_seconds": 103.841312117,
+        "verify_seconds": 1.849134461,
+        "pcs_config_blake3": "122a6aaa91eef6ecc3c978e2f2a7346f8bac0c993bf109b1fabeb554f01816c9",
+        "serialized_roundtrip_verified": true,
+        "altered_claim_rejected": true
+      },
+      "elapsed_seconds": 2728.5268472909993,
+      "peak_rss_bytes": 243778883584,
+      "sampled_peak_rss_bytes": 241642352640,
+      "terminal.json": {
+        "compact_proof_bytes_if_completed": 672,
+        "completed_phases": {
+          "boolean_piop": {
+            "cumulative_plonk_rows_excluding_public_bindings": 380838913,
+            "plonk_rows": 44471937,
+            "seconds": 21.693610649
+          },
+          "fixed_layout": {
+            "cumulative_plonk_rows_excluding_public_bindings": 1662708897,
+            "plonk_rows": 368106402,
+            "seconds": 182.74530344
+          },
+          "fixed_live_mask": {
+            "cumulative_plonk_rows_excluding_public_bindings": 336366976,
+            "plonk_rows": 7725366,
+            "seconds": 3.571901147
+          },
+          "fixed_matrices": {
+            "cumulative_plonk_rows_excluding_public_bindings": 3072514897,
+            "plonk_rows": 1409806000,
+            "seconds": 1021.454152606
+          },
+          "fixed_sigma": {
+            "cumulative_plonk_rows_excluding_public_bindings": 3897982985,
+            "plonk_rows": 825468088,
+            "seconds": 403.833849283
+          },
+          "inner_ligerito": {
+            "cumulative_plonk_rows_excluding_public_bindings": 1294602495,
+            "plonk_rows": 757612237,
+            "seconds": 374.372870179
+          },
+          "merged_pcs": {
+            "cumulative_plonk_rows_excluding_public_bindings": 414966050,
+            "plonk_rows": 34127137,
+            "seconds": 15.721399971
+          },
+          "multipoint": {
+            "cumulative_plonk_rows_excluding_public_bindings": 536990258,
+            "plonk_rows": 122024208,
+            "seconds": 214.167286182
+          },
+          "statement": {
+            "cumulative_plonk_rows_excluding_public_bindings": 132518133,
+            "plonk_rows": 8524434,
+            "seconds": 4.087631476
+          },
+          "transcript": {
+            "cumulative_plonk_rows_excluding_public_bindings": 123993699,
+            "plonk_rows": 123993699,
+            "seconds": 59.550827851
+          },
+          "wiring": {
+            "cumulative_plonk_rows_excluding_public_bindings": 328641610,
+            "plonk_rows": 196123477,
+            "seconds": 95.920106129
+          }
+        },
+        "compressed_srs_bytes": 1855425872952,
+        "domain": 4294967296,
+        "elapsed_seconds": 2429.969813521,
+        "export_seconds": 26.323896154,
+        "file_key_polynomial_bytes": 2611340115968,
+        "file_product_fft_domain": 16777216,
+        "file_srs_key_and_fft_minimum_bytes": 378017939488,
+        "flock_circuit_digest": "7f94cad0295bbfbbb6072d74c65f1e1f5e88aa32256ff5cd91b6790a16028fa8",
+        "flock_proof_blake3": "98aa0c2b506be331c7d3a7543bd73b12fdc938421331b91045c280ce18ae3671",
+        "flock_proof_bytes": 453555,
+        "flock_transcript": "chained-blake3",
+        "maximum_product_fft_domain": 4294967296,
+        "monolithic_product_fft_supported": false,
+        "pcs_profile": "slim",
+        "pending_claims": {
+          "jagged": 0,
+          "matrix": 0,
+          "structure": 0
+        },
+        "phase_seconds": {
+          "boolean_piop": 21.693610649,
+          "fixed_layout": 182.74530344,
+          "fixed_live_mask": 3.571901147,
+          "fixed_matrices": 1021.454152606,
+          "fixed_sigma": 403.833849283,
+          "inner_ligerito": 374.372870179,
+          "merged_pcs": 15.721399971,
+          "multipoint": 214.167286182,
+          "statement": 4.087631476,
+          "transcript": 59.550827851,
+          "wiring": 95.920106129
+        },
+        "plonk_rows": 3897983003,
+        "plonk_rows_by_phase": {
+          "Lincheck": 1446885499,
+          "Pcs": 2101290335,
+          "Statement": 261386,
+          "Transcript": 137766802,
+          "Wiring": 204386525,
+          "Zerocheck": 7392438
+        },
+        "polynomial_backend": "file-backed coefficient splitting",
+        "product_fft_domain": 17179869184,
+        "public_words": [
+          0,
+          293,
+          3008464260,
+          3936129970,
+          1088962797,
+          1141056675,
+          2347219926,
+          1176003176,
+          683533119,
+          3085659920,
+          1422858688,
+          3165160492,
+          1899567894,
+          784981652,
+          376864732,
+          1915641123,
+          2034217541,
+          2163067803
+        ],
+        "qr_proof_bytes_if_completed": 640,
+        "r1cs_constraints": 2662993484,
+        "r1cs_constraints_by_phase": {
+          "Lincheck": 1182203295,
+          "Pcs": 1277676265,
+          "Statement": 132868,
+          "Transcript": 73289721,
+          "Wiring": 125116637,
+          "Zerocheck": 4574698
+        },
+        "r1cs_projection_digest": "35ab71baacbbe6af495a324b49f7da7d8071040d1c0a50845cda371b085b3570",
+        "r1cs_variables": 2648373592,
+        "scope": "terminal circuit census; completed_phases records fixed discharges reached; no terminal proof generated or composed security certification",
+        "source_revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+        "srs_degree": 38654705681,
+        "status": "all_fixed_claims_projected",
+        "stopped_at_fft_limit": false,
+        "supported_fft_domain": true,
+        "terminal_proof_generated": false
+      },
+      "phase-progress.json": {
+        "boolean_piop": {
+          "cumulative_plonk_rows_excluding_public_bindings": 380838913,
+          "plonk_rows": 44471937,
+          "seconds": 21.693610649
+        },
+        "fixed_layout": {
+          "cumulative_plonk_rows_excluding_public_bindings": 1662708897,
+          "plonk_rows": 368106402,
+          "seconds": 182.74530344
+        },
+        "fixed_live_mask": {
+          "cumulative_plonk_rows_excluding_public_bindings": 336366976,
+          "plonk_rows": 7725366,
+          "seconds": 3.571901147
+        },
+        "fixed_matrices": {
+          "cumulative_plonk_rows_excluding_public_bindings": 3072514897,
+          "plonk_rows": 1409806000,
+          "seconds": 1021.454152606
+        },
+        "fixed_sigma": {
+          "cumulative_plonk_rows_excluding_public_bindings": 3897982985,
+          "plonk_rows": 825468088,
+          "seconds": 403.833849283
+        },
+        "inner_ligerito": {
+          "cumulative_plonk_rows_excluding_public_bindings": 1294602495,
+          "plonk_rows": 757612237,
+          "seconds": 374.372870179
+        },
+        "merged_pcs": {
+          "cumulative_plonk_rows_excluding_public_bindings": 414966050,
+          "plonk_rows": 34127137,
+          "seconds": 15.721399971
+        },
+        "multipoint": {
+          "cumulative_plonk_rows_excluding_public_bindings": 536990258,
+          "plonk_rows": 122024208,
+          "seconds": 214.167286182
+        },
+        "statement": {
+          "cumulative_plonk_rows_excluding_public_bindings": 132518133,
+          "plonk_rows": 8524434,
+          "seconds": 4.087631476
+        },
+        "transcript": {
+          "cumulative_plonk_rows_excluding_public_bindings": 123993699,
+          "plonk_rows": 123993699,
+          "seconds": 59.550827851
+        },
+        "wiring": {
+          "cumulative_plonk_rows_excluding_public_bindings": 328641610,
+          "plonk_rows": 196123477,
+          "seconds": 95.920106129
+        }
+      },
+      "projection-progress.json": {
+        "constraints": 2662000000,
+        "elapsed_seconds": 2429.133557046,
+        "phase": "Pcs",
+        "plonk_rows": 3896412286
+      },
+      "fixed-sigma.json": {
+        "altered_value_rejected": true,
+        "key_blake3": "99797e3f2a214f82ad61f1c9e9c12ab15207ea350eccef4a552a3d077de170de",
+        "m": 36,
+        "proof_bytes": 376144,
+        "prove_seconds": 14.105926922,
+        "scope": "native fixed-table opening; terminal constraints measured separately",
+        "setup_seconds": 7.507977556,
+        "verified": true
+      },
+      "fixed-matrix-program.json": {
+        "claims": 186,
+        "distinct_block_products": 814866,
+        "nodes": 66180,
+        "patterns": 18279,
+        "tensor_additions": 5004996,
+        "tensor_products": 4096
+      },
+      "fixed-layout.json": {
+        "column_variables": 64,
+        "nodes": 15004,
+        "row_variables": 14,
+        "shift": 17
+      }
+    }
+  ],
+  "tests": {
+    "experiment_passed": 30,
+    "fflonk_passed": 95,
+    "terminal_circuit_passed": 43,
+    "ignored": 1,
+    "clippy": "passed with warnings denied",
+    "patch_rematerialization": "matched SHA-256 of changed terminal files"
+  },
+  "file_witness_lowering": {
+    "retained_columns": 1,
+    "previous_retained_columns": 3,
+    "removed_column_bytes_at_domain_2_32": 274877906944,
+    "scope": "Array payload reduction, not a measured total proving peak; original assignment and auxiliary indices remain."
+  },
+  "file_key_storage": {
+    "domain": 4294967296,
+    "previous_bytes": 2611340115968,
+    "current_bytes": 1099511627776,
+    "scope": "Eight stored coefficient columns; sigma evaluations and packed C0 are virtual authenticated sources. Scratch and SRS are additional."
+  },
+  "workspace_packing": "Packed witness polynomials share authenticated source extents, with no duplicate packed-file allocation; regression proofs match byte-for-byte.",
+  "optimizations": [
+    "Shared 64-by-64 tensor products and cached XOR contractions for fixed matrices",
+    "Decision diagrams for exact layout/live-mask evaluations",
+    "Common boundary factors and cached subproducts for layout combinations",
+    "Separate chained-BLAKE3 opening against a circuit-derived fixed permutation commitment"
+  ],
+  "source_sha256": {
+    "experiments/flock/src/fixed_tables.rs": "689691e9ded3933c0db4a8635694ae128ace1fb578932d0b3ab296f2cd5e406c",
+    "experiments/flock/src/fixed_sigma.rs": "62010923a81a83d2a36caf6018b440795dddc427445527fed4a12e0cbfa15f15",
+    "experiments/flock/src/fixed_matrices.rs": "d4b936c590f1a751e0582c14a0ab6ddb337fc9c26a7110f5d0163a652b5d96b7",
+    "experiments/flock/src/terminal.rs": "d579d75113e5d9e736c5ba9dac567a06a7a9b3da1ab7a4af8cd4df7a1757bb01",
+    "experiments/flock/terminal.patch": "4e9ebeeab8e72424c189d87778421d454a1637199402faacc61fdad354bc0c95"
+  },
+  "small_fixture": {
+    "artifacts": "target/flock-experiment/terminal-fri-fixed-sigma-1",
+    "terminal": {
+      "compact_proof_bytes_if_completed": 672,
+      "completed_phases": {
+        "boolean_piop": {
+          "cumulative_plonk_rows_excluding_public_bindings": 97673068,
+          "plonk_rows": 24705409,
+          "seconds": 13.133385983
+        },
+        "fixed_layout": {
+          "cumulative_plonk_rows_excluding_public_bindings": 671360662,
+          "plonk_rows": 127561131,
+          "seconds": 65.656623624
+        },
+        "fixed_live_mask": {
+          "cumulative_plonk_rows_excluding_public_bindings": 72967659,
+          "plonk_rows": 3944650,
+          "seconds": 1.843768125
+        },
+        "fixed_matrices": {
+          "cumulative_plonk_rows_excluding_public_bindings": 1741044154,
+          "plonk_rows": 1069683492,
+          "seconds": 856.819688218
+        },
+        "fixed_sigma": {
+          "cumulative_plonk_rows_excluding_public_bindings": 2244274788,
+          "plonk_rows": 503230634,
+          "seconds": 242.018673082
+        },
+        "inner_ligerito": {
+          "cumulative_plonk_rows_excluding_public_bindings": 543799531,
+          "plonk_rows": 346555438,
+          "seconds": 168.625830053
+        },
+        "merged_pcs": {
+          "cumulative_plonk_rows_excluding_public_bindings": 108032193,
+          "plonk_rows": 10359125,
+          "seconds": 5.01542028
+        },
+        "multipoint": {
+          "cumulative_plonk_rows_excluding_public_bindings": 197244093,
+          "plonk_rows": 89211900,
+          "seconds": 196.776253425
+        },
+        "statement": {
+          "cumulative_plonk_rows_excluding_public_bindings": 43412330,
+          "plonk_rows": 969331,
+          "seconds": 0.458145855
+        },
+        "transcript": {
+          "cumulative_plonk_rows_excluding_public_bindings": 42442999,
+          "plonk_rows": 42442999,
+          "seconds": 20.398566267
+        },
+        "wiring": {
+          "cumulative_plonk_rows_excluding_public_bindings": 69023009,
+          "plonk_rows": 25610679,
+          "seconds": 11.901736038
+        }
+      },
+      "compressed_srs_bytes": 1855425872952,
+      "domain": 4294967296,
+      "elapsed_seconds": 1584.184057817,
+      "export_seconds": 1.504079881,
+      "file_key_polynomial_bytes": 2611340115968,
+      "file_product_fft_domain": 16777216,
+      "file_srs_key_and_fft_minimum_bytes": 378017939488,
+      "flock_circuit_digest": "93653826663a609be2a5bbfedf5d88ddd1429d03c102ec7c8ebc27e5e279e1f5",
+      "flock_proof_blake3": "3ef3d89a8ca05f57e800a5071fd9008741e1a52eaf6e99079d2be90228cdbfe7",
+      "flock_proof_bytes": 209339,
+      "flock_transcript": "chained-blake3",
+      "maximum_product_fft_domain": 4294967296,
+      "monolithic_product_fft_supported": false,
+      "pcs_profile": "slim",
+      "pending_claims": {
+        "jagged": 0,
+        "matrix": 0,
+        "structure": 0
+      },
+      "phase_seconds": {
+        "boolean_piop": 13.133385983,
+        "fixed_layout": 65.656623624,
+        "fixed_live_mask": 1.843768125,
+        "fixed_matrices": 856.819688218,
+        "fixed_sigma": 242.018673082,
+        "inner_ligerito": 168.625830053,
+        "merged_pcs": 5.01542028,
+        "multipoint": 196.776253425,
+        "statement": 0.458145855,
+        "transcript": 20.398566267,
+        "wiring": 11.901736038
+      },
+      "plonk_rows": 2244274789,
+      "plonk_rows_by_phase": {
+        "Lincheck": 1087585603,
+        "Pcs": 1071220496,
+        "Statement": 30483,
+        "Transcript": 52085381,
+        "Wiring": 26549527,
+        "Zerocheck": 6803298
+      },
+      "polynomial_backend": "file-backed coefficient splitting",
+      "product_fft_domain": 17179869184,
+      "public_words": [
+        13
+      ],
+      "qr_proof_bytes_if_completed": 640,
+      "r1cs_constraints": 1658202288,
+      "r1cs_constraints_by_phase": {
+        "Lincheck": 957112947,
+        "Pcs": 652885528,
+        "Statement": 15607,
+        "Transcript": 27700820,
+        "Wiring": 16276171,
+        "Zerocheck": 4211215
+      },
+      "r1cs_projection_digest": "17aea38b78dd91558f5f2b2e11973205f241ab44e901a46b427f6b6e40277410",
+      "r1cs_variables": 1651229876,
+      "scope": "terminal circuit census; completed_phases records fixed discharges reached; no terminal proof generated or composed security certification",
+      "source_revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+      "srs_degree": 38654705681,
+      "status": "lower_bound_projected",
+      "stopped_at_fft_limit": false,
+      "supported_fft_domain": true,
+      "terminal_proof_generated": false
+    },
+    "gnu_time": "\tCommand being timed: \"experiments/flock/target/release/init-flock terminal-fri target/flock-experiment/terminal-fri-fixed-sigma-1\"\n\tUser time (seconds): 1582.75\n\tSystem time (seconds): 4.44\n\tPercent of CPU this job got: 100%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 26:26.65\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 7428100\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 2800927\n\tVoluntary context switches: 3532\n\tInvoluntary context switches: 4442\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 14408\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+  },
+  "summary": {
+    "init_plonk_rows": 3897983003,
+    "init_domain": 4294967296,
+    "init_remaining_fixed_claims": 0,
+    "init_census_seconds": 2429.969813521,
+    "init_total_seconds": 2728.28,
+    "init_peak_rss_bytes": 243778883584,
+    "init_layout_rows_before": 1329925787,
+    "init_layout_rows_after": 368106402,
+    "layout_row_reduction_fraction": 0.7232128246566588,
+    "terminal_proof_generated": false,
+    "composed_security_validated": false
+  },
+  "current_capacity_model": {
+    "scope": "Backend payload formulas after storage optimizations; not measured full-proving RSS. Original run artifacts retain the earlier model.",
+    "domain": 4294967296,
+    "compressed_srs_bytes": 1855425872952,
+    "file_key_polynomial_bytes": 1099511627776,
+    "srs_and_key_disk_bytes_excluding_workspace": 2954937500728,
+    "file_srs_key_and_fft_minimum_bytes": 377999065120,
+    "removed_witness_column_bytes": 274877906944,
+    "available_disk_bytes": 354846109696,
+    "qr_transport_bytes_if_completed": 784
+  },
+  "remaining": [
+    "Integrate matrix-free circuit construction with full witness/key generation and run the terminal prover",
+    "Storage for SRS/key and polynomial workspace exceeds this machine; universal production SRS not supplied",
+    "Independent review and composed 128-bit security validation"
+  ]
+}

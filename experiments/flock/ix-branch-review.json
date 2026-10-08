@@ -1,0 +1,45 @@
+{
+  "repository": "https://github.com/argumentcomputer/ix",
+  "remote_heads_verified": true,
+  "review_scope": "Read-only source and recorded measurement review; branch test suites not rerun",
+  "branches": {
+    "jcb/flock-stage2": {
+      "revision": "b2c1319b5ef6e82e8a8f61a6e5dbb88bd6b3f3ab",
+      "use": "Earlier Flock backend/aggregation experiment; prefer stage4 tree for current Stage3 verifier"
+    },
+    "jcb/flock-stage3": {
+      "revision": "c753692bd4f6a3472b5c68083809af4c86256b8b",
+      "use": "Direct Aiur AIR/logUp/PCS/FRI verifier in Flock"
+    },
+    "jcb/flock-stage4": {
+      "revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+      "use": "Updated Stage3 verifier plus Flock-to-BLS12-381-Fr constraint compiler and FFLONK backend"
+    }
+  },
+  "reuse_candidates": [
+    "flock-stage3/host/src/fri.rs",
+    "flock-stage3/host/src/transcript.rs",
+    "flock-stage3/host/src/stage4.rs",
+    "flock-stage4/trace/src",
+    "flock-stage4/circuit/src/relation.rs",
+    "flock-stage4/circuit/src/f128.rs",
+    "flock-stage4/circuit/src/ligerito.rs"
+  ],
+  "compatibility_work": [
+    "Adapt pinned Flock b310f35 to current b684b12 or explicitly migrate the intermediate",
+    "Branch outer Flock transcript uses with_chained_blake3; current experiment uses FsChallenger::new",
+    "Adapt relation-specific statement and exporter to our circuit and original 18 public words",
+    "Resolve matrix/structure/jagged root claims inside the final proof or account for their external verification and transport",
+    "Connect canonical prime-field R1CS to Groth16 and measure full Init wrapper"
+  ],
+  "branch_recorded_fixture": {
+    "inner_fri_queries": 2,
+    "r1cs_constraints": 642332970,
+    "public_field_elements": 600,
+    "public_encoding_bytes": 19200,
+    "fflonk_proof_bytes": 992,
+    "full_terminal_relation_proof_generated": false
+  },
+  "recommendation": "Reuse Stage4 trace/circuit components selectively; keep the measured unchanged-Init Flock path and avoid importing an entire ix branch",
+  "security_scope": "Source review and native proof tests do not establish composed 128-bit security"
+}

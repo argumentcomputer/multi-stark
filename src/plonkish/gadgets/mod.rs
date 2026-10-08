@@ -7,5 +7,5 @@
 mod blake3;
 mod bytes;
 
-pub use blake3::blake3;
+pub use blake3::{blake3, blake3_xof};
 pub use bytes::{ByteGadgets, ByteValue};

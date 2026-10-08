@@ -1,0 +1,108 @@
+--- a/src/prover.rs
++++ b/src/prover.rs
+@@ -963,7 +963,7 @@
+     // caller's own give-back sends it — so only the FreshZeroed mode, whose
+     // buffer belongs to the union's own pool instead, keeps the copy.
+     let alias_q = union.compaction_is_identity() && give_back;
+-    let q_owned: Option<Vec<F128>> = if alias_q {
++    let mut q_owned: Option<Vec<F128>> = if alias_q {
+         None
+     } else if union.compaction_is_identity() {
+         Some(z_packed.clone())
+@@ -1001,6 +1001,18 @@
+             t.elapsed().as_secs_f64() * 1e3
+         );
+     }
++    let low_memory = std::env::var_os("FLOCK_LOW_MEMORY").is_some();
++    let regenerate_q = low_memory && q_owned.is_some();
++    let mut prover_data = if low_memory {
++        drop(prover_data);
++        drop(q_owned.take());
++        if trace {
++            eprintln!("  [prove_union] released PCS buffers until opening");
++        }
++        None
++    } else {
++        Some(prover_data)
++    };
+     let t = Instant::now();
+     match binding {
+         UnionProveBinding::Mixed => union.bind_statement(challenger, &commitment),
+@@ -1257,19 +1269,25 @@
+         // rendezvous at every shared point. One row buys free-running and
+         // two clean tape segments.
+         let mut ch_w = challenger.fork(b"flock-par-wiring-v1");
+-        let (boolean, w) = join(
+-            || run_boolean(challenger),
+-            || {
+-                let r = prove_wiring_with_grinding(
+-                    ci.circuit,
+-                    &z_packed,
+-                    ci.public,
+-                    pcs_params.product_gkr_grinding(),
+-                    &mut ch_w,
+-                );
+-                (r, ch_w)
+-            },
+-        );
++        let run_wiring = || {
++            let r = prove_wiring_with_grinding(
++                ci.circuit,
++                &z_packed,
++                ci.public,
++                pcs_params.product_gkr_grinding(),
++                &mut ch_w,
++            );
++            (r, ch_w)
++        };
++        // Scheduling only: keep the same fork, parent messages and child merge.
++        let (boolean, w) = if std::env::var_os("FLOCK_LOW_MEMORY").is_some() {
++            if trace {
++                eprintln!("  [prove_union] sequential forked PIOPs (low memory)");
++            }
++            (run_boolean(challenger), run_wiring())
++        } else {
++            join(|| run_boolean(challenger), run_wiring)
++        };
+         let (wiring, ch_w) = w;
+         challenger.merge_child(ch_w);
+         (boolean, Some(wiring))
+@@ -1281,7 +1299,7 @@
+         eprintln!(
+             "  [prove_union] boolean zerocheck + lincheck (M_bool = {}){}: {:7.2} ms",
+             union.m_bool(),
+-            if par_transcript { " ∥ wiring" } else { "" },
++            if par_transcript && low_memory { " + wiring (sequential)" } else if par_transcript { " ∥ wiring" } else { "" },
+             t_bool.elapsed().as_secs_f64() * 1e3
+         );
+     }
+@@ -1420,6 +1438,29 @@
+     // the padded witness from it. Otherwise the two are distinct buffers and
+     // the padded one stays borrowed.
+     let gb_words = z_packed.len();
++    if regenerate_q {
++        q_owned = Some(if union.compaction_is_identity() {
++            z_packed.clone()
++        } else if buf_mode == WitnessBufMode::PooledDirty {
++            union.compact_witness_unchecked(&z_packed)
++        } else {
++            union.compact_witness(&z_packed)
++        });
++    }
++    if prover_data.is_none() {
++        let q = q_owned.as_deref().unwrap_or(&z_packed);
++        let (recomputed, data) = if pcs_params.num_lanes.is_some() {
++            commit_lane_major(q, pcs_params)
++        } else {
++            commit(q, pcs_params)
++        };
++        assert_eq!(recomputed.cap, commitment.cap, "regenerated commitment changed");
++        prover_data = Some(data);
++        if trace {
++            eprintln!("  [prove_union] regenerated PCS buffers: {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
++        }
++    }
++    let prover_data = prover_data.expect("PCS buffers available for opening");
+     let (open_witness, padded_owner) = match q_owned {
+         Some(v) => (v, Some(z_packed)),
+         None => (z_packed, None),

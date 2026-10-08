@@ -1,0 +1,190 @@
+{
+  "scope": "Acceptance-check coverage review for the supported Goldilocks/BLAKE3 ordinary and one-shard batch profiles; not a formal soundness proof or composed security estimate",
+  "native_reference": "src/verifier.rs plus delegated batch, lookup, PCS, FRI and Merkle checks",
+  "cross_check": {
+    "repository": "argumentcomputer/ix",
+    "revision": "8fdb3eab26491f2e79a6004016c2b7b96d0b4bda",
+    "files": [
+      "flock-stage3/host/src/air.rs",
+      "flock-stage3/host/src/transcript.rs",
+      "flock-stage3/host/src/fri.rs",
+      "flock-stage3/host/src/merkle.rs"
+    ],
+    "method": "Source comparison of constrained selector/inverse equations, coordinate logUp, quotient slices, transcript binding, heterogeneous Merkle injection, PCS reductions and beta-squared FRI roll-ins; branch tests not rerun"
+  },
+  "supported_scope": [
+    "Quadratic Goldilocks extension and BLAKE3",
+    "Fixed active bitmap/heights; all preprocessed circuits active; nonempty preprocessing",
+    "Cap height zero; binary FRI; constant final polynomial",
+    "Ordinary or exactly one batch shard",
+    "Fixed field-sampling retry budget, rejected on exhaustion"
+  ],
+  "findings_fixed": [
+    {
+      "finding": "Public complete-verifier helpers selected a query subset using mutable redundant shape.queries",
+      "fix": "Derive full query count from trusted system configuration in both ordinary and batch helpers",
+      "regression": "complete_helpers_cannot_drop_queries_through_modified_shape",
+      "reproduced_before_fix": true,
+      "init_impact": "Validated Init plan supplied the correct query count; its circuit is unchanged"
+    },
+    {
+      "finding": "Plan/lower-level shape validation missed native log_degree + log2(quotient_degree) domain limit",
+      "fix": "Enforce native trace and quotient-domain limits before circuit construction",
+      "regression": "profile_enforces_native_quotient_domain_bound",
+      "reproduced_before_fix": true,
+      "init_impact": "Existing Init profile is within the limits"
+    }
+  ],
+  "coverage": [
+    {
+      "check": "system and proof shape",
+      "native": "src/verifier.rs::verify_shape",
+      "circuit": "plan.rs::validate; pcs.rs::FixedPcsShape::from_profile; pcs_witness.rs::validate",
+      "enforcement": "Trusted key/profile fix activation, matrix order, heights, widths, quotient slices and cap/FRI schedule. No prover-selectable shape wires."
+    },
+    {
+      "check": "lookup balance",
+      "native": "src/verifier.rs::verify_multiple_claims; src/batch.rs::verify_batch",
+      "circuit": "algebra.rs::constrain_algebraic_checks_with_residual; batch.rs::constrain_bound_batch_queries",
+      "enforcement": "Claim inverses and per-circuit accumulator chain end at zero (ordinary), or negative constrained message sum (single batch)."
+    },
+    {
+      "check": "Fiat-Shamir and statement binding",
+      "native": "src/verifier.rs::verify_multiple_claims,verify_after_challenges; src/batch.rs::batch_challenger",
+      "circuit": "transcript.rs::constrain_active_transcript; batch.rs::constrain_bound_batch_queries",
+      "enforcement": "Parameter seed, shape, activation, fixed and witness commitments, heights, length-prefixed claims/messages, shard index, accumulators, alpha and zeta."
+    },
+    {
+      "check": "challenge sampling and grinding",
+      "native": "p3-challenger HashChallenger/SerializingChallenger64",
+      "circuit": "transcript.rs::Blake3Challenger",
+      "enforcement": "Canonical bytes, first-valid rejection sampling, constrained state/cursor updates, raw query bits and nonzero-bit grinding. Retry exhaustion fails closed."
+    },
+    {
+      "check": "selectors, graph and grouped logUp",
+      "native": "src/verifier.rs::verify_after_challenges; src/lookup.rs::logup_constraint_values",
+      "circuit": "algebra.rs::sweep,coordinate_mul,constrain_algebraic_checks_with_residual",
+      "enforcement": "Selectors and inverses are constrained; stage2 coordinate polynomials remain separate; normalized accumulator injection, full/partial lookup groups and Horner constraint order match native."
+    },
+    {
+      "check": "quotient identity",
+      "native": "src/verifier.rs::verify_after_challenges",
+      "circuit": "algebra.rs::constrain_algebraic_checks_with_residual",
+      "enforcement": "Recombine every slice with extension basis and zeta^(n*i), then enforce composition/vanishing = quotient."
+    },
+    {
+      "check": "PCS reduction",
+      "native": "p3-fri/src/two_adic_pcs.rs::verify; p3-fri/src/verifier.rs::open_inputs",
+      "circuit": "pcs.rs::opening_rows,constrain_pcs",
+      "enforcement": "Observe all OOD values in native order; reduce all matrices and points at fixed coset query points with constrained nonzero denominators and per-height alpha powers."
+    },
+    {
+      "check": "input authentication",
+      "native": "p3-merkle-tree/src/mmcs",
+      "circuit": "pcs.rs::hash_fields,authenticate",
+      "enforcement": "Canonical field encoding; matrix rows grouped by height in stable order; every path direction is derived from transcript query bits; shorter-height rows injected at fixed levels."
+    },
+    {
+      "check": "FRI acceptance",
+      "native": "p3-fri/src/verifier.rs::verify_fri,fold_query",
+      "circuit": "pcs.rs::constrain_pcs",
+      "enforcement": "Trusted query count; every binary round root, grinding witness, sibling and path; derived beta/index; subgroup fold, beta-squared roll-ins and final constant equality."
+    },
+    {
+      "check": "untrusted normalization",
+      "native": "src/verifier.rs::verify_shape; native multiproof geometry",
+      "circuit": "pcs_witness.rs::expand_after_lookup,expand_paths,ExpandedPcsWitness::assign_proof",
+      "enforcement": "Normalization does not cryptographically accept the proof. Expanded values are constrained; fixed dimensions reject missing/extra fields. Duplicate-index consistency is enforced cryptographically by authenticating each path to the same root."
+    },
+    {
+      "check": "Flock lowering",
+      "native": "Plonkish gates, lookups, compact hashes and public bindings",
+      "circuit": "experiments/flock/src/adapter.rs; goldilocks.rs; packed.rs",
+      "enforcement": "Canonical/range and modular arithmetic Boolean relations, fixed constants, pinned ONE in every packed lane, exact byte/word BLAKE3 bindings, copy wiring and public claim bindings."
+    },
+    {
+      "check": "Init application boundary",
+      "native": "experiments/flock/src/init.rs",
+      "circuit": "VerifierPlan with fixed message schema and independent expected claim",
+      "enforcement": "Original key, active heights and validated closure messages specialize the trusted circuit; all 18 claim words remain public. Native prevalidation is not used in place of circuit checks."
+    }
+  ],
+  "validation": {
+    "adversarial_assignments": 420,
+    "method": "210 mutations per envelope after normalization, covering claims, both challenge/OOD coordinates, all input-query columns and Merkle depths, every FRI round, accumulators, roots, nonces and final polynomial; direct proof mutations also rejected natively",
+    "algebra": "Every selector, graph node, grouped logUp constraint, composition and quotient compared with native evaluation; groups 1,2,3,8 and partial groups",
+    "flock_mixed_fixture": {
+      "dense_m": 27,
+      "proof_and_commitment_bytes": 443203,
+      "public_words": 140,
+      "all_public_mutations_rejected": true
+    },
+    "blake3_raw_matrix_mutations": 1408,
+    "blake3_raw_matrix_scope": "Flip every bit of all 11 wired IO words after witness generation and evaluate Boolean R1CS matrices directly; reject all-zero/unpinned trace",
+    "test_files": [
+      "tests/plonkish_verifier_security.rs",
+      "tests/plonkish_verifier_algebra.rs",
+      "tests/plonkish_plan.rs",
+      "tests/plonkish_pcs.rs",
+      "tests/plonkish_batch.rs",
+      "tests/plonkish_hash.rs",
+      "tests/plonkish_transcript.rs",
+      "src/plonkish/verifier/transcript_tests.rs",
+      "experiments/flock/src/fri.rs",
+      "experiments/flock/src/packed.rs",
+      "experiments/flock/src/goldilocks.rs"
+    ],
+    "regression_results": {
+      "plonkish_unit_tests": 33,
+      "verifier_integration_tests": 28,
+      "groth16_plan_tests_including_query_shards": 11,
+      "flock_backend_tests": 12,
+      "clippy_warnings_denied": "passed for changed root tests and all Flock targets",
+      "format_and_diff_checks": "passed"
+    }
+  },
+  "remaining": [
+    "Independent security review and composed 128-bit security analysis",
+    "Complete Flock verifier in Groth16, including all deferred obligations"
+  ],
+  "source_sha256": {
+    "src/verifier.rs": "3144dde9eacbed6b228fb1e2ee470a70423c4d3d3dc96efa78c5d022dc71af0f",
+    "src/batch.rs": "3dd58d1cbf800acc7b78291660dfbc14bc0b35d884275696df989a86087ffb14",
+    "src/lookup.rs": "8c4992e10c562b7a98d983fea0be575c10f9c3736740b16abb00553d0708952e",
+    "src/plonkish/verifier/pcs.rs": "24c32b74fb2932fa677db3d952143003d32c1c4c9ea6eff6c96abc80fb77c4a2",
+    "src/plonkish/verifier/batch.rs": "5ea451a68079a32a8e29bb9e3912b56831ae83c27cf16288b500e77514f44908",
+    "src/plonkish/verifier/plan.rs": "7ef098bc4726c12cc0b7ea1a9fefcc8122b9a228a744892a60eb9823b0f7f65e",
+    "src/plonkish/verifier/algebra.rs": "20035411797570afe1d6c551e21e3b19e70e4ef2b4e15863a4b21a9c71cfc9e4",
+    "src/plonkish/verifier/transcript.rs": "30699fbdf28f735f7a0a448f10384683c8fcaf293d80c6a813e5c759a14cb5fb",
+    "experiments/flock/src/adapter.rs": "a2d492b1b84a74000e5090a3a8b34771e922797db57e764d8f937e5e197bbbbf",
+    "experiments/flock/src/packed.rs": "e8a64b3463f86ef1308d334bb0ec1e77c2240c9e0e67c45ce0ba23db4dbb8d38",
+    "experiments/flock/src/goldilocks.rs": "5a6ddc86867a02b170da0360f2b2cafb1694b4c2bd28a97d956ffcebf339f51c",
+    "tests/plonkish_verifier_security.rs": "0115c8a4d88eb0d269781163eb03c93e65cda5b27181785616656d6c50971ca2",
+    "tests/support/verifier_audit.rs": "9aaf04625aa50d634a5ecc7ce5621f3ec3f39544e026474b8bf9755e374d4881"
+  },
+  "terminal_fixed_checks": {
+    "scope": "Implementation and native-oracle/constraint tests; not an independent soundness audit or production security certification.",
+    "matrix": {
+      "source": "experiments/flock/src/fixed_matrices.rs",
+      "binding": "Registry digest, ordered A/B identities and dimensions; exact binary sparse matrices, including cancellation of repeated entries; all reported values constrained equal to the evaluations."
+    },
+    "layout": {
+      "source": "experiments/flock/src/fixed_tables.rs",
+      "binding": "Circuit-derived prefix boundaries and fixed addresses; exact Eq and Combo weights. Common factors depend only on fixed boundaries, never private values."
+    },
+    "structure": {
+      "source": "experiments/flock/src/fixed_tables.rs",
+      "binding": "Circuit-derived live masks and masked identity tags, including padded slots and skipped decision variables; constrained plane selectors and values."
+    },
+    "permutation": {
+      "source": "experiments/flock/src/fixed_sigma.rs",
+      "binding": "Circuit-derived fixed-table commitment; separate chained-BLAKE3 transcript binds circuit, commitment and the original wiring point; terminal PCS check binds the reported sigma value."
+    },
+    "small_fixture": "target/flock-experiment/terminal-fri-fixed-sigma-1/terminal.json",
+    "small_fixture_remaining_claims": 0,
+    "init_measurement": "target/flock-experiment/terminal-init-complete-fixed-slim-2",
+    "terminal_proof_generated": false,
+    "init_remaining_claims": 0,
+    "init_status": "all_fixed_claims_projected"
+  }
+}

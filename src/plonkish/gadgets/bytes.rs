@@ -259,6 +259,14 @@ impl ByteGadgets {
         bytes: [ByteValue; 8],
         bound: u64,
     ) {
+        if bound == 0xffff_ffff_0000_0000 {
+            let (high_max, low_sum) = self.goldilocks_boundary(b, &bytes);
+            b.constrain_gate(
+                [high_max.value(), low_sum, low_sum],
+                [F::ONE, F::ZERO, F::ZERO, F::ZERO, F::ZERO],
+            );
+            return;
+        }
         let bounded = self.is_at_most_u64(b, bytes, bound);
         let one = b.constant(F::ONE);
         b.assert_equal(bounded.value(), one);
@@ -272,6 +280,11 @@ impl ByteGadgets {
         bytes: [ByteValue; 8],
         bound: u64,
     ) -> Bool {
+        if bound == 0xffff_ffff_0000_0000 {
+            let (high_max, low_sum) = self.goldilocks_boundary(b, &bytes);
+            let invalid = b.mul(high_max.value(), low_sum);
+            return b.is_zero(invalid);
+        }
         let zero = b.constant(F::ZERO);
         let mut borrow = zero;
         for i in 0..16 {
@@ -303,6 +316,23 @@ impl ByteGadgets {
         }
         let within = b.affine([borrow, zero], [-F::ONE, F::ZERO], F::ONE);
         b.assert_bool(within)
+    }
+
+    fn goldilocks_boundary<F: PrimeField>(
+        &self,
+        b: &mut CircuitBuilder<F>,
+        bytes: &[ByteValue; 8],
+    ) -> (Bool, Value) {
+        // Each sum is in 0..=120. The upper word is all ones iff its
+        // nibble sum is 120; the lower word is zero iff its sum is zero.
+        let sums = [0, 4].map(|start| {
+            let nibbles = bytes[start..start + 4].iter().flat_map(|v| v.nibbles);
+            let zero = b.constant(F::ZERO);
+            nibbles.fold(zero, |sum, nibble| b.add(sum, nibble))
+        });
+        let max = b.constant(F::from_u8(120));
+        let difference = b.sub(sums[1], max);
+        (b.is_zero(difference), sums[0])
     }
 
     /// Pack eight little-endian bytes as a field element. The caller must

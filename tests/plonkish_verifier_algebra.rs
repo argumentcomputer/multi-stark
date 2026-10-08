@@ -392,3 +392,79 @@ fn algebra_handles_selectors_next_rows_no_lookups_and_multiple_quotient_slices()
     adapter::assign(&mut witness, &inputs, &wrong, &[], challenges).unwrap();
     assert!(witness.generate().is_err());
 }
+
+#[test]
+fn grouped_logup_coordinates_match_native_for_full_and_partial_groups() {
+    use multi_stark::types::{CommitmentParameters, FriParameters};
+    use multi_stark::{expr::Expr, lookup::Lookup, system::CircuitInputs};
+    use p3_matrix::dense::RowMajorMatrix;
+    let claim = vec![Val::from_u8(17)];
+    for group in [1, 2, 3, 8] {
+        let x = Expr::main(0);
+        let pair = vec![x.clone(), x.clone() * x.clone()];
+        let (system, key) = System::new(
+            GoldilocksBlake3Config::new(
+                CommitmentParameters {
+                    log_blowup: 4,
+                    cap_height: 0,
+                },
+                FriParameters {
+                    num_queries: 2,
+                    log_final_poly_len: 0,
+                    max_log_arity: 1,
+                    commit_proof_of_work_bits: 0,
+                    query_proof_of_work_bits: 0,
+                },
+            ),
+            [CircuitInputs {
+                main_width: 1,
+                preprocessed: Some(RowMajorMatrix::new_col(
+                    (0..parity::HEIGHT)
+                        .map(|i| Val::from_bool(i == 0))
+                        .collect(),
+                )),
+                lookups: vec![
+                    Lookup::pull(Expr::preprocessed(0), vec![x.clone()]),
+                    Lookup::push(x.clone(), vec![x.clone()]),
+                    Lookup::pull(x, vec![Expr::main(0)]),
+                    Lookup::push(Expr::constant(Val::ONE), pair.clone()),
+                    Lookup::pull(Expr::constant(Val::ONE), pair),
+                ],
+                lookup_group_size: group,
+                ..Default::default()
+            }],
+        );
+        let proof = system.prove(
+            &key,
+            &claim,
+            SystemWitness::from_stage_1(
+                vec![RowMajorMatrix::new_col(vec![claim[0]; parity::HEIGHT])],
+                &system,
+            ),
+        );
+        system.verify(&claim, &proof).unwrap();
+        let challenges = adapter::challenges(&system, &proof, &[&claim]);
+        let mut b = CircuitBuilder::new();
+        let inputs = AlgebraicInputs::allocate(&mut b, &system.circuits, &[1]);
+        let outputs =
+            constrain_algebraic_checks(&mut b, &system.circuits, &[parity::LOG_HEIGHT], &inputs);
+        let circuit = b.finish();
+        let a = assignment(&circuit, &inputs, &proof, &claim, challenges).unwrap();
+        check_intermediates(&system, &proof, &[&claim], challenges, &outputs, &a);
+        for point in 0..2 {
+            for column in 0..system.circuits[0].stage_2_width {
+                // Only the first accumulator carries across rows. Other
+                // next-row columns are authenticated by PCS, not logUp.
+                if point == 1 && column >= 2 {
+                    continue;
+                }
+                let mut forged = proof.clone();
+                forged.stage_2_opened_values[0][point][column] += ExtVal::ONE;
+                assert!(
+                    assignment(&circuit, &inputs, &forged, &claim, challenges).is_err(),
+                    "group {group}, point {point}, column {column}"
+                );
+            }
+        }
+    }
+}

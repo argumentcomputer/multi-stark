@@ -189,6 +189,14 @@ impl<F: Field> Circuit<F> {
         &self.lookups
     }
 
+    /// Compact BLAKE3 calls that a backend must constrain, including byte bindings.
+    pub fn blake3_calls(&self) -> impl Iterator<Item = (&[Value], &[Value; 32])> {
+        self.hashes
+            .iter()
+            .flat_map(|h| &h.calls)
+            .map(|c| (c.input.as_slice(), &c.output))
+    }
+
     /// Public bindings in the order they were exposed.
     pub fn public_values(&self) -> &[Value] {
         &self.publics

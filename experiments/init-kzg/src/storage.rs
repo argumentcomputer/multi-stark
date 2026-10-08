@@ -26,12 +26,13 @@ pub fn write_matrix(path:&Path,m:&RowMajorMatrix<Scalar>)->Result<()> {
  w.flush()?;drop(w);if !child.wait()?.success() {return Err("zstd write failed".into())}
  fs::rename(temp,path)?;Ok(())
 }
-pub fn read_matrix(path:&Path)->Result<RowMajorMatrix<Scalar>> {
+pub fn read_matrix(path:&Path)->Result<RowMajorMatrix<Scalar>> { read_matrix_bounded(path, 1<<24) }
+pub fn read_matrix_bounded(path:&Path,max_height:usize)->Result<RowMajorMatrix<Scalar>> {
  let mut child=Command::new("zstd").args(["-q","-d","-c"]).arg(path).stdout(Stdio::piped()).spawn()?;
  let mut r=BufReader::with_capacity(1<<20,child.stdout.take().unwrap());
  let mut b=[0;8];r.read_exact(&mut b)?;let width=usize::try_from(u64::from_le_bytes(b))?;
  r.read_exact(&mut b)?;let height=usize::try_from(u64::from_le_bytes(b))?;
- if width==0 || !height.is_power_of_two() || width>1024 || height>1<<24 {return Err("bad matrix dimensions".into())}
+ if width==0 || !height.is_power_of_two() || width>1024 || height>max_height {return Err("bad matrix dimensions".into())}
  let mut values=Vec::with_capacity(width.checked_mul(height).ok_or("matrix overflow")?);
  for _ in 0..width * height { let mut limbs=[0;4];for limb in &mut limbs {r.read_exact(&mut b)?;*limb=u64::from_le_bytes(b);}values.push(Scalar::from_limbs_le(limbs)); }
  if io::copy(&mut r,&mut io::sink())? != 0 { return Err("trailing matrix bytes".into()) }

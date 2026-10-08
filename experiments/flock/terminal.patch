@@ -1,0 +1,2717 @@
+--- a/circuit/src/blake3.rs
++++ b/circuit/src/blake3.rs
+@@ -398,18 +398,15 @@
+   if right.constant {
+     return Ok(if right.value { left.not() } else { left.clone() });
+   }
++  if left.expression == right.expression {
++    return Ok(BitWire::constant(false));
++  }
+   let output = alloc_derived_bit(builder, left.value ^ right.value)?;
+-  let inverse_two =
+-    Fr::from(2_u64).inverse().expect("two is invertible in BLS12-381 Fr");
+-  let right_hand_side = left
+-    .expression
+-    .clone()
+-    .plus(&right.expression)
+-    .minus(&output.expression)
+-    .scale(inverse_two);
++  let right_hand_side =
++    left.expression.clone().plus(&right.expression).minus(&output.expression);
+   builder.enforce(
+     phase,
+-    left.expression.clone(),
++    left.expression.clone().scale(Fr::from(2u64)),
+     right.expression.clone(),
+     right_hand_side,
+   );
+--- a/circuit/src/f128.rs
++++ b/circuit/src/f128.rs
+@@ -66,15 +66,18 @@
+   export_variables(builder, value, bits, phase)
+ }
+ 
+-pub(crate) fn alloc_f128_constant(
++/// Allocate a shape-time constant, never an unchecked witness value.
++pub fn alloc_f128_constant(
+   builder: &mut R1csBuilder,
+   value: [u8; 16],
+   phase: ConstraintPhase,
+ ) -> Result<F128VariablesV1, R1csError> {
+-  let mut variables = alloc_f128_private(builder, value, phase)?;
+-  enforce_f128_equal_constant(builder, &variables, value, phase);
+-  variables.constant = true;
+-  Ok(variables)
++  let mut bit_variables = [Variable::ONE; F128_BITS];
++  for (bit, variable) in bit_variables.iter_mut().enumerate() {
++    *variable =
++      builder.constant_bit((value[bit / 8] >> (bit % 8)) & 1 == 1, phase)?;
++  }
++  Ok(F128VariablesV1 { value, bit_variables, constant: true })
+ }
+ 
+ /// Reinterpret a 128-by-128 bit matrix by swapping its axes.
+@@ -216,17 +219,22 @@
+   Ok(inverse)
+ }
+ 
+-/// Enforce equality using the injective 128-bit integer packing into Fr.
++/// Bind canonical bits directly, avoiding long linear chains in PLONK.
+ pub fn enforce_f128_equal(
+   builder: &mut R1csBuilder,
+   left: &F128VariablesV1,
+   right: &F128VariablesV1,
+   phase: ConstraintPhase,
+ ) {
+-  builder.enforce_zero(
+-    phase,
+-    packed_f128_variables(left).minus(&packed_f128_variables(right)),
+-  );
++  for (&left, &right) in left.bit_variables.iter().zip(&right.bit_variables) {
++    if left != right {
++      builder.enforce_zero(
++        phase,
++        LinearCombination::from_variable(left)
++          .minus(&LinearCombination::from_variable(right)),
++      );
++    }
++  }
+ }
+ 
+ pub(crate) fn enforce_f128_equal_constant(
+@@ -324,6 +332,15 @@
+   if bit.variable.is_some() {
+     return Ok(bit.clone());
+   }
++  if bit.constant {
++    let variable = builder.constant_bit(bit.value, phase)?;
++    return Ok(BitWire {
++      value: bit.value,
++      expression: LinearCombination::from_variable(variable),
++      variable: Some(variable),
++      constant: true,
++    });
++  }
+   let output = alloc_derived_bit(builder, bit.value)?;
+   builder.enforce_zero(phase, output.expression.clone().minus(&bit.expression));
+   Ok(output)
+@@ -345,17 +362,11 @@
+     return Ok(BitWire::constant(false));
+   }
+   let output = alloc_derived_bit(builder, left.value ^ right.value)?;
+-  let inverse_two = Fr::from(2u64).inverse().expect("two is invertible in Fr");
+   builder.enforce(
+     phase,
+-    left.expression.clone(),
++    left.expression.clone().scale(Fr::from(2u64)),
+     right.expression.clone(),
+-    left
+-      .expression
+-      .clone()
+-      .plus(&right.expression)
+-      .minus(&output.expression)
+-      .scale(inverse_two),
++    left.expression.clone().plus(&right.expression).minus(&output.expression),
+   );
+   Ok(output)
+ }
+--- a/circuit/src/lib.rs
++++ b/circuit/src/lib.rs
+@@ -32,7 +32,7 @@
+   build_blake3_compression_r1cs,
+ };
+ pub use f128::{
+-  F128_BITS, F128VariablesV1, alloc_f128_private,
++  F128_BITS, F128VariablesV1, alloc_f128_constant, alloc_f128_private,
+   build_f128_multiplication_r1cs, constrain_f128_add, constrain_f128_frobenius,
+   constrain_f128_inverse, constrain_f128_multiply,
+   constrain_f128_multiply_constant, enforce_f128_equal,
+@@ -84,7 +84,7 @@
+ pub use statement::{
+   F128StatementCircuitError, F128StatementCircuitInputsV1,
+   F128StatementCircuitOutputV1, STAGE4_STAGE3_STATEMENT_BYTES,
+-  constrain_f128_statement_binding,
++  constrain_application_public_values, constrain_f128_statement_binding,
+ };
+ pub use structure_fold::{
+   F128CircuitStructureAccumulatorCircuitError,
+--- a/circuit/src/r1cs.rs
++++ b/circuit/src/r1cs.rs
+@@ -338,6 +338,7 @@
+ }
+ 
+ pub struct R1csBuilder {
++  zero: Option<Variable>,
+   public_variables: usize,
+   private_variables: usize,
+   storage: BuilderStorage,
+@@ -365,6 +366,7 @@
+ impl R1csBuilder {
+   pub fn new() -> Self {
+     Self {
++      zero: None,
+       public_variables: 0,
+       private_variables: 0,
+       storage: BuilderStorage::Materialized {
+@@ -399,6 +401,7 @@
+     let mut hasher = blake3::Hasher::new();
+     hasher.update(PROJECTION_DIGEST_DOMAIN);
+     Self {
++      zero: None,
+       public_variables: 0,
+       private_variables: 0,
+       storage: BuilderStorage::Projection {
+@@ -411,6 +414,23 @@
+         observer,
+       },
+     }
++  }
++
++  pub(crate) fn constant_bit(
++    &mut self,
++    value: bool,
++    phase: ConstraintPhase,
++  ) -> Result<Variable, R1csError> {
++    if value {
++      return Ok(Variable::ONE);
++    }
++    if let Some(zero) = self.zero {
++      return Ok(zero);
++    }
++    let zero = self.alloc_private(Fr::ZERO)?;
++    self.enforce_zero(phase, LinearCombination::from_variable(zero));
++    self.zero = Some(zero);
++    Ok(zero)
+   }
+ 
+   pub fn alloc_public(&mut self, value: Fr) -> Result<Variable, R1csError> {
+--- a/circuit/src/statement.rs
++++ b/circuit/src/statement.rs
+@@ -613,3 +613,33 @@
+     assert_eq!(first.digest(), second.digest());
+   }
+ }
++
++/// Bind a fixed prefix and application public words to the native Flock
++/// public-vector digest. The caller supplies the prefix from its verifier key.
++pub fn constrain_application_public_values(
++  builder: &mut R1csBuilder,
++  circuit_digest: [u8; 32],
++  fixed_prefix: &[[u8; 16]],
++  public_words: &[crate::Variable],
++  values: &[[u8; 16]],
++  payload_indices: [usize; 2],
++  byte_payloads: &[Vec<F128TranscriptWordV1>],
++) -> Result<Vec<F128VariablesV1>, F128StatementCircuitError> {
++  if values.len() != fixed_prefix.len() + public_words.len() {
++    return Err(F128StatementCircuitError::InternalShape("application public count"));
++  }
++  let circuit_payload = payload(byte_payloads, payload_indices[0] as u64, "circuit digest")?;
++  bind_constant_digest(builder, circuit_payload, circuit_digest, "circuit digest")?;
++  let variables = values.iter().copied().map(|v| alloc_f128_private(builder, v, ConstraintPhase::Statement)).collect::<Result<Vec<_>, _>>()?;
++  for (variable, constant) in variables.iter().zip(fixed_prefix) {
++    crate::f128::enforce_f128_equal_constant(builder, variable, *constant, ConstraintPhase::Statement);
++  }
++  for (variable, public) in variables[fixed_prefix.len()..].iter().zip(public_words) {
++    builder.enforce_zero(ConstraintPhase::Statement,
++      crate::f128::packed_f128_variables(variable).minus(&LinearCombination::from_variable(*public)));
++  }
++  let digest = constrain_public_values_digest(builder, &variables)?;
++  let digest_payload = payload(byte_payloads, payload_indices[1] as u64, "public-values digest")?;
++  bind_computed_digest(builder, &digest, digest_payload, native_public_values_digest(values), "public-values digest", ConstraintPhase::Statement)?;
++  Ok(variables)
++}
+--- a/exporter/src/lib.rs
++++ b/exporter/src/lib.rs
+@@ -14,7 +14,7 @@
+   r1cs_hashes::fs_chain::{CvSource, FsChainTrace, trace_duplex_forked},
+   schedule::Registry,
+   transcript_record::{RecordingChallenger, Stream, StreamWord, TranscriptOp},
+-  union::{UnionInstance, publics_digest},
++  union::UnionInstance,
+   zerocheck::{
+     ZerocheckGrinding, ZerocheckProof,
+     multilinear::subspace_denominator_pair,
+@@ -39,7 +39,7 @@
+   F128MergedPcsFrontendTraceV1, F128MergedPcsRoundV1, F128MultipointRoundV1,
+   F128MultipointTwistedAssistCensusV1, F128MultipointTwistedAssistTraceV1,
+   F128OperationV1, F128ReferenceV1, F128RingSwitchTraceV1,
+-  F128StatementBindingTraceV1, F128StaticMatrixIdV1, F128StructuredWeightV1,
++  F128StaticMatrixIdV1, F128StructuredWeightV1,
+   F128VerifierPhaseV1, F128WiringTraceV1, F256IndexPairV1,
+   F256LigeritoMessageV1, StreamWordSourceV1,
+ };
+@@ -211,7 +211,7 @@
+     &self.f128_algebra
+   }
+ 
+-  fn recursive_operation_count(&self) -> u64 {
++  pub fn recursive_operation_count(&self) -> u64 {
+     self.operations.iter().map(Stage4TranscriptOpV1::recursive_len).sum()
+   }
+ }
+@@ -520,7 +520,7 @@
+     &self.jagged_root_claim
+   }
+ 
+-  fn recursive_operation_count(&self) -> u64 {
++  pub fn recursive_operation_count(&self) -> u64 {
+     self.operations.iter().map(Stage4TranscriptOpV1::recursive_len).sum()
+   }
+ 
+@@ -2402,7 +2402,7 @@
+     .params
+     .ligerito_verifier_config()
+     .map_err(|error| anyhow::anyhow!("Stage 4 Ligerito config: {error}"))?;
+-  if config.merkle_hash != flock_prover::hash::HashKind::Blake3 {
++  if config.merkle_hash != flock_prover::merkle::HashKind::Blake3 {
+     bail!("Stage 4 inner Ligerito requires the pinned BLAKE3 Merkle hash");
+   }
+   let log_n =
+@@ -3990,3 +3990,10 @@
+     assert_eq!(output.value(), &encode_f128(expected));
+   }
+ }
++
++/// Locate the native statement prefix, never infer bindings from equal values.
++pub fn statement_prefix_payloads<Ch: Challenger>(recording: &RecordingChallenger<Ch>) -> Result<[usize; 2]> {
++    let events = indexed_transcript_events(recording.shape().ops());
++    let mut cursor = IndexedTranscriptCursor::at_label(&events, b"flock-circuit-stmt-v2")?;
++    Ok([cursor.observe_bytes(32)?, cursor.observe_bytes(32)?])
++}
+--- a/fflonk/Cargo.toml
++++ b/fflonk/Cargo.toml
+@@ -14,6 +14,7 @@
+ blake3.workspace = true
+ ix-terminal-circuit.workspace = true
+ tiny-keccak.workspace = true
++rayon = "1.11"
+ 
+ [lints]
+ workspace = true
+--- a/fflonk/src/arithmetization.rs
++++ b/fflonk/src/arithmetization.rs
+@@ -4,7 +4,11 @@
+   CanonicalR1csV1, Constraint, ConstraintPhase, LinearCombination, R1csError,
+   R1csProjectionV1, Variable, Witness,
+ };
+-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
++use std::{
++  cell::RefCell,
++  collections::{BTreeMap, HashMap},
++  rc::Rc,
++};
+ 
+ /// Rows reserved at the end of the evaluation domain for prover blinding.
+ pub const FFLONK_BLINDING_ROWS: u64 = 2;
+@@ -28,7 +32,7 @@
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub struct PlonkCellV1 {
+   pub column: u8,
+-  pub row: u64,
++  pub row: u32,
+ }
+ 
+ /// One standard three-wire PLONK gate
+@@ -42,6 +46,90 @@
+   pub qm: Fr,
+   pub qo: Fr,
+   pub qc: Fr,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) struct StoredGate {
++  phase: Option<ConstraintPhase>,
++  wires: [u64; 3],
++  selectors: u32,
++}
++
++/// Gate rows sharing identical coefficient records.
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub struct PlonkGateRowsV1 {
++  rows: Vec<StoredGate>,
++  selectors: Vec<[Fr; 5]>,
++}
++
++impl PlonkGateRowsV1 {
++  pub fn len(&self) -> usize {
++    self.rows.len()
++  }
++  pub fn is_empty(&self) -> bool {
++    self.rows.is_empty()
++  }
++  pub fn selector_records(&self) -> usize {
++    self.selectors.len()
++  }
++  /// Stored payload only; excludes Vec spare capacity and allocator overhead.
++  pub fn storage_payload_bytes(&self) -> usize {
++    self.rows.len() * size_of::<StoredGate>()
++      + self.selectors.len() * size_of::<[Fr; 5]>()
++  }
++  pub fn get(&self, index: usize) -> Option<PlonkGateV1> {
++    self.rows.get(index).map(|row| self.decode(row))
++  }
++  pub fn iter(
++    &self,
++  ) -> impl ExactSizeIterator<Item = PlonkGateV1> + Clone + '_ {
++    self.rows.iter().map(|row| self.decode(row))
++  }
++  fn decode(&self, row: &StoredGate) -> PlonkGateV1 {
++    let [ql, qr, qm, qo, qc] = self.selectors[row.selectors as usize];
++    let wires = row.wires.map(|wire| {
++      if wire == 0 {
++        None
++      } else if wire >> 63 != 0 {
++        Some(PlonkWireV1::Auxiliary((wire & (u64::MAX >> 1)) - 1))
++      } else {
++        Some(PlonkWireV1::R1cs(Variable::from_index(
++          u32::try_from(wire - 1).expect("encoded R1CS index"),
++        )))
++      }
++    });
++    PlonkGateV1 { phase: row.phase, wires, ql, qr, qm, qo, qc }
++  }
++  fn encode(
++    &mut self,
++    gate: PlonkGateV1,
++    ids: &mut HashMap<[Fr; 5], u32>,
++  ) -> Result<StoredGate, PlonkArithmetizationError> {
++    let mut wires = [0; 3];
++    for (encoded, wire) in wires.iter_mut().zip(gate.wires) {
++      *encoded = match wire {
++        None => 0,
++        Some(PlonkWireV1::R1cs(variable)) => u64::from(variable.index()) + 1,
++        Some(PlonkWireV1::Auxiliary(index)) if index < (u64::MAX >> 1) => {
++          (1u64 << 63) | (index + 1)
++        },
++        Some(PlonkWireV1::Auxiliary(_)) => {
++          return Err(PlonkArithmetizationError::CountOverflow);
++        },
++      };
++    }
++    let coefficients = [gate.ql, gate.qr, gate.qm, gate.qo, gate.qc];
++    let selectors = if let Some(&id) = ids.get(&coefficients) {
++      id
++    } else {
++      let id = u32::try_from(self.selectors.len())
++        .map_err(|_| PlonkArithmetizationError::CountOverflow)?;
++      self.selectors.push(coefficients);
++      ids.insert(coefficients, id);
++      id
++    };
++    Ok(StoredGate { phase: gate.phase, wires, selectors })
++  }
+ }
+ 
+ impl PlonkGateV1 {
+@@ -270,7 +358,7 @@
+   r1cs_digest: [u8; 32],
+   r1cs_variables: u32,
+   census: PlonkGateCensusV1,
+-  gates: Vec<PlonkGateV1>,
++  gates: PlonkGateRowsV1,
+   sigma: [Vec<PlonkCellV1>; 3],
+ }
+ 
+@@ -289,7 +377,7 @@
+     &self.census
+   }
+ 
+-  pub fn gates(&self) -> &[PlonkGateV1] {
++  pub fn gates(&self) -> &PlonkGateRowsV1 {
+     &self.gates
+   }
+ 
+@@ -554,9 +642,12 @@
+   )?;
+   let domain_size = usize::try_from(census.domain_size)
+     .map_err(|_| PlonkArithmetizationError::CountOverflow)?;
+-  sink.gates.resize_with(domain_size, PlonkGateV1::blank);
++  let blank =
++    sink.gates.encode(PlonkGateV1::blank(), &mut sink.selector_ids)?;
++  sink.gates.rows.resize(domain_size, blank);
++  drop(sink.selector_ids);
+   let sigma = build_copy_permutation(
+-    &sink.gates,
++    sink.gates.iter(),
+     r1cs_variables,
+     census.auxiliary_wires,
+   )?;
+@@ -664,9 +755,10 @@
+     usize::try_from(arithmetization.census.public_input_rows)
+       .map_err(|_| PlonkArithmetizationError::CountOverflow)?;
+   let mut columns = core::array::from_fn(|_| vec![Fr::zero(); domain_size]);
++  // Values already live in the output column; retain only their definition row.
+   let mut auxiliary =
+     vec![
+-      None;
++      usize::MAX;
+       usize::try_from(arithmetization.census.auxiliary_wires,)
+         .map_err(|_| PlonkArithmetizationError::CountOverflow)?
+     ];
+@@ -688,15 +780,19 @@
+             usize::try_from(*index)
+               .map_err(|_| PlonkArithmetizationError::CountOverflow)?,
+           )
+-          .copied()
+-          .flatten(),
++          .and_then(|&definition| columns[2].get(definition).copied()),
+       };
+     }
+     if values[2].is_none()
+       && let Some(PlonkWireV1::Auxiliary(index)) = gate.wires[2]
+     {
++      let qo_inverse = if gate.qo == -Fr::one() || gate.qo == Fr::one() {
++        Some(gate.qo)
++      } else {
++        gate.qo.inverse()
++      };
+       let (Some(a), Some(b), Some(qo_inverse)) =
+-        (values[0], values[1], gate.qo.inverse())
++        (values[0], values[1], qo_inverse)
+       else {
+         return Err(PlonkArithmetizationError::InvalidAuxiliaryDefinition {
+           wire: index,
+@@ -715,7 +811,7 @@
+           wire: index,
+           row: row_u64,
+         })?;
+-      *slot = Some(value);
++      *slot = row;
+       values[2] = Some(value);
+     }
+     for (column, value) in values.iter().enumerate() {
+@@ -753,7 +849,8 @@
+ 
+ #[derive(Default)]
+ struct MaterializingSink {
+-  gates: Vec<PlonkGateV1>,
++  gates: PlonkGateRowsV1,
++  selector_ids: HashMap<[Fr; 5], u32>,
+   next_auxiliary: u64,
+   rows_by_phase: BTreeMap<ConstraintPhase, u64>,
+ }
+@@ -779,7 +876,8 @@
+       *count =
+         count.checked_add(1).ok_or(PlonkArithmetizationError::CountOverflow)?;
+     }
+-    self.gates.push(gate);
++    let row = self.gates.encode(gate, &mut self.selector_ids)?;
++    self.gates.rows.push(row);
+     Ok(())
+   }
+ }
+@@ -941,6 +1039,9 @@
+   combination: &LinearCombination,
+ ) -> Result<(), PlonkArithmetizationError> {
+   let (constant, terms) = split_combination(combination);
++  if terms.is_empty() && constant.is_zero() {
++    return Ok(());
++  }
+   if terms.len() <= 3 {
+     let mut wires = [None; 3];
+     let mut coefficients = [Fr::zero(); 3];
+@@ -1120,7 +1221,7 @@
+ }
+ 
+ fn build_copy_permutation(
+-  gates: &[PlonkGateV1],
++  gates: impl ExactSizeIterator<Item = PlonkGateV1>,
+   r1cs_variables: u32,
+   auxiliary_wires: u64,
+ ) -> Result<[Vec<PlonkCellV1>; 3], PlonkArithmetizationError> {
+@@ -1136,7 +1237,7 @@
+     (0..gates.len())
+       .map(|row| PlonkCellV1 {
+         column: u8::try_from(column).expect("three columns fit u8"),
+-        row: u64::try_from(row).expect("domain row fits u64"),
++        row: u32::try_from(row).expect("supported domain row fits u32"),
+       })
+       .collect()
+   });
+@@ -1149,7 +1250,7 @@
+   } else {
+     CopyTails::Sparse(BTreeMap::new())
+   };
+-  for (row, gate) in gates.iter().enumerate() {
++  for (row, gate) in gates.enumerate() {
+     for (column, wire) in gate.wires.iter().enumerate() {
+       if let Some(wire) = wire {
+         let index = match wire {
+@@ -1171,7 +1272,7 @@
+         };
+         let current = PlonkCellV1 {
+           column: u8::try_from(column).expect("three columns fit u8"),
+-          row: u64::try_from(row)
++          row: u32::try_from(row)
+             .map_err(|_| PlonkArithmetizationError::CountOverflow)?,
+         };
+         let encoded = u64::try_from(row * 3 + column)
+@@ -1226,7 +1327,7 @@
+         return Err(PlonkArithmetizationError::CopyPermutationMismatch {
+           source: PlonkCellV1 {
+             column: u8::try_from(column).expect("three columns fit u8"),
+-            row: u64::try_from(row)
++            row: u32::try_from(row)
+               .map_err(|_| PlonkArithmetizationError::CountOverflow)?,
+           },
+           target: *target,
+@@ -1366,7 +1467,7 @@
+         (0..gates.len())
+           .map(|row| PlonkCellV1 {
+             column: u8::try_from(column).unwrap(),
+-            row: row as u64,
++            row: row as u32,
+           })
+           .collect()
+       });
+@@ -1375,7 +1476,7 @@
+           if let Some(wire) = wire {
+             lists.entry(*wire).or_default().push(PlonkCellV1 {
+               column: u8::try_from(column).unwrap(),
+-              row: row as u64,
++              row: row as u32,
+             });
+           }
+         }
+@@ -1404,9 +1505,12 @@
+           });
+         }
+         let expected = occurrence_cycles(&gates);
+-        assert_eq!(build_copy_permutation(&gates, 6, 6).unwrap(), expected);
+         assert_eq!(
+-          build_copy_permutation(&gates, u32::MAX, 6).unwrap(),
++          build_copy_permutation(gates.iter().cloned(), 6, 6).unwrap(),
++          expected
++        );
++        assert_eq!(
++          build_copy_permutation(gates.iter().cloned(), u32::MAX, 6).unwrap(),
+           expected
+         );
+       }
+@@ -1416,20 +1520,20 @@
+   #[test]
+   fn copy_cycle_builder_rejects_overflow_and_undeclared_wires() {
+     assert_eq!(
+-      build_copy_permutation(&[], 1, u64::MAX),
++      build_copy_permutation(std::iter::empty(), 1, u64::MAX),
+       Err(PlonkArithmetizationError::CountOverflow)
+     );
+     let mut gate = PlonkGateV1::blank();
+     gate.wires[0] = Some(PlonkWireV1::R1cs(Variable::from_index(3)));
+     assert_eq!(
+-      build_copy_permutation(&[gate.clone()], 3, 0),
++      build_copy_permutation([gate.clone()].into_iter(), 3, 0),
+       Err(PlonkArithmetizationError::R1cs(R1csError::UnknownVariable(
+         Variable::from_index(3)
+       )))
+     );
+     gate.wires[0] = Some(PlonkWireV1::Auxiliary(5));
+     assert_eq!(
+-      build_copy_permutation(&[gate], 1, 5),
++      build_copy_permutation([gate].into_iter(), 1, 5),
+       Err(PlonkArithmetizationError::UnknownAuxiliaryWire { wire: 5, row: 0 })
+     );
+   }
+@@ -1497,7 +1601,7 @@
+       assert_eq!(arithmetization.census().constraint_rows, 1);
+       assert_eq!(arithmetization.census().auxiliary_wires, 0);
+       lower_plonk_witness(&arithmetization, &r1cs, &witness).unwrap();
+-      let gate = &arithmetization.gates()[1];
++      let gate = &arithmetization.gates().get(1).unwrap();
+       let mut assignment = witness.assignment().to_vec();
+       for seed in 0..16u64 {
+         assignment[x.index() as usize] = Fr::from(13 * seed) - Fr::from(2u64);
+@@ -1592,7 +1696,47 @@
+     let compiled = arithmetize_r1cs(&r1cs).unwrap();
+     let start = usize::try_from(census.public_input_rows).unwrap();
+     let end = start + usize::try_from(census.constraint_rows).unwrap();
+-    assert_eq!(streamed.borrow().as_slice(), &compiled.gates()[start..end]);
++    assert_eq!(
++      streamed.borrow().as_slice(),
++      compiled
++        .gates()
++        .iter()
++        .skip(start)
++        .take(end - start)
++        .collect::<Vec<_>>()
++        .as_slice()
++    );
++  }
++
++  #[test]
++  fn packed_gate_wires_preserve_tags_and_boundary_indices() {
++    let mut storage = PlonkGateRowsV1::default();
++    let mut ids = HashMap::new();
++    for wires in [
++      [
++        None,
++        Some(PlonkWireV1::R1cs(Variable::ONE)),
++        Some(PlonkWireV1::Auxiliary(0)),
++      ],
++      [
++        Some(PlonkWireV1::R1cs(Variable::from_index(u32::MAX))),
++        Some(PlonkWireV1::Auxiliary((1u64 << 63) - 2)),
++        None,
++      ],
++    ] {
++      let mut gate = PlonkGateV1::blank();
++      gate.wires = wires;
++      let encoded = storage.encode(gate.clone(), &mut ids).unwrap();
++      assert_eq!(storage.decode(&encoded), gate);
++    }
++    assert_eq!(storage.selector_records(), 1);
++    assert_eq!(size_of::<StoredGate>(), 32);
++    let mut invalid = PlonkGateV1::blank();
++    invalid.wires[0] = Some(PlonkWireV1::Auxiliary((1u64 << 63) - 1));
++    assert_eq!(
++      storage.encode(invalid, &mut ids),
++      Err(PlonkArithmetizationError::CountOverflow)
++    );
+   }
+ 
+   #[test]
+@@ -1601,19 +1745,20 @@
+     build_fixture(&mut builder);
+     let (r1cs, _) = builder.finish().unwrap();
+     let compiled = arithmetize_r1cs(&r1cs).unwrap();
+-    for gate in compiled.gates() {
++    for gate in compiled.gates().iter() {
+       let encoded = gate.to_record_bytes();
+-      assert_eq!(PlonkGateV1::from_record_bytes(&encoded).unwrap(), *gate,);
+-    }
+-
+-    let mut bad_padding = compiled.gates()[0].to_record_bytes();
++      assert_eq!(PlonkGateV1::from_record_bytes(&encoded).unwrap(), gate,);
++    }
++
++    let mut bad_padding = compiled.gates().get(0).unwrap().to_record_bytes();
+     bad_padding[PLONK_GATE_RECORD_BYTES - 1] = 1;
+     assert_eq!(
+       PlonkGateV1::from_record_bytes(&bad_padding),
+       Err(PlonkGateRecordError::NonzeroPadding),
+     );
+ 
+-    let mut noncanonical_field = compiled.gates()[0].to_record_bytes();
++    let mut noncanonical_field =
++      compiled.gates().get(0).unwrap().to_record_bytes();
+     noncanonical_field[PLONK_GATE_RECORD_HEADER_BYTES..][..32].fill(0xff);
+     assert_eq!(
+       PlonkGateV1::from_record_bytes(&noncanonical_field),
+--- a/fflonk/src/capacity.rs
++++ b/fflonk/src/capacity.rs
+@@ -2,7 +2,7 @@
+   FFLONK_POLYNOMIAL_CHUNK_FIELDS, FFLONK_SRS_DEGREE_OVERHEAD,
+   FFLONK_SRS_DOMAIN_MULTIPLIER, KZG_SRS_FILE_CHUNK_POINTS,
+   KZG_SRS_FILE_HEADER_BYTES, KzgSrsFileEncodingV1, PLONK_GATE_RECORD_BYTES,
+-  PlonkCellV1, PlonkGateCensusV1, PlonkGateV1,
++  PlonkCellV1, PlonkGateCensusV1,
+ };
+ use ark_bls12_381::{Fr, G1Affine};
+ use ark_ff::FftField;
+@@ -14,8 +14,8 @@
+ pub const BLS12_381_G1_COMPRESSED_BYTES: u64 = 48;
+ /// EIP-2537 uncompressed width of one BLS12-381 G1 point.
+ pub const BLS12_381_G1_EIP2537_BYTES: u64 = 128;
+-/// The prover multiplies three degree-(n-1) wire polynomials
+-/// and degree-(n+2) blinded Z, requiring a size-4n polynomial FFT.
++/// The memory prover requires a size-4n polynomial FFT. The file prover splits
++/// these products into bounded transforms.
+ pub const FFLONK_POLYNOMIAL_FFT_DOMAIN_MULTIPLIER: u64 = 4;
+ 
+ /// Checked production-storage census for one Stage 4 FFLONK domain.
+@@ -27,12 +27,15 @@
+ /// A sizing census may describe a domain above the field's FFT limit; these
+ /// payload sizes alone do not establish that the backend can use that domain.
+ /// The polynomial-FFT requirement and target-specific resident SRS/key lower
+-/// bound are reported separately from canonical storage widths.
++/// bound are reported separately from canonical storage widths. Shared selector
++/// records are excluded: their count depends on coefficients, not the row census.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub struct FflonkCapacityPlanV1 {
+   pub domain_size: u64,
+   pub polynomial_fft_domain_size: u64,
+   pub supported_polynomial_fft_domain: bool,
++  pub supported_file_workspace_domain: bool,
++  pub file_product_fft_domain_size: u64,
+   pub required_srs_degree: u64,
+   pub required_srs_g1_points: u64,
+   pub constraint_gate_stream_bytes: u64,
+@@ -64,19 +67,20 @@
+   pub file_key_polynomial_bytes: u64,
+   /// One 32-byte authentication digest per stored polynomial chunk.
+   pub file_key_authentication_bytes: u64,
+-  /// Typed gates/copy cells plus file-SRS and file-key authentication indexes.
++  /// Stored gate references/copy cells plus file-SRS and file-key indexes.
++  /// Shared selector records are additional (160 bytes per distinct record).
+   /// Uses the same exclusions as `file_srs_and_key_minimum_bytes`, also
+   /// excluding polynomial reader state, read buffers, and filesystem cache.
+   pub file_srs_and_file_key_minimum_bytes: u64,
+-  /// Single largest transform array used by the file prover workspace (4*n
+-  /// native Fr values). The second operand's evaluations live on disk.
++  /// Largest of the base-domain IFFT and bounded product transform arrays.
++  /// The second operand's evaluations live on disk.
+   pub file_workspace_fft_buffer_bytes: u64,
+   /// Bounded native-Fr roots cache for the largest file-workspace FFT.
+   pub file_workspace_fft_roots_bytes: u64,
+   /// Largest rolling quotient buffer (n native Fr values), used separately
+   /// from the FFT array. Does not include I/O buffers or authentication data.
+   pub file_workspace_quotient_ring_bytes: u64,
+-  /// Three native-Fr wire columns and the auxiliary-value cache still
++  /// Three native-Fr wire columns and the auxiliary definition-row cache still
+   /// materialized during witness lowering. Excludes the original witness.
+   pub file_workspace_witness_lowering_bytes: u64,
+   /// Retained file-SRS/file-key minimum plus the largest transform array and
+@@ -141,7 +145,7 @@
+   let polynomial_fft_domain_size =
+     bytes(census.domain_size, FFLONK_POLYNOMIAL_FFT_DOMAIN_MULTIPLIER)?;
+   let retained_key_bytes_per_row = u64::try_from(
+-    size_of::<PlonkGateV1>()
++    size_of::<crate::arithmetization::StoredGate>()
+       + 3 * size_of::<PlonkCellV1>()
+       + 24 * size_of::<Fr>(),
+   )
+@@ -181,9 +185,11 @@
+   )
+   .ok_or(FflonkCapacityError::CountOverflow)?;
+   let file_key_authentication_bytes = bytes(polynomial_chunks, 32)?;
+-  let arithmetization_bytes_per_row =
+-    u64::try_from(size_of::<PlonkGateV1>() + 3 * size_of::<PlonkCellV1>())
+-      .map_err(|_| FflonkCapacityError::CountOverflow)?;
++  let arithmetization_bytes_per_row = u64::try_from(
++    size_of::<crate::arithmetization::StoredGate>()
++      + 3 * size_of::<PlonkCellV1>(),
++  )
++  .map_err(|_| FflonkCapacityError::CountOverflow)?;
+   let file_srs_and_file_key_minimum_bytes =
+     bytes(census.domain_size, arithmetization_bytes_per_row)?
+       .checked_add(file_srs_authentication_bytes)
+@@ -191,10 +197,13 @@
+       .ok_or(FflonkCapacityError::CountOverflow)?;
+   let native_field_bytes = u64::try_from(size_of::<Fr>())
+     .map_err(|_| FflonkCapacityError::CountOverflow)?;
++  let file_product_fft_domain_size =
++    polynomial_fft_domain_size.min(crate::FFLONK_FILE_PRODUCT_FFT_LIMIT as u64);
++  let file_fft_domain = census.domain_size.max(file_product_fft_domain_size);
+   let file_workspace_fft_buffer_bytes =
+-    bytes(polynomial_fft_domain_size, native_field_bytes)?;
++    bytes(file_fft_domain, native_field_bytes)?;
+   let file_workspace_fft_roots_bytes = bytes(
+-    (polynomial_fft_domain_size / 2).min(FFLONK_POLYNOMIAL_CHUNK_FIELDS as u64),
++    (file_fft_domain / 2).min(FFLONK_POLYNOMIAL_CHUNK_FIELDS as u64),
+     native_field_bytes,
+   )?;
+   let file_workspace_quotient_ring_bytes =
+@@ -203,7 +212,7 @@
+     bytes(bytes(census.domain_size, 3)?, native_field_bytes)?
+       .checked_add(bytes(
+         census.auxiliary_wires,
+-        u64::try_from(size_of::<Option<Fr>>())
++        u64::try_from(size_of::<usize>())
+           .map_err(|_| FflonkCapacityError::CountOverflow)?,
+       )?)
+       .ok_or(FflonkCapacityError::CountOverflow)?;
+@@ -215,6 +224,9 @@
+   Ok(FflonkCapacityPlanV1 {
+     domain_size: census.domain_size,
+     polynomial_fft_domain_size,
++    supported_file_workspace_domain: census.domain_size
++      <= (1u64 << Fr::TWO_ADICITY),
++    file_product_fft_domain_size,
+     supported_polynomial_fft_domain: polynomial_fft_domain_size
+       <= (1_u64 << Fr::TWO_ADICITY),
+     required_srs_degree,
+@@ -306,7 +318,7 @@
+     );
+     assert_eq!(
+       plan.file_workspace_witness_lowering_bytes,
+-      (24 * size_of::<Fr>() + 2 * size_of::<Option<Fr>>()) as u64
++      (24 * size_of::<Fr>() + 2 * size_of::<usize>()) as u64
+     );
+   }
+ 
+@@ -318,6 +330,7 @@
+     let plan = plan_fflonk_capacity(&large).unwrap();
+     assert_eq!(plan.polynomial_fft_domain_size, 1u64 << 33);
+     assert!(!plan.supported_polynomial_fft_domain);
++    assert!(plan.supported_file_workspace_domain);
+     assert!(plan.materialized_srs_and_key_minimum_bytes > 512_000_000_000);
+     large.domain_size >>= 1;
+     large.padding_rows = large.domain_size - large.active_rows();
+@@ -329,7 +342,7 @@
+     assert_eq!(plan.file_key_authentication_bytes, 9_961_472);
+     assert_eq!(
+       plan.file_workspace_fft_buffer_bytes,
+-      (1u64 << 32) * size_of::<Fr>() as u64
++      (1u64 << 30) * size_of::<Fr>() as u64
+     );
+     assert_eq!(
+       plan.file_workspace_fft_roots_bytes,
+@@ -342,8 +355,11 @@
+         + plan.file_workspace_fft_roots_bytes
+     );
+     let arithmetization_bytes = (1u64 << 30)
+-      * u64::try_from(size_of::<PlonkGateV1>() + 3 * size_of::<PlonkCellV1>())
+-        .unwrap();
++      * u64::try_from(
++        size_of::<crate::arithmetization::StoredGate>()
++          + 3 * size_of::<PlonkCellV1>(),
++      )
++      .unwrap();
+     assert_eq!(
+       plan.file_srs_and_file_key_minimum_bytes,
+       arithmetization_bytes + 9_961_472 + 4_718_624
+--- a/fflonk/src/lib.rs
++++ b/fflonk/src/lib.rs
+@@ -20,6 +20,7 @@
+ mod proof;
+ mod prover;
+ mod prover_workspace;
++pub use prover_workspace::FFLONK_FILE_PRODUCT_FFT_LIMIT;
+ mod transcript;
+ mod verifier;
+ mod verifier_key;
+@@ -27,9 +28,9 @@
+ pub use arithmetization::{
+   FFLONK_BLINDING_ROWS, FflonkCheckedWitnessV1, PLONK_GATE_RECORD_BYTES,
+   PlonkArithmetizationError, PlonkArithmetizationV1, PlonkCellV1,
+-  PlonkGateCensusV1, PlonkGateProjectionV1, PlonkGateRecordError, PlonkGateV1,
+-  PlonkWireV1, PlonkWitnessV1, arithmetize_r1cs, arithmetize_r1cs_owned,
+-  lower_plonk_witness,
++  PlonkGateCensusV1, PlonkGateProjectionV1, PlonkGateRecordError,
++  PlonkGateRowsV1, PlonkGateV1, PlonkWireV1, PlonkWitnessV1, arithmetize_r1cs,
++  arithmetize_r1cs_owned, lower_plonk_witness,
+ };
+ pub use capacity::{
+   BLS12_381_G1_COMPRESSED_BYTES, BLS12_381_G1_EIP2537_BYTES,
+@@ -69,8 +70,9 @@
+ 
+ pub use proof::{
+   BLS12_381_SCALAR_BYTES, Coordinate, EIP2537_G1_BYTES, FFLONK_COMMITMENTS,
+-  FFLONK_EVALUATIONS, FFLONK_PROOF_BYTES, FflonkCommitmentsV1,
+-  FflonkEvaluationsV1, FflonkProofDecodeError, FflonkProofV1,
++  FFLONK_COMPACT_PROOF_BYTES, FFLONK_EVALUATIONS, FFLONK_PROOF_BYTES,
++  FFLONK_QR_PROOF_BYTES, FflonkCommitmentsV1, FflonkEvaluationsV1,
++  FflonkProofDecodeError, FflonkProofV1, FflonkQrError,
+ };
+ pub use prover::{
+   FflonkBlindingV1, FflonkProverError, FflonkProverOutputV1, prove_fflonk,
+--- a/fflonk/src/preprocessing_file.rs
++++ b/fflonk/src/preprocessing_file.rs
+@@ -15,6 +15,36 @@
+ use ark_ff::{FftField, Field, Zero};
+ use ark_poly::EvaluationDomain;
+ use std::io::{Read, Seek, Write};
++
++// Random-access omega powers using O(sqrt(n)) storage instead of a full column.
++struct DomainPowers {
++  low: Vec<Fr>,
++  high: Vec<Fr>,
++}
++
++impl DomainPowers {
++  fn new(omega: Fr, n: usize) -> Self {
++    let stride = 1usize << n.ilog2().div_ceil(2);
++    let powers = |base, count| {
++      let mut value = Fr::ONE;
++      (0..count)
++        .map(|_| {
++          let result = value;
++          value *= base;
++          result
++        })
++        .collect()
++    };
++    Self {
++      low: powers(omega, stride),
++      high: powers(omega.pow([stride as u64]), n.div_ceil(stride)),
++    }
++  }
++
++  fn get(&self, row: usize) -> Fr {
++    self.low[row % self.low.len()] * self.high[row / self.low.len()]
++  }
++}
+ 
+ /// A proving key with authenticated polynomials in caller-owned scratch storage.
+ ///
+@@ -142,7 +172,7 @@
+         _ => unreachable!("five selectors"),
+       })
+       .collect();
+-    domain.ifft_in_place(&mut values);
++    crate::prover_workspace::bounded_fft(&mut values, &domain, true);
+     hash_fields(&mut hasher, &values);
+     let stored = file.write_polynomial(
+       offset,
+@@ -155,18 +185,20 @@
+   let k1 = Fr::GENERATOR;
+   let k2 = k1.square();
+   let cosets = [Fr::ONE, k1, k2];
+-  let omega_powers: Vec<Fr> = domain.elements().collect();
++  let omega_powers = DomainPowers::new(domain.group_gen, n);
+   for targets in arithmetization.sigma() {
+     let mut values = Vec::with_capacity(n);
+     for target in targets {
+       let row = usize::try_from(target.row)
+         .map_err(|_| FflonkPreprocessingError::CountOverflow)?;
+-      let omega =
+-        omega_powers.get(row).ok_or(FflonkPreprocessingError::CountOverflow)?;
++      if row >= n {
++        return Err(FflonkPreprocessingError::CountOverflow);
++      }
++      let omega = omega_powers.get(row);
+       let coset = cosets
+         .get(usize::from(target.column))
+         .ok_or(FflonkPreprocessingError::CountOverflow)?;
+-      values.push(*omega * coset);
++      values.push(omega * coset);
+     }
+     if values.len() != n {
+       return Err(FflonkPreprocessingError::CountOverflow);
+@@ -178,7 +210,7 @@
+     )?;
+     offset = stored.end();
+     sigma_evaluations.push(stored);
+-    domain.ifft_in_place(&mut values);
++    crate::prover_workspace::bounded_fft(&mut values, &domain, true);
+     hash_fields(&mut hasher, &values);
+     let stored = file.write_polynomial(
+       offset,
+@@ -285,6 +317,27 @@
+     CanonicalR1csV1, ConstraintPhase, LinearCombination, R1csBuilder, Witness,
+   };
+   use std::io::{Cursor, SeekFrom};
++
++  #[test]
++  fn split_domain_powers_match_every_root_and_largest_domain_boundaries() {
++    for log in 0..=16 {
++      let n = 1usize << log;
++      let omega = Fr::get_root_of_unity(n as u64).unwrap();
++      let powers = DomainPowers::new(omega, n);
++      let mut expected = Fr::ONE;
++      for row in 0..n {
++        assert_eq!(powers.get(row), expected);
++        expected *= omega;
++      }
++    }
++    let n = 1usize << 32;
++    let omega = Fr::get_root_of_unity(n as u64).unwrap();
++    let powers = DomainPowers::new(omega, n);
++    assert_eq!(powers.low.len() + powers.high.len(), 131072);
++    for row in [0, 1, 65535, 65536, 65537, n / 2, n - 1] {
++      assert_eq!(powers.get(row), omega.pow([row as u64]));
++    }
++  }
+ 
+   fn fixture(count: u64) -> (CanonicalR1csV1, Witness) {
+     let mut builder = R1csBuilder::new();
+--- a/fflonk/src/proof.rs
++++ b/fflonk/src/proof.rs
+@@ -1,5 +1,6 @@
+ use ark_bls12_381::{Fq, Fr, G1Affine};
+-use ark_ff::{BigInteger, PrimeField};
++use ark_ff::{BigInteger, Field, PrimeField};
++use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+ use core::fmt;
+ 
+ /// Number of G1 commitments in the Ix Stage 4 FFLONK proof profile.
+@@ -17,6 +18,12 @@
+ /// Exact encoded width of an Ix Stage 4 FFLONK proof.
+ pub const FFLONK_PROOF_BYTES: usize = FFLONK_COMMITMENTS * EIP2537_G1_BYTES
+   + FFLONK_EVALUATIONS * BLS12_381_SCALAR_BYTES;
++
++pub const FFLONK_COMPACT_PROOF_BYTES: usize =
++  FFLONK_COMMITMENTS * 48 + FFLONK_EVALUATIONS * BLS12_381_SCALAR_BYTES;
++
++/// Compressed transport with T1(xi * omega) reconstructed from Z(xi * omega).
++pub const FFLONK_QR_PROOF_BYTES: usize = FFLONK_COMPACT_PROOF_BYTES - 32;
+ 
+ const EIP2537_BASE_FIELD_BYTES: usize = 64;
+ 
+@@ -62,6 +69,106 @@
+ }
+ 
+ impl FflonkProofV1 {
++  /// Requires the verifier key and public inputs again when decoding.
++  pub fn to_qr_bytes(
++    &self,
++    key: &crate::FflonkVerificationKeyV1,
++    public_inputs: &[Fr],
++  ) -> Result<[u8; FFLONK_QR_PROOF_BYTES], FflonkQrError> {
++    if self.evaluations[13] != self.reconstruct_t1w(key, public_inputs)? {
++      return Err(FflonkQrError::InconsistentEvaluation);
++    }
++    let compact = self.to_compact_bytes();
++    let mut bytes = [0; FFLONK_QR_PROOF_BYTES];
++    bytes[..608].copy_from_slice(&compact[..608]);
++    bytes[608..].copy_from_slice(&compact[640..]);
++    Ok(bytes)
++  }
++
++  /// Reconstructs the original transcript; callers must still verify the proof.
++  pub fn from_qr_bytes(
++    bytes: &[u8],
++    key: &crate::FflonkVerificationKeyV1,
++    public_inputs: &[Fr],
++  ) -> Result<Self, FflonkQrError> {
++    if bytes.len() != FFLONK_QR_PROOF_BYTES {
++      return Err(FflonkQrError::Encoding(
++        FflonkProofDecodeError::WrongLength {
++          expected: FFLONK_QR_PROOF_BYTES,
++          actual: bytes.len(),
++        },
++      ));
++    }
++    let mut compact = [0; FFLONK_COMPACT_PROOF_BYTES];
++    compact[..608].copy_from_slice(&bytes[..608]);
++    compact[640..].copy_from_slice(&bytes[608..]);
++    let mut proof =
++      Self::from_compact_bytes(&compact).map_err(FflonkQrError::Encoding)?;
++    proof.evaluations[13] = proof.reconstruct_t1w(key, public_inputs)?;
++    Ok(proof)
++  }
++
++  fn reconstruct_t1w(
++    &self,
++    key: &crate::FflonkVerificationKeyV1,
++    public_inputs: &[Fr],
++  ) -> Result<Fr, FflonkQrError> {
++    // xi is derived before evaluations enter the transcript.
++    let (challenges, _) =
++      crate::derive_fflonk_challenges(key, self, public_inputs)
++        .map_err(FflonkQrError::Transcript)?;
++    let denominator =
++      Fr::from(key.domain_size()) * (challenges.xi_omega - Fr::from(1u64));
++    let inverse =
++      denominator.inverse().ok_or(FflonkQrError::SingularChallenge)?;
++    Ok((self.evaluations[12] - Fr::from(1u64)) * inverse)
++  }
++
++  /// Canonical compressed G1 points followed by the existing big-endian scalars.
++  pub fn to_compact_bytes(&self) -> [u8; FFLONK_COMPACT_PROOF_BYTES] {
++    let mut encoded = [0u8; FFLONK_COMPACT_PROOF_BYTES];
++    for (i, point) in self.commitments.iter().enumerate() {
++      point
++        .serialize_compressed(&mut &mut encoded[i * 48..(i + 1) * 48])
++        .expect("fixed compressed G1 buffer");
++    }
++    for (i, value) in self.evaluations.iter().enumerate() {
++      encode_field_be(value, &mut encoded[192 + i * 32..192 + (i + 1) * 32]);
++    }
++    encoded
++  }
++
++  pub fn from_compact_bytes(
++    bytes: &[u8],
++  ) -> Result<Self, FflonkProofDecodeError> {
++    if bytes.len() != FFLONK_COMPACT_PROOF_BYTES {
++      return Err(FflonkProofDecodeError::WrongLength {
++        expected: FFLONK_COMPACT_PROOF_BYTES,
++        actual: bytes.len(),
++      });
++    }
++    let mut commitments = [G1Affine::identity(); FFLONK_COMMITMENTS];
++    for (i, point) in commitments.iter_mut().enumerate() {
++      let encoded = &bytes[i * 48..(i + 1) * 48];
++      *point = G1Affine::deserialize_compressed(encoded).map_err(|_| {
++        FflonkProofDecodeError::InvalidCompressedPoint { commitment: i }
++      })?;
++      let mut canonical = [0u8; 48];
++      point.serialize_compressed(&mut canonical[..]).expect("fixed G1 buffer");
++      if canonical != encoded {
++        return Err(FflonkProofDecodeError::InvalidCompressedPoint {
++          commitment: i,
++        });
++      }
++    }
++    let mut evaluations = [Fr::from(0u64); FFLONK_EVALUATIONS];
++    for (i, value) in evaluations.iter_mut().enumerate() {
++      *value = decode_field_be(&bytes[192 + i * 32..192 + (i + 1) * 32])
++        .ok_or(FflonkProofDecodeError::NonCanonicalScalar { index: i })?;
++    }
++    Ok(Self { commitments, evaluations })
++  }
++
+   /// Returns commitment slots with their protocol names.
+   #[must_use]
+   pub fn named_commitments(&self) -> FflonkCommitmentsV1 {
+@@ -143,9 +250,33 @@
+   }
+ }
+ 
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum FflonkQrError {
++  Encoding(FflonkProofDecodeError),
++  Transcript(crate::FflonkTranscriptError),
++  SingularChallenge,
++  InconsistentEvaluation,
++}
++
++impl fmt::Display for FflonkQrError {
++  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++    match self {
++      Self::Encoding(error) => error.fmt(f),
++      Self::Transcript(error) => error.fmt(f),
++      Self::SingularChallenge => {
++        f.write_str("singular T1 reconstruction point")
++      },
++      Self::InconsistentEvaluation => f.write_str("inconsistent T1 evaluation"),
++    }
++  }
++}
++
++impl std::error::Error for FflonkQrError {}
++
+ /// Why a Stage 4 FFLONK proof failed canonical decoding.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub enum FflonkProofDecodeError {
++  InvalidCompressedPoint { commitment: usize },
+   WrongLength { expected: usize, actual: usize },
+   NonCanonicalBaseField { commitment: usize, coordinate: Coordinate },
+   PointNotOnCurve { commitment: usize },
+@@ -163,6 +294,10 @@
+ impl fmt::Display for FflonkProofDecodeError {
+   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+     match self {
++      Self::InvalidCompressedPoint { commitment } => write!(
++        formatter,
++        "commitment {commitment} has an invalid compressed encoding"
++      ),
+       Self::WrongLength { expected, actual } => write!(
+         formatter,
+         "wrong proof length: expected {expected} bytes, got {actual}",
+@@ -393,4 +528,38 @@
+       Err(FflonkProofDecodeError::NonCanonicalScalar { index: 0 }),
+     );
+   }
+-}
++  #[test]
++  fn compact_transport_is_canonical_and_checks_subgroups() {
++    for proof in [
++      sample_proof(),
++      FflonkProofV1 {
++        commitments: [G1Affine::identity(); 4],
++        evaluations: [Fr::from(0u64); 15],
++      },
++    ] {
++      let bytes = proof.to_compact_bytes();
++      assert_eq!(bytes.len(), 672);
++      assert_eq!(FflonkProofV1::from_compact_bytes(&bytes).unwrap(), proof);
++      assert!(FflonkProofV1::from_compact_bytes(&bytes[..671]).is_err());
++      let mut bad = bytes;
++      bad[192..224].copy_from_slice(&Fr::MODULUS.to_bytes_be());
++      assert!(FflonkProofV1::from_compact_bytes(&bad).is_err());
++      for i in 0..4 {
++        let mut bad = bytes;
++        bad[i * 48..(i + 1) * 48].fill(255);
++        assert!(FflonkProofV1::from_compact_bytes(&bad).is_err());
++      }
++    }
++    let point = (0u64..)
++      .find_map(|x| {
++        G1Affine::get_point_from_x_unchecked(Fq::from(x), false)
++          .filter(|p| !p.is_in_correct_subgroup_assuming_on_curve())
++      })
++      .unwrap();
++    let mut proof = sample_proof();
++    proof.commitments[0] = point;
++    assert!(
++      FflonkProofV1::from_compact_bytes(&proof.to_compact_bytes()).is_err()
++    );
++  }
++}
+--- a/fflonk/src/prover.rs
++++ b/fflonk/src/prover.rs
+@@ -142,7 +142,8 @@
+ /// values, and failures can leave a partial file. Live regions are recycled
+ /// when their polynomials are dropped. The file is never truncated.
+ ///
+-/// Arithmetic uses one resident FFT array (at most 4*n fields), bounded roots
++/// Products use bounded transforms and exact coefficient splitting; base IFFTs
++/// retain n fields. Arithmetic also uses bounded roots
+ /// and I/O buffers, and at most n fields for quotient division. Witness
+ /// lowering still materializes three columns. The relation, original witness,
+ /// proving key, SRS, allocator, and OS cache have additional memory costs;
+@@ -254,7 +255,9 @@
+   )?;
+   let domain_size = usize::try_from(verification_key.domain_size())
+     .map_err(|_| FflonkProverError::Shape("domain exceeds usize"))?;
+-  validate_polynomial_domain(domain_size)?;
++  if matches!(ws, ProverWorkspace::Memory) {
++    validate_polynomial_domain(domain_size)?;
++  }
+   let plonk_witness = witness.lower(preprocessed.arithmetization())?;
+   let domain = Radix2EvaluationDomain::<Fr>::new(domain_size)
+     .ok_or(FflonkProverError::Shape("unsupported FFT domain"))?;
+@@ -1300,4 +1303,100 @@
+       ));
+     }
+   }
+-}
++  #[test]
++  fn bounded_products_produce_the_identical_verified_compact_proof() {
++    let (r1cs, witness) = fixture();
++    let gates = arithmetize_r1cs(&r1cs).unwrap();
++    let degree =
++      required_fflonk_srs_degree(gates.census().domain_size).unwrap() as usize;
++    let srs = test_srs(degree, Fr::from(29u64));
++    let key = preprocess_fflonk(&srs, gates).unwrap();
++    let blinding = FflonkBlindingV1 {
++      wire_evaluations: [Fr::from(17u64); 6],
++      z_coefficients: [Fr::from(23u64); 3],
++    };
++    let expected = prove_fflonk(&srs, &key, &r1cs, &witness, blinding).unwrap();
++    for limit in [2, 8, 16] {
++      let ws =
++        ProverWorkspace::file_limited(std::io::Cursor::new(Vec::new()), limit)
++          .unwrap();
++      let actual = prove_in_workspace(
++        &srs,
++        &key,
++        ProverWitness::Borrowed { r1cs: &r1cs, witness: &witness },
++        blinding,
++        &ws,
++      )
++      .unwrap();
++      assert_eq!(actual.proof, expected.proof);
++      let decoded =
++        FflonkProofV1::from_compact_bytes(&actual.proof.to_compact_bytes())
++          .unwrap();
++      assert!(
++        verify_fflonk(&key.verification_key(), &decoded, &actual.public_inputs)
++          .unwrap()
++      );
++      let qr = actual
++        .proof
++        .to_qr_bytes(&key.verification_key(), &actual.public_inputs)
++        .unwrap();
++      assert_eq!(qr.len(), 640);
++      let reconstructed = FflonkProofV1::from_qr_bytes(
++        &qr,
++        &key.verification_key(),
++        &actual.public_inputs,
++      )
++      .unwrap();
++      assert_eq!(reconstructed, actual.proof);
++      assert!(
++        verify_fflonk(
++          &key.verification_key(),
++          &reconstructed,
++          &actual.public_inputs
++        )
++        .unwrap()
++      );
++      assert!(
++        FflonkProofV1::from_qr_bytes(
++          &qr[..639],
++          &key.verification_key(),
++          &actual.public_inputs
++        )
++        .is_err()
++      );
++      assert!(
++        FflonkProofV1::from_qr_bytes(&qr, &key.verification_key(), &[])
++          .is_err()
++      );
++      let mut malformed = qr;
++      malformed[192..224].fill(255);
++      assert!(
++        FflonkProofV1::from_qr_bytes(
++          &malformed,
++          &key.verification_key(),
++          &actual.public_inputs
++        )
++        .is_err()
++      );
++      let mut inconsistent = actual.proof.clone();
++      inconsistent.evaluations[13] += Fr::one();
++      assert!(
++        inconsistent
++          .to_qr_bytes(&key.verification_key(), &actual.public_inputs)
++          .is_err()
++      );
++      let mut wrong = actual.public_inputs.clone();
++      wrong[0] += Fr::one();
++      assert!(
++        !verify_fflonk(&key.verification_key(), &decoded, &wrong).unwrap()
++      );
++      let wrong_reconstruction =
++        FflonkProofV1::from_qr_bytes(&qr, &key.verification_key(), &wrong)
++          .unwrap();
++      assert!(
++        !verify_fflonk(&key.verification_key(), &wrong_reconstruction, &wrong)
++          .unwrap()
++      );
++    }
++  }
++}
+--- a/fflonk/src/prover_workspace.rs
++++ b/fflonk/src/prover_workspace.rs
+@@ -21,6 +21,28 @@
+ type Source<'a> = &'a dyn FflonkPolynomialSourceV1;
+ type Result<T> = core::result::Result<T, FflonkProverError>;
+ 
++/// Product transforms use at most 2^24 fields; base-domain IFFTs are separate.
++pub const FFLONK_FILE_PRODUCT_FFT_LIMIT: usize = 1 << 24;
++
++struct Window<'a> {
++  source: Source<'a>,
++  start: usize,
++  len: usize,
++}
++impl FflonkPolynomialSourceV1 for Window<'_> {
++  fn len(&self) -> usize {
++    self.len
++  }
++  fn read_fields(
++    &self,
++    start: usize,
++    output: &mut [Fr],
++  ) -> core::result::Result<(), FflonkStorageError> {
++    checked_range(self.len, start, output.len())?;
++    self.source.read_fields(self.start + start, output)
++  }
++}
++
+ pub(crate) enum ProverWorkspace<R> {
+   Memory,
+   File(Arc<ScratchFile<R>>),
+@@ -32,6 +54,7 @@
+ }
+ 
+ pub(crate) struct ScratchFile<R> {
++  product_fft_limit: usize,
+   file: PolynomialFile<R>,
+   space: Mutex<SpaceAllocator>,
+ }
+@@ -155,7 +178,21 @@
+ 
+ impl<R: Read + Write + Seek> ProverWorkspace<R> {
+   pub(crate) fn file(storage: R) -> Result<Self> {
++    Self::file_limited(storage, FFLONK_FILE_PRODUCT_FFT_LIMIT)
++  }
++
++  pub(crate) fn file_limited(
++    storage: R,
++    product_fft_limit: usize,
++  ) -> Result<Self> {
++    if product_fft_limit < 2
++      || !product_fft_limit.is_power_of_two()
++      || product_fft_limit > FFLONK_FILE_PRODUCT_FFT_LIMIT
++    {
++      return Err(FflonkProverError::Shape("invalid product FFT limit"));
++    }
+     Ok(Self::File(Arc::new(ScratchFile {
++      product_fft_limit,
+       file: PolynomialFile::new(storage)?,
+       space: Mutex::new(SpaceAllocator::default()),
+     })))
+@@ -276,6 +313,19 @@
+     left: Source<'_>,
+     right: Source<'_>,
+   ) -> Result<ProverPolynomial<R>> {
++    let limit = match self {
++      Self::File(file) => file.product_fft_limit,
++      Self::Memory => FFLONK_FILE_PRODUCT_FFT_LIMIT,
++    };
++    self.mul_limited(left, right, limit)
++  }
++
++  fn mul_limited(
++    &self,
++    left: Source<'_>,
++    right: Source<'_>,
++    fft_limit: usize,
++  ) -> Result<ProverPolynomial<R>> {
+     let left_len = left.nonzero_len()?;
+     let right_len = right.nonzero_len()?;
+     if left_len == 0 || right_len == 0 {
+@@ -284,6 +334,9 @@
+     let len = left_len
+       .checked_add(right_len - 1)
+       .ok_or(FflonkProverError::Shape("polynomial product length overflow"))?;
++    if !matches!(self, Self::Memory) && len > fft_limit {
++      return self.mul_split(left, left_len, right, right_len, fft_limit);
++    }
+     let domain = Radix2EvaluationDomain::<Fr>::new(len)
+       .ok_or(FflonkProverError::Shape("unsupported product FFT domain"))?;
+     if matches!(self, Self::Memory) {
+@@ -308,6 +361,71 @@
+     bounded_fft(&mut values, &domain, true);
+     values.truncate(len);
+     self.store_vec(values, true)
++  }
++
++  // Exact coefficient Karatsuba. Authentication and bounded reads remain on
++  // every temporary polynomial; no new root of unity or protocol change.
++  fn mul_split(
++    &self,
++    left: Source<'_>,
++    left_len: usize,
++    right: Source<'_>,
++    right_len: usize,
++    fft_limit: usize,
++  ) -> Result<ProverPolynomial<R>> {
++    if fft_limit < 2 || !fft_limit.is_power_of_two() {
++      return Err(FflonkProverError::Shape("invalid product FFT limit"));
++    }
++    let split = left_len.max(right_len).div_ceil(2);
++    let a0 = Window { source: left, start: 0, len: left_len.min(split) };
++    let a1 = Window {
++      source: left,
++      start: a0.len,
++      len: left_len.saturating_sub(split),
++    };
++    let b0 = Window { source: right, start: 0, len: right_len.min(split) };
++    let b1 = Window {
++      source: right,
++      start: b0.len,
++      len: right_len.saturating_sub(split),
++    };
++    let low = self.mul_limited(&a0, &b0, fft_limit)?;
++    let high = self.mul_limited(&a1, &b1, fft_limit)?;
++    let middle = if a1.len == 0 {
++      self.mul_limited(&a0, &b1, fft_limit)?
++    } else if b1.len == 0 {
++      self.mul_limited(&a1, &b0, fft_limit)?
++    } else {
++      let a = self.sum(&[(&a0, Fr::one()), (&a1, Fr::one())])?;
++      let b = self.sum(&[(&b0, Fr::one()), (&b1, Fr::one())])?;
++      let product = self.mul_limited(&a, &b, fft_limit)?;
++      self.sum(&[
++        (&product, Fr::one()),
++        (&low, -Fr::one()),
++        (&high, -Fr::one()),
++      ])?
++    };
++    let len = left_len
++      .checked_add(right_len - 1)
++      .ok_or(FflonkProverError::Shape("product length overflow"))?;
++    let mut buffer = vec![Fr::zero(); len.min(FFLONK_POLYNOMIAL_CHUNK_FIELDS)];
++    self.generate(len, true, |start, output| {
++      output.fill(Fr::zero());
++      for (source, shift) in [(&low, 0), (&middle, split), (&high, 2 * split)] {
++        let begin = start.max(shift);
++        let end = (start + output.len()).min(shift + source.len());
++        if begin < end {
++          let input = &mut buffer[..end - begin];
++          source.read_fields(begin - shift, input)?;
++          for (target, value) in
++            output[begin - start..end - start].iter_mut().zip(input)
++          {
++            *target += *value;
++          }
++        }
++      }
++      Ok(())
++    })
+   }
+ 
+   pub(crate) fn sum(
+@@ -570,11 +688,12 @@
+ /// retains a domain/2 roots table; here at most one authenticated-chunk-sized
+ /// roots tile coexists with the single transform buffer. All domains used by
+ /// this prover are unshifted roots-of-unity domains.
+-fn bounded_fft(
++pub(crate) fn bounded_fft(
+   values: &mut Vec<Fr>,
+   domain: &Radix2EvaluationDomain<Fr>,
+   inverse: bool,
+ ) {
++  use rayon::prelude::*;
+   let size = domain.size();
+   debug_assert_eq!(domain.coset_offset(), Fr::one());
+   values.resize(size, Fr::zero());
+@@ -602,18 +721,34 @@
+         *root = power;
+         power *= step;
+       }
+-      for block in values.chunks_exact_mut(width) {
++      let butterfly = |low: &mut Fr, high: &mut Fr, root: &Fr| {
++        let product = *high * root;
++        let original = *low;
++        *low = original + product;
++        *high = original - product;
++      };
++      let process = |block: &mut [Fr]| {
+         let (low, high) = block.split_at_mut(half);
+-        for ((low, high), root) in low[start..start + count]
+-          .iter_mut()
+-          .zip(&mut high[start..start + count])
+-          .zip(&roots[..count])
+-        {
+-          let product = *high * root;
+-          let original = *low;
+-          *low = original + product;
+-          *high = original - product;
+-        }
++        let low = &mut low[start..start + count];
++        let high = &mut high[start..start + count];
++        if count >= 4096 && size / width < rayon::current_num_threads() {
++          low
++            .par_iter_mut()
++            .zip(high)
++            .zip(&roots[..count])
++            .for_each(|((low, high), root)| butterfly(low, high, root));
++        } else {
++          for ((low, high), root) in
++            low.iter_mut().zip(high).zip(&roots[..count])
++          {
++            butterfly(low, high, root);
++          }
++        }
++      };
++      if size >= 65536 {
++        values.par_chunks_mut(width).for_each(process);
++      } else {
++        values.chunks_mut(width).for_each(process);
+       }
+     }
+   }
+@@ -944,4 +1079,34 @@
+     assert_eq!(read(&live), values(8));
+     drop(live);
+   }
+-}
++  #[test]
++  fn split_products_match_schoolbook_with_unequal_lengths_and_cancellation() {
++    let ws = workspace();
++    for (a, b) in [(0, 10), (1, 129), (3, 127), (17, 19), (64, 65), (129, 83)] {
++      for cancel in [false, true] {
++        let left = values(a);
++        let mut right = values(b);
++        if cancel {
++          for (i, value) in right.iter_mut().enumerate() {
++            if i % 2 == 0 {
++              *value = -*value;
++            }
++          }
++        }
++        let mut expected =
++          vec![Fr::zero(); if a == 0 || b == 0 { 0 } else { a + b - 1 }];
++        for (i, x) in left.iter().enumerate() {
++          for (j, y) in right.iter().enumerate() {
++            expected[i + j] += *x * y;
++          }
++        }
++        trim(&mut expected);
++        let l = ws.store_vec(left, true).unwrap();
++        let r = ws.store_vec(right, true).unwrap();
++        for limit in [2, 8, 32, 128] {
++          assert_eq!(read(&ws.mul_limited(&l, &r, limit).unwrap()), expected);
++        }
++      }
++    }
++  }
++}
+--- a/exporter/src/lib.rs
++++ b/exporter/src/lib.rs
+@@ -39,12 +39,10 @@
+   F128MergedPcsFrontendTraceV1, F128MergedPcsRoundV1, F128MultipointRoundV1,
+   F128MultipointTwistedAssistCensusV1, F128MultipointTwistedAssistTraceV1,
+   F128OperationV1, F128ReferenceV1, F128RingSwitchTraceV1,
+-  F128StaticMatrixIdV1, F128StructuredWeightV1,
+-  F128VerifierPhaseV1, F128WiringTraceV1, F256IndexPairV1,
+-  F256LigeritoMessageV1, StreamWordSourceV1,
++  F128StaticMatrixIdV1, F128StructuredWeightV1, F128VerifierPhaseV1,
++  F128WiringTraceV1, F256IndexPairV1, F256LigeritoMessageV1,
++  StreamWordSourceV1,
+ };
+-
+-
+ 
+ pub const STAGE4_FLOCK_VERIFIER_WITNESS_DOMAIN: &[u8; 8] = b"IXFLK4W1";
+ pub const STAGE4_MATRIX_ACCUMULATOR_TRANSCRIPT_DOMAIN: &[u8] =
+@@ -582,10 +580,6 @@
+   pub jagged: F128JaggedAccumulatorCensusV1,
+ }
+ 
+-
+-
+-
+-
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub struct Stage4FlockVerifierCensusV1 {
+   pub public_values: u64,
+@@ -806,8 +800,6 @@
+     Ok(())
+   }
+ }
+-
+-
+ 
+ /// Export Flock's real Product-GKR wiring verifier into a neutral arithmetic
+ /// DAG. The two circuit-static helper evaluations intentionally remain
+@@ -2392,8 +2384,26 @@
+   proof: &MergedOpenProof,
+   frontend: &F128MergedPcsFrontendTraceV1,
+ ) -> Result<Stage4FlockInnerLigeritoWitnessV1> {
++  export_packed_direct_ligerito(
++    recording,
++    commitment,
++    &proof.inner,
++    proof.q_eval,
++    frontend.topology_digest(),
++    Some(frontend.q_eval_observation),
++  )
++}
++
++/// Export one packed-direct opening, with its evaluation point bound by the caller.
++pub fn export_packed_direct_ligerito<Ch: Challenger>(
++  recording: &RecordingChallenger<Ch>,
++  commitment: &Commitment,
++  inner: &flock_prover::pcs::BatchOpeningProofLigerito,
++  q_eval: F128,
++  frontend_topology_digest: [u8; 32],
++  expected_q_observation: Option<u64>,
++) -> Result<Stage4FlockInnerLigeritoWitnessV1> {
+   const LOG_PACKING: usize = 7;
+-  let inner = &proof.inner;
+   let ligerito_proof = &inner.ligerito;
+   if !inner.ring_switches.is_empty() || !inner.batching_nonces.is_empty() {
+     bail!("Stage 4 inner Ligerito is not a single packed-direct opening");
+@@ -2444,10 +2454,9 @@
+     IndexedTranscriptCursor::at_label(&events, b"flock-pcs-open-batch-v0")?;
+   cursor.label(b"flock-pcs-packed-direct-v0")?;
+   let q_eval_observation = cursor.observe(1)?;
+-  if q_eval_observation
+-    != usize::try_from(frontend.q_eval_observation)
+-      .expect("frontend observation index fits usize")
+-    || recording.values().get(q_eval_observation) != Some(&proof.q_eval)
++  if expected_q_observation
++    .is_some_and(|index| index != q_eval_observation as u64)
++    || recording.values().get(q_eval_observation) != Some(&q_eval)
+   {
+     bail!("Stage 4 inner Ligerito q-evaluation binding disagrees");
+   }
+@@ -2459,8 +2468,7 @@
+ 
+   cursor.label(b"flock-ligerito-basis-f256-split-v0")?;
+   let target_observation = cursor.observe(1)?;
+-  if recording.values().get(target_observation) != Some(&(gamma * proof.q_eval))
+-  {
++  if recording.values().get(target_observation) != Some(&(gamma * q_eval)) {
+     bail!("Stage 4 inner Ligerito target disagrees with q_eval batching");
+   }
+   let initial_cap_payload =
+@@ -2638,7 +2646,7 @@
+     bail!("Stage 4 inner Ligerito exporter left proof messages unconsumed");
+   }
+   let trace = F128InnerLigeritoTraceV1 {
+-    frontend_topology_digest: frontend.topology_digest(),
++    frontend_topology_digest,
+     commitment_variables: u32::try_from(commitment.params.m).map_err(
+       |error| anyhow::anyhow!("Ligerito commitment dimension: {error}"),
+     )?,
+@@ -3992,8 +4000,11 @@
+ }
+ 
+ /// Locate the native statement prefix, never infer bindings from equal values.
+-pub fn statement_prefix_payloads<Ch: Challenger>(recording: &RecordingChallenger<Ch>) -> Result<[usize; 2]> {
+-    let events = indexed_transcript_events(recording.shape().ops());
+-    let mut cursor = IndexedTranscriptCursor::at_label(&events, b"flock-circuit-stmt-v2")?;
+-    Ok([cursor.observe_bytes(32)?, cursor.observe_bytes(32)?])
+-}
++pub fn statement_prefix_payloads<Ch: Challenger>(
++  recording: &RecordingChallenger<Ch>,
++) -> Result<[usize; 2]> {
++  let events = indexed_transcript_events(recording.shape().ops());
++  let mut cursor =
++    IndexedTranscriptCursor::at_label(&events, b"flock-circuit-stmt-v2")?;
++  Ok([cursor.observe_bytes(32)?, cursor.observe_bytes(32)?])
++}
+--- a/fflonk/src/arithmetization.rs
++++ b/fflonk/src/arithmetization.rs
+@@ -666,6 +666,14 @@
+   r1cs: &CanonicalR1csV1,
+   witness: &Witness,
+ ) -> Result<PlonkWitnessV1, PlonkArithmetizationError> {
++  prepare_plonk_witness(arithmetization, r1cs, witness)?.materialize()
++}
++
++pub(crate) fn prepare_plonk_witness<'a>(
++  arithmetization: &'a PlonkArithmetizationV1,
++  r1cs: &CanonicalR1csV1,
++  witness: &'a Witness,
++) -> Result<PreparedPlonkWitness<'a>, PlonkArithmetizationError> {
+   if arithmetization.r1cs_digest != r1cs.digest() {
+     return Err(PlonkArithmetizationError::R1csDigestMismatch);
+   }
+@@ -676,7 +684,7 @@
+     });
+   }
+   r1cs.check(witness)?;
+-  lower_witness_values(arithmetization, witness.assignment())
++  prepare_witness_values(arithmetization, witness.assignment())
+ }
+ 
+ /// A satisfying canonical assignment bound to its R1CS content address.
+@@ -727,6 +735,13 @@
+   arithmetization: &PlonkArithmetizationV1,
+   witness: &FflonkCheckedWitnessV1,
+ ) -> Result<PlonkWitnessV1, PlonkArithmetizationError> {
++  prepare_checked_plonk_witness(arithmetization, witness)?.materialize()
++}
++
++pub(crate) fn prepare_checked_plonk_witness<'a>(
++  arithmetization: &'a PlonkArithmetizationV1,
++  witness: &'a FflonkCheckedWitnessV1,
++) -> Result<PreparedPlonkWitness<'a>, PlonkArithmetizationError> {
+   if arithmetization.r1cs_digest != witness.r1cs_digest {
+     return Err(PlonkArithmetizationError::R1csDigestMismatch);
+   }
+@@ -743,46 +758,111 @@
+   {
+     return Err(PlonkArithmetizationError::R1csDigestMismatch);
+   }
+-  lower_witness_values(arithmetization, witness.assignment())
+-}
+-
+-fn lower_witness_values(
+-  arithmetization: &PlonkArithmetizationV1,
+-  assignment: &[Fr],
+-) -> Result<PlonkWitnessV1, PlonkArithmetizationError> {
++  prepare_witness_values(arithmetization, witness.assignment())
++}
++
++/// Keeps C for auxiliary references; A and B can be generated in bounded chunks.
++pub(crate) struct PreparedPlonkWitness<'a> {
++  arithmetization: &'a PlonkArithmetizationV1,
++  assignment: &'a [Fr],
++  output: Vec<Fr>,
++  auxiliary: Vec<usize>,
++}
++
++impl PreparedPlonkWitness<'_> {
++  fn value(&self, wire: Option<PlonkWireV1>) -> Option<Fr> {
++    match wire {
++      None => Some(Fr::zero()),
++      Some(PlonkWireV1::R1cs(variable)) => {
++        self.assignment.get(variable.index() as usize).copied()
++      },
++      Some(PlonkWireV1::Auxiliary(index)) => self
++        .auxiliary
++        .get(usize::try_from(index).ok()?)
++        .and_then(|&definition| self.output.get(definition).copied()),
++    }
++  }
++
++  fn cell(
++    &self,
++    column: usize,
++    row: usize,
++  ) -> Result<Fr, PlonkArithmetizationError> {
++    // Decode just the wire: selector coefficients are irrelevant to a read.
++    let encoded = self
++      .arithmetization
++      .gates
++      .rows
++      .get(row)
++      .and_then(|gate| gate.wires.get(column))
++      .copied()
++      .ok_or(PlonkArithmetizationError::CountOverflow)?;
++    let value = if encoded == 0 {
++      Some(Fr::zero())
++    } else if encoded >> 63 != 0 {
++      self.value(Some(PlonkWireV1::Auxiliary((encoded & (u64::MAX >> 1)) - 1)))
++    } else {
++      usize::try_from(encoded - 1)
++        .ok()
++        .and_then(|index| self.assignment.get(index).copied())
++    };
++    value.ok_or(PlonkArithmetizationError::UnsatisfiedGate { row: row as u64 })
++  }
++
++  pub(crate) fn read_column(
++    &self,
++    column: usize,
++    start: usize,
++    output: &mut [Fr],
++  ) -> Result<(), PlonkArithmetizationError> {
++    let end = start
++      .checked_add(output.len())
++      .ok_or(PlonkArithmetizationError::CountOverflow)?;
++    if column >= 3 || end > self.output.len() {
++      return Err(PlonkArithmetizationError::CountOverflow);
++    }
++    if column == 2 {
++      output.copy_from_slice(&self.output[start..end]);
++    } else {
++      for (row, value) in (start..end).zip(output) {
++        *value = self.cell(column, row)?;
++      }
++    }
++    Ok(())
++  }
++
++  fn materialize(self) -> Result<PlonkWitnessV1, PlonkArithmetizationError> {
++    let mut a = vec![Fr::zero(); self.output.len()];
++    let mut b = vec![Fr::zero(); self.output.len()];
++    self.read_column(0, 0, &mut a)?;
++    self.read_column(1, 0, &mut b)?;
++    Ok(PlonkWitnessV1 { columns: [a, b, self.output] })
++  }
++}
++
++fn prepare_witness_values<'a>(
++  arithmetization: &'a PlonkArithmetizationV1,
++  assignment: &'a [Fr],
++) -> Result<PreparedPlonkWitness<'a>, PlonkArithmetizationError> {
+   let domain_size = arithmetization.gates.len();
+   let public_input_rows =
+     usize::try_from(arithmetization.census.public_input_rows)
+       .map_err(|_| PlonkArithmetizationError::CountOverflow)?;
+-  let mut columns = core::array::from_fn(|_| vec![Fr::zero(); domain_size]);
+-  // Values already live in the output column; retain only their definition row.
+-  let mut auxiliary =
+-    vec![
++  let mut prepared = PreparedPlonkWitness {
++    arithmetization,
++    assignment,
++    output: vec![Fr::zero(); domain_size],
++    auxiliary: vec![
+       usize::MAX;
+-      usize::try_from(arithmetization.census.auxiliary_wires,)
++      usize::try_from(arithmetization.census.auxiliary_wires)
+         .map_err(|_| PlonkArithmetizationError::CountOverflow)?
+-    ];
+-
++    ],
++  };
+   for (row, gate) in arithmetization.gates.iter().enumerate() {
+-    let row_u64 = u64::try_from(row)
+-      .map_err(|_| PlonkArithmetizationError::CountOverflow)?;
++    let row_u64 = row as u64;
+     let public_input =
+       if row < public_input_rows { -assignment[row + 1] } else { Fr::zero() };
+-    let mut values = [None; 3];
+-    for (column, wire) in gate.wires.iter().enumerate() {
+-      values[column] = match wire {
+-        None => Some(Fr::zero()),
+-        Some(PlonkWireV1::R1cs(variable)) => assignment
+-          .get(usize::try_from(variable.index()).expect("u32 fits usize"))
+-          .copied(),
+-        Some(PlonkWireV1::Auxiliary(index)) => auxiliary
+-          .get(
+-            usize::try_from(*index)
+-              .map_err(|_| PlonkArithmetizationError::CountOverflow)?,
+-          )
+-          .and_then(|&definition| columns[2].get(definition).copied()),
+-      };
+-    }
++    let mut values = gate.wires.map(|wire| prepared.value(wire));
+     if values[2].is_none()
+       && let Some(PlonkWireV1::Auxiliary(index)) = gate.wires[2]
+     {
+@@ -802,7 +882,8 @@
+       let value =
+         -(gate.ql * a + gate.qr * b + gate.qm * a * b + gate.qc + public_input)
+           * qo_inverse;
+-      let slot = auxiliary
++      let slot = prepared
++        .auxiliary
+         .get_mut(
+           usize::try_from(index)
+             .map_err(|_| PlonkArithmetizationError::CountOverflow)?,
+@@ -814,26 +895,37 @@
+       *slot = row;
+       values[2] = Some(value);
+     }
++    let mut resolved = [Fr::zero(); 3];
+     for (column, value) in values.iter().enumerate() {
+-      columns[column][row] = value.ok_or_else(|| match gate.wires[column] {
++      resolved[column] = value.ok_or_else(|| match gate.wires[column] {
+         Some(PlonkWireV1::Auxiliary(wire)) => {
+           PlonkArithmetizationError::UnknownAuxiliaryWire { wire, row: row_u64 }
+         },
+         _ => PlonkArithmetizationError::UnsatisfiedGate { row: row_u64 },
+       })?;
+     }
+-    if !gate
+-      .evaluate(
+-        [columns[0][row], columns[1][row], columns[2][row]],
+-        public_input,
+-      )
+-      .is_zero()
+-    {
++    if !gate.evaluate(resolved, public_input).is_zero() {
+       return Err(PlonkArithmetizationError::UnsatisfiedGate { row: row_u64 });
+     }
+-  }
+-  validate_copy_values(arithmetization, &columns)?;
+-  Ok(PlonkWitnessV1 { columns })
++    prepared.output[row] = resolved[2];
++  }
++  for (column, targets) in arithmetization.sigma.iter().enumerate() {
++    for (row, target) in targets.iter().enumerate() {
++      if prepared.cell(column, row)?
++        != prepared.cell(usize::from(target.column), target.row as usize)?
++      {
++        return Err(PlonkArithmetizationError::CopyPermutationMismatch {
++          source: PlonkCellV1 {
++            column: u8::try_from(column).expect("three columns"),
++            row: u32::try_from(row)
++              .map_err(|_| PlonkArithmetizationError::CountOverflow)?,
++          },
++          target: *target,
++        });
++      }
++    }
++  }
++  Ok(prepared)
+ }
+ 
+ trait GateSink {
+@@ -1314,6 +1406,7 @@
+   }
+ }
+ 
++#[cfg(test)]
+ fn validate_copy_values(
+   arithmetization: &PlonkArithmetizationV1,
+   columns: &[Vec<Fr>; 3],
+@@ -1387,6 +1480,52 @@
+     );
+     builder.enforce_zero(ConstraintPhase::Zerocheck, sum);
+     vec![x1, x2, x3, x4, x5, product, bit]
++  }
++
++  #[test]
++  fn prepared_columns_stream_in_chunks_and_reject_corrupted_copy_cycles() {
++    let mut builder = R1csBuilder::new();
++    build_fixture(&mut builder);
++    let (r1cs, witness) = builder.finish().unwrap();
++    let mut arithmetization = arithmetize_r1cs(&r1cs).unwrap();
++    let prepared =
++      prepare_plonk_witness(&arithmetization, &r1cs, &witness).unwrap();
++    let domain = arithmetization.gates.len();
++    assert_eq!(prepared.output.len(), domain);
++    assert_eq!(
++      prepared.auxiliary.len(),
++      usize::try_from(arithmetization.census.auxiliary_wires).unwrap()
++    );
++    let mut columns = core::array::from_fn(|_| vec![Fr::zero(); domain]);
++    for (column, values) in columns.iter_mut().enumerate() {
++      for (chunk, output) in values.chunks_mut(3).enumerate() {
++        prepared.read_column(column, 3 * chunk, output).unwrap();
++      }
++    }
++    validate_copy_values(&arithmetization, &columns).unwrap();
++    assert!(prepared.read_column(3, 0, &mut [Fr::zero()]).is_err());
++    assert!(prepared.read_column(0, domain, &mut [Fr::zero()]).is_err());
++    let materialized = prepared.materialize().unwrap();
++    assert_eq!(materialized.columns(), &columns);
++    let source = columns[0][0];
++    let (column, row) = columns
++      .iter()
++      .enumerate()
++      .find_map(|(column, values)| {
++        values
++          .iter()
++          .position(|value| *value != source)
++          .map(|row| (column, row))
++      })
++      .unwrap();
++    arithmetization.sigma[0][0] = PlonkCellV1 {
++      column: u8::try_from(column).unwrap(),
++      row: u32::try_from(row).unwrap(),
++    };
++    assert!(matches!(
++      prepare_plonk_witness(&arithmetization, &r1cs, &witness),
++      Err(PlonkArithmetizationError::CopyPermutationMismatch { .. })
++    ));
+   }
+ 
+   #[test]
+@@ -1467,7 +1606,7 @@
+         (0..gates.len())
+           .map(|row| PlonkCellV1 {
+             column: u8::try_from(column).unwrap(),
+-            row: row as u32,
++            row: u32::try_from(row).unwrap(),
+           })
+           .collect()
+       });
+@@ -1476,7 +1615,7 @@
+           if let Some(wire) = wire {
+             lists.entry(*wire).or_default().push(PlonkCellV1 {
+               column: u8::try_from(column).unwrap(),
+-              row: row as u32,
++              row: u32::try_from(row).unwrap(),
+             });
+           }
+         }
+--- a/fflonk/src/prover.rs
++++ b/fflonk/src/prover.rs
+@@ -1,4 +1,7 @@
+-use crate::arithmetization::lower_checked_plonk_witness;
++use crate::arithmetization::{
++  PreparedPlonkWitness, lower_checked_plonk_witness,
++  prepare_checked_plonk_witness, prepare_plonk_witness,
++};
+ use crate::polynomial_storage::{
+   evaluate_polynomial_source, for_each_polynomial_chunk,
+ };
+@@ -145,7 +148,7 @@
+ /// Products use bounded transforms and exact coefficient splitting; base IFFTs
+ /// retain n fields. Arithmetic also uses bounded roots
+ /// and I/O buffers, and at most n fields for quotient division. Witness
+-/// lowering still materializes three columns. The relation, original witness,
++/// lowering retains C and auxiliary definition indices, streaming A/B in chunks. The relation, original witness,
+ /// proving key, SRS, allocator, and OS cache have additional memory costs;
+ /// this function does not enforce an aggregate RAM budget.
+ pub fn prove_fflonk_with_file_workspace<R: Read + Write + Seek>(
+@@ -191,8 +194,8 @@
+ /// An error also consumes the assignment.
+ ///
+ /// Storage ownership, cleanup, and polynomial memory bounds are the same as
+-/// [`prove_fflonk_with_file_workspace`]. The lowering step still materializes
+-/// three columns and auxiliary values. No aggregate RAM budget is enforced.
++/// [`prove_fflonk_with_file_workspace`]. The lowering step retains one
++/// column and auxiliary definition indices. No aggregate RAM budget is enforced.
+ pub fn prove_fflonk_checked_with_file_workspace<R: Read + Write + Seek>(
+   srs: &(impl KzgCommitmentSourceV1 + ?Sized),
+   preprocessed: &(impl FflonkProvingKeyV1 + ?Sized),
+@@ -223,6 +226,20 @@
+     }
+   }
+ 
++  fn prepare<'a>(
++    &'a self,
++    arithmetization: &'a PlonkArithmetizationV1,
++  ) -> Result<PreparedPlonkWitness<'a>, PlonkArithmetizationError> {
++    match self {
++      Self::Borrowed { r1cs, witness } => {
++        prepare_plonk_witness(arithmetization, r1cs, witness)
++      },
++      Self::Checked(witness) => {
++        prepare_checked_plonk_witness(arithmetization, witness)
++      },
++    }
++  }
++
+   fn lower(
+     &self,
+     arithmetization: &PlonkArithmetizationV1,
+@@ -258,11 +275,10 @@
+   if matches!(ws, ProverWorkspace::Memory) {
+     validate_polynomial_domain(domain_size)?;
+   }
+-  let plonk_witness = witness.lower(preprocessed.arithmetization())?;
+   let domain = Radix2EvaluationDomain::<Fr>::new(domain_size)
+     .ok_or(FflonkProverError::Shape("unsupported FFT domain"))?;
+   if domain.size() != domain_size
+-    || plonk_witness.columns()[0].len() != domain_size
++    || preprocessed.arithmetization().gates().len() != domain_size
+   {
+     return Err(FflonkProverError::Shape("witness/domain length mismatch"));
+   }
+@@ -270,26 +286,38 @@
+   if public_input_count + 2 > domain_size {
+     return Err(FflonkProverError::Shape("missing two reserved blinding rows"));
+   }
++  let wire_evaluations = if matches!(ws, ProverWorkspace::File(_)) {
++    let prepared = witness.prepare(preprocessed.arithmetization())?;
++    let column = |index| {
++      ws.generate(domain_size, false, |start, output| {
++        prepared.read_column(index, start, output)?;
++        for (offset, value) in output.iter_mut().enumerate() {
++          let row = start + offset;
++          if row >= domain_size - 2 {
++            *value =
++              blinding.wire_evaluations[2 * index + row - (domain_size - 2)];
++          }
++        }
++        Ok(())
++      })
++    };
++    [column(0)?, column(1)?, column(2)?]
++  } else {
++    let mut columns =
++      witness.lower(preprocessed.arithmetization())?.into_columns();
++    for (column, values) in columns.iter_mut().enumerate() {
++      values[domain_size - 2] = blinding.wire_evaluations[2 * column];
++      values[domain_size - 1] = blinding.wire_evaluations[2 * column + 1];
++    }
++    let [a, b, c] = columns;
++    [ws.store_vec(a, false)?, ws.store_vec(b, false)?, ws.store_vec(c, false)?]
++  };
+   let public_inputs = witness
+     .assignment()
+     .get(1..1 + public_input_count)
+     .ok_or(FflonkProverError::Shape("R1CS public-input slice"))?
+     .to_vec();
+   drop(witness);
+-
+-  let mut wire_evaluations = plonk_witness.into_columns();
+-  let blind_row0 = domain_size - 2;
+-  let blind_row1 = domain_size - 1;
+-  for (column, values) in wire_evaluations.iter_mut().enumerate() {
+-    values[blind_row0] = blinding.wire_evaluations[2 * column];
+-    values[blind_row1] = blinding.wire_evaluations[2 * column + 1];
+-  }
+-  let [wa, wb, wc] = wire_evaluations;
+-  let wire_evaluations = [
+-    ws.store_vec(wa, false)?,
+-    ws.store_vec(wb, false)?,
+-    ws.store_vec(wc, false)?,
+-  ];
+   let a = ws.ifft(&wire_evaluations[0], &domain)?;
+   let b = ws.ifft(&wire_evaluations[1], &domain)?;
+   let c = ws.ifft(&wire_evaluations[2], &domain)?;
+@@ -1307,8 +1335,10 @@
+   fn bounded_products_produce_the_identical_verified_compact_proof() {
+     let (r1cs, witness) = fixture();
+     let gates = arithmetize_r1cs(&r1cs).unwrap();
+-    let degree =
+-      required_fflonk_srs_degree(gates.census().domain_size).unwrap() as usize;
++    let degree = usize::try_from(
++      required_fflonk_srs_degree(gates.census().domain_size).unwrap(),
++    )
++    .unwrap();
+     let srs = test_srs(degree, Fr::from(29u64));
+     let key = preprocess_fflonk(&srs, gates).unwrap();
+     let blinding = FflonkBlindingV1 {
+--- a/fflonk/src/capacity.rs
++++ b/fflonk/src/capacity.rs
+@@ -80,8 +80,8 @@
+   /// Largest rolling quotient buffer (n native Fr values), used separately
+   /// from the FFT array. Does not include I/O buffers or authentication data.
+   pub file_workspace_quotient_ring_bytes: u64,
+-  /// Three native-Fr wire columns and the auxiliary definition-row cache still
+-  /// materialized during witness lowering. Excludes the original witness.
++  /// One native-Fr output column and the auxiliary definition-row cache during
++  /// file witness lowering. A/B are streamed. Excludes the original witness.
+   pub file_workspace_witness_lowering_bytes: u64,
+   /// Retained file-SRS/file-key minimum plus the largest transform array and
+   /// bounded roots cache. Excludes R1CS, original witness, workspace indexes,
+@@ -209,7 +209,7 @@
+   let file_workspace_quotient_ring_bytes =
+     bytes(census.domain_size, native_field_bytes)?;
+   let file_workspace_witness_lowering_bytes =
+-    bytes(bytes(census.domain_size, 3)?, native_field_bytes)?
++    bytes(census.domain_size, native_field_bytes)?
+       .checked_add(bytes(
+         census.auxiliary_wires,
+         u64::try_from(size_of::<usize>())
+@@ -318,7 +318,7 @@
+     );
+     assert_eq!(
+       plan.file_workspace_witness_lowering_bytes,
+-      (24 * size_of::<Fr>() + 2 * size_of::<usize>()) as u64
++      (8 * size_of::<Fr>() + 2 * size_of::<usize>()) as u64
+     );
+   }
+ 
+--- a/fflonk/src/preprocessing_file.rs
++++ b/fflonk/src/preprocessing_file.rs
+@@ -17,6 +17,7 @@
+ use std::io::{Read, Seek, Write};
+ 
+ // Random-access omega powers using O(sqrt(n)) storage instead of a full column.
++#[derive(Debug)]
+ struct DomainPowers {
+   low: Vec<Fr>,
+   high: Vec<Fr>,
+@@ -50,8 +51,9 @@
+ ///
+ /// Use `R = std::fs::File` for disk storage. The key retains its arithmetization,
+ /// verification metadata, and chunk hashes, while its eight coefficient
+-/// polynomials, three sigma evaluation columns, and packed C0 live in the file.
+-/// The file contains canonical 32-byte little-endian fields and costs `19*n*32`
++/// polynomials live in the file. Packed C0 is an interleaving of these sources;
++/// sigma evaluations are reconstructed from the retained copy permutation.
++/// The file contains canonical 32-byte little-endian fields and costs `8*n*32`
+ /// bytes. It is scratch storage: reopening the raw file does not reconstruct a
+ /// trusted key, and the authentication metadata is never loaded from the file.
+ ///
+@@ -63,8 +65,8 @@
+   arithmetization: PlonkArithmetizationV1,
+   file: PolynomialFile<R>,
+   coefficients: [StoredPolynomial; 8],
+-  sigma_evaluations: [StoredPolynomial; 3],
+-  c0: StoredPolynomial,
++  omega_powers: DomainPowers,
++  c0_len: usize,
+   verification_key: FflonkVerificationKeyV1,
+   required_srs_degree: u64,
+   digest: [u8; 32],
+@@ -89,19 +91,13 @@
+ 
+   /// Exact scratch payload bytes, excluding filesystem metadata and cache.
+   pub fn storage_bytes(&self) -> u64 {
+-    self.c0.end()
++    self.coefficients.iter().map(StoredPolynomial::end).max().unwrap_or(0)
+   }
+ 
+   /// Requested heap bytes in the retained chunk hashes, excluding the reader,
+   /// arithmetization, and fixed-size key metadata.
+   pub fn authentication_bytes(&self) -> usize {
+-    self
+-      .coefficients
+-      .iter()
+-      .chain(&self.sigma_evaluations)
+-      .chain([&self.c0])
+-      .map(StoredPolynomial::authentication_bytes)
+-      .sum()
++    self.coefficients.iter().map(StoredPolynomial::authentication_bytes).sum()
+   }
+ }
+ 
+@@ -127,20 +123,26 @@
+     self.file.source(&self.coefficients[polynomial.index()])
+   }
+   fn sigma_sources(&self) -> [impl FflonkPolynomialSourceV1 + '_; 3] {
+-    core::array::from_fn(|column| {
+-      self.file.source(&self.sigma_evaluations[column])
++    core::array::from_fn(|column| PermutationEvaluations {
++      targets: &self.arithmetization.sigma()[column],
++      powers: &self.omega_powers,
++      cosets: [Fr::ONE, self.verification_key.k1(), self.verification_key.k2()],
+     })
+   }
+   fn c0_source(&self) -> impl FflonkPolynomialSourceV1 + '_ {
+-    self.file.source(&self.c0)
++    InterleavedC0 {
++      file: &self.file,
++      coefficients: &self.coefficients,
++      len: self.c0_len,
++    }
+   }
+ }
+ 
+ /// Preprocess directly into an empty, readable/writable/seekable scratch file.
+ ///
+ /// This never constructs the materialized key. Each selector needs one size-n
+-/// in-place IFFT buffer. Sigma construction additionally retains n omega powers;
+-/// C0 packing uses bounded chunks, and its KZG commitment streams from storage.
++/// in-place IFFT buffer. Sigma construction uses a square-root-sized powers table.
++/// C0 is interleaved in bounded chunks without storing a duplicate polynomial.
+ /// The arithmetization and FFT workspaces remain in memory. The caller controls
+ /// file creation, cleanup, and durability; errors may leave partial scratch data.
+ pub fn preprocess_fflonk_to_file<R: Read + Write + Seek>(
+@@ -156,7 +158,6 @@
+   let file = PolynomialFile::new(storage)?;
+   let mut offset = 0;
+   let mut coefficients = Vec::with_capacity(8);
+-  let mut sigma_evaluations = Vec::with_capacity(3);
+   let mut hasher =
+     preprocessing_hasher(&arithmetization, srs.digest(), required_srs_degree);
+   for id in &FflonkFixedPolynomialV1::ALL[..5] {
+@@ -203,13 +204,6 @@
+     if values.len() != n {
+       return Err(FflonkPreprocessingError::CountOverflow);
+     }
+-    let stored = file.write_polynomial(
+-      offset,
+-      values.as_slice(),
+-      FFLONK_POLYNOMIAL_CHUNK_FIELDS,
+-    )?;
+-    offset = stored.end();
+-    sigma_evaluations.push(stored);
+     crate::prover_workspace::bounded_fft(&mut values, &domain, true);
+     hash_fields(&mut hasher, &values);
+     let stored = file.write_polynomial(
+@@ -220,25 +214,16 @@
+     offset = stored.end();
+     coefficients.push(stored);
+   }
+-  drop(omega_powers);
+   let coefficients: [StoredPolynomial; 8] = coefficients
+     .try_into()
+     .map_err(|_| FflonkPreprocessingError::CountOverflow)?;
+-  let sigma_evaluations = sigma_evaluations
+-    .try_into()
+-    .map_err(|_| FflonkPreprocessingError::CountOverflow)?;
+-  let c0 = file.write_polynomial(
+-    offset,
+-    &InterleavedC0 { file: &file, coefficients: &coefficients, len: c0_len },
+-    8 * FFLONK_POLYNOMIAL_CHUNK_FIELDS,
+-  )?;
+-  let c0_source = file.source(&c0);
++  let c0_source =
++    InterleavedC0 { file: &file, coefficients: &coefficients, len: c0_len };
+   let c0_commitment = commit_polynomial_source(srs, &c0_source)?;
+   hasher.update(&(c0_len as u64).to_le_bytes());
+   for_each_polynomial_chunk(&c0_source, |_, values| {
+     hash_field_values(&mut hasher, values)
+   })?;
+-  drop(c0_source);
+   let verification_key = FflonkVerificationKeyV1::new(
+     usize::try_from(arithmetization.census().public_input_rows)
+       .map_err(|_| FflonkPreprocessingError::CountOverflow)?,
+@@ -252,12 +237,46 @@
+     arithmetization,
+     file,
+     coefficients,
+-    sigma_evaluations,
+-    c0,
++    omega_powers,
++    c0_len,
+     verification_key,
+     required_srs_degree,
+     digest: *hasher.finalize().as_bytes(),
+   })
++}
++
++struct PermutationEvaluations<'a> {
++  targets: &'a [crate::PlonkCellV1],
++  powers: &'a DomainPowers,
++  cosets: [Fr; 3],
++}
++impl FflonkPolynomialSourceV1 for PermutationEvaluations<'_> {
++  fn len(&self) -> usize {
++    self.targets.len()
++  }
++  fn read_fields(
++    &self,
++    start: usize,
++    output: &mut [Fr],
++  ) -> Result<(), FflonkStorageError> {
++    let end = start
++      .checked_add(output.len())
++      .filter(|&end| end <= self.targets.len())
++      .ok_or(FflonkStorageError::Range)?;
++    for (target, value) in self.targets[start..end].iter().zip(output) {
++      let row = usize::try_from(target.row)
++        .map_err(|_| FflonkStorageError::CountOverflow)?;
++      if row >= self.targets.len() {
++        return Err(FflonkStorageError::Range);
++      }
++      let coset = self
++        .cosets
++        .get(usize::from(target.column))
++        .ok_or(FflonkStorageError::Range)?;
++      *value = self.powers.get(row) * coset;
++    }
++    Ok(())
++  }
+ }
+ 
+ struct InterleavedC0<'a, R> {
+@@ -400,8 +419,8 @@
+       assert_eq!(file.c0_commitment(), memory.c0_commitment());
+       assert_eq!(file.required_srs_degree(), memory.required_srs_degree());
+       assert_eq!(file.arithmetization(), memory.arithmetization());
+-      assert_eq!(file.storage_bytes(), 19 * n * 32);
+-      assert_eq!(file.authentication_bytes(), 12 * 32);
++      assert_eq!(file.storage_bytes(), 8 * n * 32);
++      assert_eq!(file.authentication_bytes(), 8 * 32);
+       for id in FflonkFixedPolynomialV1::ALL {
+         assert_eq!(
+           load_polynomial(&file.coefficient_source(id)).unwrap(),
+@@ -520,14 +539,7 @@
+     });
+     let interleaved =
+       InterleavedC0 { file: &file, coefficients: &coefficients, len: 8 * n };
+-    let c0 = file
+-      .write_polynomial(
+-        offset,
+-        &interleaved,
+-        8 * FFLONK_POLYNOMIAL_CHUNK_FIELDS,
+-      )
+-      .unwrap();
+-    let source = file.source(&c0);
++    let source = interleaved;
+     for start in [
+       0,
+       FFLONK_POLYNOMIAL_CHUNK_FIELDS - 3,
+@@ -602,7 +614,7 @@
+   }
+ 
+   #[test]
+-  fn external_file_changes_are_rejected_in_early_and_late_proof_rounds() {
++  fn external_file_changes_are_rejected_in_proofs_and_virtual_c0_reads() {
+     use std::sync::atomic::{AtomicU64, Ordering};
+     static NEXT: AtomicU64 = AtomicU64::new(0);
+     let path = std::env::temp_dir().join(format!(
+@@ -637,8 +649,8 @@
+       .write(true)
+       .open(&cleanup.0)
+       .unwrap();
+-    // QL is read in round 1, sigma evaluations in round 2, and C0 in round 4.
+-    for offset in [0, 5 * n * 32, 11 * n * 32] {
++    // The selector and sigma coefficient regions all authenticate virtual C0.
++    for offset in [0, 5 * n * 32, 7 * n * 32] {
+       writer.seek(SeekFrom::Start(offset)).unwrap();
+       let mut original = [0u8; 1];
+       writer.read_exact(&mut original).unwrap();
+@@ -651,6 +663,10 @@
+           offset
+         }))
+       );
++      assert_eq!(
++        key.c0_source().read_fields(0, &mut [Fr::zero(); 8]),
++        Err(FflonkStorageError::ChunkChanged { offset })
++      );
+       writer.seek(SeekFrom::Start(offset)).unwrap();
+       writer.write_all(&original).unwrap();
+       writer.flush().unwrap();
+--- a/fflonk/src/capacity.rs
++++ b/fflonk/src/capacity.rs
+@@ -61,13 +61,14 @@
+   /// same exclusions as the resident-SRS bound, and excludes temporary SRS
+   /// decoding/MSM buffers, reader state, filesystem cache, and I/O buffers.
+   pub file_srs_and_key_minimum_bytes: u64,
+-  /// Eight fixed coefficient columns, three sigma evaluation columns, and C0
+-  /// in canonical field storage. The file key omits five unused selector
+-  /// evaluation columns retained by the materialized development key.
++  /// Eight fixed coefficient columns. Sigma evaluations are reconstructed from
++  /// copy cells and C0 is an authenticated interleaving of these sources.
+   pub file_key_polynomial_bytes: u64,
+   /// One 32-byte authentication digest per stored polynomial chunk.
+   pub file_key_authentication_bytes: u64,
+-  /// Stored gate references/copy cells plus file-SRS and file-key indexes.
++  /// Small retained root tables for reconstructing sigma evaluations.
++  pub file_key_permutation_roots_bytes: u64,
++  /// Stored gate references/copy cells, root tables, and SRS/key indexes.
+   /// Shared selector records are additional (160 bytes per distinct record).
+   /// Uses the same exclusions as `file_srs_and_key_minimum_bytes`, also
+   /// excluding polynomial reader state, read buffers, and filesystem cache.
+@@ -177,14 +178,15 @@
+       .ok_or(FflonkCapacityError::CountOverflow)?;
+   let polynomial_chunks = bytes(
+     census.domain_size.div_ceil(FFLONK_POLYNOMIAL_CHUNK_FIELDS as u64),
+-    11,
+-  )?
+-  .checked_add(
+-    bytes(census.domain_size, 8)?
+-      .div_ceil(FFLONK_POLYNOMIAL_CHUNK_FIELDS as u64),
+-  )
+-  .ok_or(FflonkCapacityError::CountOverflow)?;
++    8,
++  )?;
+   let file_key_authentication_bytes = bytes(polynomial_chunks, 32)?;
++  let stride = 1u64 << census.domain_size.ilog2().div_ceil(2);
++  let file_key_permutation_roots_bytes = bytes(
++    stride + census.domain_size.div_ceil(stride),
++    u64::try_from(size_of::<Fr>())
++      .map_err(|_| FflonkCapacityError::CountOverflow)?,
++  )?;
+   let arithmetization_bytes_per_row = u64::try_from(
+     size_of::<crate::arithmetization::StoredGate>()
+       + 3 * size_of::<PlonkCellV1>(),
+@@ -194,6 +196,7 @@
+     bytes(census.domain_size, arithmetization_bytes_per_row)?
+       .checked_add(file_srs_authentication_bytes)
+       .and_then(|total| total.checked_add(file_key_authentication_bytes))
++      .and_then(|total| total.checked_add(file_key_permutation_roots_bytes))
+       .ok_or(FflonkCapacityError::CountOverflow)?;
+   let native_field_bytes = u64::try_from(size_of::<Fr>())
+     .map_err(|_| FflonkCapacityError::CountOverflow)?;
+@@ -253,8 +256,9 @@
+     uncompressed_file_srs_bytes,
+     file_srs_authentication_bytes,
+     file_srs_and_key_minimum_bytes,
+-    file_key_polynomial_bytes: bytes(field_column_bytes, 19)?,
++    file_key_polynomial_bytes: bytes(field_column_bytes, 8)?,
+     file_key_authentication_bytes,
++    file_key_permutation_roots_bytes,
+     file_srs_and_file_key_minimum_bytes,
+     file_workspace_fft_buffer_bytes,
+     file_workspace_fft_roots_bytes,
+@@ -300,8 +304,8 @@
+     assert_eq!(plan.compressed_file_srs_bytes, 4_536);
+     assert_eq!(plan.uncompressed_file_srs_bytes, 8_856);
+     assert_eq!(plan.file_srs_authentication_bytes, 32);
+-    assert_eq!(plan.file_key_polynomial_bytes, 4_864);
+-    assert_eq!(plan.file_key_authentication_bytes, 384);
++    assert_eq!(plan.file_key_polynomial_bytes, 2_048);
++    assert_eq!(plan.file_key_authentication_bytes, 256);
+     assert_eq!(plan.polynomial_fft_domain_size, 32);
+     assert!(plan.supported_polynomial_fft_domain);
+     assert_eq!(
+@@ -338,8 +342,8 @@
+     assert!(plan.supported_polynomial_fft_domain);
+     assert_eq!(plan.file_srs_authentication_bytes, 4_718_624);
+     assert!(plan.file_srs_and_key_minimum_bytes > 512_000_000_000);
+-    assert_eq!(plan.file_key_polynomial_bytes, 652_835_028_992);
+-    assert_eq!(plan.file_key_authentication_bytes, 9_961_472);
++    assert_eq!(plan.file_key_polynomial_bytes, 274_877_906_944);
++    assert_eq!(plan.file_key_authentication_bytes, 4_194_304);
+     assert_eq!(
+       plan.file_workspace_fft_buffer_bytes,
+       (1u64 << 30) * size_of::<Fr>() as u64
+@@ -362,7 +366,7 @@
+       .unwrap();
+     assert_eq!(
+       plan.file_srs_and_file_key_minimum_bytes,
+-      arithmetization_bytes + 9_961_472 + 4_718_624
++      arithmetization_bytes + 4_194_304 + 4_718_624 + 2_097_152
+     );
+     assert!(plan.file_srs_and_file_key_minimum_bytes < 512_000_000_000);
+     assert!(
+--- a/fflonk/src/prover_workspace.rs
++++ b/fflonk/src/prover_workspace.rs
+@@ -50,7 +50,8 @@
+ 
+ pub(crate) enum ProverPolynomial<R> {
+   Memory(Vec<Fr>),
+-  File(FilePolynomial<R>),
++  File(Arc<FilePolynomial<R>>),
++  Packed { columns: Vec<Arc<FilePolynomial<R>>>, len: usize },
+ }
+ 
+ pub(crate) struct ScratchFile<R> {
+@@ -141,6 +142,7 @@
+     match self {
+       Self::Memory(values) => values.len(),
+       Self::File(poly) => poly.len,
++      Self::Packed { len, .. } => *len,
+     }
+   }
+ 
+@@ -158,13 +160,31 @@
+         .file
+         .source(&poly.stored)
+         .read_fields(start, output),
++      Self::Packed { columns, .. } => {
++        if output.is_empty() {
++          return Ok(());
++        }
++        let stride = columns.len();
++        let first = start / stride;
++        let end = start + output.len();
++        let mut values = vec![Fr::zero(); end.div_ceil(stride) - first];
++        for (slot, column) in columns.iter().enumerate() {
++          let source = Self::File(Arc::clone(column));
++          read_padded(&source, first, &mut values)?;
++          let initial = (slot + stride - start % stride) % stride;
++          for index in (initial..output.len()).step_by(stride) {
++            output[index] = values[(start + index) / stride - first];
++          }
++        }
++        Ok(())
++      },
+     }
+   }
+ 
+   fn as_slice(&self) -> Option<&[Fr]> {
+     match self {
+       Self::Memory(values) => Some(values),
+-      Self::File(_) => None,
++      Self::File(_) | Self::Packed { .. } => None,
+     }
+   }
+ 
+@@ -172,6 +192,7 @@
+     match self {
+       Self::Memory(values) => values.as_slice().nonzero_len(),
+       Self::File(poly) => Ok(poly.stored.nonzero_len().min(poly.len)),
++      Self::Packed { len, .. } => Ok(*len),
+     }
+   }
+ }
+@@ -244,7 +265,11 @@
+         let stored =
+           file.file.write_generated(offset, len, batch_fields, generate)?;
+         let len = if coefficients { stored.nonzero_len() } else { len };
+-        Ok(ProverPolynomial::File(FilePolynomial { reservation, stored, len }))
++        Ok(ProverPolynomial::File(Arc::new(FilePolynomial {
++          reservation,
++          stored,
++          len,
++        })))
+       },
+     }
+   }
+@@ -505,10 +530,31 @@
+ 
+   pub(crate) fn pack<const N: usize>(
+     &self,
+-    polynomials: [Source<'_>; N],
++    polynomials: [&ProverPolynomial<R>; N],
+   ) -> Result<ProverPolynomial<R>> {
+     if N == 0 {
+       return Err(FflonkProverError::Shape("zero packed polynomial stride"));
++    }
++    if matches!(self, Self::File(_))
++      && polynomials.iter().all(|p| matches!(p, ProverPolynomial::File(_)))
++    {
++      let mut len = 0;
++      let mut columns = Vec::with_capacity(N);
++      for (slot, polynomial) in polynomials.iter().enumerate() {
++        let ProverPolynomial::File(file) = polynomial else { unreachable!() };
++        let nonzero = polynomial.nonzero_len()?;
++        if nonzero != 0 {
++          let end = (nonzero - 1)
++            .checked_mul(N)
++            .and_then(|n| n.checked_add(slot + 1))
++            .ok_or(FflonkProverError::Shape(
++              "packed polynomial length overflow",
++            ))?;
++          len = len.max(end);
++        }
++        columns.push(Arc::clone(file));
++      }
++      return Ok(ProverPolynomial::Packed { columns, len });
+     }
+     let len = polynomials
+       .iter()
+@@ -632,7 +678,7 @@
+       .enumerate()
+       .max_by_key(|(_, (poly, _))| match poly {
+         ProverPolynomial::Memory(values) => values.capacity(),
+-        ProverPolynomial::File(_) => 0,
++        ProverPolynomial::File(_) | ProverPolynomial::Packed { .. } => 0,
+       })
+       .map(|(index, _)| index)
+       .expect("three polynomials");
+@@ -655,7 +701,9 @@
+   ) -> Result<G1Affine> {
+     Ok(match poly {
+       ProverPolynomial::Memory(values) => commit_polynomial(srs, values)?.0,
+-      ProverPolynomial::File(_) => commit_polynomial_source(srs, poly)?.0,
++      ProverPolynomial::File(_) | ProverPolynomial::Packed { .. } => {
++        commit_polynomial_source(srs, poly)?.0
++      },
+     })
+   }
+ }
+@@ -776,6 +824,45 @@
+ 
+   fn read<R: Read + Seek>(poly: &ProverPolynomial<R>) -> Vec<Fr> {
+     load_polynomial(poly).unwrap().into_owned()
++  }
++
++  #[test]
++  fn packed_file_views_retain_inputs_without_allocating_another_extent() {
++    let ws = workspace();
++    let a = ws
++      .store_vec(vec![Fr::ONE, Fr::zero(), Fr::from(3u64), Fr::zero()], false)
++      .unwrap();
++    let b = ws.store_vec(vec![Fr::from(2u64), Fr::zero()], false).unwrap();
++    let ProverWorkspace::File(file) = &ws else { unreachable!() };
++    let before = file.space.lock().unwrap().end;
++    let packed = ws.pack([&a, &b]).unwrap();
++    assert_eq!(file.space.lock().unwrap().end, before);
++    drop(a);
++    drop(b);
++    let extra = ws.store_vec(vec![Fr::from(99u64); 8], true).unwrap();
++    let expected =
++      vec![Fr::ONE, Fr::from(2u64), Fr::zero(), Fr::zero(), Fr::from(3u64)];
++    assert_eq!(read(&packed), expected);
++    assert_eq!(packed.nonzero_len().unwrap(), 5);
++    let mut middle = [Fr::zero(); 3];
++    packed.read_fields(1, &mut middle).unwrap();
++    assert_eq!(middle, [Fr::from(2u64), Fr::zero(), Fr::zero()]);
++    packed.read_fields(5, &mut []).unwrap();
++    assert_eq!(
++      packed.read_fields(5, &mut [Fr::zero()]),
++      Err(FflonkStorageError::Range)
++    );
++    let nested = ws.pack([&packed, &extra]).unwrap();
++    let nested_expected: Vec<_> = (0..8)
++      .flat_map(|i| {
++        [expected.get(i).copied().unwrap_or_default(), Fr::from(99u64)]
++      })
++      .collect();
++    assert_eq!(read(&nested), nested_expected);
++    drop(packed);
++    drop(extra);
++    drop(nested);
++    assert_eq!(file.space.lock().unwrap().end, 0);
+   }
+ 
+   #[test]

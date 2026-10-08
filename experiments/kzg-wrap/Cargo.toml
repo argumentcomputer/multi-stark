@@ -1,0 +1,28 @@
+[package]
+name = "init-kzg-wrap"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+ark-bls12-381 = "0.5"
+ark-ec = "0.5"
+ark-ff = "0.5"
+ark-relations = "0.5"
+ark-r1cs-std = "0.5"
+ark-serialize = "0.5"
+serde_json = "1"
+ix-terminal-circuit = { path = "../../target/flock-terminal/circuit" }
+ix-fflonk = { path = "../../target/flock-terminal/fflonk" }
+
+
+multi-stark = { path = "../..", features = ["kzg", "parallel"] }
+num-bigint = "0.4"
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+bincode = { version = "2", features = ["serde"] }
+
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+tracing-subscriber = "0.3"

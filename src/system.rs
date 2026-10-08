@@ -312,7 +312,25 @@ fn compute_lookup_values<F: Field>(
     circuit: &Circuit<F>,
     trace: &RowMajorMatrix<F>,
 ) -> LookupValues<F> {
+    compute_lookup_values_with_fixed(circuit, trace, circuit.preprocessed.as_ref())
+}
+
+pub(crate) fn compute_lookup_values_with_fixed<F: Field>(
+    circuit: &Circuit<F>,
+    trace: &RowMajorMatrix<F>,
+    preprocessed: Option<&RowMajorMatrix<F>>,
+) -> LookupValues<F> {
+    compute_lookup_values_range(circuit, trace, preprocessed, 0..trace.height())
+}
+
+pub(crate) fn compute_lookup_values_range<F: Field>(
+    circuit: &Circuit<F>,
+    trace: &RowMajorMatrix<F>,
+    preprocessed: Option<&RowMajorMatrix<F>>,
+    rows: std::ops::Range<usize>,
+) -> LookupValues<F> {
     let height = trace.height();
+    assert!(rows.start <= rows.end && rows.end <= height);
     let slot_widths: Vec<usize> = circuit
         .graph
         .lookups
@@ -321,16 +339,15 @@ fn compute_lookup_values<F: Field>(
         .collect();
     // No rows, or no lookups: nothing to sweep, but preserve num_lookups.
     if height == 0 || slot_widths.is_empty() {
-        return LookupValues::builder(height, &slot_widths).finish();
+        return LookupValues::builder(rows.len(), &slot_widths).finish();
     }
 
-    let preprocessed = circuit.preprocessed.as_ref();
     let empty: [F; 0] = [];
-    let mut builder = LookupValues::builder(height, &slot_widths);
+    let mut builder = LookupValues::builder(rows.len(), &slot_widths);
     let mut buf = Vec::new();
     let mut args = Vec::new();
     let mut writers = builder.rows_mut();
-    for (r, writer) in writers.iter_mut().enumerate() {
+    for (r, writer) in rows.zip(writers.iter_mut()) {
         let r_next = (r + 1) % height;
         let main_cur = trace.row_slice(r).unwrap();
         let main_next = trace.row_slice(r_next).unwrap();

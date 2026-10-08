@@ -1,0 +1,1199 @@
+{
+  "pipeline_complete": false,
+  "missing_stages": [
+    "full Init terminal KZG proving with bounded-memory construction",
+    "production universal SRS and sufficient storage",
+    "composed 128-bit security validation"
+  ],
+  "binary_sha256": "82645019dcdf0d6372c314142ea31ea95b25307db006c82484d70d7d58079c93",
+  "small_fri": {
+    "elapsed_seconds": 4.41,
+    "peak_rss_bytes": 973877248,
+    "measurement": {
+      "altered_claim_rejected": true,
+      "altered_obligations_rejected": true,
+      "corrupted_lincheck_rejected": true,
+      "counter_scope": "Instrumented native operations, not a Groth16 constraint census. Deferred verification alone leaves obligations outstanding.",
+      "deferred_obligations_discharged": true,
+      "deferred_verifier_f128_inversions": 556,
+      "deferred_verifier_f128_multiplications": 230332,
+      "dense_m": 26,
+      "discharge_f128_inversions": {
+        "layout": 0,
+        "matrix": 2496,
+        "wiring": 0
+      },
+      "discharge_f128_multiplications": {
+        "layout": 45418,
+        "matrix": 298843,
+        "wiring": 2549592
+      },
+      "expected_claim": 13,
+      "fixed_wiring_pcs": {
+        "mutations_rejected": 8,
+        "profile": "fast",
+        "proof_bytes": 395352,
+        "prove_seconds": 0.319575148,
+        "scope": "Fixed wiring discharge only; not a Groth16 verifier or complete deferred discharge",
+        "serialized_roundtrip_verified": true,
+        "setup_seconds": 0.00579765,
+        "table_field_elements": 524288,
+        "verified": true,
+        "verifier_f128_inversions": 38,
+        "verifier_f128_multiplications": 148687,
+        "verify_seconds": 0.002976575
+      },
+      "flock_rev": "b684b1258e4b1f202bec24afd660ace851b09e5e",
+      "full_verifier_f128_inversions": 3052,
+      "full_verifier_f128_multiplications": 641682,
+      "geometry": {
+        "dense_m": 26,
+        "live_packed_witness_bytes": 5656448,
+        "memory_scope": "Named array sizes, not a peak-RAM prediction; excludes frontend, layout, PCS and other scratch",
+        "one_wiring_field_array_bytes": 8388608,
+        "packed_rows": true,
+        "padded_witness_array_bytes": 67108864,
+        "pcs_buffers": {
+          "fast": {
+            "codeword_bytes": 11534336,
+            "dense_message_allocation_bytes": 8388608,
+            "merkle_tree_bytes": 1048576
+          },
+          "slim": {
+            "codeword_bytes": 23068672,
+            "dense_message_allocation_bytes": 8388608,
+            "merkle_tree_bytes": 2097152
+          }
+        },
+        "strict_slim_profile_available": true,
+        "three_padded_witness_arrays_bytes": 201326592,
+        "uniform_row_log": 12,
+        "wiring_cell_log": 19
+      },
+      "groth16_flock_verifier_implemented": false,
+      "lowering": {
+        "constant_multiplications": 2334,
+        "dense_m_lower_bound": 26,
+        "equalities": 30198,
+        "memory_scope": "One packed witness only; excludes a/b, PCS, wiring, frontend and padding",
+        "most_frequent_scalars": [
+          [
+            16,
+            1630
+          ],
+          [
+            15,
+            593
+          ],
+          [
+            7,
+            48
+          ],
+          [
+            9223372034707292160,
+            8
+          ],
+          [
+            2,
+            2
+          ],
+          [
+            281474976710655,
+            2
+          ],
+          [
+            3,
+            1
+          ],
+          [
+            4,
+            1
+          ],
+          [
+            5,
+            1
+          ],
+          [
+            6,
+            1
+          ],
+          [
+            8,
+            1
+          ],
+          [
+            9,
+            1
+          ],
+          [
+            10,
+            1
+          ],
+          [
+            11,
+            1
+          ],
+          [
+            12,
+            1
+          ],
+          [
+            13,
+            1
+          ],
+          [
+            14,
+            1
+          ],
+          [
+            25,
+            1
+          ],
+          [
+            29,
+            1
+          ],
+          [
+            33,
+            1
+          ]
+        ],
+        "packed_witness_bytes_before_padding": 5656448,
+        "publics": 1,
+        "steps": 70395,
+        "tables": {
+          "Blake3": 52,
+          "Gold(Add)": 15717,
+          "Gold(Canonical)": 24224,
+          "Gold(Linear { a: 1, b: 1, a_bits: 4, b_bits: 1 })": 750,
+          "Gold(Linear { a: 1, b: 1, a_bits: 4, b_bits: 4 })": 50,
+          "Gold(Linear { a: 1, b: 1, a_bits: 5, b_bits: 4 })": 750,
+          "Gold(Linear { a: 16, b: 1, a_bits: 12, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 16, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 20, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 24, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 28, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 32, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 4, b_bits: 4 })": 2198,
+          "Gold(Linear { a: 16, b: 1, a_bits: 8, b_bits: 4 })": 38,
+          "Gold(Linear { a: 2, b: 1, a_bits: 1, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 2, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 3, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 4, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 5, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 6, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 7, b_bits: 1 })": 1,
+          "Gold(Mask)": 14252,
+          "Gold(Mul)": 157,
+          "Gold(MulSmall(2))": 1,
+          "Gold(MulSmall(4))": 47,
+          "Gold(MulSmall(8))": 1630,
+          "Gold(Pack(16))": 890,
+          "Gold(Pack(32))": 446,
+          "Gold(Pack(64))": 226,
+          "Gold(Pack(8))": 1776,
+          "Gold(Range(1))": 1452,
+          "Gold(Range(4))": 5504
+        },
+        "words": 74827
+      },
+      "prepare_seconds": 2.364354169,
+      "profile": "slim",
+      "proof_and_commitment_bytes": 227251,
+      "prove_seconds": 1.436682635,
+      "scope": "Complete single-batch FRI verifier fixture in Flock; inner fixture has development security, not Init",
+      "serialized_roundtrip_verified": true,
+      "source": "CircuitStats { hash_calls: 45, hash_compressions: 52, values: 35400, inputs: 459, gates: 33402, lookups: 5504, tables: 3, publics: 1, hint_calls: 4315, hint_outputs: 8143 }",
+      "verified": true,
+      "verify_seconds": 0.013521117
+    }
+  },
+  "full_init_attempts": [
+    {
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%e %M %x",
+        "-o",
+        "/home/arthur/multi-stark/target/flock-experiment/init-full-fast-1/time.txt",
+        "/home/arthur/multi-stark/experiments/flock/target/release/init-flock",
+        "init-prove",
+        "/home/arthur/ix/measurements/init16-root-verifier-main-20261002",
+        "/home/arthur/multi-stark/target/flock-experiment/init-full-fast-1",
+        "fast"
+      ],
+      "profile": "fast",
+      "threads": 32,
+      "rss_limit_bytes": 429496729600,
+      "status": "failed",
+      "started_unix": 1791321331.1637332,
+      "binary_sha256": "711c2afe217946db9abf3583d1845d1a29eb88b66d93d0a5d4470b9276f3d15c",
+      "source_sha256": {
+        "experiments/flock/src/adapter.rs": "f57cb600ace03a430d95c60a736908a6623722a4a98002c0ecb121d22d084dbf",
+        "experiments/flock/src/binary.rs": "fbe7c7a5d3b14f452ad30efe4b246ae4d0ed911438a5aebcd82bc19b9be763c6",
+        "experiments/flock/src/fold.rs": "c86feb3f60d391532b565daf897b02779d0be3e31038698267059ab1bebb798b",
+        "experiments/flock/src/fri.rs": "418eed5f72405df85356857a070a86b96d9244a2906bef142237c1ff166489c8",
+        "experiments/flock/src/goldilocks.rs": "5a6ddc86867a02b170da0360f2b2cafb1694b4c2bd28a97d956ffcebf339f51c",
+        "experiments/flock/src/hash_chain.rs": "cc680dd6241341c77165bd821ad89abc3acf46780e2973e6484793e0b0aefc2f",
+        "experiments/flock/src/init.rs": "22575c43f1b77f53d09f56229676ca78d8cbcf4493defa649789e9176021239b",
+        "experiments/flock/src/main.rs": "26ec40cfd296bb7867fe3f897633065d97629a9a60b54169553ffcc30252d1e6",
+        "experiments/flock/src/packed.rs": "1a360ee8d428263b07477c738d6bd9a36da3d2d83a4f3530199f2252d701f000",
+        "experiments/flock/src/parameters.rs": "d28a0125c01e1bbe6ceada70df5e0a94fbd2b58d28bd7e404695624dd3fff300"
+      },
+      "sampled_peak_process_tree_rss_bytes": 114486304768,
+      "pid": 3,
+      "elapsed_seconds": 1274.5481215920008,
+      "exit_code": 143,
+      "time_seconds": 1274.35,
+      "peak_rss_bytes": 114509172736,
+      "artifact_directory": "target/flock-experiment/init-full-fast-1",
+      "diagnosis": "Stopped after 1274.35s, peak RSS 114509172736 bytes. GDB confirmed repeated Vec<Cell> copies in ShapeBuilder::connect (builder.rs:627), called by Program::build_packed. Replaced unbalanced joins with smaller-class-into-larger joins. No proof generated."
+    },
+    {
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%e %M %x",
+        "-o",
+        "/home/arthur/multi-stark/target/flock-experiment/init-full-fast-2/time.txt",
+        "/home/arthur/multi-stark/experiments/flock/target/release/init-flock",
+        "init-prove",
+        "/home/arthur/ix/measurements/init16-root-verifier-main-20261002",
+        "/home/arthur/multi-stark/target/flock-experiment/init-full-fast-2",
+        "fast"
+      ],
+      "profile": "fast",
+      "threads": 32,
+      "rss_limit_bytes": 429496729600,
+      "status": "stopped",
+      "started_unix": 1791322704.0319526,
+      "binary_sha256": "6f20b3ba0dc2814ac990aadd8c8a2717a88f92c4049f2281b23ea47332998c11",
+      "source_sha256": {
+        "experiments/flock/Cargo.lock": "6165736889249d18e71aa8e9a569ee0327cecec0a088e484d6a08e7387e5eb55",
+        "experiments/flock/Cargo.toml": "7178510ca38ba5a5f37bb758b4ca73983be23892b32f98ba09cca16e2a57bf37",
+        "experiments/flock/configs/m36_fast.toml": "341aaa6efca8fea738b5380cc85479543b714fa0e9929e2eeca7222cdd258fbc",
+        "experiments/flock/configs/m36_slim.toml": "c825b265eac92c7bbb5437c49ef49980b76ee0708c9272f39473e4a428024921",
+        "experiments/flock/configs/m37_fast.toml": "cc8562c3cd55aa9a9a36c016f5543e277b8074c42924675d5a1edc8b2d91eccb",
+        "experiments/flock/configs/m37_slim.toml": "9c85165f0ffb14452145f6c1a5538e2ca6d3f26d36d0353a01c03dbbc7995fb5",
+        "experiments/flock/configs/m38_fast.toml": "5797ef17f26cbf2b068920a3ce902139095717ab443cf9e318c2b545b6b22c28",
+        "experiments/flock/configs/m38_slim.toml": "06ffa4f553c0ccf9782fec51c7e548f5b00c01da89e7c2dcde70c0597e1abc78",
+        "experiments/flock/configs/m39_fast.toml": "0696d86480dcc09c28ea94f51a7bf72e3a2c46e2036640152800484af27ef2df",
+        "experiments/flock/configs/m39_slim.toml": "37c342d5e640f9e914f95eed4b4ae707a2bb77f0cf309312c7cc519601e81b47",
+        "experiments/flock/configs/m40_fast.toml": "7ced90622bdc8ee0032f3a0585ec82589213b56f6a3aa466dbc9d947c9a7374d",
+        "experiments/flock/configs/m40_slim.toml": "f25738ed5992b8f2b5ddafec048e3036855b8b37827c0cbd1e9f9bb251a6ac0d",
+        "experiments/flock/flock-core.patch": "f5cfdde67a5b04f8d865611cbdaa1647caeec133da286cad4685daa7604e062c",
+        "experiments/flock/src/adapter.rs": "5d8232a86e7031cc3031d3e6bcbaf279bd3645a1e1e63d39862cd4f8e9cd2617",
+        "experiments/flock/src/binary.rs": "fbe7c7a5d3b14f452ad30efe4b246ae4d0ed911438a5aebcd82bc19b9be763c6",
+        "experiments/flock/src/fold.rs": "c86feb3f60d391532b565daf897b02779d0be3e31038698267059ab1bebb798b",
+        "experiments/flock/src/fri.rs": "418eed5f72405df85356857a070a86b96d9244a2906bef142237c1ff166489c8",
+        "experiments/flock/src/goldilocks.rs": "5a6ddc86867a02b170da0360f2b2cafb1694b4c2bd28a97d956ffcebf339f51c",
+        "experiments/flock/src/hash_chain.rs": "cc680dd6241341c77165bd821ad89abc3acf46780e2973e6484793e0b0aefc2f",
+        "experiments/flock/src/init.rs": "22575c43f1b77f53d09f56229676ca78d8cbcf4493defa649789e9176021239b",
+        "experiments/flock/src/main.rs": "07fa05b650590238a5f85ea550da2775321e154eaf6c6439aef327718d0c492a",
+        "experiments/flock/src/packed.rs": "1a360ee8d428263b07477c738d6bd9a36da3d2d83a4f3530199f2252d701f000",
+        "experiments/flock/src/parameters.rs": "d28a0125c01e1bbe6ceada70df5e0a94fbd2b58d28bd7e404695624dd3fff300",
+        "src/plonkish/builder.rs": "536a3c44a5d6245e0a656e015a356c50fc5450df9d3734b8e188db7747dbd42d"
+      },
+      "sampled_peak_process_tree_rss_bytes": 138051543040,
+      "pid": 3,
+      "elapsed_seconds": 687.3878615659996,
+      "exit_code": -15,
+      "artifact_directory": "target/flock-experiment/init-full-fast-2",
+      "diagnosis": "Stopped during serial table witness generation after 687.4s, sampled peak process-tree RSS 138051543040 bytes. Balanced wiring joins completed in 9.1s, shape generation and row evaluation in 192.2s. Parallel row tasks added inside each packed table before restarting. No proof generated."
+    },
+    {
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%e %M %x",
+        "-o",
+        "/home/arthur/multi-stark/target/flock-experiment/init-full-fast-3/time.txt",
+        "/home/arthur/multi-stark/experiments/flock/target/release/init-flock",
+        "init-prove",
+        "/home/arthur/ix/measurements/init16-root-verifier-main-20261002",
+        "/home/arthur/multi-stark/target/flock-experiment/init-full-fast-3",
+        "fast"
+      ],
+      "profile": "fast",
+      "threads": 32,
+      "rss_limit_bytes": 429496729600,
+      "status": "rss_limit",
+      "started_unix": 1791323419.2934666,
+      "binary_sha256": "4bf6c2f755f2e225ab2925e750dd0a48918b6816bec98d25f91c482f4e357d4a",
+      "source_sha256": {
+        "experiments/flock/Cargo.lock": "0a98713d8603489af8843ccde96049244ae74b048597ade84a1f819af8b44758",
+        "experiments/flock/Cargo.toml": "340aca31aef058f90452d77ca5a86e2f5ef282aa89e674da8b77d77a55b3eddb",
+        "experiments/flock/configs/m36_fast.toml": "341aaa6efca8fea738b5380cc85479543b714fa0e9929e2eeca7222cdd258fbc",
+        "experiments/flock/configs/m36_slim.toml": "c825b265eac92c7bbb5437c49ef49980b76ee0708c9272f39473e4a428024921",
+        "experiments/flock/configs/m37_fast.toml": "cc8562c3cd55aa9a9a36c016f5543e277b8074c42924675d5a1edc8b2d91eccb",
+        "experiments/flock/configs/m37_slim.toml": "9c85165f0ffb14452145f6c1a5538e2ca6d3f26d36d0353a01c03dbbc7995fb5",
+        "experiments/flock/configs/m38_fast.toml": "5797ef17f26cbf2b068920a3ce902139095717ab443cf9e318c2b545b6b22c28",
+        "experiments/flock/configs/m38_slim.toml": "06ffa4f553c0ccf9782fec51c7e548f5b00c01da89e7c2dcde70c0597e1abc78",
+        "experiments/flock/configs/m39_fast.toml": "0696d86480dcc09c28ea94f51a7bf72e3a2c46e2036640152800484af27ef2df",
+        "experiments/flock/configs/m39_slim.toml": "37c342d5e640f9e914f95eed4b4ae707a2bb77f0cf309312c7cc519601e81b47",
+        "experiments/flock/configs/m40_fast.toml": "7ced90622bdc8ee0032f3a0585ec82589213b56f6a3aa466dbc9d947c9a7374d",
+        "experiments/flock/configs/m40_slim.toml": "f25738ed5992b8f2b5ddafec048e3036855b8b37827c0cbd1e9f9bb251a6ac0d",
+        "experiments/flock/flock-core.patch": "f5cfdde67a5b04f8d865611cbdaa1647caeec133da286cad4685daa7604e062c",
+        "experiments/flock/src/adapter.rs": "a2d492b1b84a74000e5090a3a8b34771e922797db57e764d8f937e5e197bbbbf",
+        "experiments/flock/src/binary.rs": "fbe7c7a5d3b14f452ad30efe4b246ae4d0ed911438a5aebcd82bc19b9be763c6",
+        "experiments/flock/src/fold.rs": "c86feb3f60d391532b565daf897b02779d0be3e31038698267059ab1bebb798b",
+        "experiments/flock/src/fri.rs": "41b5e73ff98750e25e3c4b4fcf3899d083a933bd3e14d5ea867b691725e065c1",
+        "experiments/flock/src/goldilocks.rs": "5a6ddc86867a02b170da0360f2b2cafb1694b4c2bd28a97d956ffcebf339f51c",
+        "experiments/flock/src/hash_chain.rs": "cc680dd6241341c77165bd821ad89abc3acf46780e2973e6484793e0b0aefc2f",
+        "experiments/flock/src/init.rs": "22575c43f1b77f53d09f56229676ca78d8cbcf4493defa649789e9176021239b",
+        "experiments/flock/src/main.rs": "7fca8c098dc4fe3532b8b0b103ec3575b4ead9a6cbe464803610146ba382869b",
+        "experiments/flock/src/packed.rs": "aa4f110845b11746e5d0f8518bd14b99073c9b3ddd6268f6fa51138ac1091a4e",
+        "experiments/flock/src/parameters.rs": "d28a0125c01e1bbe6ceada70df5e0a94fbd2b58d28bd7e404695624dd3fff300",
+        "experiments/flock/src/static_wiring.rs": "cfa8f2a8fa9e278d7b82e24eadb2747a68dbcec647034c84238dc674ae5add23",
+        "src/plonkish/builder.rs": "536a3c44a5d6245e0a656e015a356c50fc5450df9d3734b8e188db7747dbd42d"
+      },
+      "sampled_peak_process_tree_rss_bytes": 429732802560,
+      "pid": 3,
+      "elapsed_seconds": 456.3204028589971,
+      "current_process_tree_rss_bytes": 429732802560,
+      "exit_code": -15,
+      "artifact_directory": "target/flock-experiment/init-full-fast-3",
+      "diagnosis": "Memory guard stopped the main Boolean/wiring PIOPs at 400.22 GiB RSS after 456.3s. Packed witness generation completed in 25.276s, dense compaction in 1.141s, commitment in 36.324s. No proof generated. Next attempt disables scratch retention and runs the forked PIOPs sequentially with unchanged transcript order."
+    },
+    {
+      "low_memory": true,
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%e %M %x",
+        "-o",
+        "/home/arthur/multi-stark/target/flock-experiment/init-full-fast-4/time.txt",
+        "/home/arthur/multi-stark/experiments/flock/target/release/init-flock",
+        "init-prove",
+        "/home/arthur/ix/measurements/init16-root-verifier-main-20261002",
+        "/home/arthur/multi-stark/target/flock-experiment/init-full-fast-4",
+        "fast"
+      ],
+      "profile": "fast",
+      "threads": 32,
+      "rss_limit_bytes": 429496729600,
+      "status": "rss_limit",
+      "started_unix": 1791324006.8945868,
+      "binary_sha256": "66efad99bcbec775ca6fe8a178cbe911d5b8649d23b752f5a9efee1436f5bd50",
+      "source_sha256": {
+        "experiments/flock/Cargo.lock": "80351e278b2bebfb1b9ae52e7264de63810f071af5b79cd51619d38e9362261a",
+        "experiments/flock/Cargo.toml": "d5b0b3badd1e307c61425b37af9db9b88989e54c19c37af00fe6b6c2695561ff",
+        "experiments/flock/configs/m36_fast.toml": "341aaa6efca8fea738b5380cc85479543b714fa0e9929e2eeca7222cdd258fbc",
+        "experiments/flock/configs/m36_slim.toml": "c825b265eac92c7bbb5437c49ef49980b76ee0708c9272f39473e4a428024921",
+        "experiments/flock/configs/m37_fast.toml": "cc8562c3cd55aa9a9a36c016f5543e277b8074c42924675d5a1edc8b2d91eccb",
+        "experiments/flock/configs/m37_slim.toml": "9c85165f0ffb14452145f6c1a5538e2ca6d3f26d36d0353a01c03dbbc7995fb5",
+        "experiments/flock/configs/m38_fast.toml": "5797ef17f26cbf2b068920a3ce902139095717ab443cf9e318c2b545b6b22c28",
+        "experiments/flock/configs/m38_slim.toml": "06ffa4f553c0ccf9782fec51c7e548f5b00c01da89e7c2dcde70c0597e1abc78",
+        "experiments/flock/configs/m39_fast.toml": "0696d86480dcc09c28ea94f51a7bf72e3a2c46e2036640152800484af27ef2df",
+        "experiments/flock/configs/m39_slim.toml": "37c342d5e640f9e914f95eed4b4ae707a2bb77f0cf309312c7cc519601e81b47",
+        "experiments/flock/configs/m40_fast.toml": "7ced90622bdc8ee0032f3a0585ec82589213b56f6a3aa466dbc9d947c9a7374d",
+        "experiments/flock/configs/m40_slim.toml": "f25738ed5992b8f2b5ddafec048e3036855b8b37827c0cbd1e9f9bb251a6ac0d",
+        "experiments/flock/flock-core.patch": "8415c3d22f870d5146ef2e1c7f7ff0fc7369a58000ab52cdcdd472db990b1926",
+        "experiments/flock/flock-prover.patch": "e3edb669a0aafcb43fb63667a8118c3aa7b0d0662b071b88fa2eb07b5898a5f5",
+        "experiments/flock/src/adapter.rs": "a2d492b1b84a74000e5090a3a8b34771e922797db57e764d8f937e5e197bbbbf",
+        "experiments/flock/src/binary.rs": "fbe7c7a5d3b14f452ad30efe4b246ae4d0ed911438a5aebcd82bc19b9be763c6",
+        "experiments/flock/src/fold.rs": "c86feb3f60d391532b565daf897b02779d0be3e31038698267059ab1bebb798b",
+        "experiments/flock/src/fri.rs": "41b5e73ff98750e25e3c4b4fcf3899d083a933bd3e14d5ea867b691725e065c1",
+        "experiments/flock/src/goldilocks.rs": "5a6ddc86867a02b170da0360f2b2cafb1694b4c2bd28a97d956ffcebf339f51c",
+        "experiments/flock/src/hash_chain.rs": "cc680dd6241341c77165bd821ad89abc3acf46780e2973e6484793e0b0aefc2f",
+        "experiments/flock/src/init.rs": "22575c43f1b77f53d09f56229676ca78d8cbcf4493defa649789e9176021239b",
+        "experiments/flock/src/main.rs": "7fca8c098dc4fe3532b8b0b103ec3575b4ead9a6cbe464803610146ba382869b",
+        "experiments/flock/src/packed.rs": "0b2934fe3af9472a5d21f1303c973acf00acf93b0226e07d5c0f155cfcc68535",
+        "experiments/flock/src/parameters.rs": "d28a0125c01e1bbe6ceada70df5e0a94fbd2b58d28bd7e404695624dd3fff300",
+        "experiments/flock/src/static_wiring.rs": "cfa8f2a8fa9e278d7b82e24eadb2747a68dbcec647034c84238dc674ae5add23",
+        "src/plonkish/builder.rs": "536a3c44a5d6245e0a656e015a356c50fc5450df9d3734b8e188db7747dbd42d"
+      },
+      "sampled_peak_process_tree_rss_bytes": 429634482176,
+      "pid": 3,
+      "elapsed_seconds": 522.3631277780005,
+      "current_process_tree_rss_bytes": 429634482176,
+      "exit_code": -15,
+      "artifact_directory": "target/flock-experiment/init-full-fast-4",
+      "diagnosis": "Memory guard stopped the sequential Boolean PIOP at 400.13 GiB after 522.4s. Witness generation 25.049s; compaction 1.112s; commitment 35.739s. Scratch pooling was disabled and wiring had not started. Next attempt also releases the dense witness and encoded PCS buffers, regenerating them before opening and checking commitment equality. No proof generated."
+    },
+    {
+      "low_memory": true,
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%e %M %x",
+        "-o",
+        "/home/arthur/multi-stark/target/flock-experiment/init-full-fast-5/time.txt",
+        "/home/arthur/multi-stark/experiments/flock/target/release/init-flock",
+        "init-prove",
+        "/home/arthur/ix/measurements/init16-root-verifier-main-20261002",
+        "/home/arthur/multi-stark/target/flock-experiment/init-full-fast-5",
+        "fast"
+      ],
+      "profile": "fast",
+      "threads": 32,
+      "rss_limit_bytes": 429496729600,
+      "status": "stopped",
+      "started_unix": 1791324689.23868,
+      "binary_sha256": "d091c86e703537f57f472b1ac977d55eca9f3d0facc52c772de3c7ad4bad41fd",
+      "source_sha256": {
+        "experiments/flock/Cargo.lock": "80351e278b2bebfb1b9ae52e7264de63810f071af5b79cd51619d38e9362261a",
+        "experiments/flock/Cargo.toml": "d5b0b3badd1e307c61425b37af9db9b88989e54c19c37af00fe6b6c2695561ff",
+        "experiments/flock/configs/m36_fast.toml": "341aaa6efca8fea738b5380cc85479543b714fa0e9929e2eeca7222cdd258fbc",
+        "experiments/flock/configs/m36_slim.toml": "c825b265eac92c7bbb5437c49ef49980b76ee0708c9272f39473e4a428024921",
+        "experiments/flock/configs/m37_fast.toml": "cc8562c3cd55aa9a9a36c016f5543e277b8074c42924675d5a1edc8b2d91eccb",
+        "experiments/flock/configs/m37_slim.toml": "9c85165f0ffb14452145f6c1a5538e2ca6d3f26d36d0353a01c03dbbc7995fb5",
+        "experiments/flock/configs/m38_fast.toml": "5797ef17f26cbf2b068920a3ce902139095717ab443cf9e318c2b545b6b22c28",
+        "experiments/flock/configs/m38_slim.toml": "06ffa4f553c0ccf9782fec51c7e548f5b00c01da89e7c2dcde70c0597e1abc78",
+        "experiments/flock/configs/m39_fast.toml": "0696d86480dcc09c28ea94f51a7bf72e3a2c46e2036640152800484af27ef2df",
+        "experiments/flock/configs/m39_slim.toml": "37c342d5e640f9e914f95eed4b4ae707a2bb77f0cf309312c7cc519601e81b47",
+        "experiments/flock/configs/m40_fast.toml": "7ced90622bdc8ee0032f3a0585ec82589213b56f6a3aa466dbc9d947c9a7374d",
+        "experiments/flock/configs/m40_slim.toml": "f25738ed5992b8f2b5ddafec048e3036855b8b37827c0cbd1e9f9bb251a6ac0d",
+        "experiments/flock/flock-core.patch": "8415c3d22f870d5146ef2e1c7f7ff0fc7369a58000ab52cdcdd472db990b1926",
+        "experiments/flock/flock-prover.patch": "a6007c4b01f4ee875dbd6535216b1a1966ed81fe2aef1cd18a8c88ed1f62addc",
+        "experiments/flock/src/adapter.rs": "a2d492b1b84a74000e5090a3a8b34771e922797db57e764d8f937e5e197bbbbf",
+        "experiments/flock/src/binary.rs": "fbe7c7a5d3b14f452ad30efe4b246ae4d0ed911438a5aebcd82bc19b9be763c6",
+        "experiments/flock/src/fold.rs": "c86feb3f60d391532b565daf897b02779d0be3e31038698267059ab1bebb798b",
+        "experiments/flock/src/fri.rs": "41b5e73ff98750e25e3c4b4fcf3899d083a933bd3e14d5ea867b691725e065c1",
+        "experiments/flock/src/goldilocks.rs": "5a6ddc86867a02b170da0360f2b2cafb1694b4c2bd28a97d956ffcebf339f51c",
+        "experiments/flock/src/hash_chain.rs": "cc680dd6241341c77165bd821ad89abc3acf46780e2973e6484793e0b0aefc2f",
+        "experiments/flock/src/init.rs": "22575c43f1b77f53d09f56229676ca78d8cbcf4493defa649789e9176021239b",
+        "experiments/flock/src/main.rs": "7fca8c098dc4fe3532b8b0b103ec3575b4ead9a6cbe464803610146ba382869b",
+        "experiments/flock/src/packed.rs": "0b2934fe3af9472a5d21f1303c973acf00acf93b0226e07d5c0f155cfcc68535",
+        "experiments/flock/src/parameters.rs": "d28a0125c01e1bbe6ceada70df5e0a94fbd2b58d28bd7e404695624dd3fff300",
+        "experiments/flock/src/static_wiring.rs": "cfa8f2a8fa9e278d7b82e24eadb2747a68dbcec647034c84238dc674ae5add23",
+        "src/plonkish/builder.rs": "536a3c44a5d6245e0a656e015a356c50fc5450df9d3734b8e188db7747dbd42d"
+      },
+      "sampled_peak_process_tree_rss_bytes": 345301086208,
+      "pid": 3,
+      "elapsed_seconds": 684.5043389249986,
+      "current_process_tree_rss_bytes": 345301086208,
+      "exit_code": -15,
+      "artifact_directory": "target/flock-experiment/init-full-fast-5",
+      "diagnosis": "Stopped after 684.5s to replace the globally contended mul-count/hash-count instrumentation with an uninstrumented build. Peak sampled process-tree RSS 345301086208 bytes (321.59 GiB). Memory stayed below the guard through this attempt. Round1 URM 2.329s, round2 fused fold 6.150s; tail still running. No proof generated. The uninstrumented small fixture produced byte-identical proof bytes."
+    },
+    {
+      "build_info": {
+        "counters_enabled": false
+      },
+      "low_memory": true,
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%e %M %x",
+        "-o",
+        "/home/arthur/multi-stark/target/flock-experiment/init-full-fast-6/time.txt",
+        "/home/arthur/multi-stark/experiments/flock/target/release/init-flock",
+        "init-prove",
+        "/home/arthur/ix/measurements/init16-root-verifier-main-20261002",
+        "/home/arthur/multi-stark/target/flock-experiment/init-full-fast-6",
+        "fast"
+      ],
+      "profile": "fast",
+      "threads": 32,
+      "rss_limit_bytes": 429496729600,
+      "status": "completed",
+      "started_unix": 1791325389.9257028,
+      "binary_sha256": "68be8ef41092354afdb430f8ac14bedac4ae314cf69955beb8679acd779fae73",
+      "source_sha256": {
+        "experiments/flock/Cargo.lock": "80351e278b2bebfb1b9ae52e7264de63810f071af5b79cd51619d38e9362261a",
+        "experiments/flock/Cargo.toml": "b6be09fa0751474b0fa28f5b3c12fb0938943d904799dd2cbec06acf05865e21",
+        "experiments/flock/configs/m36_fast.toml": "341aaa6efca8fea738b5380cc85479543b714fa0e9929e2eeca7222cdd258fbc",
+        "experiments/flock/configs/m36_slim.toml": "c825b265eac92c7bbb5437c49ef49980b76ee0708c9272f39473e4a428024921",
+        "experiments/flock/configs/m37_fast.toml": "cc8562c3cd55aa9a9a36c016f5543e277b8074c42924675d5a1edc8b2d91eccb",
+        "experiments/flock/configs/m37_slim.toml": "9c85165f0ffb14452145f6c1a5538e2ca6d3f26d36d0353a01c03dbbc7995fb5",
+        "experiments/flock/configs/m38_fast.toml": "5797ef17f26cbf2b068920a3ce902139095717ab443cf9e318c2b545b6b22c28",
+        "experiments/flock/configs/m38_slim.toml": "06ffa4f553c0ccf9782fec51c7e548f5b00c01da89e7c2dcde70c0597e1abc78",
+        "experiments/flock/configs/m39_fast.toml": "0696d86480dcc09c28ea94f51a7bf72e3a2c46e2036640152800484af27ef2df",
+        "experiments/flock/configs/m39_slim.toml": "37c342d5e640f9e914f95eed4b4ae707a2bb77f0cf309312c7cc519601e81b47",
+        "experiments/flock/configs/m40_fast.toml": "7ced90622bdc8ee0032f3a0585ec82589213b56f6a3aa466dbc9d947c9a7374d",
+        "experiments/flock/configs/m40_slim.toml": "f25738ed5992b8f2b5ddafec048e3036855b8b37827c0cbd1e9f9bb251a6ac0d",
+        "experiments/flock/flock-core.patch": "8415c3d22f870d5146ef2e1c7f7ff0fc7369a58000ab52cdcdd472db990b1926",
+        "experiments/flock/flock-prover.patch": "a6007c4b01f4ee875dbd6535216b1a1966ed81fe2aef1cd18a8c88ed1f62addc",
+        "experiments/flock/src/adapter.rs": "a2d492b1b84a74000e5090a3a8b34771e922797db57e764d8f937e5e197bbbbf",
+        "experiments/flock/src/binary.rs": "fbe7c7a5d3b14f452ad30efe4b246ae4d0ed911438a5aebcd82bc19b9be763c6",
+        "experiments/flock/src/counts.rs": "54b056e231d4b4ec87be244f01573ff3af9b3d0757c1eac689bf2e892e6be2fe",
+        "experiments/flock/src/fold.rs": "c86feb3f60d391532b565daf897b02779d0be3e31038698267059ab1bebb798b",
+        "experiments/flock/src/fri.rs": "aa7d157906000ccb7c7d794ec6aec7cbc410bec634ce26a89dabbcebae651868",
+        "experiments/flock/src/goldilocks.rs": "5a6ddc86867a02b170da0360f2b2cafb1694b4c2bd28a97d956ffcebf339f51c",
+        "experiments/flock/src/hash_chain.rs": "374ba520767b2f5096f26a6ca44800165a1853df328721a742396a9cc9a36ea9",
+        "experiments/flock/src/init.rs": "88181e51c2f1e4f1bfbf0bc9685209f22b1383da4ad5c709a89f30d6d6219c7c",
+        "experiments/flock/src/main.rs": "bc828b2e6322535dd856231005c171042c82b63b68425d04206810127310ed62",
+        "experiments/flock/src/packed.rs": "0b2934fe3af9472a5d21f1303c973acf00acf93b0226e07d5c0f155cfcc68535",
+        "experiments/flock/src/parameters.rs": "d28a0125c01e1bbe6ceada70df5e0a94fbd2b58d28bd7e404695624dd3fff300",
+        "experiments/flock/src/static_wiring.rs": "2ecd1e7b3605ace648e106c24d876d5a8e7b3af1dc3bdddd4b1e807d6ed1c9cc",
+        "src/plonkish/builder.rs": "536a3c44a5d6245e0a656e015a356c50fc5450df9d3734b8e188db7747dbd42d"
+      },
+      "sampled_peak_process_tree_rss_bytes": 345358344192,
+      "pid": 4,
+      "elapsed_seconds": 399.36925820599936,
+      "current_process_tree_rss_bytes": 1658880,
+      "exit_code": 0,
+      "time_seconds": 398.97,
+      "peak_rss_bytes": 345336741888,
+      "artifact_directory": "target/flock-experiment/init-full-fast-6"
+    }
+  ],
+  "small_fri_low_memory": {
+    "elapsed_seconds": 4.41,
+    "peak_rss_bytes": 920748032,
+    "proof_identical_to_parallel": true,
+    "measurement": {
+      "altered_claim_rejected": true,
+      "altered_obligations_rejected": true,
+      "corrupted_lincheck_rejected": true,
+      "counter_scope": "Instrumented native operations, not a Groth16 constraint census. Deferred verification alone leaves obligations outstanding.",
+      "deferred_obligations_discharged": true,
+      "deferred_verifier_f128_inversions": 556,
+      "deferred_verifier_f128_multiplications": 230332,
+      "dense_m": 26,
+      "discharge_f128_inversions": {
+        "layout": 0,
+        "matrix": 2496,
+        "wiring": 0
+      },
+      "discharge_f128_multiplications": {
+        "layout": 45418,
+        "matrix": 298843,
+        "wiring": 2549592
+      },
+      "expected_claim": 13,
+      "fixed_wiring_pcs": {
+        "mutations_rejected": 8,
+        "profile": "fast",
+        "proof_bytes": 395352,
+        "prove_seconds": 0.320982606,
+        "scope": "Fixed wiring discharge only; not a Groth16 verifier or complete deferred discharge",
+        "serialized_roundtrip_verified": true,
+        "setup_seconds": 0.004342177,
+        "table_field_elements": 524288,
+        "verified": true,
+        "verifier_f128_inversions": 38,
+        "verifier_f128_multiplications": 148687,
+        "verify_seconds": 0.003228348
+      },
+      "flock_rev": "b684b1258e4b1f202bec24afd660ace851b09e5e",
+      "full_verifier_f128_inversions": 3052,
+      "full_verifier_f128_multiplications": 641682,
+      "geometry": {
+        "dense_m": 26,
+        "live_packed_witness_bytes": 5656448,
+        "memory_scope": "Named array sizes, not a peak-RAM prediction; excludes frontend, layout, PCS and other scratch",
+        "one_wiring_field_array_bytes": 8388608,
+        "packed_rows": true,
+        "padded_witness_array_bytes": 67108864,
+        "pcs_buffers": {
+          "fast": {
+            "codeword_bytes": 11534336,
+            "dense_message_allocation_bytes": 8388608,
+            "merkle_tree_bytes": 1048576
+          },
+          "slim": {
+            "codeword_bytes": 23068672,
+            "dense_message_allocation_bytes": 8388608,
+            "merkle_tree_bytes": 2097152
+          }
+        },
+        "strict_slim_profile_available": true,
+        "three_padded_witness_arrays_bytes": 201326592,
+        "uniform_row_log": 12,
+        "wiring_cell_log": 19
+      },
+      "groth16_flock_verifier_implemented": false,
+      "lowering": {
+        "constant_multiplications": 2334,
+        "dense_m_lower_bound": 26,
+        "equalities": 30198,
+        "memory_scope": "One packed witness only; excludes a/b, PCS, wiring, frontend and padding",
+        "most_frequent_scalars": [
+          [
+            16,
+            1630
+          ],
+          [
+            15,
+            593
+          ],
+          [
+            7,
+            48
+          ],
+          [
+            9223372034707292160,
+            8
+          ],
+          [
+            2,
+            2
+          ],
+          [
+            281474976710655,
+            2
+          ],
+          [
+            3,
+            1
+          ],
+          [
+            4,
+            1
+          ],
+          [
+            5,
+            1
+          ],
+          [
+            6,
+            1
+          ],
+          [
+            8,
+            1
+          ],
+          [
+            9,
+            1
+          ],
+          [
+            10,
+            1
+          ],
+          [
+            11,
+            1
+          ],
+          [
+            12,
+            1
+          ],
+          [
+            13,
+            1
+          ],
+          [
+            14,
+            1
+          ],
+          [
+            25,
+            1
+          ],
+          [
+            29,
+            1
+          ],
+          [
+            33,
+            1
+          ]
+        ],
+        "packed_witness_bytes_before_padding": 5656448,
+        "publics": 1,
+        "steps": 70395,
+        "tables": {
+          "Blake3": 52,
+          "Gold(Add)": 15717,
+          "Gold(Canonical)": 24224,
+          "Gold(Linear { a: 1, b: 1, a_bits: 4, b_bits: 1 })": 750,
+          "Gold(Linear { a: 1, b: 1, a_bits: 4, b_bits: 4 })": 50,
+          "Gold(Linear { a: 1, b: 1, a_bits: 5, b_bits: 4 })": 750,
+          "Gold(Linear { a: 16, b: 1, a_bits: 12, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 16, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 20, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 24, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 28, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 32, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 4, b_bits: 4 })": 2198,
+          "Gold(Linear { a: 16, b: 1, a_bits: 8, b_bits: 4 })": 38,
+          "Gold(Linear { a: 2, b: 1, a_bits: 1, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 2, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 3, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 4, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 5, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 6, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 7, b_bits: 1 })": 1,
+          "Gold(Mask)": 14252,
+          "Gold(Mul)": 157,
+          "Gold(MulSmall(2))": 1,
+          "Gold(MulSmall(4))": 47,
+          "Gold(MulSmall(8))": 1630,
+          "Gold(Pack(16))": 890,
+          "Gold(Pack(32))": 446,
+          "Gold(Pack(64))": 226,
+          "Gold(Pack(8))": 1776,
+          "Gold(Range(1))": 1452,
+          "Gold(Range(4))": 5504
+        },
+        "words": 74827
+      },
+      "prepare_seconds": 2.380234687,
+      "profile": "slim",
+      "proof_and_commitment_bytes": 227251,
+      "prove_seconds": 1.4384590099999999,
+      "scope": "Complete single-batch FRI verifier fixture in Flock; inner fixture has development security, not Init",
+      "serialized_roundtrip_verified": true,
+      "source": "CircuitStats { hash_calls: 45, hash_compressions: 52, values: 35400, inputs: 459, gates: 33402, lookups: 5504, tables: 3, publics: 1, hint_calls: 4315, hint_outputs: 8143 }",
+      "verified": true,
+      "verify_seconds": 0.01313046
+    },
+    "binary_sha256": "66efad99bcbec775ca6fe8a178cbe911d5b8649d23b752f5a9efee1436f5bd50"
+  },
+  "validation": [
+    "10 release tests passed without default features; earlier default-feature tests also passed",
+    "Clippy all-targets with warnings denied passed with and without default features",
+    "Small fixture proofs byte-identical across parallel, low-memory, regenerated-PCS, and counter-disabled modes",
+    "Full Init native verification, serialized roundtrip verification, and altered public claim rejection passed"
+  ],
+  "instrumentation": "Full Init timing and no-counters fixture disable global operation counters; earlier fixtures enable them. Native operation counts are not Groth16 constraint counts.",
+  "full_init": {
+    "altered_claim_rejected": true,
+    "counters_enabled": false,
+    "frontend": "CircuitStats { hash_calls: 53066, hash_compressions: 127593, values: 132013262, inputs: 1859170, gates: 117687732, lookups: 25385056, tables: 3, publics: 18, hint_calls: 23102862, hint_outputs: 36833298 }",
+    "frontend_seconds": 11.787549984,
+    "geometry": {
+      "dense_m": 38,
+      "live_packed_witness_bytes": 30089890176,
+      "memory_scope": "Named array sizes, not a peak-RAM prediction; excludes frontend, layout, PCS and other scratch",
+      "one_wiring_field_array_bytes": 137438953472,
+      "packed_rows": false,
+      "padded_witness_array_bytes": 1099511627776,
+      "pcs_buffers": {
+        "fast": {
+          "codeword_bytes": 61203283968,
+          "dense_message_allocation_bytes": 34359738368,
+          "merkle_tree_bytes": 4294967296
+        },
+        "slim": {
+          "codeword_bytes": 122406567936,
+          "dense_message_allocation_bytes": 34359738368,
+          "merkle_tree_bytes": 8589934592
+        }
+      },
+      "strict_slim_profile_available": true,
+      "three_padded_witness_arrays_bytes": 3298534883328,
+      "uniform_row_log": 26,
+      "wiring_cell_log": 33
+    },
+    "lowering": {
+      "constant_multiplications": 22347554,
+      "dense_m_lower_bound": 38,
+      "equalities": 107431865,
+      "memory_scope": "One packed witness only; excludes a/b, PCS, wiring, frontend and padding",
+      "most_frequent_scalars": [
+        [
+          16,
+          14001738
+        ],
+        [
+          15,
+          4870293
+        ],
+        [
+          7,
+          3398976
+        ],
+        [
+          9223372034707292160,
+          9218
+        ],
+        [
+          281474976710655,
+          4200
+        ],
+        [
+          16777217,
+          4100
+        ],
+        [
+          1152921504606846977,
+          3900
+        ],
+        [
+          70368744161279,
+          3700
+        ],
+        [
+          549755813887,
+          3600
+        ],
+        [
+          576451956076183553,
+          3500
+        ],
+        [
+          4649662884198176412,
+          3300
+        ],
+        [
+          1803076106186727245,
+          3100
+        ],
+        [
+          7093403778535204496,
+          2900
+        ],
+        [
+          455906449640507598,
+          2700
+        ],
+        [
+          953828971695440716,
+          2500
+        ],
+        [
+          1532612707718625686,
+          2400
+        ],
+        [
+          2238841433216015904,
+          2300
+        ],
+        [
+          670244699813528918,
+          2200
+        ],
+        [
+          2,
+          2001
+        ],
+        [
+          6115771955107415309,
+          2000
+        ]
+      ],
+      "packed_witness_bytes_before_padding": 30089890176,
+      "publics": 18,
+      "steps": 225604981,
+      "tables": {
+        "Blake3": 127593,
+        "Gold(Add)": 45410856,
+        "Gold(Canonical)": 61060347,
+        "Gold(Linear { a: 1, b: 1, a_bits: 4, b_bits: 1 })": 9130065,
+        "Gold(Linear { a: 1, b: 1, a_bits: 4, b_bits: 4 })": 608671,
+        "Gold(Linear { a: 1, b: 1, a_bits: 5, b_bits: 4 })": 9130065,
+        "Gold(Linear { a: 16, b: 1, a_bits: 12, b_bits: 4 })": 608615,
+        "Gold(Linear { a: 16, b: 1, a_bits: 16, b_bits: 4 })": 608615,
+        "Gold(Linear { a: 16, b: 1, a_bits: 20, b_bits: 4 })": 608615,
+        "Gold(Linear { a: 16, b: 1, a_bits: 24, b_bits: 4 })": 608615,
+        "Gold(Linear { a: 16, b: 1, a_bits: 28, b_bits: 4 })": 608615,
+        "Gold(Linear { a: 16, b: 1, a_bits: 32, b_bits: 4 })": 608615,
+        "Gold(Linear { a: 16, b: 1, a_bits: 4, b_bits: 4 })": 8430879,
+        "Gold(Linear { a: 16, b: 1, a_bits: 8, b_bits: 4 })": 608615,
+        "Gold(Linear { a: 2, b: 1, a_bits: 1, b_bits: 1 })": 403,
+        "Gold(Linear { a: 2, b: 1, a_bits: 2, b_bits: 1 })": 403,
+        "Gold(Linear { a: 2, b: 1, a_bits: 3, b_bits: 1 })": 403,
+        "Gold(Linear { a: 2, b: 1, a_bits: 4, b_bits: 1 })": 403,
+        "Gold(Linear { a: 2, b: 1, a_bits: 5, b_bits: 1 })": 403,
+        "Gold(Linear { a: 2, b: 1, a_bits: 6, b_bits: 1 })": 403,
+        "Gold(Linear { a: 2, b: 1, a_bits: 7, b_bits: 1 })": 403,
+        "Gold(Mask)": 15121544,
+        "Gold(Mul)": 10324578,
+        "Gold(MulSmall(16))": 984,
+        "Gold(MulSmall(2))": 2290,
+        "Gold(MulSmall(4))": 3399525,
+        "Gold(MulSmall(8))": 14004203,
+        "Gold(Pack(16))": 2360346,
+        "Gold(Pack(32))": 1180174,
+        "Gold(Pack(64))": 590588,
+        "Gold(Pack(8))": 4720688,
+        "Gold(Range(1))": 10353403,
+        "Gold(Range(4))": 25385056
+      },
+      "words": 261202846
+    },
+    "lowering_seconds": 52.666637886,
+    "packed_geometry": {
+      "dense_m": 38,
+      "live_packed_witness_bytes": 30089890176,
+      "memory_scope": "Named array sizes, not a peak-RAM prediction; excludes frontend, layout, PCS and other scratch",
+      "one_wiring_field_array_bytes": 8589934592,
+      "packed_rows": true,
+      "padded_witness_array_bytes": 68719476736,
+      "pcs_buffers": {
+        "fast": {
+          "codeword_bytes": 61203283968,
+          "dense_message_allocation_bytes": 34359738368,
+          "merkle_tree_bytes": 4294967296
+        },
+        "slim": {
+          "codeword_bytes": 122406567936,
+          "dense_message_allocation_bytes": 34359738368,
+          "merkle_tree_bytes": 8589934592
+        }
+      },
+      "strict_slim_profile_available": true,
+      "three_padded_witness_arrays_bytes": 206158430208,
+      "uniform_row_log": 17,
+      "wiring_cell_log": 29
+    },
+    "prepare_witness_and_shape_seconds": 195.17358234,
+    "profile": "fast",
+    "proof_and_commitment_bytes": 712099,
+    "proof_blake3": "8f93741e3e08430d99687ee4e00754f4f750ca8ec365224021d01fdd65db9fc3",
+    "prove_seconds": 107.081682146,
+    "public_claim_words": [
+      0,
+      293,
+      3008464260,
+      3936129970,
+      1088962797,
+      1141056675,
+      2347219926,
+      1176003176,
+      683533119,
+      3085659920,
+      1422858688,
+      3165160492,
+      1899567894,
+      784981652,
+      376864732,
+      1915641123,
+      2034217541,
+      2163067803
+    ],
+    "queries": 100,
+    "scope": "Full unchanged Init Flock proof; Groth16 wrapper and composed security validation outstanding",
+    "serialized_roundtrip_verified": true,
+    "source_proof_blake3": "f0fa026a149dd1c8c450fe55ceed38b006003cb0f9aa60339082f3ba3abb1613",
+    "source_proof_bytes": 5738492,
+    "source_vk_blake3": "f0c635f096bb2b9ff8fbeaf947c406978c11ce3bc447df94e43d6e9fe3cc6fbc",
+    "status": "verified",
+    "verify_seconds": 2.5120256789999997
+  },
+  "small_fri_no_counters": {
+    "elapsed_seconds": 4.67,
+    "peak_rss_bytes": 924909568,
+    "measurement": {
+      "altered_claim_rejected": true,
+      "altered_obligations_rejected": true,
+      "corrupted_lincheck_rejected": true,
+      "counter_scope": "Native operations when counters are enabled; null otherwise. Not a Groth16 constraint census. Deferred verification alone leaves obligations outstanding.",
+      "counters_enabled": false,
+      "deferred_obligations_discharged": true,
+      "deferred_verifier_f128_inversions": null,
+      "deferred_verifier_f128_multiplications": null,
+      "dense_m": 26,
+      "discharge_f128_inversions": {
+        "layout": null,
+        "matrix": null,
+        "wiring": null
+      },
+      "discharge_f128_multiplications": {
+        "layout": null,
+        "matrix": null,
+        "wiring": null
+      },
+      "expected_claim": 13,
+      "fixed_wiring_pcs": {
+        "mutations_rejected": 8,
+        "profile": "fast",
+        "proof_bytes": 395352,
+        "prove_seconds": 0.059015064,
+        "scope": "Fixed wiring discharge only; not a Groth16 verifier or complete deferred discharge",
+        "serialized_roundtrip_verified": true,
+        "setup_seconds": 0.011346795,
+        "table_field_elements": 524288,
+        "verified": true,
+        "verifier_f128_inversions": null,
+        "verifier_f128_multiplications": null,
+        "verify_seconds": 0.003941887
+      },
+      "flock_rev": "b684b1258e4b1f202bec24afd660ace851b09e5e",
+      "full_verifier_f128_inversions": null,
+      "full_verifier_f128_multiplications": null,
+      "geometry": {
+        "dense_m": 26,
+        "live_packed_witness_bytes": 5656448,
+        "memory_scope": "Named array sizes, not a peak-RAM prediction; excludes frontend, layout, PCS and other scratch",
+        "one_wiring_field_array_bytes": 8388608,
+        "packed_rows": true,
+        "padded_witness_array_bytes": 67108864,
+        "pcs_buffers": {
+          "fast": {
+            "codeword_bytes": 11534336,
+            "dense_message_allocation_bytes": 8388608,
+            "merkle_tree_bytes": 1048576
+          },
+          "slim": {
+            "codeword_bytes": 23068672,
+            "dense_message_allocation_bytes": 8388608,
+            "merkle_tree_bytes": 2097152
+          }
+        },
+        "strict_slim_profile_available": true,
+        "three_padded_witness_arrays_bytes": 201326592,
+        "uniform_row_log": 12,
+        "wiring_cell_log": 19
+      },
+      "groth16_flock_verifier_implemented": false,
+      "lowering": {
+        "constant_multiplications": 2334,
+        "dense_m_lower_bound": 26,
+        "equalities": 30198,
+        "memory_scope": "One packed witness only; excludes a/b, PCS, wiring, frontend and padding",
+        "most_frequent_scalars": [
+          [
+            16,
+            1630
+          ],
+          [
+            15,
+            593
+          ],
+          [
+            7,
+            48
+          ],
+          [
+            9223372034707292160,
+            8
+          ],
+          [
+            2,
+            2
+          ],
+          [
+            281474976710655,
+            2
+          ],
+          [
+            3,
+            1
+          ],
+          [
+            4,
+            1
+          ],
+          [
+            5,
+            1
+          ],
+          [
+            6,
+            1
+          ],
+          [
+            8,
+            1
+          ],
+          [
+            9,
+            1
+          ],
+          [
+            10,
+            1
+          ],
+          [
+            11,
+            1
+          ],
+          [
+            12,
+            1
+          ],
+          [
+            13,
+            1
+          ],
+          [
+            14,
+            1
+          ],
+          [
+            25,
+            1
+          ],
+          [
+            29,
+            1
+          ],
+          [
+            33,
+            1
+          ]
+        ],
+        "packed_witness_bytes_before_padding": 5656448,
+        "publics": 1,
+        "steps": 70395,
+        "tables": {
+          "Blake3": 52,
+          "Gold(Add)": 15717,
+          "Gold(Canonical)": 24224,
+          "Gold(Linear { a: 1, b: 1, a_bits: 4, b_bits: 1 })": 750,
+          "Gold(Linear { a: 1, b: 1, a_bits: 4, b_bits: 4 })": 50,
+          "Gold(Linear { a: 1, b: 1, a_bits: 5, b_bits: 4 })": 750,
+          "Gold(Linear { a: 16, b: 1, a_bits: 12, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 16, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 20, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 24, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 28, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 32, b_bits: 4 })": 38,
+          "Gold(Linear { a: 16, b: 1, a_bits: 4, b_bits: 4 })": 2198,
+          "Gold(Linear { a: 16, b: 1, a_bits: 8, b_bits: 4 })": 38,
+          "Gold(Linear { a: 2, b: 1, a_bits: 1, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 2, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 3, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 4, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 5, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 6, b_bits: 1 })": 1,
+          "Gold(Linear { a: 2, b: 1, a_bits: 7, b_bits: 1 })": 1,
+          "Gold(Mask)": 14252,
+          "Gold(Mul)": 157,
+          "Gold(MulSmall(2))": 1,
+          "Gold(MulSmall(4))": 47,
+          "Gold(MulSmall(8))": 1630,
+          "Gold(Pack(16))": 890,
+          "Gold(Pack(32))": 446,
+          "Gold(Pack(64))": 226,
+          "Gold(Pack(8))": 1776,
+          "Gold(Range(1))": 1452,
+          "Gold(Range(4))": 5504
+        },
+        "words": 74827
+      },
+      "prepare_seconds": 3.425868968,
+      "profile": "slim",
+      "proof_and_commitment_bytes": 227251,
+      "prove_seconds": 0.738879608,
+      "scope": "Complete single-batch FRI verifier fixture in Flock; inner fixture has development security, not Init",
+      "serialized_roundtrip_verified": true,
+      "source": "CircuitStats { hash_calls: 45, hash_compressions: 52, values: 35400, inputs: 459, gates: 33402, lookups: 5504, tables: 3, publics: 1, hint_calls: 4315, hint_outputs: 8143 }",
+      "verified": true,
+      "verify_seconds": 0.017741289
+    },
+    "proof_identical_to_parallel": true
+  },
+  "verifier_audit": {
+    "report": "verifier-audit.json",
+    "construction_gaps_fixed": 2,
+    "adversarial_assignments_rejected": 420,
+    "raw_blake3_matrix_mutations_rejected": 1408,
+    "mixed_height_flock_proof_verified": true,
+    "full_init_rerun_after_construction_fixes": false,
+    "note": "Changes affect construction validation and trusted query-count selection; the valid Init profile produces the same constraints."
+  },
+  "terminal_kzg": {
+    "status": "all_init_fixed_claims_projected",
+    "pipeline_complete": false,
+    "measurements": "fixed-discharge-results.json",
+    "rows": 3897983003,
+    "domain": 4294967296,
+    "pending_claims": {
+      "jagged": 0,
+      "matrix": 0,
+      "structure": 0
+    },
+    "blockers": [
+      "Integrate matrix-free circuit construction with full witness/key generation and run the terminal prover",
+      "Storage for SRS/key and polynomial workspace exceeds this machine; universal production SRS not supplied",
+      "Independent review and composed 128-bit security validation"
+    ]
+  },
+  "lowering_optimization": {
+    "results": "lowering-results.json",
+    "status": "full_init_native_verified",
+    "terminal_remeasured": false,
+    "proof_bytes": 485283,
+    "elapsed_seconds": 379.09,
+    "peak_rss_bytes": 308518027264
+  },
+  "current_work": "Full Init census complete with all fixed claims constrained. Streaming witness lowering and virtual key/workspace packing validated; terminal proving remains outstanding.",
+  "active_runs": [],
+  "width_results": "experiments/flock/width-results.json"
+}
