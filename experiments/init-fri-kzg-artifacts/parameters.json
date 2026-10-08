@@ -1,0 +1,10 @@
+{
+  "development_srs": true,
+  "curve": "BLS12-381",
+  "srs_max_len": 16777216,
+  "unsafe_dev_setup_seed_utf8": "init-fri-kzg-ordinary-v1",
+  "max_quotient_degree": 2,
+  "traces": 21,
+  "namespace": 93,
+  "claim_words": 18
+}

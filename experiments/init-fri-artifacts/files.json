@@ -1,0 +1,14 @@
+{
+  "outer-claims.bin": {
+    "bytes": 1328,
+    "sha256": "3d3d66873cbef47724c3e1df4583d9e8c5e9cc9f03d6e15e9c226e4d7a4ab9ed"
+  },
+  "outer-proof.bin": {
+    "bytes": 1530149,
+    "sha256": "ac654d6fa64b217863a9f5f8b1b9bc3510101564a657c6eadecc71994eddd0f6"
+  },
+  "outer-vk.bin": {
+    "bytes": 7107,
+    "sha256": "ce5c425571edfe396f601963337c4d8c3875b5663ba37a542c972d6a3ba840e2"
+  }
+}

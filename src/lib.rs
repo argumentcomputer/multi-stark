@@ -1,3 +1,5 @@
+#[cfg(feature = "kzg")]
+pub mod ark_adapter;
 pub mod batch;
 pub mod config;
 #[cfg(feature = "cuda")]
@@ -10,10 +12,12 @@ pub mod expr;
 pub mod graph;
 pub mod lookup;
 pub mod p3_adapter;
+pub mod plonkish;
 pub mod prover;
 pub mod system;
 #[cfg(test)]
 mod test_circuits;
+pub mod traits;
 pub mod types;
 pub mod verifier;
 pub mod witness;

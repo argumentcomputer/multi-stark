@@ -1,0 +1,40 @@
+{
+  "status": "outer_proof_generated_and_verified",
+  "parameters": {
+    "threads": 32,
+    "queries": 100,
+    "log_blowup": 2,
+    "cap_height": 0,
+    "log_final_poly_len": 0,
+    "max_log_arity": 1,
+    "commit_pow_bits": 0,
+    "query_pow_bits": 20,
+    "lookup_group_size": 3,
+    "address_space_cap_gib": 450
+  },
+  "timings_seconds": {
+    "native_inner_verification": 0.03353809,
+    "circuit_build": 11.493567242,
+    "witness_generation_constraint_check": 5.228321552,
+    "lowering": 28.189491791,
+    "trace_construction": 41.882244536,
+    "setup": 30.763719916,
+    "outer_proving": 220.989899125,
+    "outer_verification": 0.011631793,
+    "whole_process_wall": 349.46,
+    "whole_process_user": 2510.53,
+    "whole_process_system": 277.36
+  },
+  "whole_process_peak_rss_kib": 365401288,
+  "whole_process_peak_rss_gib": 348.4738235473633,
+  "proof": {
+    "file": "init-fri-artifacts/outer-proof.bin",
+    "bytes": 1530149,
+    "sha256": "ac654d6fa64b217863a9f5f8b1b9bc3510101564a657c6eadecc71994eddd0f6",
+    "format": "multi_stark::prover::Proof<GoldilocksBlake3Config>",
+    "verified": true,
+    "altered_public_claim_rejected": true
+  },
+  "input_proof_bytes": 5738492,
+  "note": "Historical successful FRI compression; same proof bytes used as the KZG input. Original root proof generation is excluded."
+}

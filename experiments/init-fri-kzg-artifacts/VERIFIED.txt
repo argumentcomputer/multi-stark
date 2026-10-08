@@ -1,0 +1,1 @@
+VERIFIED: proof_bytes=53157 packet_bytes=53333 verify_seconds=0.101705423 total_seconds=53.194657319 altered_claims_rejected=18 development_srs=true

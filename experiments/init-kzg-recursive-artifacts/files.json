@@ -1,0 +1,38 @@
+{
+  "SECURITY.txt": {
+    "bytes": 150,
+    "sha256": "dd8c4dc814165de9405d425d71fbc09bceb77da93a171ce9f842c1cd2e68307d"
+  },
+  "kzg/SECURITY.txt": {
+    "bytes": 55,
+    "sha256": "7d0592921c8323dae41df0a97973eb4337af79d4b62395020dd1ae1d8e80d295"
+  },
+  "kzg/packet.bin": {
+    "bytes": 2757,
+    "sha256": "ae8cbb4c7cd5f899c7fe19ea319d2599e2f2939a76d46489dbdae7e0cb192b81"
+  },
+  "kzg/profile-id.bin": {
+    "bytes": 32,
+    "sha256": "caa917ccd52167ee4a6f81ef84e8be1d22fc32f89d2b5f4f92acf17a07e042dc"
+  },
+  "kzg/proof.compact.bin": {
+    "bytes": 2053,
+    "sha256": "52afd8c8b95e122d5c43ca85201f746199274bb7eaace63e19bf8f99af675272"
+  },
+  "kzg/setup-0.bin": {
+    "bytes": 1128,
+    "sha256": "b4c965ad915c9203a8248be59fa3e235d55d012a502244e0f59142a8059e8f95"
+  },
+  "kzg/setup-1.bin": {
+    "bytes": 540,
+    "sha256": "73861d15eaccf38966a434515f3bce3392c65c32c33b7ae4434087961f8052c3"
+  },
+  "manifest.bin": {
+    "bytes": 5304,
+    "sha256": "e5d8f60cdf07d3117875b4b710c073e813395a3a01e9a00203076a4c4224de6f"
+  },
+  "pairings.bin": {
+    "bytes": 1068,
+    "sha256": "f48d9a0f96a7f805ad1cf852a5fd0bb01cf0f3180580fa61740d30e1cd24fdfb"
+  }
+}

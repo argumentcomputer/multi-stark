@@ -1,0 +1,41 @@
+{
+  "claim_bytes": 144,
+  "development_srs": true,
+  "external_pairings_pass": true,
+  "negative_tests_pass": true,
+  "packet_bytes": 2757,
+  "pairing_bytes": 528,
+  "profile_bytes": 32,
+  "proof_bytes": 2053,
+  "total_seconds": 10009.884711985,
+  "verify_seconds": 0.012705637,
+  "resources": {
+    "prove": {
+      "exit_code": 0,
+      "wall_seconds": 10011.452152013779,
+      "peak_rss_bytes": 521333415936
+    },
+    "verify": {
+      "exit_code": 0,
+      "wall_seconds": 676.8639147281647,
+      "peak_rss_bytes": 79450120192
+    },
+    "stage": {
+      "exit_code": 0,
+      "wall_seconds": 487.81,
+      "peak_rss_bytes": 197601308672
+    }
+  },
+  "separate_verification": {
+    "claim_bytes": 144,
+    "development_srs": true,
+    "external_pairings_pass": true,
+    "negative_tests_pass": true,
+    "packet_bytes": 2757,
+    "pairing_bytes": 528,
+    "profile_bytes": 32,
+    "proof_bytes": 2053,
+    "total_seconds": 676.06300206,
+    "verify_seconds": 0.013797335
+  }
+}
