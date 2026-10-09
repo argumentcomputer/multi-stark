@@ -1,0 +1,473 @@
+{
+  "status": "verified_cpu_artifact_parity_and_optional_srs_cache",
+  "development_srs": true,
+  "fri_compression_rerun": false,
+  "sppark_revision": "e10e107673aa22861f0f8b9758fc62169ab919ae",
+  "hardware": "index, name, memory.total [MiB], driver_version\n0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07\n",
+  "cpu_count": 96,
+  "initial_fri_to_kzg_run": {
+    "scope": "Initial implementation before resident-column reuse and structured-scalar normalization. Diagnostic timing; subsequent development builds overlapped part of proving.",
+    "phases": {
+      "fri_stage": {
+        "wall_seconds": 368.4752518339992,
+        "exit_code": 0,
+        "peak_rss_bytes": 77704921088,
+        "command": [
+          "/home/sam/repos/multi-stark/target/release/examples/init_fri_kzg_prove",
+          "stage",
+          "/home/sam/repos/multi-stark/experiments/init-fri-artifacts",
+          "/opt/dlami/nvme/multi-stark-kzg-cuda-20261008/fri-to-kzg"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-20261008/fri_stage.log",
+        "backend": "cuda"
+      },
+      "fri_prove": {
+        "wall_seconds": 1672.853685954,
+        "exit_code": 0,
+        "peak_rss_bytes": 219585544192,
+        "command": [
+          "/home/sam/repos/multi-stark/target/release/examples/init_fri_kzg_prove",
+          "prove",
+          "/opt/dlami/nvme/multi-stark-kzg-cuda-20261008/fri-to-kzg"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-20261008/fri_prove.log",
+        "backend": "cuda"
+      }
+    },
+    "parity": {
+      "proof.compact.bin": {
+        "sha256": "60031d908e1a07dafd42e3558aa563e0a46180c671c37ad4c5d334d9a6eac6e8",
+        "bytes": 53157
+      },
+      "packet.bin": {
+        "sha256": "e3c2164d3d09ff2affa261055d9eb4555a32d73a06031caa422a6c0115dbb40a",
+        "bytes": 53333
+      },
+      "profile-id.bin": {
+        "sha256": "74c36ceebca446b34c79bd96e08a44fa68aeceb141aa71afd2ded24f9784e933",
+        "bytes": 32
+      }
+    },
+    "recursive_stage": "Stopped deliberately before recursive proving to apply review findings.",
+    "raw_report": "/opt/dlami/nvme/multi-stark-kzg-cuda-20261008/report.json"
+  },
+  "completed_validation": {
+    "scope": "GPU primitives and full two-stage proving, parallel CPU lookups, CPU-only builds, optional development SRS caching, independent CPU verification, external pairings, tampering and artifact byte parity. Detailed scopes and measurements are recorded below.",
+    "kzg_adapter_tests_passed": 37,
+    "gpu_primitive_tests_passed": 7,
+    "cpu_only_adapter_tests_passed": 30,
+    "cpu_bypass_with_hidden_gpus": "passed, 24 tests",
+    "wrapper_tests_passed": 10,
+    "cuda_memcheck_errors": 0,
+    "cuda_evaluation_racecheck_errors": 0,
+    "full_2pow29_checks_passed": [
+      "MSM",
+      "coset FFT and inverse"
+    ],
+    "benchmark_cancellation": "SIGINT and SIGTERM both stop the proving process group and GPU monitor; tested with isolated stub executables",
+    "logs_directory": "experiments/kzg-cuda-validation",
+    "combined_goldilocks_kzg_tests_passed": 8,
+    "goldilocks_only_fft_test": "passed",
+    "filtered_reordered_device_selection": "passed, 7 GPU tests, CUDA_VISIBLE_DEVICES=2,0 with MULTI_STARK_KZG_CUDA_DEVICES=1",
+    "parallel_lookup_parity": "Passed serial trace/group/next-row/wave parity and complete proof-byte parity tests.",
+    "nonparallel_kzg_config_tests_passed": 10,
+    "full_pipeline_cpu_artifact_parity": "Both proofs, packets and profile identifiers match saved CPU files byte for byte.",
+    "independent_cpu_verification": "Both stages passed, including external pairings and tampering checks.",
+    "nonparallel_srs_tests_passed": 7,
+    "cache_enabled_gpu_prove_resume_verify_fixture": "passed",
+    "format_and_whitespace": "cargo fmt checks for both manifests and git diff --check passed."
+  },
+  "resident_point_benchmark": {
+    "srs_points": 16777216,
+    "scalar_columns": 4,
+    "separate_upload_seconds": 0.896001,
+    "resident_batch_seconds": 0.365633,
+    "outputs_equal": true
+  },
+  "fixed_trace_profile": {
+    "height": 16777216,
+    "width": 17,
+    "nonconstant_columns": 12,
+    "transpose_seconds": 3.860713576,
+    "interpolation_seconds": 1.96570422,
+    "msm_seconds_before_normalization": 41.687666657,
+    "finding": "The repeated nonunit selector coefficient overloaded serial Pippenger buckets. Normalizing the common scalar reduced fixed-column MSM time from 41.688 to 0.949 seconds on the same trace.",
+    "msm_seconds_after_normalization": 0.948660845,
+    "commit_fixed_seconds_before_normalization": 49.56663,
+    "commit_fixed_seconds_after_normalization": 8.891154
+  },
+  "pending": [],
+  "dependency_integration_follow_up": [
+    "Move CUDA context selection during multi-device synchronization into the sppark fork; the current exact-pinned integration uses a scoped header copy.",
+    "Replace the KZG-specific runtime and symbol-renaming shim with fork-supported namespace isolation or a shared runtime, while preserving Goldilocks's SPPARK_NO_CXX_RUNTIME configuration."
+  ],
+  "upstream_evaluation_race": {
+    "finding": "Multi-point d_evaluate writes reduction values into shared storage before every warp has read its saved powers. Racecheck reports hazards between evaluate.cuh lines 107-115 and 227.",
+    "workaround": "Upload coefficients once and evaluate each point with the single-point sppark kernel against the resident buffer.",
+    "before_log": "experiments/kzg-cuda-validation/upstream-evaluation-race.txt",
+    "after_log": "experiments/kzg-cuda-validation/final-evaluation-racecheck.txt"
+  },
+  "clean_pipeline_output": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008",
+  "interrupted_measurement": {
+    "output": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-20261008",
+    "reason": "Stopped through the benchmark cancellation handler to parallelize serial lookup construction. Prover and GPU monitor exited.",
+    "fri_stage_wall_seconds": 366.8,
+    "fri_all_traces_prepared_seconds": 418.337254677,
+    "large_partition_lookup_seconds_approximate": 31
+  },
+  "parallel_lookup_profile": {
+    "height": 16777216,
+    "cpu_workers": 96,
+    "lookup_seconds_before_approximate": 31,
+    "lookup_seconds_after": 7.819326,
+    "notes": "Same staged trace; the preparation benchmark uses deterministic benchmark challenges and a separate development SRS seed. The fresh full first-stage run measured 7.33\u20138.01 seconds per large partition and matched all saved CPU artifacts.",
+    "log": "experiments/kzg-cuda-validation/final-parallel-lookup.txt"
+  },
+  "development_srs_cache": {
+    "status": "verified_unit_tests_proving_fixture_and_real_2pow24_cache",
+    "environment": "MULTI_STARK_KZG_DEV_SRS_CACHE",
+    "default": "disabled; fresh deterministic generation",
+    "notes": "Opt-in trusted local cache. Seed/degree/version keys, checksummed canonical uncompressed points, bounded buffers, atomic publication. The active pipeline uses the pre-cache binaries throughout.",
+    "validation": {
+      "gpu_adapter_tests_passed": 37,
+      "cpu_only_parallel_adapter_tests_passed": 30,
+      "nonparallel_srs_tests_passed": 7,
+      "wrapper_tests_passed": 10,
+      "gpu_prove_resume_verify_fixture": "passed; generated parameters then reloaded them for resumed proving and verification, preserving proof bytes"
+    },
+    "real_2pow24_measurement": {
+      "srs_points": 16777216,
+      "backend": "cpu",
+      "binary_sha256": "3ed97bd81df39e1ae8636daaedba1d3d7981fcadf9cdb21429ab39e87e556c93",
+      "cache_directory": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/cache-validation/srs",
+      "cache_hit_storage_state": "Immediate reload; the operating-system page cache may be warm.",
+      "phases": {
+        "cache_miss": {
+          "wall_seconds": 44.887272143998416,
+          "exit_code": 0,
+          "peak_rss_bytes": 4977225728,
+          "command": [
+            "/home/sam/repos/multi-stark/target/release/examples/init_fri_kzg_prove",
+            "verify",
+            "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/cache-validation/fri-to-kzg"
+          ],
+          "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/cache-validation/cache_miss.log",
+          "srs_setup_seconds": 42.232863146,
+          "verified": true,
+          "cpu_artifact_parity": true
+        },
+        "cache_hit": {
+          "wall_seconds": 4.1463708670053165,
+          "exit_code": 0,
+          "peak_rss_bytes": 1851252736,
+          "command": [
+            "/home/sam/repos/multi-stark/target/release/examples/init_fri_kzg_prove",
+            "verify",
+            "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/cache-validation/fri-to-kzg"
+          ],
+          "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/cache-validation/cache_hit.log",
+          "srs_setup_seconds": 1.491084283,
+          "verified": true,
+          "cpu_artifact_parity": true
+        }
+      },
+      "cache_bytes": 1610618025,
+      "status": "verified_cache_miss_and_hit"
+    },
+    "report_copy": "experiments/kzg-cuda-validation/final-srs-cache-report.json",
+    "measurement_limit": "Immediate 2^24 reload only; OS page cache may be warm. A 2^28 cache load and a cached full pipeline were not measured."
+  },
+  "fresh_first_stage_breakdown": {
+    "development_srs_seconds": 40.307560511,
+    "commit_and_checkpoint_seconds": 379.879544528,
+    "lookup_commit_seconds_sum": 100.727664093,
+    "remaining_quotient_openings_and_verification_seconds": 345.74389224099997,
+    "total_seconds": 866.658661373,
+    "large_partition_lookup_seconds": [
+      7.736124995,
+      7.866512959,
+      7.693200526,
+      7.799717402,
+      7.67350836,
+      7.760353994,
+      7.720633759,
+      8.006570007,
+      7.33443824,
+      7.648922819
+    ]
+  },
+  "fresh_pipeline": {
+    "phases": {
+      "fri_stage": {
+        "wall_seconds": 364.9709382889996,
+        "exit_code": 0,
+        "peak_rss_bytes": 77704634368,
+        "command": [
+          "/home/sam/repos/multi-stark/target/release/examples/init_fri_kzg_prove",
+          "stage",
+          "/home/sam/repos/multi-stark/experiments/init-fri-artifacts",
+          "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/fri-to-kzg"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/fri_stage.log",
+        "backend": "cuda"
+      },
+      "fri_prove": {
+        "wall_seconds": 867.0728516449999,
+        "exit_code": 0,
+        "peak_rss_bytes": 220798521344,
+        "command": [
+          "/home/sam/repos/multi-stark/target/release/examples/init_fri_kzg_prove",
+          "prove",
+          "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/fri-to-kzg"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/fri_prove.log",
+        "backend": "cuda"
+      },
+      "recursive_stage": {
+        "wall_seconds": 385.5459813390007,
+        "exit_code": 0,
+        "peak_rss_bytes": 197633007616,
+        "command": [
+          "/home/sam/repos/multi-stark/experiments/kzg-wrap/target/release/init-kzg-wrap",
+          "stage",
+          "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/intermediate",
+          "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/recursive"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/recursive_stage.log",
+        "backend": "cuda"
+      },
+      "recursive_prove": {
+        "wall_seconds": 1652.8739594019971,
+        "exit_code": 0,
+        "peak_rss_bytes": 500877668352,
+        "command": [
+          "/home/sam/repos/multi-stark/experiments/kzg-wrap/target/release/init-kzg-wrap",
+          "prove",
+          "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/recursive"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/recursive_prove.log",
+        "backend": "cuda"
+      },
+      "fri_cpu_verify": {
+        "wall_seconds": 43.38101314900268,
+        "exit_code": 0,
+        "peak_rss_bytes": 4978110464,
+        "command": [
+          "/home/sam/repos/multi-stark/target/release/examples/init_fri_kzg_prove",
+          "verify",
+          "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/fri-to-kzg"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/fri_cpu_verify.log",
+        "backend": "cpu"
+      },
+      "recursive_cpu_verify": {
+        "wall_seconds": 641.6340633759974,
+        "exit_code": 0,
+        "peak_rss_bytes": 79470116864,
+        "command": [
+          "/home/sam/repos/multi-stark/experiments/kzg-wrap/target/release/init-kzg-wrap",
+          "verify",
+          "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/recursive"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/recursive_cpu_verify.log",
+        "backend": "cpu"
+      }
+    },
+    "parity": {
+      "fri_to_kzg": {
+        "proof.compact.bin": {
+          "sha256": "60031d908e1a07dafd42e3558aa563e0a46180c671c37ad4c5d334d9a6eac6e8",
+          "bytes": 53157
+        },
+        "packet.bin": {
+          "sha256": "e3c2164d3d09ff2affa261055d9eb4555a32d73a06031caa422a6c0115dbb40a",
+          "bytes": 53333
+        },
+        "profile-id.bin": {
+          "sha256": "74c36ceebca446b34c79bd96e08a44fa68aeceb141aa71afd2ded24f9784e933",
+          "bytes": 32
+        }
+      },
+      "recursive_kzg": {
+        "proof.compact.bin": {
+          "sha256": "52afd8c8b95e122d5c43ca85201f746199274bb7eaace63e19bf8f99af675272",
+          "bytes": 2053
+        },
+        "packet.bin": {
+          "sha256": "ae8cbb4c7cd5f899c7fe19ea319d2599e2f2939a76d46489dbdae7e0cb192b81",
+          "bytes": 2757
+        },
+        "profile-id.bin": {
+          "sha256": "caa917ccd52167ee4a6f81ef84e8be1d22fc32f89d2b5f4f92acf17a07e042dc",
+          "bytes": 32
+        }
+      }
+    },
+    "pipeline_wall_seconds": 3270.4672243609966,
+    "recursive_verification": {
+      "claim_bytes": 144,
+      "development_srs": true,
+      "external_pairings_pass": true,
+      "negative_tests_pass": true,
+      "packet_bytes": 2757,
+      "pairing_bytes": 528,
+      "profile_bytes": 32,
+      "proof_bytes": 2053,
+      "total_seconds": 1652.234062765,
+      "verify_seconds": 0.015101423
+    },
+    "binaries": {
+      "target/release/examples/init_fri_kzg_prove": "adc14293c6c07916dd596021200d1f08fc868021f906c882cf84e265acaeb78f",
+      "experiments/kzg-wrap/target/release/init-kzg-wrap": "bd43439ca18375f54009eff95b3507bc215535867405c0bf0f04a18fc6a5a400"
+    },
+    "sources": {
+      ".cargo/config.toml": "59a8c63e78a3524907d28ece7b3a0fc308c61e4333c063a56391d39bcb08545c",
+      "Cargo.toml": "2a252b6baa2c8136786d43d6a42626db57141c878565afb7a812f903655625ad",
+      "Cargo.lock": "caa8b6acb928eefc55aed5daaf8744aa03c2eaa22b75a9439b58c4a7f5418791",
+      "build.rs": "1eaddc438d7fea27ff2e9e8cfc9f750cdd7277cc67e184f183a53921f1536866",
+      "cuda/kzg.cu": "c4f6d11586d6b26553f1522c26ebf2ad22a53cb53b5743a940fcd7729977c1af",
+      "cuda/kzg_runtime.cpp": "bb65a7fea78f6e3b32bcfca83d47e788cf9f57d727cf66cae1ad3a7e4484127d",
+      "cuda/kzg_sppark.cuh": "2f766526bc46d56434da21cb738037beb3081832483d369f78f023d4be7f11c3",
+      "src/ark_adapter/cuda.rs": "ff53df146806e5cf539518d17248a194ec24005e0f7ea6dd5e2d3db7cf50cd62",
+      "src/ark_adapter/pcs.rs": "47854705becf48fec602bed8a275bc8759f3cdd6bf1f449129c8249acb0229e3",
+      "src/ark_adapter/config.rs": "c09ba9d5ffcc84ea2091079247a4d167dab460f92405f222014a29d38e92ba0c",
+      "src/ark_adapter/mod.rs": "cbc43316a0e2ae686b115375306d5ff0d453f8afd412aaf8663ddce8a6ce8160",
+      "examples/init_fri_kzg_prove.rs": "fdd8e19f0d8f4ae3d95ecb06a04d117112d6043f858dd8778824c674270fa2fa",
+      "examples/support/kzg_storage.rs": "d961d4ebede26ba44499d608590672e9411316bec95ead66b671dcfc25b16c46",
+      "experiments/kzg-wrap/Cargo.toml": "403825e796d9fdb1adff5e7729f911e1d627c0950c06bdabd80135e9e49ee3c1",
+      "experiments/kzg-wrap/Cargo.lock": "e53341844df5cfdc02dfcf2e2dbf99d749f5bddba423aa0996ac214fa22b8351",
+      "experiments/kzg-wrap/src/outer.rs": "4eeb90bc6cd0cc43eb28be4f026e49d1480a7b3a7e8630f3a362be5e21fbc773",
+      "experiments/kzg-cuda-bench.py": "a380863a777bf11b340cf4dc5369ccfb80c005d5c056384966c04db08624f5b3"
+    },
+    "environment": {
+      "MULTI_STARK_CUDA_ARCHS": "120",
+      "MULTI_STARK_KZG_BACKEND": "cuda"
+    },
+    "raw_report": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/report.json",
+    "srs_cache_enabled": false,
+    "timing_scope": "Four consecutive fresh staging/proving stages, with SRS generation, checkpoints, in-process verification and tampering checks. Extra CPU verification is timed separately. Cache code was written after the measured binaries were built and is covered by separate validation.",
+    "status": "verified_cpu_artifact_parity",
+    "gpu_samples_every_2_seconds": {
+      "0": {
+        "peak_memory_mib": 17103,
+        "peak_utilization_percent": 94
+      },
+      "1": {
+        "peak_memory_mib": 8911,
+        "peak_utilization_percent": 95
+      },
+      "2": {
+        "peak_memory_mib": 8911,
+        "peak_utilization_percent": 90
+      },
+      "3": {
+        "peak_memory_mib": 8911,
+        "peak_utilization_percent": 95
+      }
+    },
+    "total_wall_seconds": 3955.7041046329978,
+    "report_copy": "experiments/kzg-cuda-validation/final-pipeline-report.json",
+    "preserved_binaries": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/measured-binaries"
+  },
+  "fresh_recursive_stage_breakdown": {
+    "development_srs_seconds": 641.755657757,
+    "commit_and_checkpoint_seconds": 456.0036022139999,
+    "lookup_commit_seconds_sum": 110.916914131,
+    "remaining_quotient_openings_and_verification_seconds": 443.5578886630002,
+    "total_seconds": 1652.234062765,
+    "quotient_commit_seconds": 403.457782486,
+    "large_lookup_commit_seconds": 110.876933982
+  },
+  "historical_cpu_baseline": {
+    "fri_to_kzg_prove_seconds": 6702.857925415039,
+    "recursive_kzg_prove_seconds": 10011.452152013779,
+    "fri_to_kzg_stage_seconds": 448.3828675746918,
+    "recursive_kzg_stage_seconds": 487.81,
+    "notes": "Historical artifacts, not a fresh same-machine CPU benchmark."
+  },
+  "including_reported_fri_compression": {
+    "reported_fri_seconds_approximate": 360,
+    "estimated_total_seconds": 3630.4672243609966,
+    "fri_compression_rerun": false
+  },
+  "current_implementation": {
+    "base_branch": "ap/init-recursive-kzg-minimal",
+    "uncommitted": true,
+    "sources": {
+      ".cargo/config.toml": "59a8c63e78a3524907d28ece7b3a0fc308c61e4333c063a56391d39bcb08545c",
+      "Cargo.toml": "2a252b6baa2c8136786d43d6a42626db57141c878565afb7a812f903655625ad",
+      "Cargo.lock": "caa8b6acb928eefc55aed5daaf8744aa03c2eaa22b75a9439b58c4a7f5418791",
+      "build.rs": "b7fa9c530156e62c18053c5ba787f78bf30cd40cf5345ffd05c55d381ad5b088",
+      "cuda/kzg.cu": "832c476651482f75d0083f249f0467ad416e7a5a6d5ec62067ae2af4d8687926",
+      "cuda/kzg_runtime.cpp": "bb65a7fea78f6e3b32bcfca83d47e788cf9f57d727cf66cae1ad3a7e4484127d",
+      "cuda/kzg_sppark.cuh": "2f766526bc46d56434da21cb738037beb3081832483d369f78f023d4be7f11c3",
+      "cuda/kzg_transfer.cuh": "3db6e1b56b4463962dc19d5ac899d1a6da877202286cd2316ea478a6eface633",
+      "src/ark_adapter/buffer.rs": "afee8ada04733c1beb5e829309dc1e2ffdd351fcf264f4b628c96fc7dfedb214",
+      "src/ark_adapter/cuda.rs": "7557d4cf49f371c1d119b9e27e81dce27afbc3c1f6d45602952f1e0ca1f61787",
+      "src/ark_adapter/pcs.rs": "6aa3953fab80537f4b6dc4c7fb2a0e9fc76cc67da047725c566e8a7f2ad03892",
+      "src/ark_adapter/config.rs": "a14c7442c547a8e345e421a4128795bb7db39ff085878ce4f7abef54d587e278",
+      "src/ark_adapter/domain.rs": "b6455eb69ed26ae5c66efc4354742ee70d53c126e69b1dbe1bc9e85efc5e86d2",
+      "src/ark_adapter/encoding.rs": "13394ee47e9f57814ca1801503dae2a383580e0ae25aadce40f73f1e58707b49",
+      "src/lookup.rs": "d83aec8f9118c55b1144d21b08cd3cb9cc5767795c682974b0aba5dfc29e42ba",
+      "src/plonkish/stark.rs": "3b979d484210fd893b1db7dc1746b18153c2245e38f1eea47de5bf7507ddfc2f",
+      "src/ark_adapter/srs.rs": "b2bda245b197a847f10d9c1bbf0fa27ce6486260f6d5a344de56dafbb11763d0",
+      "src/ark_adapter/srs/cache.rs": "85084b1c868c1a2dc51bc56a94fff6196620b17b9bb42e8f218cec716d98f9ca",
+      "src/ark_adapter/mod.rs": "8dea705e8deecf63e4100777cb60cb1c985eec331c0ecfaa01f8e7ff0acabc17",
+      "examples/init_fri_kzg_prove.rs": "105e246a8e33b02c961738ee9cc350f81f560780e0917312eba21274ae2008ff",
+      "examples/support/kzg_storage.rs": "65cd3b8be7c6ec83e2a17006794ebd8f675da48e5f27d73bbc3b8d3d96b13e60",
+      "examples/support/kzg_fixed_cache.rs": "c281c38988e2dead64e2b7d176037d24e29f7a8e27b15acad265fc8de3e83f00",
+      "examples/support/init_claim.rs": "f69f4be3b260152a21646508612e1bca38c4e8188a6d2b833bc893f6bf7592a7",
+      "examples/support/init_fri.rs": "e00ede824b1a48a1b1a769e6db3779e5435685e23d9e707f58b4d9426097d9db",
+      "examples/ix_root.rs": "f795aa930a652d575dbf66b94d7cce70b6a1b9ec65b43aefc863a9a952ef3e84",
+      "examples/support/ix_vk.rs": "7158c1b2c92c3eb38e7a7f8cb19f791dbe0f9fa957e7f182671c353dc460fa97",
+      "experiments/kzg-wrap/Cargo.toml": "403825e796d9fdb1adff5e7729f911e1d627c0950c06bdabd80135e9e49ee3c1",
+      "experiments/kzg-wrap/Cargo.lock": "e53341844df5cfdc02dfcf2e2dbf99d749f5bddba423aa0996ac214fa22b8351",
+      "experiments/kzg-wrap/src/outer.rs": "5b1e1302b6b5a69da4644afc66351dd235ae8fb433eec62557a311cae790da6c",
+      "experiments/kzg-wrap/src/saved.rs": "027eae94dc84412a3edcb9d9b327d9529b819452854e10b7850462f796d011b5",
+      "experiments/kzg-cuda-bench.py": "9785240f806afd8ce0d14cb29c111b307d2de1a0a0f2fcb81c8f5502eec6a97d"
+    },
+    "binaries": {
+      "target/release/examples/init_fri_kzg_prove": "83f25e3bf696d78f6fc261fd6860dde466e4b87754557b33a5427e2523e25919",
+      "experiments/kzg-wrap/target/release/init-kzg-wrap": "5a9029801ab8a02192ac27c84341b04328a8141eaab6189afa18ae9465793afc",
+      "target/release/examples/ix_root": "774f4f408767f9a5501405bac5c074c2e0c69fc2362ad6ff9f0f914f9ebaac5f"
+    },
+    "notes": "Pinned transfers, bounded FFT queues and resident coefficients. Current prover sources and executables match the frozen 14m29s cached run; all witnesses and proofs were generated during the run."
+  },
+  "latest_complete_pipeline": {
+    "results": "experiments/kzg-cuda-gpu-feeding-results.json",
+    "pipeline_seconds": 869.4707562330004,
+    "includes_fri_compression": true,
+    "uses_cached_fixed_parameters_and_srs": true,
+    "profile_note": "Same regenerated 19-circuit Init FRI profile as the preceding 23m10s cached run; both packets match exactly. Recursive fixed cache binds the expected Init statement."
+  },
+  "implementation_at_initial_cuda_measurement": {
+    "base_branch": "ap/init-recursive-kzg-minimal",
+    "uncommitted": true,
+    "sources": {
+      ".cargo/config.toml": "59a8c63e78a3524907d28ece7b3a0fc308c61e4333c063a56391d39bcb08545c",
+      "Cargo.toml": "2a252b6baa2c8136786d43d6a42626db57141c878565afb7a812f903655625ad",
+      "Cargo.lock": "caa8b6acb928eefc55aed5daaf8744aa03c2eaa22b75a9439b58c4a7f5418791",
+      "build.rs": "1eaddc438d7fea27ff2e9e8cfc9f750cdd7277cc67e184f183a53921f1536866",
+      "cuda/kzg.cu": "c4f6d11586d6b26553f1522c26ebf2ad22a53cb53b5743a940fcd7729977c1af",
+      "cuda/kzg_runtime.cpp": "bb65a7fea78f6e3b32bcfca83d47e788cf9f57d727cf66cae1ad3a7e4484127d",
+      "cuda/kzg_sppark.cuh": "2f766526bc46d56434da21cb738037beb3081832483d369f78f023d4be7f11c3",
+      "src/ark_adapter/cuda.rs": "ff53df146806e5cf539518d17248a194ec24005e0f7ea6dd5e2d3db7cf50cd62",
+      "src/ark_adapter/pcs.rs": "47854705becf48fec602bed8a275bc8759f3cdd6bf1f449129c8249acb0229e3",
+      "src/ark_adapter/config.rs": "c09ba9d5ffcc84ea2091079247a4d167dab460f92405f222014a29d38e92ba0c",
+      "src/ark_adapter/mod.rs": "cbc43316a0e2ae686b115375306d5ff0d453f8afd412aaf8663ddce8a6ce8160",
+      "examples/init_fri_kzg_prove.rs": "68fd7f104c08e89dfc4d3382987c96c91ab74c8f366b5aaa94fb8e378e460b34",
+      "examples/support/kzg_storage.rs": "d961d4ebede26ba44499d608590672e9411316bec95ead66b671dcfc25b16c46",
+      "experiments/kzg-wrap/Cargo.toml": "403825e796d9fdb1adff5e7729f911e1d627c0950c06bdabd80135e9e49ee3c1",
+      "experiments/kzg-wrap/Cargo.lock": "e53341844df5cfdc02dfcf2e2dbf99d749f5bddba423aa0996ac214fa22b8351",
+      "experiments/kzg-wrap/src/outer.rs": "25e4f3935bea1d5a4fc782809865289f2611aabdc4b553c0cc810b1ff27d691a",
+      "experiments/kzg-cuda-bench.py": "0da79435cf91c7d64e57bbf6ac3eaca1e6ca150d68f31b8ecdee6846ffe75f9a",
+      "src/ark_adapter/srs.rs": "6944bf5d5b2fd27c11e31edc3618c5a6157b3554b680d5369297e5bcf9e12a3d",
+      "src/ark_adapter/srs/cache.rs": "85084b1c868c1a2dc51bc56a94fff6196620b17b9bb42e8f218cec716d98f9ca"
+    },
+    "binaries": {
+      "target/release/examples/init_fri_kzg_prove": "3ed97bd81df39e1ae8636daaedba1d3d7981fcadf9cdb21429ab39e87e556c93",
+      "experiments/kzg-wrap/target/release/init-kzg-wrap": "d161db8b63d930968a4d9ca12b1bec84284b6a24a1523b89da517b0babfceb2d"
+    },
+    "notes": "The fresh pipeline used the preserved pre-cache executables. Current executables also support opt-in caching, validated by unit tests, the GPU prove/resume/verify fixture, and real 2^24 cache miss/hit packet verification."
+  }
+}

@@ -1,0 +1,9 @@
+
+running 2 tests
+2^29 chunked MSM: 8.164s
+test ark_adapter::cuda::tests::cuda_msm_2pow29 ... ok
+2^29 coset FFT and inverse: 23.411s
+test ark_adapter::cuda::tests::cuda_fft_2pow29 ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 124 filtered out; finished in 26.17s
+

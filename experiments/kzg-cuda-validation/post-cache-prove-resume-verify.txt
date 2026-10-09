@@ -1,0 +1,65 @@
+   Compiling multi-stark v0.1.0 (/home/sam/repos/multi-stark)
+warning: unused import: `Zero`
+  --> src/ark_adapter/srs/cache.rs:13:21
+   |
+13 | use ark_ff::{Field, Zero};
+   |                     ^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `multi-stark` (lib) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 8.99s
+     Running unittests examples/init_fri_kzg_prove.rs (target/release/examples/init_fri_kzg_prove-bf53f0bbdcb985ef)
+
+running 1 test
+Generated and cached development SRS /tmp/multi-stark-kzg-dev-srs-fixture-20261008/23a2d6c0e1656864e943c78f311b70c746d73e55c6706d8c573debf085599350.dev-srs in 1.918938432s
+Development SRS: 1.918953753s
+Prepared 0/12: 3.129356349s
+Prepared 1/12: 3.143263064s
+Prepared 2/12: 3.154698155s
+Prepared 3/12: 3.168338097s
+Prepared 4/12: 3.18360725s
+Prepared 5/12: 3.197041761s
+Prepared 6/12: 3.211927694s
+Prepared 7/12: 3.218332438s
+Prepared 8/12: 3.226318137s
+Prepared 9/12: 3.276408859s
+Prepared 10/12: 3.287778953s
+Prepared 11/12: 3.294709086s
+Proving all 12 partitions together: 3.294779023s
+VERIFIED: proof_bytes=39045 packet_bytes=39221 verify_seconds=0.12062637 total_seconds=6.357300116 altered_claims_rejected=18 development_srs=true
+Loaded development SRS cache /tmp/multi-stark-kzg-dev-srs-fixture-20261008/23a2d6c0e1656864e943c78f311b70c746d73e55c6706d8c573debf085599350.dev-srs in 20.765233ms
+Development SRS: 20.782567ms
+Prepared 0/12: 207.300344ms
+Prepared 1/12: 212.188385ms
+Prepared 2/12: 215.675191ms
+Prepared 3/12: 221.739181ms
+Prepared 4/12: 228.252883ms
+Prepared 5/12: 234.22274ms
+Prepared 6/12: 240.836716ms
+Prepared 7/12: 244.848733ms
+Prepared 8/12: 249.561534ms
+Prepared 9/12: 287.443884ms
+Prepared 10/12: 290.55372ms
+Prepared 11/12: 293.215478ms
+Proving all 12 partitions together: 293.307788ms
+VERIFIED: proof_bytes=39045 packet_bytes=39221 verify_seconds=0.120598806 total_seconds=3.326727423 altered_claims_rejected=18 development_srs=true
+Loaded development SRS cache /tmp/multi-stark-kzg-dev-srs-fixture-20261008/23a2d6c0e1656864e943c78f311b70c746d73e55c6706d8c573debf085599350.dev-srs in 20.806354ms
+Development SRS: 20.823279ms
+Prepared 0/12: 21.715553ms
+Prepared 1/12: 23.091733ms
+Prepared 2/12: 23.88957ms
+Prepared 3/12: 25.396392ms
+Prepared 4/12: 26.82961ms
+Prepared 5/12: 28.33002ms
+Prepared 6/12: 29.79251ms
+Prepared 7/12: 30.920937ms
+Prepared 8/12: 32.562511ms
+Prepared 9/12: 33.204006ms
+Prepared 10/12: 34.012473ms
+Prepared 11/12: 34.641362ms
+VERIFIED: proof_bytes=39045 packet_bytes=39221 verify_seconds=0.120559944 total_seconds=2.513608424 altered_claims_rejected=18 development_srs=true
+test tests::staged_hash_fixture_proves_and_resumes_verification ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.38s
+

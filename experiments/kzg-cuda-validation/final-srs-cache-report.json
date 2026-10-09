@@ -1,0 +1,39 @@
+{
+  "srs_points": 16777216,
+  "backend": "cpu",
+  "binary_sha256": "3ed97bd81df39e1ae8636daaedba1d3d7981fcadf9cdb21429ab39e87e556c93",
+  "cache_directory": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/cache-validation/srs",
+  "cache_hit_storage_state": "Immediate reload; the operating-system page cache may be warm.",
+  "phases": {
+    "cache_miss": {
+      "wall_seconds": 44.887272143998416,
+      "exit_code": 0,
+      "peak_rss_bytes": 4977225728,
+      "command": [
+        "/home/sam/repos/multi-stark/target/release/examples/init_fri_kzg_prove",
+        "verify",
+        "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/cache-validation/fri-to-kzg"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/cache-validation/cache_miss.log",
+      "srs_setup_seconds": 42.232863146,
+      "verified": true,
+      "cpu_artifact_parity": true
+    },
+    "cache_hit": {
+      "wall_seconds": 4.1463708670053165,
+      "exit_code": 0,
+      "peak_rss_bytes": 1851252736,
+      "command": [
+        "/home/sam/repos/multi-stark/target/release/examples/init_fri_kzg_prove",
+        "verify",
+        "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/cache-validation/fri-to-kzg"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/cache-validation/cache_hit.log",
+      "srs_setup_seconds": 1.491084283,
+      "verified": true,
+      "cpu_artifact_parity": true
+    }
+  },
+  "cache_bytes": 1610618025,
+  "status": "verified_cache_miss_and_hit"
+}

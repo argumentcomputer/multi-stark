@@ -1,0 +1,2 @@
+{"signal": "SIGINT", "status": "cancelled", "prover_descendant_and_monitor_exited": true}
+{"signal": "SIGTERM", "status": "cancelled", "prover_descendant_and_monitor_exited": true}

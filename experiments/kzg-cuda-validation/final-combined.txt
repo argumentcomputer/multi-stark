@@ -1,0 +1,19 @@
+   Compiling multi-stark v0.1.0 (/home/sam/repos/multi-stark)
+    Finished `release` profile [optimized] target(s) in 52.63s
+     Running unittests src/lib.rs (target/release/deps/multi_stark-09255da3156b5f0d)
+
+running 11 tests
+test ark_adapter::cuda::tests::cuda_fft_2pow29 ... ignored, allocates 32 GiB of host memory and a 16 GiB GPU transform
+test ark_adapter::cuda::tests::cuda_msm_2pow29 ... ignored, allocates approximately 70 GiB of host memory; exercises all selected GPUs
+test ark_adapter::cuda::tests::cuda_fft_rejects_overflowing_domain_stride ... ok
+test ark_adapter::cuda::tests::cuda_primitive_benchmark ... ignored, measures CPU/GPU crossover and repeated-column MSM throughput
+test ark_adapter::cuda::tests::cuda_msm_matches_arkworks_with_chunks_and_exceptional_points ... ok
+test ark_adapter::cuda::tests::cuda_resident_msm_columns_match_arkworks ... ok
+test ark_adapter::cuda::tests::cuda_msm_normalizes_structured_columns ... ok
+test ark_adapter::cuda::tests::cuda_polynomial_evaluation_and_division_match_horner ... ok
+test ark_adapter::cuda::tests::cuda_polynomial_evaluates_all_points_in_order ... ok
+test ark_adapter::cuda::tests::cuda_fft_matches_arkworks_on_subgroups_and_arbitrary_cosets ... ok
+test ark_adapter::cuda::tests::cuda_goldilocks_and_kzg_runtime_coexist ... ok
+
+test result: ok. 8 passed; 0 failed; 3 ignored; 0 measured; 150 filtered out; finished in 3.89s
+

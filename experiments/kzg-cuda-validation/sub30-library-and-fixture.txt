@@ -1,0 +1,153 @@
+   Compiling multi-stark v0.1.0 (/home/sam/repos/multi-stark)
+    Finished `release` profile [optimized] target(s) in 14.73s
+     Running unittests src/lib.rs (target/release/deps/multi_stark-b1106e9cea6d0a24)
+
+running 138 tests
+test ark_adapter::cuda::tests::cuda_fft_2pow29 ... ignored, allocates 32 GiB of host memory and a 16 GiB GPU transform
+test ark_adapter::cuda::tests::cuda_msm_2pow29 ... ignored, allocates approximately 70 GiB of host memory; exercises all selected GPUs
+test ark_adapter::cuda::tests::cuda_fft_rejects_overflowing_domain_stride ... ok
+test ark_adapter::cuda::tests::cuda_primitive_benchmark ... ignored, measures CPU/GPU crossover and repeated-column MSM throughput
+test ark_adapter::field::tests::inverse_and_powers ... ok
+test ark_adapter::field::tests::two_adicity_matches_ark ... ok
+test ark_adapter::field::tests::serde_round_trip ... ok
+test ark_adapter::transcript::tests::consecutive_samples_differ ... ok
+test ark_adapter::transcript::tests::deterministic_and_sensitive ... ok
+test ark_adapter::transcript::tests::slice_observation_flat ... ok
+test lookup::tests::builder_matches_from_rows ... ok
+test lookup::tests::direct_logup_matches_synthesized_reference ... ok
+test plonkish::foreign::tests::lookup_tuning_respects_the_quotient_budget ... ok
+test plonkish::stark::partition_tests::root_dimensions_fit_goldilocks_domains ... ok
+test lookup::tests::selector_normalization_constants ... ok
+test plonkish::tests::hardening::arithmetic_folds_constants_and_has_predictable_costs ... ok
+test plonkish::tests::hardening::arithmetic_matches_native_fields_at_wrapping_boundaries ... ok
+test plonkish::tests::hardening::hint_batches_are_not_implicit_constraints ... ok
+test plonkish::tests::hardening::goldilocks_byte_boundary_rejects_forged_zero_tests_and_aliases ... ok
+test plonkish::tests::hardening::measurements_reject_replacing_the_builder ... ok
+test plonkish::tests::hardening::invalid_constant_booleans_cannot_be_optimized_away ... ok
+test plonkish::tests::hardening::simplifications_never_hide_foreign_handles ... ok
+test plonkish::tests::partitioned::oversized_tables_are_rejected_explicitly ... ok
+test plonkish::tests::plonkish_witness_errors_and_invalid_hints ... ok
+test system::tests::excessive_constraint_degree_rejected - should panic ... ok
+test test_circuits::blake3::tests::compression_test_vector ... ok
+test plonkish::tests::plonkish_invalid_boolean_and_lookup_are_rejected ... ok
+test plonkish::tests::plonkish_foreign_handles_are_rejected_during_construction - should panic ... ok
+test plonkish::tests::plonkish_public_count_and_foreign_assignment_are_checked ... ok
+test test_circuits::blake3::tests::g_function_test_vector ... ok
+test ark_adapter::encoding::tests::scalar_stream_rejects_invalid_and_truncated_fields ... ok
+test ark_adapter::domain::tests::disjoint_domain_is_disjoint ... ok
+test ark_adapter::domain::tests::next_point_walks_the_domain ... ok
+test types::pcs_ref_gen::blake3_challenger_contract ... ok
+test types::pcs_ref_gen::goldilocks_arithmetic_contract ... ok
+test ark_adapter::domain::tests::coset_selectors_match_pointwise ... ok
+test system::tests::mismatched_preprocessed_height_panics - should panic ... ok
+test types::pcs_ref_gen::blake3_and_merkle_contract ... ok
+test lookup::tests::sparse_needed_circuit_rejected ... ok
+test plonkish::tests::hardening::layout_inspection_matches_allocations_and_inclusive_measurements ... ok
+test plonkish::tests::hardening::linear_combinations_normalize_terms_without_public_side_effects ... ok
+test plonkish::tests::plonkish_every_physical_cell_is_bound_including_padding ... ok
+test plonkish::tests::plonkish_anchor_prevents_deactivating_a_computation_without_publics ... ok
+test test_circuits::baby_bear_config::baby_bear_poseidon2_smoke_test ... ok
+test plonkish::stark::partition_tests::merged_tables_keep_ids_and_unpadded_multiplicities ... ok
+test lookup::tests::lookup_test ... ok
+test test_circuits::baby_bear_config::plonkish_baby_bear_native_field_proof ... ok
+test lookup::tests::sparse_bitmap_tamper_rejected ... ok
+test lookup::tests::test_claim_split_rejected ... ok
+test plonkish::tests::plonkish_rejects_broken_copy_even_when_local_arithmetic_is_valid ... ok
+test system::tests::high_degree_constraint_with_larger_blowup ... ok
+test plonkish::tests::plonkish_same_layout_supports_multiple_witnesses_and_zero_tests ... ok
+test lookup::tests::sparse_inactive_circuit_accepted ... ok
+test verifier::tests::multi_stark_test ... ok
+test verifier::tests::test_oversized_log_degree_rejected ... ok
+test ark_adapter::srs::cache::tests::cache_rejects_a_different_seed_even_with_valid_checksum ... ok
+test verifier::tests::test_tampered_stage_1_values_rejected ... ok
+test verifier::tests::test_tampered_opening_proof_rejected ... ok
+test verifier::tests::test_wrong_claim_rejected ... ok
+test verifier::tests::test_truncated_proof_rejected ... ok
+test verifier::tests::test_truncated_log_degrees_rejected ... ok
+test plonkish::tests::partitioned::partitioned_proof_preserves_cross_trace_copies ... ok
+test plonkish::tests::partitioned::partitioned_mixed_heights_prove_the_same_statement ... ok
+test verifier::tests::multi_stark_proof_bytes_contract ... ok
+test verifier::tests::test_tampered_accumulator_rejected ... ok
+test plonkish::tests::partitioned::every_partition_is_required_even_without_user_publics ... ok
+test ark_adapter::domain::tests::selectors_and_points_agree_across_parallel_tiles ... ok
+test verifier::tests::test_serialization_round_trip ... ok
+test types::grind_tests::grind_leaves_the_challenger_where_the_verifier_lands ... ok
+test plonkish::tests::plonkish_fixed_tables_and_namespaces_do_not_cross_match ... ok
+test plonkish::verifier::transcript::tests::retries_select_first_valid_candidate_and_preserve_native_transcript_state ... ok
+test plonkish::foreign::tests::modular_arithmetic_and_canonical_boundaries ... ok
+test plonkish::foreign::tests::selection_preserves_integer_bounds_and_rejects_aliases ... ok
+test ark_adapter::srs::tests::mismatched_tau_g2_rejected ... ok
+test plonkish::foreign::tests::equality_ranges_need_an_independent_bound ... ok
+test plonkish::foreign::tests::arbitrary_gate_coefficients_and_lookup_bounds ... ok
+test plonkish::foreign::tests::boolean_bounds_are_enforced_without_integer_range_gadgets ... ok
+test plonkish::stark::partition_tests::generated_fixed_partitions_match_dense_layout ... ok
+test ark_adapter::compact::tests::merged_tables_do_not_allow_cross_table_substitution ... ok
+test ark_adapter::srs::cache::tests::concurrent_cache_writers_publish_complete_files ... ok
+test plonkish::tests::partitioned::partitioned_traces_share_table_multiplicities ... ok
+test ark_adapter::config::tests::batch_messages_work_with_scalar_challenges ... ok
+test ark_adapter::srs::tests::corrupted_power_rejected ... ok
+test ark_adapter::pcs::degree_tests::parallel_checkpoint_encoding_preserves_canonical_format ... ok
+test batch::tests::rejects_reordered_and_missing_shards ... ok
+test ark_adapter::compact::tests::roundtrip_and_reject_malformed_transport ... ok
+test batch::tests::shard_residuals_are_nonzero_and_cancel ... ok
+test ark_adapter::config::tests::opens_next_rows_only_when_the_graph_reads_them ... ok
+test ark_adapter::config::tests::kzg_tampering_rejected ... ok
+test batch::tests::regenerated_shards_prove_the_same_batch ... ok
+test ark_adapter::encoding::tests::field_stream_matches_arkworks_across_blocks ... ok
+test ark_adapter::srs::cache::tests::cache_round_trip_and_key_separation ... ok
+test batch::tests::positive_proof_of_work_batches_are_reproducible ... ok
+test plonkish::verifier::transcript::tests::byte_reads_after_conditional_retries_cross_digest_boundaries_correctly ... ok
+test plonkish::gadgets::blake3::xof_tests::xof_matches_native_across_chunk_boundaries ... ok
+test plonkish::foreign::tests::census_matches_materialized_translation ... ok
+test test_circuits::blake3::tests::test_compression_reference_compatibility ... ok
+test batch::tests::rejects_tampered_header_claim ... ok
+test plonkish::tests::hardening::batched_hints_execute_once_and_preserve_input_and_output_roles ... ok
+test batch::tests::opposite_messages_cancel ... ok
+test batch::tests::a_shard_is_not_a_standalone_proof ... ok
+test ark_adapter::srs::tests::dev_setup_validates ... ok
+test ark_adapter::config::tests::streamed_lookups_preserve_proof_bytes ... ok
+test ark_adapter::srs::tests::fixed_base_setup_matches_individual_multiplication_across_tiles ... ok
+test batch::tests::rejects_tampered_residual ... ok
+test p3_adapter::pcs::tests::shifted_quotient_slices_matches_naive_composition ... ok
+test plonkish::tests::plonkish_proves_arithmetic_selection_hints_and_wide_lookups ... ok
+test ark_adapter::config::tests::kzg_serialization_round_trip ... ok
+test ark_adapter::config::tests::kzg_two_circuits_two_heights ... ok
+test ark_adapter::pcs::degree_tests::batched_openings_preserve_point_column_and_transcript_order ... ok
+test ark_adapter::config::tests::kzg_wrong_claim_rejected ... ok
+test ark_adapter::config::tests::quotient_slices_fit_an_srs_exactly_as_large_as_the_trace ... ok
+test ark_adapter::pcs::degree_tests::mixed_degree_openings_enforce_every_bound ... ok
+test test_circuits::u32_add::tests::u32_add_proof ... ok
+test batch::tests::regenerated_shard_must_match_its_header - should panic ... ok
+test ark_adapter::cuda::tests::cuda_msm_normalizes_structured_columns ... ok
+test batch::tests::batch_of_one_is_a_distinct_protocol ... ok
+test ark_adapter::srs::cache::tests::damaged_cache_fails_without_regeneration ... ok
+test types::grind_tests::grind_returns_the_smallest_witness ... ok
+test ark_adapter::cuda::tests::cuda_msm_matches_arkworks_with_chunks_and_exceptional_points ... ok
+test types::grind_tests::grind_crosses_windows ... ok
+test ark_adapter::cuda::tests::cuda_polynomial_evaluation_and_division_match_horner ... ok
+test ark_adapter::cuda::tests::cuda_resident_msm_columns_match_arkworks ... ok
+test batch::tests::messages_stand_in_for_claims ... ok
+test ark_adapter::config::tests::scalar_quotient_matches_portable_evaluator_with_next_rows ... ok
+test ark_adapter::config::tests::kzg_prove_verify ... ok
+test batch::tests::rejects_message_added_after_proving ... ok
+test p3_adapter::pcs::tests::lde_from_coefficients_matches_commit_transform ... ok
+test batch::tests::two_shards_verify_and_round_trip ... ok
+test batch::tests::rejects_unbalanced_message ... ok
+test test_circuits::byte_operations::tests::byte_test ... ok
+test ark_adapter::config::tests::lookup_tiles_match_serial_trace_across_waves_and_next_rows ... ok
+test ark_adapter::cuda::tests::cuda_polynomial_evaluates_all_points_in_order ... ok
+test plonkish::tests::compact_hash::compact_hash_all_block_and_tree_boundaries_match_native ... ok
+test plonkish::verifier::transcript::tests::conditional_retry_circuit_proves_multiple_paths_under_one_outer_key ... ok
+test ark_adapter::cuda::tests::cuda_fft_matches_arkworks_on_subgroups_and_arbitrary_cosets ... ok
+test plonkish::tests::compact_hash::compact_hash_bridge_rejects_valid_hash_traces_for_a_different_witness ... ok
+test test_circuits::blake3::tests::test_all_claims ... ok
+
+test result: ok. 135 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 3.75s
+
+     Running unittests examples/init_fri_kzg_prove.rs (target/release/examples/init_fri_kzg_prove-bf53f0bbdcb985ef)
+
+running 1 test
+test tests::staged_hash_fixture_proves_and_resumes_verification ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.91s
+

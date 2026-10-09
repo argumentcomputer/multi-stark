@@ -1,0 +1,49 @@
+   Compiling constant_time_eq v0.4.2
+   Compiling multi-stark v0.1.0 (/home/sam/repos/multi-stark)
+   Compiling blake3 v1.8.5
+   Compiling syn v2.0.117
+   Compiling num-integer v0.1.46
+   Compiling num-bigint v0.5.1
+   Compiling serde_derive v1.0.228
+   Compiling tracing-attributes v0.1.31
+   Compiling zerocopy-derive v0.8.48
+   Compiling thiserror-impl v2.0.18
+   Compiling tracing v0.1.44
+   Compiling thiserror v2.0.18
+   Compiling tracing-texray v0.2.0 (https://github.com/argumentcomputer/tracing-texray?rev=465bbca0bea4721e58419c11cabd8cce21757822#465bbca0)
+   Compiling zerocopy v0.8.48
+   Compiling serde v1.0.228
+   Compiling p3-util v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling tinytemplate v1.2.1
+   Compiling bincode v2.0.1
+   Compiling p3-field v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-matrix v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-symmetric v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-challenger v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-blake3 v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-keccak v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling half v2.7.1
+   Compiling p3-dft v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-multilinear-util v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-air v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling ciborium-ll v0.2.2
+   Compiling ciborium v0.2.2
+   Compiling p3-mds v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling criterion v0.5.1
+   Compiling p3-commit v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-security v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-poseidon1 v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-poseidon2 v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-merkle-tree v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-monty-31 v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-goldilocks v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-fri v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+   Compiling p3-baby-bear v0.6.0 (https://github.com/Plonky3/Plonky3?rev=3152b14a89067c83775a8076cc262ffc48a1fd7c#3152b14a)
+    Finished `release` profile [optimized] target(s) in 31.01s
+     Running unittests src/lib.rs (target/release/deps/multi_stark-e7d2b2d6b5a945ad)
+
+running 1 test
+test cuda::sppark::tests::forward_natural_matches_the_cpu_dft ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 117 filtered out; finished in 1.03s
+

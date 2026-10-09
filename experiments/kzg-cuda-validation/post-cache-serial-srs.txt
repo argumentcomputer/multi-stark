@@ -1,0 +1,29 @@
+   Compiling multi-stark v0.1.0 (/home/sam/repos/multi-stark)
+warning: unnecessary qualification
+   --> src/verifier.rs:953:30
+    |
+953 |         let hash: [u8; 32] = p3_blake3::Blake3.hash_iter(bytes.iter().copied());
+    |                              ^^^^^^^^^^^^^^^^^
+    |
+    = note: requested on the command line with `-W unused-qualifications`
+help: remove the unnecessary path segments
+    |
+953 -         let hash: [u8; 32] = p3_blake3::Blake3.hash_iter(bytes.iter().copied());
+953 +         let hash: [u8; 32] = Blake3.hash_iter(bytes.iter().copied());
+    |
+
+warning: `multi-stark` (lib test) generated 1 warning (run `cargo fix --lib -p multi-stark --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 13.01s
+     Running unittests src/lib.rs (target/release/deps/multi_stark-3737ec7525f48a60)
+
+running 7 tests
+test ark_adapter::srs::cache::tests::cache_rejects_a_different_seed_even_with_valid_checksum ... ok
+test ark_adapter::srs::cache::tests::damaged_cache_fails_without_regeneration ... ok
+test ark_adapter::srs::tests::corrupted_power_rejected ... ok
+test ark_adapter::srs::tests::dev_setup_validates ... ok
+test ark_adapter::srs::cache::tests::concurrent_cache_writers_publish_complete_files ... ok
+test ark_adapter::srs::tests::mismatched_tau_g2_rejected ... ok
+test ark_adapter::srs::cache::tests::cache_round_trip_and_key_separation ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 116 filtered out; finished in 0.13s
+

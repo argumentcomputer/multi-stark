@@ -1,0 +1,17 @@
+Preparing development SRS for 2^28 rows
+Loaded development SRS cache /opt/dlami/nvme/multi-stark-kzg-sub30-srs-cache/1d6bb915e14b784d5ec3244950e35b82e7abcdafba2d40c53b3a89c80df51133.dev-srs in 23.319545457s
+Outer development SRS ready: 23.329607256s
+Prepared recursive trace 0: 23.330686416s
+Prepared recursive trace 1: 23.331567541s
+{
+  "claim_bytes": 144,
+  "development_srs": true,
+  "external_pairings_pass": true,
+  "negative_tests_pass": true,
+  "packet_bytes": 2709,
+  "pairing_bytes": 480,
+  "profile_bytes": 32,
+  "proof_bytes": 2053,
+  "total_seconds": 23.514738788,
+  "verify_seconds": 0.014805808
+}

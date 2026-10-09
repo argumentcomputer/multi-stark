@@ -1,0 +1,27 @@
+Saved 1418855-byte recursive FRI proof verified; all 18 altered Init claim words rejected
+Fixed preprocessing cache miss: /opt/dlami/nvme/multi-stark-kzg-resident-fixed-cache-20261009/523edddb347a1bbea104cf7ac336b85d4fae90c1abb89b382b8036eaf0c53f72
+Source circuit: 3.245046545s; CircuitStats { hash_calls: 51371, hash_compressions: 58340, values: 45135947, inputs: 1443451, gates: 38123497, lookups: 7273312, tables: 3, publics: 18, hint_calls: 3226127, hint_outputs: 9002635 }
+Source witness satisfied: 4.679448436s
+Scalar translation: 55.67031542s; CircuitStats { hash_calls: 51371, hash_compressions: 58340, values: 132836856, inputs: 45135828, gates: 113913331, lookups: 31689424, tables: 4, publics: 18, hint_calls: 40938272, hint_outputs: 40938272 }
+Scalar witness satisfied: 105.015329646s
+Lowered 19 circuits: 130.97877938s
+Staged 0/19: 153.715643784s
+Staged 1/19: 159.722078112s
+Staged 2/19: 165.691020276s
+Staged 3/19: 171.699264162s
+Staged 4/19: 177.682903696s
+Staged 5/19: 183.705973144s
+Staged 6/19: 189.713668854s
+Staged 7/19: 195.699460603s
+Staged 8/19: 201.607382131s
+Staged 9/19: 204.722012608s
+Staged 10/19: 213.296097155s
+Staged 11/19: 223.013705401s
+Staged 12/19: 231.646638801s
+Staged 13/19: 241.307555325s
+Staged 14/19: 242.097445575s
+Staged 15/19: 243.386037119s
+Staged 16/19: 244.619499686s
+Staged 17/19: 245.335194589s
+Staged 18/19: 245.985231166s
+STAGING COMPLETE: 245.985287744s

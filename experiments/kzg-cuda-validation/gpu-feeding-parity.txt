@@ -1,0 +1,73 @@
+   Compiling multi-stark v0.1.0 (/home/sam/repos/multi-stark)
+    Finished `release` profile [optimized] target(s) in 54.27s
+     Running unittests src/lib.rs (target/release/deps/multi_stark-09255da3156b5f0d)
+
+running 50 tests
+test ark_adapter::cuda::tests::cuda_fft_2pow29 ... ignored, allocates 32 GiB of host memory and a 16 GiB GPU transform
+test ark_adapter::cuda::tests::cuda_msm_2pow29 ... ignored, allocates approximately 70 GiB of host memory; exercises all selected GPUs
+test ark_adapter::cuda::tests::cuda_fft_rejects_overflowing_domain_stride ... ok
+test ark_adapter::cuda::tests::cuda_primitive_benchmark ... ignored, measures CPU/GPU crossover and repeated-column MSM throughput
+test ark_adapter::field::tests::serde_round_trip ... ok
+test ark_adapter::field::tests::inverse_and_powers ... ok
+test ark_adapter::field::tests::two_adicity_matches_ark ... ok
+test ark_adapter::transcript::tests::consecutive_samples_differ ... ok
+test ark_adapter::transcript::tests::slice_observation_flat ... ok
+test ark_adapter::transcript::tests::deterministic_and_sensitive ... ok
+test ark_adapter::encoding::tests::scalar_stream_rejects_invalid_and_truncated_fields ... ok
+test ark_adapter::domain::tests::next_point_walks_the_domain ... ok
+test ark_adapter::domain::tests::disjoint_domain_is_disjoint ... ok
+test ark_adapter::domain::tests::coset_selectors_match_pointwise ... ok
+Generated and cached development SRS /tmp/multi-stark-dev-srs-2538665-2/0c196906e336a48aae5afa99941c50162eca8c472f66927fc5ecf7e90dfbf96c.dev-srs in 8.411318ms
+Loaded development SRS cache /tmp/multi-stark-dev-srs-2538665-2/0c196906e336a48aae5afa99941c50162eca8c472f66927fc5ecf7e90dfbf96c.dev-srs in 4.00928ms
+Generated and cached development SRS /tmp/multi-stark-dev-srs-2538665-1/6365fe20e4c68e171b263b778a5246ad47a4658e220d951e23530d8de44f5029.dev-srs in 13.80065ms
+test ark_adapter::config::tests::scalar_quotient_matches_portable_evaluator_with_next_rows ... ok
+Generated and cached development SRS /tmp/multi-stark-dev-srs-2538665-1/6365fe20e4c68e171b263b778a5246ad47a4658e220d951e23530d8de44f5029.dev-srs in 27.342661ms
+test ark_adapter::srs::tests::mismatched_tau_g2_rejected ... ok
+test ark_adapter::compact::tests::roundtrip_and_reject_malformed_transport ... ok
+Generated and cached development SRS /tmp/multi-stark-dev-srs-2538665-1/6365fe20e4c68e171b263b778a5246ad47a4658e220d951e23530d8de44f5029.dev-srs in 33.532705ms
+test ark_adapter::config::tests::kzg_wrong_claim_rejected ... ok
+test ark_adapter::domain::tests::selectors_and_points_agree_across_parallel_tiles ... ok
+test ark_adapter::srs::tests::corrupted_power_rejected ... ok
+test ark_adapter::srs::tests::dev_setup_validates ... ok
+test ark_adapter::pcs::degree_tests::mixed_degree_openings_enforce_every_bound ... ok
+test ark_adapter::config::tests::batch_messages_work_with_scalar_challenges ... ok
+Generated and cached development SRS /tmp/multi-stark-dev-srs-2538665-2/586560addf40195a47d35590243444a8a527ae0d8d1c1af7d42fd5e347a5c727.dev-srs in 15.64485ms
+test ark_adapter::config::tests::quotient_slices_fit_an_srs_exactly_as_large_as_the_trace ... ok
+Generated and cached development SRS /tmp/multi-stark-dev-srs-2538665-3/434dd0010ceac7d362a4c170440133befa82606349bfda39ad66f65b313c415c.dev-srs in 58.191119ms
+Loaded development SRS cache /tmp/multi-stark-dev-srs-2538665-2/586560addf40195a47d35590243444a8a527ae0d8d1c1af7d42fd5e347a5c727.dev-srs in 14.310373ms
+test ark_adapter::pcs::degree_tests::parallel_checkpoint_encoding_preserves_canonical_format ... ok
+test ark_adapter::config::tests::streamed_lookups_preserve_proof_bytes ... ok
+test ark_adapter::srs::cache::tests::damaged_cache_fails_without_regeneration ... ok
+test ark_adapter::config::tests::kzg_prove_verify ... ok
+test ark_adapter::config::tests::kzg_serialization_round_trip ... ok
+KZG proof: 2221 bytes (two circuits, heights 4 and 16)
+test ark_adapter::config::tests::opens_next_rows_only_when_the_graph_reads_them ... ok
+test ark_adapter::config::tests::kzg_tampering_rejected ... ok
+test ark_adapter::config::tests::kzg_two_circuits_two_heights ... ok
+Generated and cached development SRS /tmp/multi-stark-dev-srs-2538665-2/959cc628e446820dbcfc68ea25c9a725a33ad40ad8cdab5e72e18487f79905f1.dev-srs in 7.334125ms
+Loaded development SRS cache /tmp/multi-stark-dev-srs-2538665-2/959cc628e446820dbcfc68ea25c9a725a33ad40ad8cdab5e72e18487f79905f1.dev-srs in 5.604877ms
+test ark_adapter::encoding::tests::field_stream_matches_arkworks_across_blocks ... ok
+Generated and cached development SRS /tmp/multi-stark-dev-srs-2538665-2/f7bbcbaa04f87b4644f73a60399fe6054a300b1d5dac2f2da6000b13d1e528be.dev-srs in 4.230062ms
+Loaded development SRS cache /tmp/multi-stark-dev-srs-2538665-2/f7bbcbaa04f87b4644f73a60399fe6054a300b1d5dac2f2da6000b13d1e528be.dev-srs in 3.87465ms
+test ark_adapter::srs::cache::tests::cache_round_trip_and_key_separation ... ok
+test ark_adapter::srs::cache::tests::cache_rejects_a_different_seed_even_with_valid_checksum ... ok
+test ark_adapter::srs::tests::fixed_base_setup_matches_individual_multiplication_across_tiles ... ok
+test ark_adapter::compact::tests::merged_tables_do_not_allow_cross_table_substitution ... ok
+Generated and cached development SRS /tmp/multi-stark-dev-srs-2538665-1/6365fe20e4c68e171b263b778a5246ad47a4658e220d951e23530d8de44f5029.dev-srs in 1.28915695s
+Loaded development SRS cache /tmp/multi-stark-dev-srs-2538665-1/6365fe20e4c68e171b263b778a5246ad47a4658e220d951e23530d8de44f5029.dev-srs in 5.167031ms
+test ark_adapter::srs::cache::tests::concurrent_cache_writers_publish_complete_files ... ok
+test ark_adapter::pcs::degree_tests::batched_openings_preserve_point_column_and_transcript_order ... ok
+test ark_adapter::config::tests::lookup_tiles_match_serial_trace_across_waves_and_next_rows ... ok
+test ark_adapter::cuda::tests::cuda_msm_matches_arkworks_with_chunks_and_exceptional_points ... ok
+test ark_adapter::cuda::tests::cuda_resident_msm_columns_match_arkworks ... ok
+test ark_adapter::cuda::tests::cuda_fft_queues_reuse_resident_inputs_and_preserve_order ... ok
+test ark_adapter::cuda::tests::cuda_fft_from_pads_without_mutating_coefficients ... ok
+test ark_adapter::cuda::tests::cuda_msm_normalizes_structured_columns ... ok
+test ark_adapter::cuda::tests::cuda_polynomial_evaluates_all_points_in_order ... ok
+test ark_adapter::cuda::tests::cuda_polynomial_evaluation_and_division_match_horner ... ok
+test ark_adapter::cuda::tests::cuda_fft_matches_arkworks_on_subgroups_and_arbitrary_cosets ... ok
+test ark_adapter::cuda::tests::cuda_interpolation_retains_outputs_for_msm_and_cosets ... ok
+test ark_adapter::cuda::tests::cuda_goldilocks_and_kzg_runtime_coexist ... ok
+
+test result: ok. 47 passed; 0 failed; 3 ignored; 0 measured; 126 filtered out; finished in 4.24s
+

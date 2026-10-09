@@ -1,0 +1,24 @@
+Generated and cached development SRS /opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/cache-validation/srs/50664d8c92de07b40c102be45cdb7c87837511bc767f775e0a24b06e841f3137.dev-srs in 42.232821736s
+Development SRS: 42.232863146s
+Prepared 0/21: 42.233886309s
+Prepared 1/21: 42.234862845s
+Prepared 2/21: 42.235799107s
+Prepared 3/21: 42.236682418s
+Prepared 4/21: 42.237560739s
+Prepared 5/21: 42.238436669s
+Prepared 6/21: 42.23935991s
+Prepared 7/21: 42.240448003s
+Prepared 8/21: 42.24129077s
+Prepared 9/21: 42.242200936s
+Prepared 10/21: 42.243363162s
+Prepared 11/21: 42.244408792s
+Prepared 12/21: 42.245794194s
+Prepared 13/21: 42.24717415s
+Prepared 14/21: 42.248556963s
+Prepared 15/21: 42.249917854s
+Prepared 16/21: 42.250973263s
+Prepared 17/21: 42.252502919s
+Prepared 18/21: 42.253397798s
+Prepared 19/21: 42.254251019s
+Prepared 20/21: 42.255018787s
+VERIFIED: proof_bytes=53157 packet_bytes=53333 verify_seconds=0.12716589 total_seconds=44.877550938 altered_claims_rejected=18 development_srs=true

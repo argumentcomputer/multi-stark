@@ -1,0 +1,915 @@
+{
+  "status": "verified_regenerated_chain",
+  "development_srs": true,
+  "development_srs_cache": "/opt/dlami/nvme/multi-stark-kzg-sub30-srs-cache",
+  "fixed_preprocessing_cache": "/opt/dlami/nvme/multi-stark-kzg-resident-fixed-cache-20261009",
+  "fri_compression_rerun": true,
+  "timing_boundary": "aggregation root to verified final packet",
+  "historical_cpu_artifact_comparison": false,
+  "gpu_sampling_scope": "whole run, including independent CPU verification after pipeline timing",
+  "git_head": "6d9d5ddad4fb9bfbabf8238ef87af6e9d7b3cab6",
+  "hardware": "index, name, memory.total [MiB], driver_version\n0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07\n",
+  "cpu_count": 96,
+  "cpu_affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    83,
+    84,
+    85,
+    86,
+    87,
+    88,
+    89,
+    90,
+    91,
+    92,
+    93,
+    94,
+    95
+  ],
+  "cpu": {
+    "lscpu": [
+      {
+        "field": "Architecture:",
+        "data": "x86_64"
+      },
+      {
+        "field": "CPU op-mode(s):",
+        "data": "32-bit, 64-bit"
+      },
+      {
+        "field": "Address sizes:",
+        "data": "46 bits physical, 48 bits virtual"
+      },
+      {
+        "field": "Byte Order:",
+        "data": "Little Endian"
+      },
+      {
+        "field": "CPU(s):",
+        "data": "96"
+      },
+      {
+        "field": "On-line CPU(s) list:",
+        "data": "0-95"
+      },
+      {
+        "field": "Vendor ID:",
+        "data": "GenuineIntel"
+      },
+      {
+        "field": "Model name:",
+        "data": "Intel(R) Xeon(R) Platinum 8559C"
+      },
+      {
+        "field": "CPU family:",
+        "data": "6"
+      },
+      {
+        "field": "Model:",
+        "data": "207"
+      },
+      {
+        "field": "Thread(s) per core:",
+        "data": "2"
+      },
+      {
+        "field": "Core(s) per socket:",
+        "data": "48"
+      },
+      {
+        "field": "Socket(s):",
+        "data": "1"
+      },
+      {
+        "field": "Stepping:",
+        "data": "2"
+      },
+      {
+        "field": "BogoMIPS:",
+        "data": "4800.00"
+      },
+      {
+        "field": "Flags:",
+        "data": "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc arch_perfmon rep_good nopl xtopology nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq monitor ssse3 fma cx16 pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch cpuid_fault ssbd ibrs ibpb stibp ibrs_enhanced fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx_vnni avx512_bf16 wbnoinvd ida arat avx512vbmi umip pku ospke waitpkg avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg tme avx512_vpopcntdq rdpid cldemote movdiri movdir64b md_clear serialize amx_bf16 avx512_fp16 amx_tile amx_int8 flush_l1d arch_capabilities"
+      },
+      {
+        "field": "Hypervisor vendor:",
+        "data": "KVM"
+      },
+      {
+        "field": "Virtualization type:",
+        "data": "full"
+      },
+      {
+        "field": "L1d cache:",
+        "data": "2.3 MiB (48 instances)"
+      },
+      {
+        "field": "L1i cache:",
+        "data": "1.5 MiB (48 instances)"
+      },
+      {
+        "field": "L2 cache:",
+        "data": "96 MiB (48 instances)"
+      },
+      {
+        "field": "L3 cache:",
+        "data": "320 MiB (1 instance)"
+      },
+      {
+        "field": "NUMA node(s):",
+        "data": "1"
+      },
+      {
+        "field": "NUMA node0 CPU(s):",
+        "data": "0-95"
+      },
+      {
+        "field": "Vulnerability Gather data sampling:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Ghostwrite:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Indirect target selection:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Itlb multihit:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability L1tf:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Mds:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Meltdown:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Mmio stale data:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Old microcode:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Reg file data sampling:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Retbleed:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Spec rstack overflow:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Spec store bypass:",
+        "data": "Mitigation; Speculative Store Bypass disabled via prctl"
+      },
+      {
+        "field": "Vulnerability Spectre v1:",
+        "data": "Mitigation; usercopy/swapgs barriers and __user pointer sanitization"
+      },
+      {
+        "field": "Vulnerability Spectre v2:",
+        "data": "Mitigation; Enhanced / Automatic IBRS; IBPB conditional; PBRSB-eIBRS SW sequence; BHI BHI_DIS_S"
+      },
+      {
+        "field": "Vulnerability Srbds:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Tsa:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Tsx async abort:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Vmscape:",
+        "data": "Not affected"
+      }
+    ]
+  },
+  "storage": "Filesystem                      Size  Used Avail Use% Mounted on\n/dev/mapper/vg.01-lv_ephemeral  6.9T  1.5T  5.2T  22% /opt/dlami/nvme\n",
+  "environment": {
+    "MULTI_STARK_KZG_CUDA_PROFILE": "1",
+    "MULTI_STARK_KZG_BACKEND": "cuda",
+    "MULTI_STARK_KZG_FIXED_CACHE": "/opt/dlami/nvme/multi-stark-kzg-resident-fixed-cache-20261009",
+    "MULTI_STARK_KZG_DEV_SRS_CACHE": "/opt/dlami/nvme/multi-stark-kzg-sub30-srs-cache",
+    "MULTI_STARK_INIT_EXPECTED_CLAIMS": "/opt/dlami/nvme/multi-stark-init-root-20261008/root/root-claims.bin"
+  },
+  "binaries": {
+    "target/release/examples/init_fri_kzg_prove": "83f25e3bf696d78f6fc261fd6860dde466e4b87754557b33a5427e2523e25919",
+    "experiments/kzg-wrap/target/release/init-kzg-wrap": "5a9029801ab8a02192ac27c84341b04328a8141eaab6189afa18ae9465793afc",
+    "target/release/examples/ix_root": "774f4f408767f9a5501405bac5c074c2e0c69fc2362ad6ff9f0f914f9ebaac5f"
+  },
+  "sources": {
+    ".cargo/config.toml": "59a8c63e78a3524907d28ece7b3a0fc308c61e4333c063a56391d39bcb08545c",
+    "Cargo.toml": "2a252b6baa2c8136786d43d6a42626db57141c878565afb7a812f903655625ad",
+    "Cargo.lock": "caa8b6acb928eefc55aed5daaf8744aa03c2eaa22b75a9439b58c4a7f5418791",
+    "build.rs": "b7fa9c530156e62c18053c5ba787f78bf30cd40cf5345ffd05c55d381ad5b088",
+    "cuda/kzg.cu": "832c476651482f75d0083f249f0467ad416e7a5a6d5ec62067ae2af4d8687926",
+    "cuda/kzg_runtime.cpp": "bb65a7fea78f6e3b32bcfca83d47e788cf9f57d727cf66cae1ad3a7e4484127d",
+    "cuda/kzg_sppark.cuh": "2f766526bc46d56434da21cb738037beb3081832483d369f78f023d4be7f11c3",
+    "cuda/kzg_transfer.cuh": "3db6e1b56b4463962dc19d5ac899d1a6da877202286cd2316ea478a6eface633",
+    "src/ark_adapter/buffer.rs": "afee8ada04733c1beb5e829309dc1e2ffdd351fcf264f4b628c96fc7dfedb214",
+    "src/ark_adapter/cuda.rs": "7557d4cf49f371c1d119b9e27e81dce27afbc3c1f6d45602952f1e0ca1f61787",
+    "src/ark_adapter/pcs.rs": "6aa3953fab80537f4b6dc4c7fb2a0e9fc76cc67da047725c566e8a7f2ad03892",
+    "src/ark_adapter/config.rs": "a14c7442c547a8e345e421a4128795bb7db39ff085878ce4f7abef54d587e278",
+    "src/ark_adapter/domain.rs": "b6455eb69ed26ae5c66efc4354742ee70d53c126e69b1dbe1bc9e85efc5e86d2",
+    "src/ark_adapter/encoding.rs": "13394ee47e9f57814ca1801503dae2a383580e0ae25aadce40f73f1e58707b49",
+    "src/lookup.rs": "d83aec8f9118c55b1144d21b08cd3cb9cc5767795c682974b0aba5dfc29e42ba",
+    "src/plonkish/stark.rs": "3b979d484210fd893b1db7dc1746b18153c2245e38f1eea47de5bf7507ddfc2f",
+    "src/ark_adapter/srs.rs": "b2bda245b197a847f10d9c1bbf0fa27ce6486260f6d5a344de56dafbb11763d0",
+    "src/ark_adapter/srs/cache.rs": "85084b1c868c1a2dc51bc56a94fff6196620b17b9bb42e8f218cec716d98f9ca",
+    "src/ark_adapter/mod.rs": "8dea705e8deecf63e4100777cb60cb1c985eec331c0ecfaa01f8e7ff0acabc17",
+    "examples/init_fri_kzg_prove.rs": "105e246a8e33b02c961738ee9cc350f81f560780e0917312eba21274ae2008ff",
+    "examples/support/kzg_storage.rs": "65cd3b8be7c6ec83e2a17006794ebd8f675da48e5f27d73bbc3b8d3d96b13e60",
+    "examples/support/kzg_fixed_cache.rs": "c281c38988e2dead64e2b7d176037d24e29f7a8e27b15acad265fc8de3e83f00",
+    "examples/support/init_claim.rs": "f69f4be3b260152a21646508612e1bca38c4e8188a6d2b833bc893f6bf7592a7",
+    "examples/support/init_fri.rs": "e00ede824b1a48a1b1a769e6db3779e5435685e23d9e707f58b4d9426097d9db",
+    "examples/ix_root.rs": "f795aa930a652d575dbf66b94d7cce70b6a1b9ec65b43aefc863a9a952ef3e84",
+    "examples/support/ix_vk.rs": "7158c1b2c92c3eb38e7a7f8cb19f791dbe0f9fa957e7f182671c353dc460fa97",
+    "experiments/kzg-wrap/Cargo.toml": "403825e796d9fdb1adff5e7729f911e1d627c0950c06bdabd80135e9e49ee3c1",
+    "experiments/kzg-wrap/Cargo.lock": "e53341844df5cfdc02dfcf2e2dbf99d749f5bddba423aa0996ac214fa22b8351",
+    "experiments/kzg-wrap/src/outer.rs": "5b1e1302b6b5a69da4644afc66351dd235ae8fb433eec62557a311cae790da6c",
+    "experiments/kzg-wrap/src/saved.rs": "027eae94dc84412a3edcb9d9b327d9529b819452854e10b7850462f796d011b5",
+    "experiments/kzg-cuda-bench.py": "9785240f806afd8ce0d14cb29c111b307d2de1a0a0f2fcb81c8f5502eec6a97d"
+  },
+  "phases": {
+    "fri_compress": {
+      "wall_seconds": 171.88006284199946,
+      "exit_code": 0,
+      "started_at_utc": "2026-10-09T02:57:18.820164+00:00",
+      "finished_at_utc": "2026-10-09T03:00:10.700229+00:00",
+      "peak_rss_bytes": 249536172032,
+      "command": [
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/ix_root",
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/root-artifacts",
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/compressed-fri",
+        "--prove-outer"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/fri_compress.log",
+      "backend": "cuda",
+      "fixed_cache_hits": 0,
+      "fixed_cache_misses": 0,
+      "srs_cache_hits": 0,
+      "srs_cache_misses": 0,
+      "cuda_operation_totals_overlap": {},
+      "gpu_samples_every_2_seconds": {
+        "0": {
+          "peak_memory_mib": 95257,
+          "peak_utilization_percent": 71,
+          "sample_count": 86,
+          "zero_utilization_samples": 71,
+          "mean_utilization_percent": 5.395348837209302,
+          "zero_utilization_sample_percent": 82.55813953488372
+        },
+        "1": {
+          "peak_memory_mib": 721,
+          "peak_utilization_percent": 7,
+          "sample_count": 86,
+          "zero_utilization_samples": 83,
+          "mean_utilization_percent": 0.13953488372093023,
+          "zero_utilization_sample_percent": 96.51162790697674
+        },
+        "2": {
+          "peak_memory_mib": 721,
+          "peak_utilization_percent": 3,
+          "sample_count": 86,
+          "zero_utilization_samples": 84,
+          "mean_utilization_percent": 0.06976744186046512,
+          "zero_utilization_sample_percent": 97.67441860465117
+        },
+        "3": {
+          "peak_memory_mib": 727,
+          "peak_utilization_percent": 3,
+          "sample_count": 86,
+          "zero_utilization_samples": 85,
+          "mean_utilization_percent": 0.03488372093023256,
+          "zero_utilization_sample_percent": 98.83720930232558
+        }
+      }
+    },
+    "fri_stage": {
+      "wall_seconds": 199.03858726700128,
+      "exit_code": 0,
+      "started_at_utc": "2026-10-09T03:00:10.701980+00:00",
+      "finished_at_utc": "2026-10-09T03:03:29.740569+00:00",
+      "peak_rss_bytes": 68291305472,
+      "command": [
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/init_fri_kzg_prove",
+        "stage",
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/compressed-fri",
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/fri-to-kzg"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/fri_stage.log",
+      "backend": "cuda",
+      "fixed_cache_hits": 1,
+      "fixed_cache_misses": 0,
+      "srs_cache_hits": 0,
+      "srs_cache_misses": 0,
+      "cuda_operation_totals_overlap": {},
+      "gpu_samples_every_2_seconds": {
+        "0": {
+          "peak_memory_mib": 561,
+          "peak_utilization_percent": 45,
+          "sample_count": 100,
+          "zero_utilization_samples": 99,
+          "mean_utilization_percent": 0.45,
+          "zero_utilization_sample_percent": 99.0
+        },
+        "1": {
+          "peak_memory_mib": 3,
+          "peak_utilization_percent": 0,
+          "sample_count": 100,
+          "zero_utilization_samples": 100,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "2": {
+          "peak_memory_mib": 3,
+          "peak_utilization_percent": 0,
+          "sample_count": 100,
+          "zero_utilization_samples": 100,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "3": {
+          "peak_memory_mib": 3,
+          "peak_utilization_percent": 0,
+          "sample_count": 100,
+          "zero_utilization_samples": 100,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        }
+      }
+    },
+    "fri_prove": {
+      "wall_seconds": 156.03037904699886,
+      "exit_code": 0,
+      "started_at_utc": "2026-10-09T03:03:29.740951+00:00",
+      "finished_at_utc": "2026-10-09T03:06:05.771333+00:00",
+      "peak_rss_bytes": 204711391232,
+      "command": [
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/init_fri_kzg_prove",
+        "prove",
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/fri-to-kzg"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/fri_prove.log",
+      "backend": "cuda",
+      "fixed_cache_hits": 0,
+      "fixed_cache_misses": 0,
+      "srs_cache_hits": 1,
+      "srs_cache_misses": 0,
+      "cuda_operation_totals_overlap": {
+        "ifft": {
+          "calls": 293,
+          "upload_ms": 2001.3140000000005,
+          "kernel_ms": 602.633,
+          "download_ms": 1635.2750000000005,
+          "host_copy_ms": 8515.521999999999,
+          "upload_bytes": 72026685440.0,
+          "download_bytes": 72026685440.0,
+          "device_copy_bytes": 0.0
+        },
+        "msm-points": {
+          "calls": 237,
+          "upload_ms": 4553.865999999998,
+          "kernel_ms": 0.0,
+          "download_ms": 0.0,
+          "host_copy_ms": 9090.194,
+          "upload_bytes": 165270256992.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        },
+        "retain": {
+          "calls": 227,
+          "upload_ms": 2125.5769999999984,
+          "kernel_ms": 0.0,
+          "download_ms": 0.0,
+          "host_copy_ms": 4063.1730000000007,
+          "upload_bytes": 76701237248.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        },
+        "fft": {
+          "calls": 843,
+          "upload_ms": 0.0,
+          "kernel_ms": 3487.240999999999,
+          "download_ms": 7223.928999999996,
+          "host_copy_ms": 39905.59600000003,
+          "upload_bytes": 0.0,
+          "download_bytes": 350641717248.0,
+          "device_copy_bytes": 223772409856.0
+        },
+        "evaluate": {
+          "calls": 503,
+          "upload_ms": 0.0,
+          "kernel_ms": 146.94300000000035,
+          "download_ms": 0.0,
+          "host_copy_ms": 0.0,
+          "upload_bytes": 0.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        },
+        "divide": {
+          "calls": 7,
+          "upload_ms": 27.471,
+          "kernel_ms": 17.846,
+          "download_ms": 25.224,
+          "host_copy_ms": 86.82499999999999,
+          "upload_bytes": 1298137088.0,
+          "download_bytes": 1298136864.0,
+          "device_copy_bytes": 0.0
+        },
+        "msm-scalars": {
+          "calls": 28,
+          "upload_ms": 33.207,
+          "kernel_ms": 0.0,
+          "download_ms": 0.0,
+          "host_copy_ms": 62.81799999999999,
+          "upload_bytes": 1298136864.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        }
+      },
+      "gpu_samples_every_2_seconds": {
+        "0": {
+          "peak_memory_mib": 33617,
+          "peak_utilization_percent": 95,
+          "sample_count": 78,
+          "zero_utilization_samples": 57,
+          "mean_utilization_percent": 9.14102564102564,
+          "zero_utilization_sample_percent": 73.07692307692308
+        },
+        "1": {
+          "peak_memory_mib": 33969,
+          "peak_utilization_percent": 86,
+          "sample_count": 78,
+          "zero_utilization_samples": 63,
+          "mean_utilization_percent": 6.82051282051282,
+          "zero_utilization_sample_percent": 80.76923076923077
+        },
+        "2": {
+          "peak_memory_mib": 33969,
+          "peak_utilization_percent": 54,
+          "sample_count": 78,
+          "zero_utilization_samples": 62,
+          "mean_utilization_percent": 6.012820512820513,
+          "zero_utilization_sample_percent": 79.48717948717949
+        },
+        "3": {
+          "peak_memory_mib": 33617,
+          "peak_utilization_percent": 95,
+          "sample_count": 78,
+          "zero_utilization_samples": 60,
+          "mean_utilization_percent": 8.85897435897436,
+          "zero_utilization_sample_percent": 76.92307692307692
+        }
+      }
+    },
+    "recursive_stage": {
+      "wall_seconds": 138.4885909270015,
+      "exit_code": 0,
+      "started_at_utc": "2026-10-09T03:06:05.784612+00:00",
+      "finished_at_utc": "2026-10-09T03:08:24.273204+00:00",
+      "peak_rss_bytes": 90370891776,
+      "command": [
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/init-kzg-wrap",
+        "stage",
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/intermediate",
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/recursive"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/recursive_stage.log",
+      "backend": "cuda",
+      "fixed_cache_hits": 1,
+      "fixed_cache_misses": 0,
+      "srs_cache_hits": 1,
+      "srs_cache_misses": 0,
+      "cuda_operation_totals_overlap": {},
+      "gpu_samples_every_2_seconds": {
+        "0": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 69,
+          "zero_utilization_samples": 69,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "1": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 69,
+          "zero_utilization_samples": 69,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "2": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 69,
+          "zero_utilization_samples": 69,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "3": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 69,
+          "zero_utilization_samples": 69,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        }
+      }
+    },
+    "recursive_prove": {
+      "wall_seconds": 204.01464313900215,
+      "exit_code": 0,
+      "started_at_utc": "2026-10-09T03:08:24.273690+00:00",
+      "finished_at_utc": "2026-10-09T03:11:48.288335+00:00",
+      "peak_rss_bytes": 498442252288,
+      "command": [
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/init-kzg-wrap",
+        "prove",
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/recursive"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/recursive_prove.log",
+      "backend": "cuda",
+      "fixed_cache_hits": 0,
+      "fixed_cache_misses": 0,
+      "srs_cache_hits": 1,
+      "srs_cache_misses": 0,
+      "cuda_operation_totals_overlap": {
+        "ifft": {
+          "calls": 11,
+          "upload_ms": 2173.6839999999997,
+          "kernel_ms": 760.896,
+          "download_ms": 1843.862,
+          "host_copy_ms": 7137.817999999998,
+          "upload_bytes": 77321994240.0,
+          "download_bytes": 77321994240.0,
+          "device_copy_bytes": 0.0
+        },
+        "msm-points": {
+          "calls": 154,
+          "upload_ms": 6915.919,
+          "kernel_ms": 0.0,
+          "download_ms": 0.0,
+          "host_copy_ms": 12141.462000000012,
+          "upload_bytes": 232016314080.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        },
+        "retain": {
+          "calls": 20,
+          "upload_ms": 3969.357,
+          "kernel_ms": 0.0,
+          "download_ms": 0.0,
+          "host_copy_ms": 5488.431,
+          "upload_bytes": 128869990400.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        },
+        "fft": {
+          "calls": 73,
+          "upload_ms": 1094.721,
+          "kernel_ms": 5605.802999999999,
+          "download_ms": 11059.659999999998,
+          "host_copy_ms": 63521.775,
+          "upload_bytes": 34359738368.0,
+          "download_bytes": 532622082048.0,
+          "device_copy_bytes": 498262343680.0
+        },
+        "msm-scalars": {
+          "calls": 100,
+          "upload_ms": 1360.8719999999996,
+          "kernel_ms": 0.0,
+          "download_ms": 0.0,
+          "host_copy_ms": 2172.1790000000005,
+          "upload_bytes": 51543801760.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        },
+        "evaluate": {
+          "calls": 31,
+          "upload_ms": 1230.027,
+          "kernel_ms": 162.01200000000003,
+          "download_ms": 0.0,
+          "host_copy_ms": 1037.8999999999999,
+          "upload_bytes": 34359738368.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        },
+        "divide": {
+          "calls": 3,
+          "upload_ms": 362.61400000000003,
+          "kernel_ms": 205.176,
+          "download_ms": 355.197,
+          "host_copy_ms": 1083.3180000000002,
+          "upload_bytes": 17184063488.0,
+          "download_bytes": 17184063392.0,
+          "device_copy_bytes": 0.0
+        }
+      },
+      "gpu_samples_every_2_seconds": {
+        "0": {
+          "peak_memory_mib": 58065,
+          "peak_utilization_percent": 100,
+          "sample_count": 102,
+          "zero_utilization_samples": 81,
+          "mean_utilization_percent": 7.637254901960785,
+          "zero_utilization_sample_percent": 79.41176470588235
+        },
+        "1": {
+          "peak_memory_mib": 58065,
+          "peak_utilization_percent": 100,
+          "sample_count": 102,
+          "zero_utilization_samples": 83,
+          "mean_utilization_percent": 7.7745098039215685,
+          "zero_utilization_sample_percent": 81.37254901960785
+        },
+        "2": {
+          "peak_memory_mib": 58065,
+          "peak_utilization_percent": 92,
+          "sample_count": 102,
+          "zero_utilization_samples": 83,
+          "mean_utilization_percent": 7.735294117647059,
+          "zero_utilization_sample_percent": 81.37254901960785
+        },
+        "3": {
+          "peak_memory_mib": 58065,
+          "peak_utilization_percent": 100,
+          "sample_count": 102,
+          "zero_utilization_samples": 85,
+          "mean_utilization_percent": 6.450980392156863,
+          "zero_utilization_sample_percent": 83.33333333333333
+        }
+      }
+    },
+    "fri_cpu_verify": {
+      "wall_seconds": 4.020047177997185,
+      "exit_code": 0,
+      "started_at_utc": "2026-10-09T03:11:48.291154+00:00",
+      "finished_at_utc": "2026-10-09T03:11:52.311202+00:00",
+      "peak_rss_bytes": 1843798016,
+      "command": [
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/init_fri_kzg_prove",
+        "verify",
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/fri-to-kzg"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/fri_cpu_verify.log",
+      "backend": "cpu",
+      "fixed_cache_hits": 0,
+      "fixed_cache_misses": 0,
+      "srs_cache_hits": 1,
+      "srs_cache_misses": 0,
+      "cuda_operation_totals_overlap": {},
+      "gpu_samples_every_2_seconds": {
+        "0": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 2,
+          "zero_utilization_samples": 2,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "1": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 2,
+          "zero_utilization_samples": 2,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "2": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 2,
+          "zero_utilization_samples": 2,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "3": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 2,
+          "zero_utilization_samples": 2,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        }
+      }
+    },
+    "recursive_cpu_verify": {
+      "wall_seconds": 23.665946636996523,
+      "exit_code": 0,
+      "started_at_utc": "2026-10-09T03:11:52.311666+00:00",
+      "finished_at_utc": "2026-10-09T03:12:15.977615+00:00",
+      "peak_rss_bytes": 28062318592,
+      "command": [
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/init-kzg-wrap",
+        "verify",
+        "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/recursive"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/recursive_cpu_verify.log",
+      "backend": "cpu",
+      "fixed_cache_hits": 0,
+      "fixed_cache_misses": 0,
+      "srs_cache_hits": 1,
+      "srs_cache_misses": 0,
+      "cuda_operation_totals_overlap": {},
+      "gpu_samples_every_2_seconds": {
+        "0": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 12,
+          "zero_utilization_samples": 12,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "1": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 12,
+          "zero_utilization_samples": 12,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "2": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 12,
+          "zero_utilization_samples": 12,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "3": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 12,
+          "zero_utilization_samples": 12,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        }
+      }
+    }
+  },
+  "parity": {},
+  "binary_snapshots": {
+    "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/init_fri_kzg_prove": "83f25e3bf696d78f6fc261fd6860dde466e4b87754557b33a5427e2523e25919",
+    "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/init-kzg-wrap": "5a9029801ab8a02192ac27c84341b04328a8141eaab6189afa18ae9465793afc",
+    "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/ix_root": "774f4f408767f9a5501405bac5c074c2e0c69fc2362ad6ff9f0f914f9ebaac5f"
+  },
+  "root_artifacts": {
+    "root-vk.bin": "c5ba16f0baedddba8f950a95bb26b8a551049f65f0a6f4c235f6a85a37a09424",
+    "root-proof.bin": "bf2005ede2852d89588f75fbc435a66d8e5bbd64e0b00737d007afd986b84ed3",
+    "root-claims.bin": "dfb8b96191a556e5ef5b6999aceaffbcc5d5d9b90b79d275f547adc0f71dd4fa"
+  },
+  "fri_input": {
+    "outer-vk.bin": "b38b0798ac9ce9ce8bc99f1218836fa631baff4ddad51dc4b6ad84a276d03a73",
+    "outer-proof.bin": "3d9ad6a91cc5ee1e00ff7e5681f1564620d152abcea5d25c28814b51a04aff35",
+    "outer-claims.bin": "9db98e5ee23718cf145fbcd557e535a8e4203358e75591e3c13aa9c3cb3e44c2"
+  },
+  "pipeline_wall_seconds": 869.4707562330004,
+  "recursive_verification": {
+    "claim_bytes": 144,
+    "development_srs": true,
+    "external_pairings_pass": true,
+    "negative_tests_pass": true,
+    "packet_bytes": 2709,
+    "pairing_bytes": 480,
+    "profile_bytes": 32,
+    "proof_bytes": 2053,
+    "total_seconds": 203.409562438,
+    "verify_seconds": 0.014775488
+  },
+  "gpu_samples_every_2_seconds": {
+    "0": {
+      "peak_memory_mib": 95257,
+      "peak_utilization_percent": 100,
+      "sample_count": 449,
+      "zero_utilization_samples": 391,
+      "mean_utilization_percent": 4.456570155902004,
+      "zero_utilization_sample_percent": 87.08240534521158
+    },
+    "1": {
+      "peak_memory_mib": 58065,
+      "peak_utilization_percent": 100,
+      "sample_count": 449,
+      "zero_utilization_samples": 412,
+      "mean_utilization_percent": 2.977728285077951,
+      "zero_utilization_sample_percent": 91.75946547884188
+    },
+    "2": {
+      "peak_memory_mib": 58065,
+      "peak_utilization_percent": 92,
+      "sample_count": 449,
+      "zero_utilization_samples": 412,
+      "mean_utilization_percent": 2.8151447661469935,
+      "zero_utilization_sample_percent": 91.75946547884188
+    },
+    "3": {
+      "peak_memory_mib": 58065,
+      "peak_utilization_percent": 100,
+      "sample_count": 449,
+      "zero_utilization_samples": 413,
+      "mean_utilization_percent": 3.0111358574610243,
+      "zero_utilization_sample_percent": 91.98218262806236
+    }
+  },
+  "total_wall_seconds": 897.3935074100009
+}

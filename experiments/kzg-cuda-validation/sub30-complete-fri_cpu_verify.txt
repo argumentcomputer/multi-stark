@@ -1,0 +1,22 @@
+Loaded development SRS cache /opt/dlami/nvme/multi-stark-kzg-sub30-srs-cache/50664d8c92de07b40c102be45cdb7c87837511bc767f775e0a24b06e841f3137.dev-srs in 1.512938711s
+Development SRS: 1.513010045s
+Prepared 0/19: 1.513936527s
+Prepared 1/19: 1.514862182s
+Prepared 2/19: 1.515848568s
+Prepared 3/19: 1.516814772s
+Prepared 4/19: 1.517799545s
+Prepared 5/19: 1.518757071s
+Prepared 6/19: 1.519791696s
+Prepared 7/19: 1.520685548s
+Prepared 8/19: 1.521542847s
+Prepared 9/19: 1.522504637s
+Prepared 10/19: 1.523897086s
+Prepared 11/19: 1.525353493s
+Prepared 12/19: 1.52678481s
+Prepared 13/19: 1.528111153s
+Prepared 14/19: 1.529280469s
+Prepared 15/19: 1.530941887s
+Prepared 16/19: 1.531703432s
+Prepared 17/19: 1.53263781s
+Prepared 18/19: 1.533338402s
+VERIFIED: proof_bytes=49557 packet_bytes=49733 verify_seconds=0.121311575 total_seconds=4.009006645 altered_claims_rejected=18 development_srs=true

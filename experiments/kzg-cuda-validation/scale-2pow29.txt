@@ -1,0 +1,32 @@
+
+running 2 tests
+2^29 chunked MSM: 7.764s
+test ark_adapter::cuda::tests::cuda_msm_2pow29 ... ok
+2^29 coset FFT and inverse: 23.340s
+test ark_adapter::cuda::tests::cuda_fft_2pow29 ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 121 filtered out; finished in 26.07s
+
+	Command being timed: "target/release/deps/multi_stark-b1106e9cea6d0a24 2pow29 --ignored --nocapture"
+	User time (seconds): 93.20
+	System time (seconds): 26.71
+	Percent of CPU this job got: 453%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:26.45
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 110025220
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 174706
+	Voluntary context switches: 7845
+	Involuntary context switches: 1674
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

@@ -50,3 +50,7 @@ Omit `--check-only` to also prove the verifier circuit; this requires more memor
 For KZG compression, see [commitment backends](pcs-abstraction.md) and
 [the Init pipeline](../experiments/kzg-wrap/README.md). Goldilocks constraints
 require explicit field translation.
+
+For a proposed single BLAKE3 terminal proof under a PLONK-family KZG backend,
+see [the terminal statement design](blake3-terminal-statement.md) and
+[the conventional PLONK backend comparison](plonk-terminal-backend-review.md).

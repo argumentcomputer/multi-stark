@@ -1,0 +1,448 @@
+{
+  "status": "verified_cpu_artifact_parity",
+  "development_srs": true,
+  "fri_compression_rerun": false,
+  "git_head": "6d9d5ddad4fb9bfbabf8238ef87af6e9d7b3cab6",
+  "hardware": "index, name, memory.total [MiB], driver_version\n0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, 595.91.07\n",
+  "cpu_count": 96,
+  "cpu_affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    83,
+    84,
+    85,
+    86,
+    87,
+    88,
+    89,
+    90,
+    91,
+    92,
+    93,
+    94,
+    95
+  ],
+  "cpu": {
+    "lscpu": [
+      {
+        "field": "Architecture:",
+        "data": "x86_64"
+      },
+      {
+        "field": "CPU op-mode(s):",
+        "data": "32-bit, 64-bit"
+      },
+      {
+        "field": "Address sizes:",
+        "data": "46 bits physical, 48 bits virtual"
+      },
+      {
+        "field": "Byte Order:",
+        "data": "Little Endian"
+      },
+      {
+        "field": "CPU(s):",
+        "data": "96"
+      },
+      {
+        "field": "On-line CPU(s) list:",
+        "data": "0-95"
+      },
+      {
+        "field": "Vendor ID:",
+        "data": "GenuineIntel"
+      },
+      {
+        "field": "Model name:",
+        "data": "Intel(R) Xeon(R) Platinum 8559C"
+      },
+      {
+        "field": "CPU family:",
+        "data": "6"
+      },
+      {
+        "field": "Model:",
+        "data": "207"
+      },
+      {
+        "field": "Thread(s) per core:",
+        "data": "2"
+      },
+      {
+        "field": "Core(s) per socket:",
+        "data": "48"
+      },
+      {
+        "field": "Socket(s):",
+        "data": "1"
+      },
+      {
+        "field": "Stepping:",
+        "data": "2"
+      },
+      {
+        "field": "BogoMIPS:",
+        "data": "4800.00"
+      },
+      {
+        "field": "Flags:",
+        "data": "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc arch_perfmon rep_good nopl xtopology nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq monitor ssse3 fma cx16 pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch cpuid_fault ssbd ibrs ibpb stibp ibrs_enhanced fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx_vnni avx512_bf16 wbnoinvd ida arat avx512vbmi umip pku ospke waitpkg avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg tme avx512_vpopcntdq rdpid cldemote movdiri movdir64b md_clear serialize amx_bf16 avx512_fp16 amx_tile amx_int8 flush_l1d arch_capabilities"
+      },
+      {
+        "field": "Hypervisor vendor:",
+        "data": "KVM"
+      },
+      {
+        "field": "Virtualization type:",
+        "data": "full"
+      },
+      {
+        "field": "L1d cache:",
+        "data": "2.3 MiB (48 instances)"
+      },
+      {
+        "field": "L1i cache:",
+        "data": "1.5 MiB (48 instances)"
+      },
+      {
+        "field": "L2 cache:",
+        "data": "96 MiB (48 instances)"
+      },
+      {
+        "field": "L3 cache:",
+        "data": "320 MiB (1 instance)"
+      },
+      {
+        "field": "NUMA node(s):",
+        "data": "1"
+      },
+      {
+        "field": "NUMA node0 CPU(s):",
+        "data": "0-95"
+      },
+      {
+        "field": "Vulnerability Gather data sampling:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Ghostwrite:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Indirect target selection:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Itlb multihit:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability L1tf:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Mds:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Meltdown:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Mmio stale data:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Old microcode:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Reg file data sampling:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Retbleed:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Spec rstack overflow:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Spec store bypass:",
+        "data": "Mitigation; Speculative Store Bypass disabled via prctl"
+      },
+      {
+        "field": "Vulnerability Spectre v1:",
+        "data": "Mitigation; usercopy/swapgs barriers and __user pointer sanitization"
+      },
+      {
+        "field": "Vulnerability Spectre v2:",
+        "data": "Mitigation; Enhanced / Automatic IBRS; IBPB conditional; PBRSB-eIBRS SW sequence; BHI BHI_DIS_S"
+      },
+      {
+        "field": "Vulnerability Srbds:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Tsa:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Tsx async abort:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Vmscape:",
+        "data": "Not affected"
+      }
+    ]
+  },
+  "storage": "Filesystem                      Size  Used Avail Use% Mounted on\n/dev/mapper/vg.01-lv_ephemeral  6.9T  260G  6.3T   4% /opt/dlami/nvme\n",
+  "environment": {
+    "MULTI_STARK_CUDA_ARCHS": "120",
+    "MULTI_STARK_KZG_BACKEND": "cuda"
+  },
+  "binaries": {
+    "target/release/examples/init_fri_kzg_prove": "adc14293c6c07916dd596021200d1f08fc868021f906c882cf84e265acaeb78f",
+    "experiments/kzg-wrap/target/release/init-kzg-wrap": "bd43439ca18375f54009eff95b3507bc215535867405c0bf0f04a18fc6a5a400"
+  },
+  "sources": {
+    ".cargo/config.toml": "59a8c63e78a3524907d28ece7b3a0fc308c61e4333c063a56391d39bcb08545c",
+    "Cargo.toml": "2a252b6baa2c8136786d43d6a42626db57141c878565afb7a812f903655625ad",
+    "Cargo.lock": "caa8b6acb928eefc55aed5daaf8744aa03c2eaa22b75a9439b58c4a7f5418791",
+    "build.rs": "1eaddc438d7fea27ff2e9e8cfc9f750cdd7277cc67e184f183a53921f1536866",
+    "cuda/kzg.cu": "c4f6d11586d6b26553f1522c26ebf2ad22a53cb53b5743a940fcd7729977c1af",
+    "cuda/kzg_runtime.cpp": "bb65a7fea78f6e3b32bcfca83d47e788cf9f57d727cf66cae1ad3a7e4484127d",
+    "cuda/kzg_sppark.cuh": "2f766526bc46d56434da21cb738037beb3081832483d369f78f023d4be7f11c3",
+    "src/ark_adapter/cuda.rs": "ff53df146806e5cf539518d17248a194ec24005e0f7ea6dd5e2d3db7cf50cd62",
+    "src/ark_adapter/pcs.rs": "47854705becf48fec602bed8a275bc8759f3cdd6bf1f449129c8249acb0229e3",
+    "src/ark_adapter/config.rs": "c09ba9d5ffcc84ea2091079247a4d167dab460f92405f222014a29d38e92ba0c",
+    "src/ark_adapter/mod.rs": "cbc43316a0e2ae686b115375306d5ff0d453f8afd412aaf8663ddce8a6ce8160",
+    "examples/init_fri_kzg_prove.rs": "fdd8e19f0d8f4ae3d95ecb06a04d117112d6043f858dd8778824c674270fa2fa",
+    "examples/support/kzg_storage.rs": "d961d4ebede26ba44499d608590672e9411316bec95ead66b671dcfc25b16c46",
+    "experiments/kzg-wrap/Cargo.toml": "403825e796d9fdb1adff5e7729f911e1d627c0950c06bdabd80135e9e49ee3c1",
+    "experiments/kzg-wrap/Cargo.lock": "e53341844df5cfdc02dfcf2e2dbf99d749f5bddba423aa0996ac214fa22b8351",
+    "experiments/kzg-wrap/src/outer.rs": "4eeb90bc6cd0cc43eb28be4f026e49d1480a7b3a7e8630f3a362be5e21fbc773",
+    "experiments/kzg-cuda-bench.py": "a380863a777bf11b340cf4dc5369ccfb80c005d5c056384966c04db08624f5b3"
+  },
+  "phases": {
+    "fri_stage": {
+      "wall_seconds": 364.9709382889996,
+      "exit_code": 0,
+      "peak_rss_bytes": 77704634368,
+      "command": [
+        "/home/sam/repos/multi-stark/target/release/examples/init_fri_kzg_prove",
+        "stage",
+        "/home/sam/repos/multi-stark/experiments/init-fri-artifacts",
+        "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/fri-to-kzg"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/fri_stage.log",
+      "backend": "cuda"
+    },
+    "fri_prove": {
+      "wall_seconds": 867.0728516449999,
+      "exit_code": 0,
+      "peak_rss_bytes": 220798521344,
+      "command": [
+        "/home/sam/repos/multi-stark/target/release/examples/init_fri_kzg_prove",
+        "prove",
+        "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/fri-to-kzg"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/fri_prove.log",
+      "backend": "cuda"
+    },
+    "recursive_stage": {
+      "wall_seconds": 385.5459813390007,
+      "exit_code": 0,
+      "peak_rss_bytes": 197633007616,
+      "command": [
+        "/home/sam/repos/multi-stark/experiments/kzg-wrap/target/release/init-kzg-wrap",
+        "stage",
+        "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/intermediate",
+        "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/recursive"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/recursive_stage.log",
+      "backend": "cuda"
+    },
+    "recursive_prove": {
+      "wall_seconds": 1652.8739594019971,
+      "exit_code": 0,
+      "peak_rss_bytes": 500877668352,
+      "command": [
+        "/home/sam/repos/multi-stark/experiments/kzg-wrap/target/release/init-kzg-wrap",
+        "prove",
+        "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/recursive"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/recursive_prove.log",
+      "backend": "cuda"
+    },
+    "fri_cpu_verify": {
+      "wall_seconds": 43.38101314900268,
+      "exit_code": 0,
+      "peak_rss_bytes": 4978110464,
+      "command": [
+        "/home/sam/repos/multi-stark/target/release/examples/init_fri_kzg_prove",
+        "verify",
+        "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/fri-to-kzg"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/fri_cpu_verify.log",
+      "backend": "cpu"
+    },
+    "recursive_cpu_verify": {
+      "wall_seconds": 641.6340633759974,
+      "exit_code": 0,
+      "peak_rss_bytes": 79470116864,
+      "command": [
+        "/home/sam/repos/multi-stark/experiments/kzg-wrap/target/release/init-kzg-wrap",
+        "verify",
+        "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/recursive"
+      ],
+      "log": "/opt/dlami/nvme/multi-stark-kzg-cuda-final-v2-20261008/recursive_cpu_verify.log",
+      "backend": "cpu"
+    }
+  },
+  "parity": {
+    "fri_to_kzg": {
+      "proof.compact.bin": {
+        "sha256": "60031d908e1a07dafd42e3558aa563e0a46180c671c37ad4c5d334d9a6eac6e8",
+        "bytes": 53157
+      },
+      "packet.bin": {
+        "sha256": "e3c2164d3d09ff2affa261055d9eb4555a32d73a06031caa422a6c0115dbb40a",
+        "bytes": 53333
+      },
+      "profile-id.bin": {
+        "sha256": "74c36ceebca446b34c79bd96e08a44fa68aeceb141aa71afd2ded24f9784e933",
+        "bytes": 32
+      }
+    },
+    "recursive_kzg": {
+      "proof.compact.bin": {
+        "sha256": "52afd8c8b95e122d5c43ca85201f746199274bb7eaace63e19bf8f99af675272",
+        "bytes": 2053
+      },
+      "packet.bin": {
+        "sha256": "ae8cbb4c7cd5f899c7fe19ea319d2599e2f2939a76d46489dbdae7e0cb192b81",
+        "bytes": 2757
+      },
+      "profile-id.bin": {
+        "sha256": "caa917ccd52167ee4a6f81ef84e8be1d22fc32f89d2b5f4f92acf17a07e042dc",
+        "bytes": 32
+      }
+    }
+  },
+  "pipeline_wall_seconds": 3270.4672243609966,
+  "recursive_verification": {
+    "claim_bytes": 144,
+    "development_srs": true,
+    "external_pairings_pass": true,
+    "negative_tests_pass": true,
+    "packet_bytes": 2757,
+    "pairing_bytes": 528,
+    "profile_bytes": 32,
+    "proof_bytes": 2053,
+    "total_seconds": 1652.234062765,
+    "verify_seconds": 0.015101423
+  },
+  "gpu_samples_every_2_seconds": {
+    "0": {
+      "peak_memory_mib": 17103,
+      "peak_utilization_percent": 94
+    },
+    "1": {
+      "peak_memory_mib": 8911,
+      "peak_utilization_percent": 95
+    },
+    "2": {
+      "peak_memory_mib": 8911,
+      "peak_utilization_percent": 90
+    },
+    "3": {
+      "peak_memory_mib": 8911,
+      "peak_utilization_percent": 95
+    }
+  },
+  "total_wall_seconds": 3955.7041046329978
+}

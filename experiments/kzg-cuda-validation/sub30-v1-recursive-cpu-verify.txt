@@ -1,0 +1,19 @@
+Preparing development SRS for 2^28 rows
+VmHWM:	27676844 kB VmRSS:	27662568 kB
+VmHWM:	27676844 kB VmRSS:	27639116 kB
+VmHWM:	27730100 kB VmRSS:	27730100 kB
+Outer development SRS ready: 99.956988727s
+Prepared recursive trace 0: 99.958051248s
+Prepared recursive trace 1: 99.959030358s
+{
+  "claim_bytes": 144,
+  "development_srs": true,
+  "external_pairings_pass": true,
+  "negative_tests_pass": true,
+  "packet_bytes": 2757,
+  "pairing_bytes": 528,
+  "profile_bytes": 32,
+  "proof_bytes": 2053,
+  "total_seconds": 100.142365999,
+  "verify_seconds": 0.015138111
+}

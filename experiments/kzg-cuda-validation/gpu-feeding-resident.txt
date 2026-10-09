@@ -1,0 +1,170 @@
+CPU threads: 96
+read_fixed_seconds=4.444704
+srs_seconds=6.331530
+2026-10-09T02:32:35.088432Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=17 height=16777216 seconds=0.290409703
+2026-10-09T02:32:36.137865Z  INFO multi_stark::ark_adapter::cuda: KZG sppark CUDA backend ids=[0, 1, 2, 3] chunk_points=16777216 resident_limits=[50987925504, 50987925504, 50987925504, 50987925504]
+KZG CUDA profile device=1 operation=ifft elements=16777216 upload_ms=15.493 kernel_ms=22.033 download_ms=13.692 host_copy_ms=87.686 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+KZG CUDA profile device=2 operation=ifft elements=16777216 upload_ms=14.751 kernel_ms=29.814 download_ms=11.297 host_copy_ms=129.129 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+KZG CUDA profile device=0 operation=ifft elements=16777216 upload_ms=17.959 kernel_ms=31.036 download_ms=13.517 host_copy_ms=153.361 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+KZG CUDA profile device=3 operation=ifft elements=16777216 upload_ms=15.463 kernel_ms=4.019 download_ms=11.472 host_copy_ms=63.813 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+KZG CUDA profile device=1 operation=ifft elements=16777216 upload_ms=15.725 kernel_ms=3.987 download_ms=12.494 host_copy_ms=64.434 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+KZG CUDA profile device=2 operation=ifft elements=16777216 upload_ms=14.552 kernel_ms=3.983 download_ms=11.619 host_copy_ms=68.243 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+KZG CUDA profile device=0 operation=ifft elements=16777216 upload_ms=15.444 kernel_ms=3.984 download_ms=13.133 host_copy_ms=74.500 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+KZG CUDA profile device=3 operation=ifft elements=16777216 upload_ms=14.310 kernel_ms=4.003 download_ms=12.990 host_copy_ms=66.438 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+KZG CUDA profile device=1 operation=ifft elements=16777216 upload_ms=11.463 kernel_ms=3.988 download_ms=13.263 host_copy_ms=59.938 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+2026-10-09T02:32:36.736144Z DEBUG multi_stark::ark_adapter::cuda: KZG interpolation queue device=1 columns=3 elements=16777216 slots=2 resident_bytes=1610612736 cuda_seconds=0.598159172
+KZG CUDA profile device=2 operation=ifft elements=16777216 upload_ms=11.518 kernel_ms=3.993 download_ms=13.031 host_copy_ms=55.075 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+2026-10-09T02:32:36.737548Z DEBUG multi_stark::ark_adapter::cuda: KZG interpolation queue device=2 columns=3 elements=16777216 slots=2 resident_bytes=1610612736 cuda_seconds=0.59957477
+KZG CUDA profile device=0 operation=ifft elements=16777216 upload_ms=12.236 kernel_ms=3.963 download_ms=12.330 host_copy_ms=72.267 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+2026-10-09T02:32:36.747472Z DEBUG multi_stark::ark_adapter::cuda: KZG interpolation queue device=0 columns=3 elements=16777216 slots=2 resident_bytes=1610612736 cuda_seconds=0.609509146
+KZG CUDA profile device=3 operation=ifft elements=16777216 upload_ms=15.340 kernel_ms=4.039 download_ms=11.313 host_copy_ms=62.562 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+2026-10-09T02:32:36.753982Z DEBUG multi_stark::ark_adapter::cuda: KZG interpolation queue device=3 columns=3 elements=16777216 slots=2 resident_bytes=1610612736 cuda_seconds=0.615970985
+2026-10-09T02:32:36.754037Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=17 height=16777216 seconds=1.665577915
+KZG CUDA profile device=2 operation=msm-points elements=16777216 upload_ms=48.625 kernel_ms=0.000 download_ms=0.000 host_copy_ms=94.691 upload_bytes=1610612736 download_bytes=0 device_copy_bytes=0
+KZG CUDA profile device=3 operation=msm-points elements=16777216 upload_ms=48.434 kernel_ms=0.000 download_ms=0.000 host_copy_ms=98.052 upload_bytes=1610612736 download_bytes=0 device_copy_bytes=0
+KZG CUDA profile device=1 operation=msm-points elements=16777216 upload_ms=50.312 kernel_ms=0.000 download_ms=0.000 host_copy_ms=97.825 upload_bytes=1610612736 download_bytes=0 device_copy_bytes=0
+KZG CUDA profile device=0 operation=msm-points elements=16777216 upload_ms=50.602 kernel_ms=0.000 download_ms=0.000 host_copy_ms=103.676 upload_bytes=1610612736 download_bytes=0 device_copy_bytes=0
+2026-10-09T02:32:37.319315Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=12 seconds=0.539902431
+commit_fixed_seconds=4.331506
+encode_fixed_seconds=0.126264
+read_main_seconds=0.800277
+2026-10-09T02:32:38.287704Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=3 height=16777216 seconds=0.041488118
+KZG CUDA profile device=2 operation=ifft elements=16777216 upload_ms=12.166 kernel_ms=3.960 download_ms=10.636 host_copy_ms=55.460 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+2026-10-09T02:32:38.350814Z DEBUG multi_stark::ark_adapter::cuda: KZG interpolation queue device=2 columns=1 elements=16777216 slots=1 resident_bytes=536870912 cuda_seconds=0.06292671
+KZG CUDA profile device=1 operation=ifft elements=16777216 upload_ms=17.465 kernel_ms=3.954 download_ms=13.031 host_copy_ms=58.269 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+2026-10-09T02:32:38.352893Z DEBUG multi_stark::ark_adapter::cuda: KZG interpolation queue device=1 columns=1 elements=16777216 slots=1 resident_bytes=536870912 cuda_seconds=0.06502154
+KZG CUDA profile device=0 operation=ifft elements=16777216 upload_ms=17.120 kernel_ms=3.944 download_ms=12.863 host_copy_ms=61.772 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+2026-10-09T02:32:38.356608Z DEBUG multi_stark::ark_adapter::cuda: KZG interpolation queue device=0 columns=1 elements=16777216 slots=1 resident_bytes=536870912 cuda_seconds=0.068712661
+2026-10-09T02:32:38.356641Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=3 height=16777216 seconds=0.06890946
+KZG CUDA profile device=2 operation=msm-points elements=16777216 upload_ms=35.242 kernel_ms=0.000 download_ms=0.000 host_copy_ms=74.635 upload_bytes=1610612736 download_bytes=0 device_copy_bytes=0
+KZG CUDA profile device=1 operation=msm-points elements=16777216 upload_ms=47.571 kernel_ms=0.000 download_ms=0.000 host_copy_ms=75.973 upload_bytes=1610612736 download_bytes=0 device_copy_bytes=0
+KZG CUDA profile device=0 operation=msm-points elements=16777216 upload_ms=47.272 kernel_ms=0.000 download_ms=0.000 host_copy_ms=84.528 upload_bytes=1610612736 download_bytes=0 device_copy_bytes=0
+2026-10-09T02:32:38.649907Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=3 seconds=0.28797922
+commit_main_seconds=0.403796
+encode_main_seconds=0.025281
+KZG CUDA profile device=1 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.747 download_ms=11.348 host_copy_ms=63.124 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=2 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=5.395 download_ms=10.877 host_copy_ms=65.327 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=0 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.737 download_ms=11.087 host_copy_ms=67.170 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=3 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=6.134 download_ms=10.857 host_copy_ms=66.206 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=1 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=3.852 download_ms=10.355 host_copy_ms=65.098 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=2 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=3.849 download_ms=10.373 host_copy_ms=67.776 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=3 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=3.837 download_ms=10.392 host_copy_ms=65.694 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=0 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=3.833 download_ms=10.469 host_copy_ms=71.430 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=1 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=3.875 download_ms=10.970 host_copy_ms=65.707 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:38.887764Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=1 columns=3 elements=16777216 slots=2 wait_seconds=4.87e-7 cuda_seconds=0.212043652
+KZG CUDA profile device=2 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=5.182 download_ms=10.929 host_copy_ms=67.362 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=3 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=6.270 download_ms=10.989 host_copy_ms=65.455 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:38.896237Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=2 columns=3 elements=16777216 slots=2 wait_seconds=3.96e-7 cuda_seconds=0.220387206
+2026-10-09T02:32:38.899770Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=3 columns=3 elements=16777216 slots=2 wait_seconds=4.43e-7 cuda_seconds=0.224064338
+KZG CUDA profile device=0 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=3.854 download_ms=10.860 host_copy_ms=65.463 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:38.904857Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=0 columns=3 elements=16777216 slots=2 wait_seconds=3.83e-7 cuda_seconds=0.22915911
+2026-10-09T02:32:39.045373Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=17 height=16777216 transform_seconds=0.229575912 transpose_seconds=0.140483821
+KZG CUDA profile device=1 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=3.856 download_ms=11.127 host_copy_ms=56.778 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=2 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=3.846 download_ms=9.889 host_copy_ms=57.950 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:39.132369Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=1 columns=1 elements=16777216 slots=1 wait_seconds=3.8e-7 cuda_seconds=0.065629002
+KZG CUDA profile device=0 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=3.842 download_ms=11.077 host_copy_ms=58.036 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:39.134178Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=2 columns=1 elements=16777216 slots=1 wait_seconds=4.62e-7 cuda_seconds=0.067458337
+2026-10-09T02:32:39.135923Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=0 columns=1 elements=16777216 slots=1 wait_seconds=5.11e-7 cuda_seconds=0.069194002
+2026-10-09T02:32:39.164695Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=3 height=16777216 transform_seconds=0.069354336 transpose_seconds=0.028735391
+2026-10-09T02:32:41.316226Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=5 height=16777216 seconds=0.083386186
+KZG CUDA profile device=2 operation=ifft elements=16777216 upload_ms=17.160 kernel_ms=3.953 download_ms=11.503 host_copy_ms=76.622 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+2026-10-09T02:32:41.400412Z DEBUG multi_stark::ark_adapter::cuda: KZG interpolation queue device=2 columns=1 elements=16777216 slots=1 resident_bytes=536870912 cuda_seconds=0.083966717
+KZG CUDA profile device=0 operation=ifft elements=16777216 upload_ms=17.366 kernel_ms=3.941 download_ms=14.723 host_copy_ms=78.316 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+2026-10-09T02:32:41.402018Z DEBUG multi_stark::ark_adapter::cuda: KZG interpolation queue device=0 columns=1 elements=16777216 slots=1 resident_bytes=536870912 cuda_seconds=0.08559171
+KZG CUDA profile device=1 operation=ifft elements=16777216 upload_ms=17.465 kernel_ms=3.964 download_ms=14.652 host_copy_ms=78.115 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+2026-10-09T02:32:41.403859Z DEBUG multi_stark::ark_adapter::cuda: KZG interpolation queue device=1 columns=1 elements=16777216 slots=1 resident_bytes=536870912 cuda_seconds=0.087409767
+KZG CUDA profile device=3 operation=ifft elements=16777216 upload_ms=16.879 kernel_ms=4.009 download_ms=11.077 host_copy_ms=59.129 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+KZG CUDA profile device=3 operation=ifft elements=16777216 upload_ms=14.840 kernel_ms=4.061 download_ms=10.616 host_copy_ms=56.701 upload_bytes=536870912 download_bytes=536870912 device_copy_bytes=0
+2026-10-09T02:32:41.438043Z DEBUG multi_stark::ark_adapter::cuda: KZG interpolation queue device=3 columns=2 elements=16777216 slots=2 resident_bytes=1073741824 cuda_seconds=0.121580917
+2026-10-09T02:32:41.438106Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=5 height=16777216 seconds=0.121850862
+KZG CUDA profile device=1 operation=msm-points elements=16777216 upload_ms=48.892 kernel_ms=0.000 download_ms=0.000 host_copy_ms=98.430 upload_bytes=1610612736 download_bytes=0 device_copy_bytes=0
+KZG CUDA profile device=3 operation=msm-points elements=16777216 upload_ms=49.131 kernel_ms=0.000 download_ms=0.000 host_copy_ms=98.407 upload_bytes=1610612736 download_bytes=0 device_copy_bytes=0
+KZG CUDA profile device=2 operation=msm-points elements=16777216 upload_ms=49.207 kernel_ms=0.000 download_ms=0.000 host_copy_ms=99.707 upload_bytes=1610612736 download_bytes=0 device_copy_bytes=0
+KZG CUDA profile device=0 operation=msm-points elements=16777216 upload_ms=48.950 kernel_ms=0.000 download_ms=0.000 host_copy_ms=103.821 upload_bytes=1610612736 download_bytes=0 device_copy_bytes=0
+2026-10-09T02:32:41.876591Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=5 seconds=0.43034211
+2026-10-09T02:32:41.876701Z  INFO multi_stark::ark_adapter::config: KZG lookup committed circuit=0 evaluation_seconds=0.495005716 trace_seconds=2.031432797 commit_seconds=0.643864993 seconds=3.201389813
+commit_lookup_seconds=3.201398
+KZG CUDA profile device=1 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=7.632 download_ms=10.826 host_copy_ms=63.813 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=0 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=6.850 download_ms=10.742 host_copy_ms=68.955 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=3 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=6.891 download_ms=11.156 host_copy_ms=66.649 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=2 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=6.853 download_ms=11.081 host_copy_ms=69.885 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=1 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.602 download_ms=10.772 host_copy_ms=65.007 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=3 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.618 download_ms=10.808 host_copy_ms=65.720 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=0 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.581 download_ms=10.794 host_copy_ms=67.519 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=2 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.593 download_ms=10.704 host_copy_ms=68.053 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=1 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=7.737 download_ms=11.271 host_copy_ms=66.131 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:42.263464Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=1 columns=3 elements=16777216 slots=2 wait_seconds=2.7e-7 cuda_seconds=0.218667293
+KZG CUDA profile device=3 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=7.039 download_ms=11.472 host_copy_ms=67.011 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:42.269148Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=3 columns=3 elements=16777216 slots=2 wait_seconds=5.67e-7 cuda_seconds=0.224341402
+KZG CUDA profile device=0 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=6.982 download_ms=11.153 host_copy_ms=69.560 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=2 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=6.990 download_ms=11.371 host_copy_ms=67.290 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:42.275612Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=0 columns=3 elements=16777216 slots=2 wait_seconds=3.41e-7 cuda_seconds=0.231069406
+2026-10-09T02:32:42.279098Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=2 columns=3 elements=16777216 slots=2 wait_seconds=3.43e-7 cuda_seconds=0.234541089
+2026-10-09T02:32:42.418780Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=17 height=16777216 transform_seconds=0.234772428 transpose_seconds=0.139636047
+KZG CUDA profile device=1 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.598 download_ms=11.342 host_copy_ms=54.862 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:42.502880Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=1 columns=1 elements=16777216 slots=1 wait_seconds=4.01e-7 cuda_seconds=0.063831615
+KZG CUDA profile device=2 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.601 download_ms=9.896 host_copy_ms=58.891 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=0 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.582 download_ms=11.162 host_copy_ms=59.077 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:42.508836Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=2 columns=1 elements=16777216 slots=1 wait_seconds=4.35e-7 cuda_seconds=0.06976254
+2026-10-09T02:32:42.510585Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=0 columns=1 elements=16777216 slots=1 wait_seconds=4.92e-7 cuda_seconds=0.071525527
+2026-10-09T02:32:42.540102Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=3 height=16777216 transform_seconds=0.071680604 transpose_seconds=0.029485248
+KZG CUDA profile device=3 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=7.641 download_ms=10.539 host_copy_ms=62.980 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=0 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.590 download_ms=11.070 host_copy_ms=67.519 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=1 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.608 download_ms=11.113 host_copy_ms=68.107 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:42.625381Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=0 columns=1 elements=16777216 slots=1 wait_seconds=6.45e-7 cuda_seconds=0.079244102
+KZG CUDA profile device=2 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.607 download_ms=10.410 host_copy_ms=69.567 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:42.627172Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=1 columns=1 elements=16777216 slots=1 wait_seconds=4.56e-7 cuda_seconds=0.081022536
+2026-10-09T02:32:42.628953Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=2 columns=1 elements=16777216 slots=1 wait_seconds=4.93e-7 cuda_seconds=0.082542837
+KZG CUDA profile device=3 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=7.766 download_ms=10.513 host_copy_ms=38.743 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:42.665057Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=3 columns=2 elements=16777216 slots=2 wait_seconds=3.63e-7 cuda_seconds=0.118880168
+2026-10-09T02:32:42.711979Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=5 height=16777216 transform_seconds=0.119107272 transpose_seconds=0.046849919
+2026-10-09T02:32:43.888803Z  INFO multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=16777216 selector_seconds=0.405158582 constraint_seconds=0.762693372
+2026-10-09T02:32:44.017535Z  INFO multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=0 coset=0 lde_seconds=0.676582842 seconds=2.140811484
+KZG CUDA profile device=3 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=6.182 download_ms=10.838 host_copy_ms=64.647 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=1 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=7.627 download_ms=11.984 host_copy_ms=67.044 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=0 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=6.117 download_ms=12.238 host_copy_ms=68.711 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=2 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=6.870 download_ms=10.554 host_copy_ms=66.719 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=3 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.622 download_ms=10.655 host_copy_ms=63.995 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=1 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.596 download_ms=11.161 host_copy_ms=65.146 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=0 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.578 download_ms=11.101 host_copy_ms=67.904 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=2 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.599 download_ms=10.739 host_copy_ms=70.836 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=3 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=5.900 download_ms=11.095 host_copy_ms=65.919 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:44.272813Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=3 columns=3 elements=16777216 slots=2 wait_seconds=3.32e-7 cuda_seconds=0.215924564
+KZG CUDA profile device=1 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=7.741 download_ms=10.831 host_copy_ms=64.944 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:44.277723Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=1 columns=3 elements=16777216 slots=2 wait_seconds=4.79e-7 cuda_seconds=0.220848768
+KZG CUDA profile device=0 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=5.842 download_ms=10.830 host_copy_ms=65.096 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=2 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=7.753 download_ms=10.971 host_copy_ms=64.285 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:44.285512Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=0 columns=3 elements=16777216 slots=2 wait_seconds=6.08e-7 cuda_seconds=0.229133745
+2026-10-09T02:32:44.289022Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=2 columns=3 elements=16777216 slots=2 wait_seconds=5e-7 cuda_seconds=0.232382507
+2026-10-09T02:32:44.428655Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=17 height=16777216 transform_seconds=0.232829881 transpose_seconds=0.139589018
+KZG CUDA profile device=1 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.599 download_ms=10.984 host_copy_ms=56.097 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:44.514838Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=1 columns=1 elements=16777216 slots=1 wait_seconds=4.13e-7 cuda_seconds=0.065094894
+KZG CUDA profile device=0 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.585 download_ms=11.002 host_copy_ms=57.028 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=2 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.598 download_ms=9.848 host_copy_ms=58.039 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:44.518480Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=0 columns=1 elements=16777216 slots=1 wait_seconds=5.24e-7 cuda_seconds=0.068712514
+2026-10-09T02:32:44.520246Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=2 columns=1 elements=16777216 slots=1 wait_seconds=4.94e-7 cuda_seconds=0.070488952
+2026-10-09T02:32:44.550080Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=3 height=16777216 transform_seconds=0.070658408 transpose_seconds=0.029789974
+KZG CUDA profile device=3 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=6.868 download_ms=10.028 host_copy_ms=64.704 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=1 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.605 download_ms=11.081 host_copy_ms=68.605 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=2 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.615 download_ms=10.027 host_copy_ms=69.240 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+KZG CUDA profile device=0 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=4.596 download_ms=11.086 host_copy_ms=69.639 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:44.636460Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=1 columns=1 elements=16777216 slots=1 wait_seconds=4.33e-7 cuda_seconds=0.079930115
+2026-10-09T02:32:44.638282Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=2 columns=1 elements=16777216 slots=1 wait_seconds=5.06e-7 cuda_seconds=0.081767235
+2026-10-09T02:32:44.640035Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=0 columns=1 elements=16777216 slots=1 wait_seconds=5.53e-7 cuda_seconds=0.08353466
+KZG CUDA profile device=3 operation=fft elements=16777216 upload_ms=0.000 kernel_ms=7.014 download_ms=10.575 host_copy_ms=37.658 upload_bytes=0 download_bytes=536870912 device_copy_bytes=536870912
+2026-10-09T02:32:44.676098Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT queue device=3 columns=2 elements=16777216 slots=2 wait_seconds=4.2e-7 cuda_seconds=0.119553913
+2026-10-09T02:32:44.723315Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=5 height=16777216 transform_seconds=0.1197764 transpose_seconds=0.047147366
+2026-10-09T02:32:45.902497Z  INFO multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=16777216 selector_seconds=0.404453034 constraint_seconds=0.765393218
+2026-10-09T02:32:46.053918Z  INFO multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=0 coset=1 lde_seconds=0.676414356 seconds=4.177193943
+2026-10-09T02:32:46.113515Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=1 height=33554432 seconds=0.020706305
+KZG CUDA profile device=0 operation=ifft elements=33554432 upload_ms=22.740 kernel_ms=9.649 download_ms=21.628 host_copy_ms=67.608 upload_bytes=1073741824 download_bytes=1073741824 device_copy_bytes=0
+2026-10-09T02:32:46.193861Z DEBUG multi_stark::ark_adapter::cuda: KZG interpolation queue device=0 columns=1 elements=33554432 slots=1 resident_bytes=1073741824 cuda_seconds=0.080209257
+2026-10-09T02:32:46.193901Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=1 height=33554432 seconds=0.080357904
+KZG CUDA profile device=1 operation=retain elements=16777216 upload_ms=16.079 kernel_ms=0.000 download_ms=0.000 host_copy_ms=22.086 upload_bytes=536870912 download_bytes=0 device_copy_bytes=0
+KZG CUDA profile device=0 operation=retain elements=16777216 upload_ms=16.099 kernel_ms=0.000 download_ms=0.000 host_copy_ms=23.428 upload_bytes=536870912 download_bytes=0 device_copy_bytes=0
+KZG CUDA profile device=1 operation=msm-points elements=16777216 upload_ms=56.573 kernel_ms=0.000 download_ms=0.000 host_copy_ms=61.916 upload_bytes=1610612736 download_bytes=0 device_copy_bytes=0
+KZG CUDA profile device=0 operation=msm-points elements=16777216 upload_ms=56.483 kernel_ms=0.000 download_ms=0.000 host_copy_ms=63.702 upload_bytes=1610612736 download_bytes=0 device_copy_bytes=0
+2026-10-09T02:32:46.707208Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=2 seconds=0.243882724
+2026-10-09T02:32:46.707285Z  INFO multi_stark::ark_adapter::config: KZG quotient committed circuit=0 seconds=4.830562287
+commit_quotient_seconds=4.830577
+wall_seconds=25.06 peak_rss_kib=52076364 exit_code=0

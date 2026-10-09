@@ -21,6 +21,8 @@ lookup arguments for shared state.
 - **Parallel proving** — opt-in via the `parallel` feature flag
 - **CUDA transforms** — opt-in sppark Goldilocks DFT/LDE backend via the
   `cuda` feature; normal builds remain independent of CUDA
+- **KZG backend** — BLS12-381 KZG commitments via the `kzg` feature, with GPU
+  MSM/FFT via `kzg-cuda`; see [commitment backends](docs/pcs-abstraction.md)
 
 ## Reference configuration
 

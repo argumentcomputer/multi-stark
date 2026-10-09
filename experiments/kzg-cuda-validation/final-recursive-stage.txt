@@ -1,0 +1,81 @@
+Loading development SRS and saved proof
+Saved 53157-byte proof verifies natively: 40.689738053s
+Allocated 64 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 706, inputs: 0, gates: 770, lookups: 0, tables: 4, publics: 0, hint_calls: 0, hint_outputs: 0 }
+Allocated 128 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 1126, inputs: 0, gates: 1254, lookups: 0, tables: 4, publics: 0, hint_calls: 0, hint_outputs: 0 }
+Allocated 192 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 1476, inputs: 0, gates: 1668, lookups: 0, tables: 4, publics: 0, hint_calls: 0, hint_outputs: 0 }
+Allocated 256 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 1946, inputs: 0, gates: 2202, lookups: 0, tables: 4, publics: 0, hint_calls: 0, hint_outputs: 0 }
+Allocated 320 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 2436, inputs: 0, gates: 2756, lookups: 0, tables: 4, publics: 0, hint_calls: 0, hint_outputs: 0 }
+Allocated 384 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 2896, inputs: 0, gates: 3280, lookups: 0, tables: 4, publics: 0, hint_calls: 0, hint_outputs: 0 }
+Allocated 448 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 5857724, inputs: 616, gates: 4257692, lookups: 1842064, tables: 4, publics: 0, hint_calls: 390824, hint_outputs: 2066568 }
+Allocated 512 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 12548860, inputs: 1320, gates: 9119772, lookups: 3947280, tables: 4, publics: 0, hint_calls: 837480, hint_outputs: 4428360 }
+Allocated 576 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 19239996, inputs: 2024, gates: 13981852, lookups: 6052496, tables: 4, publics: 0, hint_calls: 1284136, hint_outputs: 6790152 }
+Allocated 640 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 25931132, inputs: 2728, gates: 18843932, lookups: 8157712, tables: 4, publics: 0, hint_calls: 1730792, hint_outputs: 9151944 }
+Allocated 704 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 32622268, inputs: 3432, gates: 23706012, lookups: 10262928, tables: 4, publics: 0, hint_calls: 2177448, hint_outputs: 11513736 }
+Allocated 768 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 39313404, inputs: 4136, gates: 28568092, lookups: 12368144, tables: 4, publics: 0, hint_calls: 2624104, hint_outputs: 13875528 }
+Allocated 832 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 46004540, inputs: 4840, gates: 33430172, lookups: 14473360, tables: 4, publics: 0, hint_calls: 3070760, hint_outputs: 16237320 }
+Allocated 896 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 52695676, inputs: 5544, gates: 38292252, lookups: 16578576, tables: 4, publics: 0, hint_calls: 3517416, hint_outputs: 18599112 }
+Allocated 960 curve points: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 59386812, inputs: 6248, gates: 43154332, lookups: 18683792, tables: 4, publics: 0, hint_calls: 3964072, hint_outputs: 20960904 }
+Curve inputs complete: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 62941478, inputs: 6622, gates: 45737313, lookups: 19802188, tables: 4, publics: 0, hint_calls: 4201358, hint_outputs: 22215606 }
+Transcript complete: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 91382296, inputs: 7399, gates: 62647589, lookups: 31109204, tables: 4, publics: 18, hint_calls: 10959157, hint_outputs: 36114275 }
+AIR checks complete: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 91388371, inputs: 7399, gates: 62653685, lookups: 31109204, tables: 4, publics: 18, hint_calls: 10959220, hint_outputs: 36114338 }
+MSM 0/11: 357 bases
+MSM 0 complete: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 128500194, inputs: 7399, gates: 92547727, lookups: 39424971, tables: 4, publics: 20, hint_calls: 12723876, hint_outputs: 45522576 }
+MSM 1/11: 4 bases
+MSM 1 complete: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 129356835, inputs: 7399, gates: 93203992, lookups: 39655522, tables: 4, publics: 22, hint_calls: 12772339, hint_outputs: 45781598 }
+MSM 2/11: 7 bases
+MSM 2 complete: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 130473693, inputs: 7399, gates: 94068031, lookups: 39946517, tables: 4, publics: 24, hint_calls: 12833669, hint_outputs: 46109140 }
+MSM 3/11: 27 bases
+MSM 3 complete: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 133486601, inputs: 7399, gates: 96454112, lookups: 40668500, tables: 4, publics: 26, hint_calls: 12986603, hint_outputs: 46924786 }
+MSM 4/11: 6 bases
+MSM 4 complete: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 134516720, inputs: 7399, gates: 97248893, lookups: 40939347, tables: 4, publics: 28, hint_calls: 13043644, hint_outputs: 47229488 }
+MSM 5/11: 7 bases
+MSM 5 complete: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 135633578, inputs: 7399, gates: 98112932, lookups: 41230342, tables: 4, publics: 30, hint_calls: 13104974, hint_outputs: 47557030 }
+MSM 6/11: 28 bases
+MSM 6 complete: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 138966525, inputs: 7399, gates: 100766731, lookups: 42012513, tables: 4, publics: 32, hint_calls: 13270517, hint_outputs: 48440236 }
+MSM 7/11: 30 bases
+MSM 7 complete: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 142286670, inputs: 7399, gates: 103400638, lookups: 42802948, tables: 4, publics: 34, hint_calls: 13437982, hint_outputs: 49333346 }
+MSM 8/11: 248 bases
+MSM 8 complete: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 168691767, inputs: 7399, gates: 124681519, lookups: 48706367, tables: 4, publics: 36, hint_calls: 14690209, hint_outputs: 56010536 }
+MSM 9/11: 638 bases
+MSM 9 complete: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 229483000, inputs: 7399, gates: 173816634, lookups: 62139178, tables: 4, publics: 38, hint_calls: 17546922, hint_outputs: 71228622 }
+MSM 10/11: 10 bases
+MSM 10 complete: CircuitStats { hash_calls: 0, hash_compressions: 0, values: 230891455, inputs: 7399, gates: 174930279, lookups: 62478605, tables: 4, publics: 40, hint_calls: 17618623, hint_outputs: 71611268 }
+Complete circuit witness checked: 55.982707444s
+{
+  "build_seconds": 28.879844296999998,
+  "circuit_satisfied": true,
+  "development_srs": true,
+  "external_pairings_pass": true,
+  "gates": 174930279,
+  "input_proof_blake3": "8b968b6a8f849b06d8431a59c002a0bc7bcc9e0e5caa194cfebe4800a73933b7",
+  "input_proof_bytes": 53157,
+  "load_and_native_verify_seconds": 40.689764178,
+  "lookups": 62478605,
+  "msm_terms": [
+    357,
+    4,
+    7,
+    27,
+    6,
+    7,
+    28,
+    30,
+    248,
+    638,
+    10
+  ],
+  "outer_proof_generated": false,
+  "pairing_points": 11,
+  "public_values": 40,
+  "rows": 237408925,
+  "scope": "Full saved Init KZG proof checked by recursive constraints and external pairings; no outer proof yet",
+  "total_seconds": 125.755918117,
+  "values": 230891455,
+  "witness_seconds": 56.186085688
+}
+Lowering recursive circuit into one 268435456-row computation trace
+Preparing recursive trace 0/2
+Staged recursive trace 0: 249.82469441s
+Preparing recursive trace 1/2
+Staged recursive trace 1: 256.654123415s
+Recursive staging complete: 256.654216868s

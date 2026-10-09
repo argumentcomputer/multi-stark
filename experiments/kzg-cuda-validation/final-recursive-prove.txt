@@ -1,0 +1,84 @@
+Generating development SRS for 2^28 rows
+VmHWM:	 1863476 kB VmRSS:	 1863476 kB
+VmHWM:	 3675172 kB VmRSS:	 3675172 kB
+VmHWM:	 5485460 kB VmRSS:	 5485460 kB
+VmHWM:	 7288076 kB VmRSS:	 7288076 kB
+VmHWM:	 9099956 kB VmRSS:	 9099956 kB
+VmHWM:	10927528 kB VmRSS:	10927528 kB
+VmHWM:	12734168 kB VmRSS:	12734168 kB
+VmHWM:	14536376 kB VmRSS:	14536376 kB
+VmHWM:	16343048 kB VmRSS:	16343048 kB
+VmHWM:	18150364 kB VmRSS:	18150364 kB
+VmHWM:	19969868 kB VmRSS:	19969868 kB
+VmHWM:	21785784 kB VmRSS:	21785784 kB
+VmHWM:	23599616 kB VmRSS:	23599616 kB
+VmHWM:	25402660 kB VmRSS:	25402660 kB
+VmHWM:	27208184 kB VmRSS:	27208184 kB
+VmHWM:	29013652 kB VmRSS:	29013652 kB
+VmHWM:	30828588 kB VmRSS:	30828588 kB
+VmHWM:	32642720 kB VmRSS:	32642720 kB
+VmHWM:	34453988 kB VmRSS:	34453988 kB
+VmHWM:	36257524 kB VmRSS:	36257524 kB
+VmHWM:	37864024 kB VmRSS:	37801144 kB
+Outer development SRS ready: 641.755657757s
+VmHWM:	77607456 kB VmRSS:	39133836 kB
+VmHWM:	77607456 kB VmRSS:	58684044 kB
+VmHWM:	78271116 kB VmRSS:	78271116 kB
+VmHWM:	97876620 kB VmRSS:	97876620 kB
+VmHWM:	118166156 kB VmRSS:	118166156 kB
+VmHWM:	139274892 kB VmRSS:	139274892 kB
+Committing recursive fixed trace 0: 828.486053287s
+VmHWM:	210039452 kB VmRSS:	210039452 kB
+VmHWM:	316879748 kB VmRSS:	316879748 kB
+VmHWM:	388738868 kB VmRSS:	388738868 kB
+2026-10-08T22:16:19.819313Z  INFO multi_stark::ark_adapter::cuda: KZG sppark CUDA backend ids=[0, 1, 2, 3] chunk_points=16777216
+VmHWM:	438728852 kB VmRSS:	281462452 kB
+VmHWM:	438728852 kB VmRSS:	153561124 kB
+VmHWM:	438728852 kB VmRSS:	153561124 kB
+VmHWM:	438728852 kB VmRSS:	153561124 kB
+VmHWM:	438728852 kB VmRSS:	167539648 kB
+Committing recursive main trace 0: 1064.916671629s
+VmHWM:	438728852 kB VmRSS:	180825968 kB
+Prepared recursive trace 0: 1097.639270193s
+Committing recursive fixed trace 1: 1097.66012455s
+Committing recursive main trace 1: 1097.740068019s
+Prepared recursive trace 1: 1097.759233173s
+Proving recursive KZG wrapper: 1097.759259971s
+VmHWM:	438728852 kB VmRSS:	338195816 kB
+VmHWM:	438728852 kB VmRSS:	388259164 kB
+VmHWM:	438728852 kB VmRSS:	373200788 kB
+VmHWM:	438728852 kB VmRSS:	283522276 kB
+2026-10-08T22:21:20.790319Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=0 seconds=110.876933982
+2026-10-08T22:21:20.830349Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=1 seconds=0.039980149
+VmHWM:	438728852 kB VmRSS:	374144736 kB
+VmHWM:	477329096 kB VmRSS:	477329096 kB
+VmHWM:	484895608 kB VmRSS:	418097732 kB
+VmHWM:	484895608 kB VmRSS:	451350180 kB
+VmHWM:	484895608 kB VmRSS:	459738792 kB
+VmHWM:	484895608 kB VmRSS:	451951432 kB
+2026-10-08T22:24:32.208420Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=0 coset=0 seconds=191.378030971
+VmHWM:	484895608 kB VmRSS:	394596848 kB
+VmHWM:	484895608 kB VmRSS:	439888340 kB
+VmHWM:	489138348 kB VmRSS:	455619004 kB
+VmHWM:	489138348 kB VmRSS:	445566360 kB
+VmHWM:	489138348 kB VmRSS:	453107104 kB
+VmHWM:	489138348 kB VmRSS:	452826820 kB
+VmHWM:	489138348 kB VmRSS:	430287564 kB
+2026-10-08T22:27:42.484256Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=0 coset=1 seconds=381.653866609
+2026-10-08T22:28:04.202993Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient committed circuit=0 seconds=403.372604437
+2026-10-08T22:28:04.270868Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=1 coset=0 seconds=0.067839552
+2026-10-08T22:28:04.288206Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient committed circuit=1 seconds=0.085178049
+VmHWM:	489138348 kB VmRSS:	253963204 kB
+VmHWM:	489138348 kB VmRSS:	260254712 kB
+{
+  "claim_bytes": 144,
+  "development_srs": true,
+  "external_pairings_pass": true,
+  "negative_tests_pass": true,
+  "packet_bytes": 2757,
+  "pairing_bytes": 528,
+  "profile_bytes": 32,
+  "proof_bytes": 2053,
+  "total_seconds": 1652.234062765,
+  "verify_seconds": 0.015101423
+}

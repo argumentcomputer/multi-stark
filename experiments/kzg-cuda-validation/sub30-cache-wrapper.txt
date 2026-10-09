@@ -1,0 +1,19 @@
+   Compiling init-kzg-wrap v0.1.0 (/home/sam/repos/multi-stark/experiments/kzg-wrap)
+    Finished `release` profile [optimized] target(s) in 4.96s
+     Running unittests src/main.rs (experiments/kzg-wrap/target/release/deps/init_kzg_wrap-39547409f2a63a15)
+
+running 11 tests
+test native_field::tests::integer_bounds_do_not_wrap_fr ... ok
+test native_field::tests::rejects_noncanonical_and_out_of_range ... ok
+test native_field::tests::bounded_relations_accept_redundant_representatives ... ok
+test outer::tests::packet_requires_outer_proof_claim_and_external_pairings ... ok
+test native_field::tests::products_and_adversarial_assignments ... ok
+test native_curve::tests::affine_operations ... ok
+test outer::storage::tests::parallel_frames_and_legacy_streams_are_interoperable ... ok
+test native_transcript::tests::transcript_and_point_encoding_match_native ... ok
+test native_curve::tests::subgroup_infinity_and_reject_wrong_subgroup ... ok
+test native_msm::tests::msm_matches_native_with_zero_scalars_and_identity ... ok
+test native_verifier::tests::complete_wrapper_fixture_and_changed_claim ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.71s
+

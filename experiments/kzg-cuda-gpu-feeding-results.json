@@ -1,0 +1,1449 @@
+{
+  "status": "verified_gpu_feeding_pipeline",
+  "raw_pipeline": "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009",
+  "boundary": "Aggregation root through FRI compression, both staging and KZG proving phases, and in-process verification. Root generation is excluded; additional CPU verification is reported separately.",
+  "focused_tests": {
+    "passed": 47,
+    "ignored": 3,
+    "large_fft_2pow29": "passed",
+    "cpu_only_passed": 36,
+    "large_msm_2pow29": "passed",
+    "large_msm_timing_scope": "Correctness test; CPU-only tests were running concurrently, so its timing is not an isolated benchmark."
+  },
+  "diagnostic": {
+    "input": "/opt/dlami/nvme/multi-stark-kzg-sub30-cache-setup-20261009/fri-to-kzg",
+    "trace_index": 0,
+    "rows": 16777216,
+    "fresh_srs": true,
+    "checkpoint_output": "/dev/null"
+  },
+  "diagnostic_iterations": {
+    "before": {
+      "log": "experiments/kzg-cuda-validation/gpu-feeding-before.txt",
+      "seconds": {
+        "read_fixed_seconds": 10.095134,
+        "srs_seconds": 6.332632,
+        "commit_fixed_seconds": 5.309567,
+        "encode_fixed_seconds": 0.126695,
+        "read_main_seconds": 1.721728,
+        "commit_main_seconds": 0.768239,
+        "encode_main_seconds": 0.024408,
+        "commit_lookup_seconds": 6.633242,
+        "commit_quotient_seconds": 13.207508,
+        "wall_seconds": 44.63
+      }
+    },
+    "direct": {
+      "log": "experiments/kzg-cuda-validation/gpu-feeding-direct.txt",
+      "seconds": {
+        "read_fixed_seconds": 4.470576,
+        "srs_seconds": 6.290425,
+        "commit_fixed_seconds": 4.526194,
+        "encode_fixed_seconds": 0.124367,
+        "read_main_seconds": 0.825771,
+        "commit_main_seconds": 0.472814,
+        "encode_main_seconds": 0.02393,
+        "commit_lookup_seconds": 3.846559,
+        "commit_quotient_seconds": 6.477554,
+        "wall_seconds": 27.48
+      }
+    },
+    "resident": {
+      "log": "experiments/kzg-cuda-validation/gpu-feeding-resident.txt",
+      "seconds": {
+        "read_fixed_seconds": 4.444704,
+        "srs_seconds": 6.33153,
+        "commit_fixed_seconds": 4.331506,
+        "encode_fixed_seconds": 0.126264,
+        "read_main_seconds": 0.800277,
+        "commit_main_seconds": 0.403796,
+        "encode_main_seconds": 0.025281,
+        "commit_lookup_seconds": 3.201398,
+        "commit_quotient_seconds": 4.830577,
+        "wall_seconds": 25.06
+      }
+    }
+  },
+  "limitations": [
+    "One-trace diagnostics are not whole-pipeline measurements.",
+    "Host coefficients are retained for checkpoints and spill recovery.",
+    "Lookup and constraint evaluation still run on the CPU and require downloaded row-major evaluations.",
+    "Fixed cache identity binds the exact executable and the recursive public statement.",
+    "The conservative half-VRAM budget holds about 160 GiB of recursive coefficients and leaves four large columns on the host. This is bounded coefficient residency, not a fully device-only prover.",
+    "Coarse utilization samples miss short kernels; phase samples and overlapping per-operation event intervals are both retained.",
+    "Known-trapdoor development SRS only. The benchmark uses the regenerated 19-circuit Init FRI profile."
+  ],
+  "diagnostic_profile_overlapping_operation_totals": {
+    "ifft": {
+      "calls": 21.0,
+      "upload_ms": 327.455,
+      "kernel_ms": 160.27700000000002,
+      "download_ms": 270.88,
+      "host_copy_ms": 1549.4379999999999,
+      "upload_bytes": 11811160064.0,
+      "download_bytes": 11811160064.0,
+      "device_copy_bytes": 0.0
+    },
+    "msm-points": {
+      "calls": 13.0,
+      "upload_ms": 637.2939999999999,
+      "kernel_ms": 0.0,
+      "download_ms": 0.0,
+      "host_copy_ms": 1155.3629999999998,
+      "upload_bytes": 20937965568.0,
+      "download_bytes": 0.0,
+      "device_copy_bytes": 0.0
+    },
+    "fft": {
+      "calls": 55.0,
+      "upload_ms": 0.0,
+      "kernel_ms": 299.377,
+      "download_ms": 597.4219999999999,
+      "host_copy_ms": 3530.171,
+      "upload_bytes": 0.0,
+      "download_bytes": 29527900160.0,
+      "device_copy_bytes": 29527900160.0
+    },
+    "retain": {
+      "calls": 2.0,
+      "upload_ms": 32.178,
+      "kernel_ms": 0.0,
+      "download_ms": 0.0,
+      "host_copy_ms": 45.513999999999996,
+      "upload_bytes": 1073741824.0,
+      "download_bytes": 0.0,
+      "device_copy_bytes": 0.0
+    }
+  },
+  "peer_access": {
+    "supported_pairs": [
+      [
+        0,
+        1
+      ],
+      [
+        2,
+        3
+      ]
+    ],
+    "cross_pair": "not supported",
+    "source": "nvidia-smi topo -p2p r"
+  },
+  "implementation": [
+    "Direct scalar-limb borrowing with layout assertions",
+    "Parallel canonical decoding into final allocations",
+    "Parallel first-touch construction and compact constant evaluation metadata",
+    "Bounded pinned host rings and DMA event reuse",
+    "Two-slot per-device FFT queues",
+    "Immutable resident coefficients retained after interpolation",
+    "Resident-input coset FFTs, MSMs and batched-point evaluation",
+    "Per-device byte admission with host-backed spill recovery",
+    "Parallel affine conversion and scalar normalization",
+    "Per-operation CUDA transfer and compute-interval profiling"
+  ],
+  "fresh_fixed_pipeline": {
+    "report": "experiments/kzg-cuda-validation/gpu-feeding-cold-report.json",
+    "pipeline_seconds": 1200.9572465200035,
+    "total_with_independent_cpu_checks_seconds": 1229.4686331060002,
+    "parity": {
+      "fri-to-kzg": {
+        "proof.compact.bin": {
+          "bytes": 49557,
+          "sha256": "60743ce900113029b9f95eae72ee7f3134420c84a2c4e5a9abc6cbfbda306f8d",
+          "matches_previous_verified_artifact": true
+        },
+        "packet.bin": {
+          "bytes": 49733,
+          "sha256": "1c9cd6b0c1edeef6e6babe0a07713e0518265f99d563d0274f07a2488bf31554",
+          "matches_previous_verified_artifact": true
+        },
+        "profile-id.bin": {
+          "bytes": 32,
+          "sha256": "e816255cfe6d15472b53627c4ad32a939fd3b0ff7f57a821042414ce6d71d242",
+          "matches_previous_verified_artifact": true
+        }
+      },
+      "recursive": {
+        "proof.compact.bin": {
+          "bytes": 2053,
+          "sha256": "c11227de7fbdec5aad81043233cd3e9afa48972fb7a9e59be78fd59982f9c971",
+          "matches_previous_verified_artifact": true
+        },
+        "packet.bin": {
+          "bytes": 2709,
+          "sha256": "89ee32757b0d4faeef6071e23838c7cf7e48c582a63070cd2f3a491a8410ece4",
+          "matches_previous_verified_artifact": true
+        },
+        "profile-id.bin": {
+          "bytes": 32,
+          "sha256": "e922e6ed5e1621cf61b22eb55f7deaa247671ddb51147aeab62b09acfbb65362",
+          "matches_previous_verified_artifact": true
+        }
+      }
+    },
+    "phases": {
+      "fri_compress": {
+        "wall_seconds": 171.4191530809985,
+        "exit_code": 0,
+        "peak_rss_bytes": 249722028032,
+        "command": [
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/measured-binaries/ix_root",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/root-artifacts",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/compressed-fri",
+          "--prove-outer"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/fri_compress.log",
+        "backend": "cuda",
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 0,
+        "srs_cache_misses": 0
+      },
+      "fri_stage": {
+        "wall_seconds": 251.98023335100152,
+        "exit_code": 0,
+        "peak_rss_bytes": 72048439296,
+        "command": [
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/measured-binaries/init_fri_kzg_prove",
+          "stage",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/compressed-fri",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/fri-to-kzg"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/fri_stage.log",
+        "backend": "cuda",
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 1,
+        "srs_cache_hits": 0,
+        "srs_cache_misses": 0
+      },
+      "fri_prove": {
+        "wall_seconds": 240.41532858899882,
+        "exit_code": 0,
+        "peak_rss_bytes": 204088688640,
+        "command": [
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/measured-binaries/init_fri_kzg_prove",
+          "prove",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/fri-to-kzg"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/fri_prove.log",
+        "backend": "cuda",
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 1,
+        "srs_cache_misses": 0
+      },
+      "recursive_stage": {
+        "wall_seconds": 212.0174244439986,
+        "exit_code": 0,
+        "peak_rss_bytes": 193421578240,
+        "command": [
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/measured-binaries/init-kzg-wrap",
+          "stage",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/intermediate",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/recursive"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/recursive_stage.log",
+        "backend": "cuda",
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 1,
+        "srs_cache_hits": 1,
+        "srs_cache_misses": 0
+      },
+      "recursive_prove": {
+        "wall_seconds": 325.1196160670006,
+        "exit_code": 0,
+        "peak_rss_bytes": 498451177472,
+        "command": [
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/measured-binaries/init-kzg-wrap",
+          "prove",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/recursive"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/recursive_prove.log",
+        "backend": "cuda",
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 1,
+        "srs_cache_misses": 0
+      },
+      "fri_cpu_verify": {
+        "wall_seconds": 4.021353628995712,
+        "exit_code": 0,
+        "peak_rss_bytes": 1852387328,
+        "command": [
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/measured-binaries/init_fri_kzg_prove",
+          "verify",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/fri-to-kzg"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/fri_cpu_verify.log",
+        "backend": "cpu",
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 1,
+        "srs_cache_misses": 0
+      },
+      "recursive_cpu_verify": {
+        "wall_seconds": 23.62176270600321,
+        "exit_code": 0,
+        "peak_rss_bytes": 28059299840,
+        "command": [
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/measured-binaries/init-kzg-wrap",
+          "verify",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/recursive"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cold-20261009/recursive_cpu_verify.log",
+        "backend": "cpu",
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 1,
+        "srs_cache_misses": 0
+      }
+    },
+    "recursive_verification": {
+      "claim_bytes": 144,
+      "development_srs": true,
+      "external_pairings_pass": true,
+      "negative_tests_pass": true,
+      "packet_bytes": 2709,
+      "pairing_bytes": 480,
+      "profile_bytes": 32,
+      "proof_bytes": 2053,
+      "total_seconds": 324.523910805,
+      "verify_seconds": 0.014848245
+    },
+    "cuda_operation_totals_overlap": {
+      "fri_prove": {
+        "ifft": {
+          "calls": 488,
+          "upload_ms": 4024.8100000000027,
+          "kernel_ms": 1087.231999999999,
+          "download_ms": 3200.6330000000003,
+          "host_copy_ms": 17747.67499999998,
+          "upload_bytes": 137816440832.0,
+          "download_bytes": 137816440832.0,
+          "device_copy_bytes": 0.0
+        },
+        "msm-points": {
+          "calls": 325,
+          "upload_ms": 7196.688,
+          "kernel_ms": 0.0,
+          "download_ms": 0.0,
+          "host_copy_ms": 13705.908999999994,
+          "upload_bytes": 237244513632.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        },
+        "fft": {
+          "calls": 843,
+          "upload_ms": 0.0,
+          "kernel_ms": 3481.303,
+          "download_ms": 7298.369999999993,
+          "host_copy_ms": 41127.32600000001,
+          "upload_bytes": 0.0,
+          "download_bytes": 350641717248.0,
+          "device_copy_bytes": 223772409856.0
+        },
+        "retain": {
+          "calls": 32,
+          "upload_ms": 321.927,
+          "kernel_ms": 0.0,
+          "download_ms": 0.0,
+          "host_copy_ms": 491.7199999999999,
+          "upload_bytes": 10911481856.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        },
+        "evaluate": {
+          "calls": 503,
+          "upload_ms": 0.0,
+          "kernel_ms": 147.03000000000026,
+          "download_ms": 0.0,
+          "host_copy_ms": 0.0,
+          "upload_bytes": 0.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        },
+        "divide": {
+          "calls": 7,
+          "upload_ms": 27.346000000000004,
+          "kernel_ms": 17.801000000000002,
+          "download_ms": 25.261,
+          "host_copy_ms": 91.636,
+          "upload_bytes": 1298137088.0,
+          "download_bytes": 1298136864.0,
+          "device_copy_bytes": 0.0
+        },
+        "msm-scalars": {
+          "calls": 28,
+          "upload_ms": 33.24100000000001,
+          "kernel_ms": 0.0,
+          "download_ms": 0.0,
+          "host_copy_ms": 67.33999999999999,
+          "upload_bytes": 1298136864.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        }
+      },
+      "recursive_prove": {
+        "ifft": {
+          "calls": 30,
+          "upload_ms": 5900.120999999998,
+          "kernel_ms": 1847.35,
+          "download_ms": 5040.815,
+          "host_copy_ms": 21277.091,
+          "upload_bytes": 206187790336.0,
+          "download_bytes": 206187790336.0,
+          "device_copy_bytes": 0.0
+        },
+        "msm-points": {
+          "calls": 222,
+          "upload_ms": 9692.000000000005,
+          "kernel_ms": 0.0,
+          "download_ms": 0.0,
+          "host_copy_ms": 17742.19800000001,
+          "upload_bytes": 335145860832.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        },
+        "fft": {
+          "calls": 73,
+          "upload_ms": 1063.654,
+          "kernel_ms": 5805.635000000003,
+          "download_ms": 10971.412999999999,
+          "host_copy_ms": 64862.35600000001,
+          "upload_bytes": 34359738368.0,
+          "download_bytes": 532622082048.0,
+          "device_copy_bytes": 498262343680.0
+        },
+        "msm-scalars": {
+          "calls": 100,
+          "upload_ms": 1353.9739999999997,
+          "kernel_ms": 0.0,
+          "download_ms": 0.0,
+          "host_copy_ms": 2220.656,
+          "upload_bytes": 51543801760.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        },
+        "retain": {
+          "calls": 1,
+          "upload_ms": 0.097,
+          "kernel_ms": 0.0,
+          "download_ms": 0.0,
+          "host_copy_ms": 0.406,
+          "upload_bytes": 4194304.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        },
+        "evaluate": {
+          "calls": 31,
+          "upload_ms": 1229.095,
+          "kernel_ms": 161.986,
+          "download_ms": 0.0,
+          "host_copy_ms": 1041.097,
+          "upload_bytes": 34359738368.0,
+          "download_bytes": 0.0,
+          "device_copy_bytes": 0.0
+        },
+        "divide": {
+          "calls": 3,
+          "upload_ms": 363.326,
+          "kernel_ms": 204.982,
+          "download_ms": 353.48499999999996,
+          "host_copy_ms": 1093.7469999999998,
+          "upload_bytes": 17184063488.0,
+          "download_bytes": 17184063392.0,
+          "device_copy_bytes": 0.0
+        }
+      }
+    }
+  },
+  "cached_pipeline_raw_output": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009",
+  "gpu_phase_samples": {
+    "previous_cached": {
+      "fri_prove": {
+        "window_source": "time-file completion mtime minus measured wall time, approximately process lifetime",
+        "gpus": {
+          "0": {
+            "peak_memory_mib": 1743,
+            "peak_utilization_percent": 76,
+            "sample_count": 193,
+            "zero_utilization_samples": 151,
+            "mean_utilization_percent": 5.901554404145077,
+            "zero_utilization_sample_percent": 78.23834196891191
+          },
+          "1": {
+            "peak_memory_mib": 1743,
+            "peak_utilization_percent": 76,
+            "sample_count": 193,
+            "zero_utilization_samples": 154,
+            "mean_utilization_percent": 5.077720207253886,
+            "zero_utilization_sample_percent": 79.79274611398964
+          },
+          "2": {
+            "peak_memory_mib": 1743,
+            "peak_utilization_percent": 76,
+            "sample_count": 193,
+            "zero_utilization_samples": 159,
+            "mean_utilization_percent": 4.683937823834197,
+            "zero_utilization_sample_percent": 82.38341968911917
+          },
+          "3": {
+            "peak_memory_mib": 1743,
+            "peak_utilization_percent": 76,
+            "sample_count": 193,
+            "zero_utilization_samples": 163,
+            "mean_utilization_percent": 4.533678756476684,
+            "zero_utilization_sample_percent": 84.4559585492228
+          }
+        }
+      },
+      "recursive_prove": {
+        "window_source": "time-file completion mtime minus measured wall time, approximately process lifetime",
+        "gpus": {
+          "0": {
+            "peak_memory_mib": 17103,
+            "peak_utilization_percent": 94,
+            "sample_count": 247,
+            "zero_utilization_samples": 213,
+            "mean_utilization_percent": 5.777327935222672,
+            "zero_utilization_sample_percent": 86.23481781376518
+          },
+          "1": {
+            "peak_memory_mib": 8911,
+            "peak_utilization_percent": 91,
+            "sample_count": 247,
+            "zero_utilization_samples": 219,
+            "mean_utilization_percent": 4.425101214574899,
+            "zero_utilization_sample_percent": 88.66396761133603
+          },
+          "2": {
+            "peak_memory_mib": 8911,
+            "peak_utilization_percent": 94,
+            "sample_count": 247,
+            "zero_utilization_samples": 220,
+            "mean_utilization_percent": 3.8947368421052633,
+            "zero_utilization_sample_percent": 89.06882591093117
+          },
+          "3": {
+            "peak_memory_mib": 8911,
+            "peak_utilization_percent": 97,
+            "sample_count": 247,
+            "zero_utilization_samples": 222,
+            "mean_utilization_percent": 4.202429149797571,
+            "zero_utilization_sample_percent": 89.87854251012146
+          }
+        }
+      }
+    },
+    "fresh_fixed": {
+      "fri_prove": {
+        "window_source": "time-file completion mtime minus measured wall time, approximately process lifetime",
+        "gpus": {
+          "0": {
+            "peak_memory_mib": 33585,
+            "peak_utilization_percent": 94,
+            "sample_count": 120,
+            "zero_utilization_samples": 97,
+            "mean_utilization_percent": 7.725,
+            "zero_utilization_sample_percent": 80.83333333333333
+          },
+          "1": {
+            "peak_memory_mib": 33585,
+            "peak_utilization_percent": 96,
+            "sample_count": 120,
+            "zero_utilization_samples": 98,
+            "mean_utilization_percent": 7.208333333333333,
+            "zero_utilization_sample_percent": 81.66666666666667
+          },
+          "2": {
+            "peak_memory_mib": 33585,
+            "peak_utilization_percent": 96,
+            "sample_count": 120,
+            "zero_utilization_samples": 96,
+            "mean_utilization_percent": 8.25,
+            "zero_utilization_sample_percent": 80.0
+          },
+          "3": {
+            "peak_memory_mib": 33585,
+            "peak_utilization_percent": 95,
+            "sample_count": 120,
+            "zero_utilization_samples": 101,
+            "mean_utilization_percent": 6.591666666666667,
+            "zero_utilization_sample_percent": 84.16666666666667
+          }
+        }
+      },
+      "recursive_prove": {
+        "window_source": "time-file completion mtime minus measured wall time, approximately process lifetime",
+        "gpus": {
+          "0": {
+            "peak_memory_mib": 58065,
+            "peak_utilization_percent": 97,
+            "sample_count": 163,
+            "zero_utilization_samples": 139,
+            "mean_utilization_percent": 6.0552147239263805,
+            "zero_utilization_sample_percent": 85.2760736196319
+          },
+          "1": {
+            "peak_memory_mib": 58065,
+            "peak_utilization_percent": 100,
+            "sample_count": 163,
+            "zero_utilization_samples": 141,
+            "mean_utilization_percent": 6.484662576687117,
+            "zero_utilization_sample_percent": 86.50306748466258
+          },
+          "2": {
+            "peak_memory_mib": 58065,
+            "peak_utilization_percent": 100,
+            "sample_count": 163,
+            "zero_utilization_samples": 141,
+            "mean_utilization_percent": 5.674846625766871,
+            "zero_utilization_sample_percent": 86.50306748466258
+          },
+          "3": {
+            "peak_memory_mib": 58065,
+            "peak_utilization_percent": 96,
+            "sample_count": 163,
+            "zero_utilization_samples": 142,
+            "mean_utilization_percent": 4.877300613496932,
+            "zero_utilization_sample_percent": 87.11656441717791
+          }
+        }
+      }
+    },
+    "cached": {
+      "fri_compress": {
+        "0": {
+          "peak_memory_mib": 95257,
+          "peak_utilization_percent": 71,
+          "sample_count": 86,
+          "zero_utilization_samples": 71,
+          "mean_utilization_percent": 5.395348837209302,
+          "zero_utilization_sample_percent": 82.55813953488372
+        },
+        "1": {
+          "peak_memory_mib": 721,
+          "peak_utilization_percent": 7,
+          "sample_count": 86,
+          "zero_utilization_samples": 83,
+          "mean_utilization_percent": 0.13953488372093023,
+          "zero_utilization_sample_percent": 96.51162790697674
+        },
+        "2": {
+          "peak_memory_mib": 721,
+          "peak_utilization_percent": 3,
+          "sample_count": 86,
+          "zero_utilization_samples": 84,
+          "mean_utilization_percent": 0.06976744186046512,
+          "zero_utilization_sample_percent": 97.67441860465117
+        },
+        "3": {
+          "peak_memory_mib": 727,
+          "peak_utilization_percent": 3,
+          "sample_count": 86,
+          "zero_utilization_samples": 85,
+          "mean_utilization_percent": 0.03488372093023256,
+          "zero_utilization_sample_percent": 98.83720930232558
+        }
+      },
+      "fri_stage": {
+        "0": {
+          "peak_memory_mib": 561,
+          "peak_utilization_percent": 45,
+          "sample_count": 100,
+          "zero_utilization_samples": 99,
+          "mean_utilization_percent": 0.45,
+          "zero_utilization_sample_percent": 99.0
+        },
+        "1": {
+          "peak_memory_mib": 3,
+          "peak_utilization_percent": 0,
+          "sample_count": 100,
+          "zero_utilization_samples": 100,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "2": {
+          "peak_memory_mib": 3,
+          "peak_utilization_percent": 0,
+          "sample_count": 100,
+          "zero_utilization_samples": 100,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "3": {
+          "peak_memory_mib": 3,
+          "peak_utilization_percent": 0,
+          "sample_count": 100,
+          "zero_utilization_samples": 100,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        }
+      },
+      "fri_prove": {
+        "0": {
+          "peak_memory_mib": 33617,
+          "peak_utilization_percent": 95,
+          "sample_count": 78,
+          "zero_utilization_samples": 57,
+          "mean_utilization_percent": 9.14102564102564,
+          "zero_utilization_sample_percent": 73.07692307692308
+        },
+        "1": {
+          "peak_memory_mib": 33969,
+          "peak_utilization_percent": 86,
+          "sample_count": 78,
+          "zero_utilization_samples": 63,
+          "mean_utilization_percent": 6.82051282051282,
+          "zero_utilization_sample_percent": 80.76923076923077
+        },
+        "2": {
+          "peak_memory_mib": 33969,
+          "peak_utilization_percent": 54,
+          "sample_count": 78,
+          "zero_utilization_samples": 62,
+          "mean_utilization_percent": 6.012820512820513,
+          "zero_utilization_sample_percent": 79.48717948717949
+        },
+        "3": {
+          "peak_memory_mib": 33617,
+          "peak_utilization_percent": 95,
+          "sample_count": 78,
+          "zero_utilization_samples": 60,
+          "mean_utilization_percent": 8.85897435897436,
+          "zero_utilization_sample_percent": 76.92307692307692
+        }
+      },
+      "recursive_stage": {
+        "0": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 69,
+          "zero_utilization_samples": 69,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "1": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 69,
+          "zero_utilization_samples": 69,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "2": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 69,
+          "zero_utilization_samples": 69,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "3": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 69,
+          "zero_utilization_samples": 69,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        }
+      },
+      "recursive_prove": {
+        "0": {
+          "peak_memory_mib": 58065,
+          "peak_utilization_percent": 100,
+          "sample_count": 102,
+          "zero_utilization_samples": 81,
+          "mean_utilization_percent": 7.637254901960785,
+          "zero_utilization_sample_percent": 79.41176470588235
+        },
+        "1": {
+          "peak_memory_mib": 58065,
+          "peak_utilization_percent": 100,
+          "sample_count": 102,
+          "zero_utilization_samples": 83,
+          "mean_utilization_percent": 7.7745098039215685,
+          "zero_utilization_sample_percent": 81.37254901960785
+        },
+        "2": {
+          "peak_memory_mib": 58065,
+          "peak_utilization_percent": 92,
+          "sample_count": 102,
+          "zero_utilization_samples": 83,
+          "mean_utilization_percent": 7.735294117647059,
+          "zero_utilization_sample_percent": 81.37254901960785
+        },
+        "3": {
+          "peak_memory_mib": 58065,
+          "peak_utilization_percent": 100,
+          "sample_count": 102,
+          "zero_utilization_samples": 85,
+          "mean_utilization_percent": 6.450980392156863,
+          "zero_utilization_sample_percent": 83.33333333333333
+        }
+      },
+      "fri_cpu_verify": {
+        "0": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 2,
+          "zero_utilization_samples": 2,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "1": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 2,
+          "zero_utilization_samples": 2,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "2": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 2,
+          "zero_utilization_samples": 2,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "3": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 2,
+          "zero_utilization_samples": 2,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        }
+      },
+      "recursive_cpu_verify": {
+        "0": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 12,
+          "zero_utilization_samples": 12,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "1": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 12,
+          "zero_utilization_samples": 12,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "2": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 12,
+          "zero_utilization_samples": 12,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        },
+        "3": {
+          "peak_memory_mib": 0,
+          "peak_utilization_percent": 0,
+          "sample_count": 12,
+          "zero_utilization_samples": 12,
+          "mean_utilization_percent": 0.0,
+          "zero_utilization_sample_percent": 100.0
+        }
+      }
+    }
+  },
+  "cached_pipeline": {
+    "report": "experiments/kzg-cuda-validation/gpu-feeding-cached-report.json",
+    "pipeline_seconds": 869.4707562330004,
+    "total_with_independent_cpu_checks_seconds": 897.3935074100009,
+    "parity": {
+      "fri-to-kzg": {
+        "proof.compact.bin": {
+          "bytes": 49557,
+          "sha256": "60743ce900113029b9f95eae72ee7f3134420c84a2c4e5a9abc6cbfbda306f8d",
+          "matches_previous_and_fresh_fixed": true
+        },
+        "packet.bin": {
+          "bytes": 49733,
+          "sha256": "1c9cd6b0c1edeef6e6babe0a07713e0518265f99d563d0274f07a2488bf31554",
+          "matches_previous_and_fresh_fixed": true
+        },
+        "profile-id.bin": {
+          "bytes": 32,
+          "sha256": "e816255cfe6d15472b53627c4ad32a939fd3b0ff7f57a821042414ce6d71d242",
+          "matches_previous_and_fresh_fixed": true
+        }
+      },
+      "recursive": {
+        "proof.compact.bin": {
+          "bytes": 2053,
+          "sha256": "c11227de7fbdec5aad81043233cd3e9afa48972fb7a9e59be78fd59982f9c971",
+          "matches_previous_and_fresh_fixed": true
+        },
+        "packet.bin": {
+          "bytes": 2709,
+          "sha256": "89ee32757b0d4faeef6071e23838c7cf7e48c582a63070cd2f3a491a8410ece4",
+          "matches_previous_and_fresh_fixed": true
+        },
+        "profile-id.bin": {
+          "bytes": 32,
+          "sha256": "e922e6ed5e1621cf61b22eb55f7deaa247671ddb51147aeab62b09acfbb65362",
+          "matches_previous_and_fresh_fixed": true
+        }
+      }
+    },
+    "phases": {
+      "fri_compress": {
+        "wall_seconds": 171.88006284199946,
+        "exit_code": 0,
+        "started_at_utc": "2026-10-09T02:57:18.820164+00:00",
+        "finished_at_utc": "2026-10-09T03:00:10.700229+00:00",
+        "peak_rss_bytes": 249536172032,
+        "command": [
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/ix_root",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/root-artifacts",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/compressed-fri",
+          "--prove-outer"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/fri_compress.log",
+        "backend": "cuda",
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 0,
+        "srs_cache_misses": 0,
+        "cuda_operation_totals_overlap": {},
+        "gpu_samples_every_2_seconds": {
+          "0": {
+            "peak_memory_mib": 95257,
+            "peak_utilization_percent": 71,
+            "sample_count": 86,
+            "zero_utilization_samples": 71,
+            "mean_utilization_percent": 5.395348837209302,
+            "zero_utilization_sample_percent": 82.55813953488372
+          },
+          "1": {
+            "peak_memory_mib": 721,
+            "peak_utilization_percent": 7,
+            "sample_count": 86,
+            "zero_utilization_samples": 83,
+            "mean_utilization_percent": 0.13953488372093023,
+            "zero_utilization_sample_percent": 96.51162790697674
+          },
+          "2": {
+            "peak_memory_mib": 721,
+            "peak_utilization_percent": 3,
+            "sample_count": 86,
+            "zero_utilization_samples": 84,
+            "mean_utilization_percent": 0.06976744186046512,
+            "zero_utilization_sample_percent": 97.67441860465117
+          },
+          "3": {
+            "peak_memory_mib": 727,
+            "peak_utilization_percent": 3,
+            "sample_count": 86,
+            "zero_utilization_samples": 85,
+            "mean_utilization_percent": 0.03488372093023256,
+            "zero_utilization_sample_percent": 98.83720930232558
+          }
+        }
+      },
+      "fri_stage": {
+        "wall_seconds": 199.03858726700128,
+        "exit_code": 0,
+        "started_at_utc": "2026-10-09T03:00:10.701980+00:00",
+        "finished_at_utc": "2026-10-09T03:03:29.740569+00:00",
+        "peak_rss_bytes": 68291305472,
+        "command": [
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/init_fri_kzg_prove",
+          "stage",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/compressed-fri",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/fri-to-kzg"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/fri_stage.log",
+        "backend": "cuda",
+        "fixed_cache_hits": 1,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 0,
+        "srs_cache_misses": 0,
+        "cuda_operation_totals_overlap": {},
+        "gpu_samples_every_2_seconds": {
+          "0": {
+            "peak_memory_mib": 561,
+            "peak_utilization_percent": 45,
+            "sample_count": 100,
+            "zero_utilization_samples": 99,
+            "mean_utilization_percent": 0.45,
+            "zero_utilization_sample_percent": 99.0
+          },
+          "1": {
+            "peak_memory_mib": 3,
+            "peak_utilization_percent": 0,
+            "sample_count": 100,
+            "zero_utilization_samples": 100,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          },
+          "2": {
+            "peak_memory_mib": 3,
+            "peak_utilization_percent": 0,
+            "sample_count": 100,
+            "zero_utilization_samples": 100,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          },
+          "3": {
+            "peak_memory_mib": 3,
+            "peak_utilization_percent": 0,
+            "sample_count": 100,
+            "zero_utilization_samples": 100,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          }
+        }
+      },
+      "fri_prove": {
+        "wall_seconds": 156.03037904699886,
+        "exit_code": 0,
+        "started_at_utc": "2026-10-09T03:03:29.740951+00:00",
+        "finished_at_utc": "2026-10-09T03:06:05.771333+00:00",
+        "peak_rss_bytes": 204711391232,
+        "command": [
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/init_fri_kzg_prove",
+          "prove",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/fri-to-kzg"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/fri_prove.log",
+        "backend": "cuda",
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 1,
+        "srs_cache_misses": 0,
+        "cuda_operation_totals_overlap": {
+          "ifft": {
+            "calls": 293,
+            "upload_ms": 2001.3140000000005,
+            "kernel_ms": 602.633,
+            "download_ms": 1635.2750000000005,
+            "host_copy_ms": 8515.521999999999,
+            "upload_bytes": 72026685440.0,
+            "download_bytes": 72026685440.0,
+            "device_copy_bytes": 0.0
+          },
+          "msm-points": {
+            "calls": 237,
+            "upload_ms": 4553.865999999998,
+            "kernel_ms": 0.0,
+            "download_ms": 0.0,
+            "host_copy_ms": 9090.194,
+            "upload_bytes": 165270256992.0,
+            "download_bytes": 0.0,
+            "device_copy_bytes": 0.0
+          },
+          "retain": {
+            "calls": 227,
+            "upload_ms": 2125.5769999999984,
+            "kernel_ms": 0.0,
+            "download_ms": 0.0,
+            "host_copy_ms": 4063.1730000000007,
+            "upload_bytes": 76701237248.0,
+            "download_bytes": 0.0,
+            "device_copy_bytes": 0.0
+          },
+          "fft": {
+            "calls": 843,
+            "upload_ms": 0.0,
+            "kernel_ms": 3487.240999999999,
+            "download_ms": 7223.928999999996,
+            "host_copy_ms": 39905.59600000003,
+            "upload_bytes": 0.0,
+            "download_bytes": 350641717248.0,
+            "device_copy_bytes": 223772409856.0
+          },
+          "evaluate": {
+            "calls": 503,
+            "upload_ms": 0.0,
+            "kernel_ms": 146.94300000000035,
+            "download_ms": 0.0,
+            "host_copy_ms": 0.0,
+            "upload_bytes": 0.0,
+            "download_bytes": 0.0,
+            "device_copy_bytes": 0.0
+          },
+          "divide": {
+            "calls": 7,
+            "upload_ms": 27.471,
+            "kernel_ms": 17.846,
+            "download_ms": 25.224,
+            "host_copy_ms": 86.82499999999999,
+            "upload_bytes": 1298137088.0,
+            "download_bytes": 1298136864.0,
+            "device_copy_bytes": 0.0
+          },
+          "msm-scalars": {
+            "calls": 28,
+            "upload_ms": 33.207,
+            "kernel_ms": 0.0,
+            "download_ms": 0.0,
+            "host_copy_ms": 62.81799999999999,
+            "upload_bytes": 1298136864.0,
+            "download_bytes": 0.0,
+            "device_copy_bytes": 0.0
+          }
+        },
+        "gpu_samples_every_2_seconds": {
+          "0": {
+            "peak_memory_mib": 33617,
+            "peak_utilization_percent": 95,
+            "sample_count": 78,
+            "zero_utilization_samples": 57,
+            "mean_utilization_percent": 9.14102564102564,
+            "zero_utilization_sample_percent": 73.07692307692308
+          },
+          "1": {
+            "peak_memory_mib": 33969,
+            "peak_utilization_percent": 86,
+            "sample_count": 78,
+            "zero_utilization_samples": 63,
+            "mean_utilization_percent": 6.82051282051282,
+            "zero_utilization_sample_percent": 80.76923076923077
+          },
+          "2": {
+            "peak_memory_mib": 33969,
+            "peak_utilization_percent": 54,
+            "sample_count": 78,
+            "zero_utilization_samples": 62,
+            "mean_utilization_percent": 6.012820512820513,
+            "zero_utilization_sample_percent": 79.48717948717949
+          },
+          "3": {
+            "peak_memory_mib": 33617,
+            "peak_utilization_percent": 95,
+            "sample_count": 78,
+            "zero_utilization_samples": 60,
+            "mean_utilization_percent": 8.85897435897436,
+            "zero_utilization_sample_percent": 76.92307692307692
+          }
+        }
+      },
+      "recursive_stage": {
+        "wall_seconds": 138.4885909270015,
+        "exit_code": 0,
+        "started_at_utc": "2026-10-09T03:06:05.784612+00:00",
+        "finished_at_utc": "2026-10-09T03:08:24.273204+00:00",
+        "peak_rss_bytes": 90370891776,
+        "command": [
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/init-kzg-wrap",
+          "stage",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/intermediate",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/recursive"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/recursive_stage.log",
+        "backend": "cuda",
+        "fixed_cache_hits": 1,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 1,
+        "srs_cache_misses": 0,
+        "cuda_operation_totals_overlap": {},
+        "gpu_samples_every_2_seconds": {
+          "0": {
+            "peak_memory_mib": 0,
+            "peak_utilization_percent": 0,
+            "sample_count": 69,
+            "zero_utilization_samples": 69,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          },
+          "1": {
+            "peak_memory_mib": 0,
+            "peak_utilization_percent": 0,
+            "sample_count": 69,
+            "zero_utilization_samples": 69,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          },
+          "2": {
+            "peak_memory_mib": 0,
+            "peak_utilization_percent": 0,
+            "sample_count": 69,
+            "zero_utilization_samples": 69,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          },
+          "3": {
+            "peak_memory_mib": 0,
+            "peak_utilization_percent": 0,
+            "sample_count": 69,
+            "zero_utilization_samples": 69,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          }
+        }
+      },
+      "recursive_prove": {
+        "wall_seconds": 204.01464313900215,
+        "exit_code": 0,
+        "started_at_utc": "2026-10-09T03:08:24.273690+00:00",
+        "finished_at_utc": "2026-10-09T03:11:48.288335+00:00",
+        "peak_rss_bytes": 498442252288,
+        "command": [
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/init-kzg-wrap",
+          "prove",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/recursive"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/recursive_prove.log",
+        "backend": "cuda",
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 1,
+        "srs_cache_misses": 0,
+        "cuda_operation_totals_overlap": {
+          "ifft": {
+            "calls": 11,
+            "upload_ms": 2173.6839999999997,
+            "kernel_ms": 760.896,
+            "download_ms": 1843.862,
+            "host_copy_ms": 7137.817999999998,
+            "upload_bytes": 77321994240.0,
+            "download_bytes": 77321994240.0,
+            "device_copy_bytes": 0.0
+          },
+          "msm-points": {
+            "calls": 154,
+            "upload_ms": 6915.919,
+            "kernel_ms": 0.0,
+            "download_ms": 0.0,
+            "host_copy_ms": 12141.462000000012,
+            "upload_bytes": 232016314080.0,
+            "download_bytes": 0.0,
+            "device_copy_bytes": 0.0
+          },
+          "retain": {
+            "calls": 20,
+            "upload_ms": 3969.357,
+            "kernel_ms": 0.0,
+            "download_ms": 0.0,
+            "host_copy_ms": 5488.431,
+            "upload_bytes": 128869990400.0,
+            "download_bytes": 0.0,
+            "device_copy_bytes": 0.0
+          },
+          "fft": {
+            "calls": 73,
+            "upload_ms": 1094.721,
+            "kernel_ms": 5605.802999999999,
+            "download_ms": 11059.659999999998,
+            "host_copy_ms": 63521.775,
+            "upload_bytes": 34359738368.0,
+            "download_bytes": 532622082048.0,
+            "device_copy_bytes": 498262343680.0
+          },
+          "msm-scalars": {
+            "calls": 100,
+            "upload_ms": 1360.8719999999996,
+            "kernel_ms": 0.0,
+            "download_ms": 0.0,
+            "host_copy_ms": 2172.1790000000005,
+            "upload_bytes": 51543801760.0,
+            "download_bytes": 0.0,
+            "device_copy_bytes": 0.0
+          },
+          "evaluate": {
+            "calls": 31,
+            "upload_ms": 1230.027,
+            "kernel_ms": 162.01200000000003,
+            "download_ms": 0.0,
+            "host_copy_ms": 1037.8999999999999,
+            "upload_bytes": 34359738368.0,
+            "download_bytes": 0.0,
+            "device_copy_bytes": 0.0
+          },
+          "divide": {
+            "calls": 3,
+            "upload_ms": 362.61400000000003,
+            "kernel_ms": 205.176,
+            "download_ms": 355.197,
+            "host_copy_ms": 1083.3180000000002,
+            "upload_bytes": 17184063488.0,
+            "download_bytes": 17184063392.0,
+            "device_copy_bytes": 0.0
+          }
+        },
+        "gpu_samples_every_2_seconds": {
+          "0": {
+            "peak_memory_mib": 58065,
+            "peak_utilization_percent": 100,
+            "sample_count": 102,
+            "zero_utilization_samples": 81,
+            "mean_utilization_percent": 7.637254901960785,
+            "zero_utilization_sample_percent": 79.41176470588235
+          },
+          "1": {
+            "peak_memory_mib": 58065,
+            "peak_utilization_percent": 100,
+            "sample_count": 102,
+            "zero_utilization_samples": 83,
+            "mean_utilization_percent": 7.7745098039215685,
+            "zero_utilization_sample_percent": 81.37254901960785
+          },
+          "2": {
+            "peak_memory_mib": 58065,
+            "peak_utilization_percent": 92,
+            "sample_count": 102,
+            "zero_utilization_samples": 83,
+            "mean_utilization_percent": 7.735294117647059,
+            "zero_utilization_sample_percent": 81.37254901960785
+          },
+          "3": {
+            "peak_memory_mib": 58065,
+            "peak_utilization_percent": 100,
+            "sample_count": 102,
+            "zero_utilization_samples": 85,
+            "mean_utilization_percent": 6.450980392156863,
+            "zero_utilization_sample_percent": 83.33333333333333
+          }
+        }
+      },
+      "fri_cpu_verify": {
+        "wall_seconds": 4.020047177997185,
+        "exit_code": 0,
+        "started_at_utc": "2026-10-09T03:11:48.291154+00:00",
+        "finished_at_utc": "2026-10-09T03:11:52.311202+00:00",
+        "peak_rss_bytes": 1843798016,
+        "command": [
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/init_fri_kzg_prove",
+          "verify",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/fri-to-kzg"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/fri_cpu_verify.log",
+        "backend": "cpu",
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 1,
+        "srs_cache_misses": 0,
+        "cuda_operation_totals_overlap": {},
+        "gpu_samples_every_2_seconds": {
+          "0": {
+            "peak_memory_mib": 0,
+            "peak_utilization_percent": 0,
+            "sample_count": 2,
+            "zero_utilization_samples": 2,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          },
+          "1": {
+            "peak_memory_mib": 0,
+            "peak_utilization_percent": 0,
+            "sample_count": 2,
+            "zero_utilization_samples": 2,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          },
+          "2": {
+            "peak_memory_mib": 0,
+            "peak_utilization_percent": 0,
+            "sample_count": 2,
+            "zero_utilization_samples": 2,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          },
+          "3": {
+            "peak_memory_mib": 0,
+            "peak_utilization_percent": 0,
+            "sample_count": 2,
+            "zero_utilization_samples": 2,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          }
+        }
+      },
+      "recursive_cpu_verify": {
+        "wall_seconds": 23.665946636996523,
+        "exit_code": 0,
+        "started_at_utc": "2026-10-09T03:11:52.311666+00:00",
+        "finished_at_utc": "2026-10-09T03:12:15.977615+00:00",
+        "peak_rss_bytes": 28062318592,
+        "command": [
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/measured-binaries/init-kzg-wrap",
+          "verify",
+          "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/recursive"
+        ],
+        "log": "/opt/dlami/nvme/multi-stark-kzg-resident-cached-20261009/recursive_cpu_verify.log",
+        "backend": "cpu",
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 1,
+        "srs_cache_misses": 0,
+        "cuda_operation_totals_overlap": {},
+        "gpu_samples_every_2_seconds": {
+          "0": {
+            "peak_memory_mib": 0,
+            "peak_utilization_percent": 0,
+            "sample_count": 12,
+            "zero_utilization_samples": 12,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          },
+          "1": {
+            "peak_memory_mib": 0,
+            "peak_utilization_percent": 0,
+            "sample_count": 12,
+            "zero_utilization_samples": 12,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          },
+          "2": {
+            "peak_memory_mib": 0,
+            "peak_utilization_percent": 0,
+            "sample_count": 12,
+            "zero_utilization_samples": 12,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          },
+          "3": {
+            "peak_memory_mib": 0,
+            "peak_utilization_percent": 0,
+            "sample_count": 12,
+            "zero_utilization_samples": 12,
+            "mean_utilization_percent": 0.0,
+            "zero_utilization_sample_percent": 100.0
+          }
+        }
+      }
+    },
+    "recursive_verification": {
+      "claim_bytes": 144,
+      "development_srs": true,
+      "external_pairings_pass": true,
+      "negative_tests_pass": true,
+      "packet_bytes": 2709,
+      "pairing_bytes": 480,
+      "profile_bytes": 32,
+      "proof_bytes": 2053,
+      "total_seconds": 203.409562438,
+      "verify_seconds": 0.014775488
+    },
+    "sources_and_binaries_match_current_tree": true
+  },
+  "comparison_with_previous_cached_pipeline": {
+    "previous_report": "experiments/kzg-cuda-validation/sub30-complete-report.json",
+    "previous_pipeline_seconds": 1390.017792808001,
+    "pipeline_seconds_saved": 520.5470365750007,
+    "pipeline_time_reduction_percent": 37.4489477234269,
+    "same_proofs_packets_profiles": true,
+    "fri_compression_rerun_in_both": true,
+    "populated_fixed_and_srs_caches_in_both": true,
+    "same_root_and_compressed_fri_inputs": true
+  },
+  "cache_modes": {
+    "fresh_fixed_pipeline": "Fresh fixed preprocessing, populated development SRS cache.",
+    "cached_pipeline": "Populated fixed preprocessing and development SRS caches; fresh witnesses and proofs."
+  },
+  "final_checks": [
+    "47 focused adapter tests passed, including mixed Goldilocks/KZG CUDA runtime and retained-coefficient parity.",
+    "36 CPU-only adapter tests passed.",
+    "2^29 FFT and chunked MSM correctness checks passed.",
+    "Fresh-fixed and cached full pipelines verified; both packets and profiles match the previous verified run byte for byte.",
+    "Independent CPU verification, external pairings and tampering checks passed for both runs.",
+    "Both workspaces pass cargo fmt --check; git diff --check passes."
+  ]
+}

@@ -1,0 +1,58 @@
+   Compiling multi-stark v0.1.0 (/home/sam/repos/multi-stark)
+warning: unnecessary qualification
+   --> src/verifier.rs:953:30
+    |
+953 |         let hash: [u8; 32] = p3_blake3::Blake3.hash_iter(bytes.iter().copied());
+    |                              ^^^^^^^^^^^^^^^^^
+    |
+    = note: requested on the command line with `-W unused-qualifications`
+help: remove the unnecessary path segments
+    |
+953 -         let hash: [u8; 32] = p3_blake3::Blake3.hash_iter(bytes.iter().copied());
+953 +         let hash: [u8; 32] = Blake3.hash_iter(bytes.iter().copied());
+    |
+
+warning: `multi-stark` (lib test) generated 1 warning (run `cargo fix --lib -p multi-stark --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 13.31s
+     Running unittests src/lib.rs (target/release/deps/multi_stark-3737ec7525f48a60)
+
+running 36 tests
+test ark_adapter::domain::tests::disjoint_domain_is_disjoint ... ok
+test ark_adapter::encoding::tests::scalar_stream_rejects_invalid_and_truncated_fields ... ok
+test ark_adapter::field::tests::serde_round_trip ... ok
+test ark_adapter::field::tests::inverse_and_powers ... ok
+test ark_adapter::field::tests::two_adicity_matches_ark ... ok
+test ark_adapter::domain::tests::next_point_walks_the_domain ... ok
+test ark_adapter::transcript::tests::consecutive_samples_differ ... ok
+test ark_adapter::transcript::tests::slice_observation_flat ... ok
+test ark_adapter::transcript::tests::deterministic_and_sensitive ... ok
+test ark_adapter::domain::tests::coset_selectors_match_pointwise ... ok
+test ark_adapter::config::tests::lookup_tiles_match_serial_trace_across_waves_and_next_rows ... ok
+test ark_adapter::srs::cache::tests::cache_rejects_a_different_seed_even_with_valid_checksum ... ok
+test ark_adapter::pcs::degree_tests::parallel_checkpoint_encoding_preserves_canonical_format ... ok
+test ark_adapter::compact::tests::roundtrip_and_reject_malformed_transport ... ok
+test ark_adapter::config::tests::quotient_slices_fit_an_srs_exactly_as_large_as_the_trace ... ok
+test ark_adapter::config::tests::batch_messages_work_with_scalar_challenges ... ok
+test ark_adapter::pcs::degree_tests::mixed_degree_openings_enforce_every_bound ... ok
+test ark_adapter::srs::cache::tests::damaged_cache_fails_without_regeneration ... ok
+test ark_adapter::config::tests::scalar_quotient_matches_portable_evaluator_with_next_rows ... ok
+test ark_adapter::srs::tests::mismatched_tau_g2_rejected ... ok
+test ark_adapter::srs::tests::corrupted_power_rejected ... ok
+test ark_adapter::config::tests::streamed_lookups_preserve_proof_bytes ... ok
+test ark_adapter::srs::cache::tests::concurrent_cache_writers_publish_complete_files ... ok
+test ark_adapter::config::tests::opens_next_rows_only_when_the_graph_reads_them ... ok
+test ark_adapter::srs::tests::dev_setup_validates ... ok
+test ark_adapter::config::tests::kzg_prove_verify ... ok
+test ark_adapter::config::tests::kzg_wrong_claim_rejected ... ok
+test ark_adapter::config::tests::kzg_serialization_round_trip ... ok
+test ark_adapter::config::tests::kzg_two_circuits_two_heights ... ok
+test ark_adapter::domain::tests::selectors_and_points_agree_across_parallel_tiles ... ok
+test ark_adapter::compact::tests::merged_tables_do_not_allow_cross_table_substitution ... ok
+test ark_adapter::config::tests::kzg_tampering_rejected ... ok
+test ark_adapter::srs::cache::tests::cache_round_trip_and_key_separation ... ok
+test ark_adapter::encoding::tests::field_stream_matches_arkworks_across_blocks ... ok
+test ark_adapter::pcs::degree_tests::batched_openings_preserve_point_column_and_transcript_order ... ok
+test ark_adapter::srs::tests::fixed_base_setup_matches_individual_multiplication_across_tiles ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 93 filtered out; finished in 0.71s
+

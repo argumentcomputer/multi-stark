@@ -1,0 +1,114 @@
+CPU threads: 96
+read_fixed_seconds=4.470576
+srs_seconds=6.290425
+2026-10-09T02:18:57.038327Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=17 height=16777216 seconds=0.291077136
+2026-10-09T02:18:58.034997Z  INFO multi_stark::ark_adapter::cuda: KZG sppark CUDA backend ids=[0, 1, 2, 3] chunk_points=16777216
+2026-10-09T02:18:58.169461Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 wait_seconds=0.99663151 cuda_seconds=0.134427667
+2026-10-09T02:18:58.169521Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 wait_seconds=0.996628366 cuda_seconds=0.134449349
+2026-10-09T02:18:58.169634Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 wait_seconds=0.996627692 cuda_seconds=0.134554041
+2026-10-09T02:18:58.170483Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 wait_seconds=0.996630532 cuda_seconds=0.135383321
+2026-10-09T02:18:58.271376Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 wait_seconds=1.131081557 cuda_seconds=0.101849851
+2026-10-09T02:18:58.273024Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 wait_seconds=1.131131485 cuda_seconds=0.103428911
+2026-10-09T02:18:58.274198Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 wait_seconds=1.132110902 cuda_seconds=0.103650913
+2026-10-09T02:18:58.275417Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 wait_seconds=1.1312595619999999 cuda_seconds=0.105712155
+2026-10-09T02:18:58.375447Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 wait_seconds=1.235813779 cuda_seconds=0.101183124
+2026-10-09T02:18:58.375464Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 wait_seconds=1.232974396 cuda_seconds=0.10401686
+2026-10-09T02:18:58.376844Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 wait_seconds=1.234635626 cuda_seconds=0.103755122
+2026-10-09T02:18:58.376881Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 wait_seconds=1.2370417200000001 cuda_seconds=0.101389869
+2026-10-09T02:18:58.376923Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=17 height=16777216 seconds=1.338557869
+2026-10-09T02:18:59.451089Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=12 seconds=0.836656734
+commit_fixed_seconds=4.526194
+encode_fixed_seconds=0.124367
+read_main_seconds=0.825771
+2026-10-09T02:19:00.443386Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=3 height=16777216 seconds=0.041716455
+2026-10-09T02:19:00.536362Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 wait_seconds=3.24e-7 cuda_seconds=0.092818644
+2026-10-09T02:19:00.541678Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 wait_seconds=5.99e-7 cuda_seconds=0.098162548
+2026-10-09T02:19:00.542604Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 wait_seconds=4.4e-7 cuda_seconds=0.099072608
+2026-10-09T02:19:00.542638Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=3 height=16777216 seconds=0.09922418
+2026-10-09T02:19:00.874397Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=3 seconds=0.327158134
+commit_main_seconds=0.472814
+encode_main_seconds=0.023930
+2026-10-09T02:19:01.102584Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 input_elements=16777216 wait_seconds=4.05e-7 cuda_seconds=0.204060093
+2026-10-09T02:19:01.107942Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=4.01e-7 cuda_seconds=0.209409289
+2026-10-09T02:19:01.108764Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=4.25e-7 cuda_seconds=0.21021938
+2026-10-09T02:19:01.113485Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 input_elements=16777216 wait_seconds=4.55e-7 cuda_seconds=0.214925086
+2026-10-09T02:19:01.293680Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 input_elements=16777216 wait_seconds=0.204130317 cuda_seconds=0.190897552
+2026-10-09T02:19:01.312486Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 input_elements=16777216 wait_seconds=0.215004501 cuda_seconds=0.198928199
+2026-10-09T02:19:01.356028Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=0.210310667 cuda_seconds=0.247169502
+2026-10-09T02:19:01.357880Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=0.209481178 cuda_seconds=0.249859404
+2026-10-09T02:19:01.487688Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 input_elements=16777216 wait_seconds=0.395206409 cuda_seconds=0.193866974
+2026-10-09T02:19:01.505694Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 input_elements=16777216 wait_seconds=0.414004158 cuda_seconds=0.19312835
+2026-10-09T02:19:01.551083Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=0.457531546 cuda_seconds=0.194891915
+2026-10-09T02:19:01.552222Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=0.45937751 cuda_seconds=0.194223569
+2026-10-09T02:19:01.690916Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=17 height=16777216 transform_seconds=0.653837546 transpose_seconds=0.138638107
+2026-10-09T02:19:01.904425Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=3.81e-7 cuda_seconds=0.192503326
+2026-10-09T02:19:01.905926Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 input_elements=16777216 wait_seconds=5.76e-7 cuda_seconds=0.194017007
+2026-10-09T02:19:01.906489Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=4.95e-7 cuda_seconds=0.194562347
+2026-10-09T02:19:01.935563Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=3 height=16777216 transform_seconds=0.194728775 transpose_seconds=0.029035871
+2026-10-09T02:19:04.104881Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=5 height=16777216 seconds=0.081988776
+2026-10-09T02:19:04.205810Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 wait_seconds=4.74e-7 cuda_seconds=0.100778008
+2026-10-09T02:19:04.206361Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 wait_seconds=5.23e-7 cuda_seconds=0.101346343
+2026-10-09T02:19:04.207921Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 wait_seconds=4.01e-7 cuda_seconds=0.102882607
+2026-10-09T02:19:04.208125Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 wait_seconds=3.98e-7 cuda_seconds=0.103073874
+2026-10-09T02:19:04.296505Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 wait_seconds=0.100888712 cuda_seconds=0.090613646
+2026-10-09T02:19:04.296567Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=5 height=16777216 seconds=0.191659075
+2026-10-09T02:19:04.744842Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=5 seconds=0.440622857
+2026-10-09T02:19:04.744983Z  INFO multi_stark::ark_adapter::config: KZG lookup committed circuit=0 evaluation_seconds=1.042354447 trace_seconds=2.051572185 commit_seconds=0.72209437 seconds=3.846545856
+commit_lookup_seconds=3.846559
+2026-10-09T02:19:05.105458Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=2.72e-7 cuda_seconds=0.202888196
+2026-10-09T02:19:05.108796Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=5.54e-7 cuda_seconds=0.206216961
+2026-10-09T02:19:05.111545Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 input_elements=16777216 wait_seconds=4.49e-7 cuda_seconds=0.208954408
+2026-10-09T02:19:05.136475Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 input_elements=16777216 wait_seconds=3.27e-7 cuda_seconds=0.233922305
+2026-10-09T02:19:05.299961Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=0.202998207 cuda_seconds=0.194280405
+2026-10-09T02:19:05.308473Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=0.206335347 cuda_seconds=0.199376913
+2026-10-09T02:19:05.311444Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 input_elements=16777216 wait_seconds=0.209071851 cuda_seconds=0.199784773
+2026-10-09T02:19:05.332351Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 input_elements=16777216 wait_seconds=0.233994477 cuda_seconds=0.195809195
+2026-10-09T02:19:05.496500Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=0.39748037 cuda_seconds=0.196442191
+2026-10-09T02:19:05.508541Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 input_elements=16777216 wait_seconds=0.408943292 cuda_seconds=0.196985193
+2026-10-09T02:19:05.509940Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=0.405984118 cuda_seconds=0.201196746
+2026-10-09T02:19:05.532119Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 input_elements=16777216 wait_seconds=0.429838305 cuda_seconds=0.199695624
+2026-10-09T02:19:05.670863Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=17 height=16777216 transform_seconds=0.62977091 transpose_seconds=0.138677662
+2026-10-09T02:19:05.884733Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=3.57e-7 cuda_seconds=0.192445625
+2026-10-09T02:19:05.885227Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 input_elements=16777216 wait_seconds=4.94e-7 cuda_seconds=0.192952112
+2026-10-09T02:19:05.886135Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=4.38e-7 cuda_seconds=0.193870202
+2026-10-09T02:19:05.915309Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=3 height=16777216 transform_seconds=0.194021145 transpose_seconds=0.029137114
+2026-10-09T02:19:06.121199Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=4.53e-7 cuda_seconds=0.199970778
+2026-10-09T02:19:06.123051Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=4.33e-7 cuda_seconds=0.201866847
+2026-10-09T02:19:06.123819Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 input_elements=16777216 wait_seconds=6.53e-7 cuda_seconds=0.202621761
+2026-10-09T02:19:06.124482Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 input_elements=16777216 wait_seconds=4.02e-7 cuda_seconds=0.203265875
+2026-10-09T02:19:06.305510Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=0.200148378 cuda_seconds=0.1840895
+2026-10-09T02:19:06.352424Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=5 height=16777216 transform_seconds=0.3845205 transpose_seconds=0.046839418
+2026-10-09T02:19:07.524067Z  INFO multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=16777216 selector_seconds=0.401491125 constraint_seconds=0.760834404
+2026-10-09T02:19:07.653618Z  INFO multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=0 coset=0 lde_seconds=1.459327546 seconds=2.908610575
+2026-10-09T02:19:07.897603Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=4.25e-7 cuda_seconds=0.205106212
+2026-10-09T02:19:07.898054Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 input_elements=16777216 wait_seconds=4.95e-7 cuda_seconds=0.205566804
+2026-10-09T02:19:07.916371Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=4.01e-7 cuda_seconds=0.223858984
+2026-10-09T02:19:07.916603Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 input_elements=16777216 wait_seconds=8.2e-8 cuda_seconds=0.224081362
+2026-10-09T02:19:08.094482Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 input_elements=16777216 wait_seconds=0.205649187 cuda_seconds=0.19621208
+2026-10-09T02:19:08.099603Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=0.205200853 cuda_seconds=0.201846546
+2026-10-09T02:19:08.116620Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=0.223960754 cuda_seconds=0.200172898
+2026-10-09T02:19:08.116928Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 input_elements=16777216 wait_seconds=0.224181464 cuda_seconds=0.20025291
+2026-10-09T02:19:08.290402Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 input_elements=16777216 wait_seconds=0.402061926 cuda_seconds=0.195662986
+2026-10-09T02:19:08.299601Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=0.407176762 cuda_seconds=0.199782514
+2026-10-09T02:19:08.315733Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=0.424192798 cuda_seconds=0.199031999
+2026-10-09T02:19:08.316535Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 input_elements=16777216 wait_seconds=0.424488293 cuda_seconds=0.199532124
+2026-10-09T02:19:08.455383Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=17 height=16777216 transform_seconds=0.624239671 transpose_seconds=0.138762817
+2026-10-09T02:19:08.668913Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=3.97e-7 cuda_seconds=0.19232771
+2026-10-09T02:19:08.669071Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 input_elements=16777216 wait_seconds=4.93e-7 cuda_seconds=0.192503632
+2026-10-09T02:19:08.669846Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=3.59e-7 cuda_seconds=0.193270751
+2026-10-09T02:19:08.698431Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=3 height=16777216 transform_seconds=0.193430532 transpose_seconds=0.028540622
+2026-10-09T02:19:08.903701Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=4.16e-7 cuda_seconds=0.199747971
+2026-10-09T02:19:08.905835Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=16777216 input_elements=16777216 wait_seconds=5.6e-7 cuda_seconds=0.201904059
+2026-10-09T02:19:08.906095Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=3 elements=16777216 input_elements=16777216 wait_seconds=4.02e-7 cuda_seconds=0.202151724
+2026-10-09T02:19:08.906659Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=1 elements=16777216 input_elements=16777216 wait_seconds=5.05e-7 cuda_seconds=0.202740542
+2026-10-09T02:19:09.088028Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=2 elements=16777216 input_elements=16777216 wait_seconds=0.199874204 cuda_seconds=0.184134312
+2026-10-09T02:19:09.134727Z DEBUG multi_stark::ark_adapter::pcs: KZG evaluation reconstruction width=5 height=16777216 transform_seconds=0.384269586 transpose_seconds=0.046646841
+2026-10-09T02:19:10.326308Z  INFO multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=16777216 selector_seconds=0.40834083 constraint_seconds=0.773942561
+2026-10-09T02:19:10.477750Z  INFO multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=0 coset=1 lde_seconds=1.45164431 seconds=5.732741434
+2026-10-09T02:19:10.538308Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=1 height=33554432 seconds=0.021279196
+2026-10-09T02:19:10.716303Z DEBUG multi_stark::ark_adapter::cuda: KZG FFT transfer profile device=0 elements=33554432 wait_seconds=6.29e-7 cuda_seconds=0.177870968
+2026-10-09T02:19:10.716320Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=1 height=33554432 seconds=0.177989792
+2026-10-09T02:19:11.222478Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=2 seconds=0.271342189
+2026-10-09T02:19:11.222547Z  INFO multi_stark::ark_adapter::config: KZG quotient committed circuit=0 seconds=6.477540774
+commit_quotient_seconds=6.477554
+wall_seconds=27.48 peak_rss_kib=51037352 exit_code=0

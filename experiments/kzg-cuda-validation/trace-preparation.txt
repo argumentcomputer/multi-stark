@@ -1,0 +1,15 @@
+CPU threads: 96
+read_fixed_seconds=14.094332
+srs_seconds=40.649522
+2026-10-08T15:22:12.720804Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=17 height=16777216 seconds=3.860713576
+2026-10-08T15:22:13.710254Z  INFO multi_stark::ark_adapter::cuda: KZG sppark CUDA backend ids=[0, 1, 2, 3] chunk_points=16777216
+2026-10-08T15:22:14.686532Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=17 height=16777216 seconds=1.9657042200000001
+2026-10-08T15:22:56.612181Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=12 seconds=41.687666657
+commit_fixed_seconds=49.566630
+encode_fixed_seconds=3.784885
+read_main_seconds=2.479258
+2026-10-08T15:23:03.331908Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=3 height=16777216 seconds=0.455184564
+2026-10-08T15:23:03.634616Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=3 height=16777216 seconds=0.302687439
+2026-10-08T15:23:03.967302Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=3 seconds=0.328284823
+commit_main_seconds=1.090678
+encode_main_seconds=0.659566

@@ -1,0 +1,10 @@
+
+running 1 test
+KZG CUDA profile device=0 operation=fft elements=536870912 upload_ms=369.162 kernel_ms=192.429 download_ms=360.008 host_copy_ms=954.369 upload_bytes=17179869184 download_bytes=17179869184 device_copy_bytes=0
+KZG CUDA profile device=0 operation=ifft elements=536870912 upload_ms=368.786 kernel_ms=192.343 download_ms=359.295 host_copy_ms=931.142 upload_bytes=17179869184 download_bytes=17179869184 device_copy_bytes=0
+2^29 coset FFT and inverse: 3.583s
+test ark_adapter::cuda::tests::cuda_fft_2pow29 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 175 filtered out; finished in 6.32s
+
+wall_seconds=6.71 peak_rss_kib=17327948 exit_code=0

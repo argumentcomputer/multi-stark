@@ -1,0 +1,476 @@
+{
+  "status": "verified_sub30_cached_pipeline",
+  "target": "Under 1800 seconds including FRI compression, staging, both KZG proofs and in-process verification; Init aggregation input generation is outside this boundary.",
+  "development_srs": true,
+  "fri_input_regeneration": {
+    "status": "regenerated_and_verified",
+    "root_address": "779713f2027576d9f8bbbb5573e237a057e0bdc18b8599571feff20fcadb814f",
+    "raw_output": "/opt/dlami/nvme/multi-stark-init-root-20261008",
+    "ix_checkout": "/home/sam/repos/ix-l40s-proof-handoff",
+    "ix_head": "c1e923ecc6dc4b47814d81e76585a7e4125b2013",
+    "aggregation_seconds": 194,
+    "aggregation_in_target_boundary": false,
+    "public_claim_equals_historical_init": true,
+    "root_artifacts": {
+      "root-proof.bin": {
+        "sha256": "bf2005ede2852d89588f75fbc435a66d8e5bbd64e0b00737d007afd986b84ed3",
+        "bytes": 5547673
+      },
+      "root-vk.bin": {
+        "sha256": "c5ba16f0baedddba8f950a95bb26b8a551049f65f0a6f4c235f6a85a37a09424",
+        "bytes": 226313
+      },
+      "root-claims.bin": {
+        "sha256": "dfb8b96191a556e5ef5b6999aceaffbcc5d5d9b90b79d275f547adc0f71dd4fa",
+        "bytes": 160
+      }
+    },
+    "aggregation_whole_process_seconds": 198.26
+  },
+  "historical_fri_seconds": 349.46,
+  "historical_fri_rerun": false,
+  "fresh_srs_kzg_iteration_1": {
+    "report": "experiments/kzg-cuda-validation/sub30-v1-pipeline-report.json",
+    "raw_output": "/opt/dlami/nvme/multi-stark-kzg-cuda-sub30-v1-20261008",
+    "pipeline_seconds": 1740.2015457219968,
+    "including_historical_fri_seconds": 2089.661545721997,
+    "including_historical_fri_is_estimate": true,
+    "parity": {
+      "fri_to_kzg": {
+        "proof.compact.bin": {
+          "sha256": "60031d908e1a07dafd42e3558aa563e0a46180c671c37ad4c5d334d9a6eac6e8",
+          "bytes": 53157
+        },
+        "packet.bin": {
+          "sha256": "e3c2164d3d09ff2affa261055d9eb4555a32d73a06031caa422a6c0115dbb40a",
+          "bytes": 53333
+        },
+        "profile-id.bin": {
+          "sha256": "74c36ceebca446b34c79bd96e08a44fa68aeceb141aa71afd2ded24f9784e933",
+          "bytes": 32
+        }
+      },
+      "recursive_kzg": {
+        "proof.compact.bin": {
+          "sha256": "52afd8c8b95e122d5c43ca85201f746199274bb7eaace63e19bf8f99af675272",
+          "bytes": 2053
+        },
+        "packet.bin": {
+          "sha256": "ae8cbb4c7cd5f899c7fe19ea319d2599e2f2939a76d46489dbdae7e0cb192b81",
+          "bytes": 2757
+        },
+        "profile-id.bin": {
+          "sha256": "caa917ccd52167ee4a6f81ef84e8be1d22fc32f89d2b5f4f92acf17a07e042dc",
+          "bytes": 32
+        }
+      }
+    },
+    "recursive_verification": {
+      "claim_bytes": 144,
+      "development_srs": true,
+      "external_pairings_pass": true,
+      "negative_tests_pass": true,
+      "packet_bytes": 2757,
+      "pairing_bytes": 528,
+      "profile_bytes": 32,
+      "proof_bytes": 2053,
+      "total_seconds": 706.741959806,
+      "verify_seconds": 0.015594606
+    },
+    "independent_cpu_verification": "passed both stages",
+    "trace_codec": "zstd -1 -T0; single-thread decompression"
+  },
+  "implemented_in_iteration_1": [
+    "Bounded fixed-base SRS generation",
+    "Parallel trace materialization and matrix transposes",
+    "Parallel canonical field encoding with bounded buffers and compatible checkpoints",
+    "Allocation-free base-field lookup constraints",
+    "Reusable quotient scratch and parallel selector construction"
+  ],
+  "pending": [],
+  "regenerated_fri_diagnostic": {
+    "wall_seconds": 171.62,
+    "proving_seconds": 124.245835781,
+    "peak_rss_bytes": 249417084928,
+    "verified": true,
+    "altered_public_claim_rejected": true,
+    "profile_circuits": 19,
+    "historical_profile_circuits": 22,
+    "arithmetic_partitions": 7,
+    "historical_arithmetic_partitions": 10,
+    "artifacts": {
+      "outer-proof.bin": {
+        "sha256": "3d9ad6a91cc5ee1e00ff7e5681f1564620d152abcea5d25c28814b51a04aff35",
+        "bytes": 1418855
+      },
+      "outer-vk.bin": {
+        "sha256": "b38b0798ac9ce9ce8bc99f1218836fa631baff4ddad51dc4b6ad84a276d03a73",
+        "bytes": 6180
+      },
+      "outer-claims.bin": {
+        "sha256": "9db98e5ee23718cf145fbcd557e535a8e4203358e75591e3c13aa9c3cb3e44c2",
+        "bytes": 1232
+      }
+    },
+    "comparison_note": "The regenerated aggregate certifies the identical Init public claim but has a smaller trace profile; this is not an identical-workload speed comparison."
+  },
+  "fixed_preprocessing_cache": {
+    "status": "full_size_population_and_cpu_verification_passed",
+    "key": "executable digest plus verifier plan (stage 1), or inner system and statement (recursive stage)",
+    "contents": [
+      "fixed circuit metadata",
+      "fixed column commitments",
+      "fixed polynomial coefficients"
+    ],
+    "witness_reused": false,
+    "limitation": "Recursive builder allocates constant gates before rebinding public slots, so its cache also binds the expected statement."
+  },
+  "parallel_frame_io_diagnostic": {
+    "canonical_bytes": 9126805520,
+    "legacy_read_seconds": 9.579882,
+    "parallel_read_seconds": 9.382388,
+    "parallel_encode_seconds": 3.577051,
+    "parallel_decode_to_null_seconds": 0.371666963,
+    "parallel_decode_pipe_copy_seconds": 4.139801373,
+    "note": "Parallel decompression alone did not materially improve full matrix load time."
+  },
+  "cache_populating_run": {
+    "report": "experiments/kzg-cuda-validation/sub30-cache-population-report.json",
+    "raw_output": "/opt/dlami/nvme/multi-stark-kzg-sub30-cache-setup-20261009",
+    "boundary": "compressed FRI to verified final packet; this is a complete proof run which also creates parameters, not an isolated parameter-generation measurement",
+    "pipeline_seconds": 1695.3028964059995,
+    "phases": {
+      "fri_stage": {
+        "wall_seconds": 252.02995270000247,
+        "peak_rss_bytes": 72051699712,
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 1,
+        "srs_cache_hits": 0,
+        "srs_cache_misses": 0
+      },
+      "fri_prove": {
+        "wall_seconds": 494.8606964549981,
+        "peak_rss_bytes": 206359457792,
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 0,
+        "srs_cache_misses": 1
+      },
+      "recursive_stage": {
+        "wall_seconds": 212.16717937000067,
+        "peak_rss_bytes": 193425408000,
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 1,
+        "srs_cache_hits": 1,
+        "srs_cache_misses": 0
+      },
+      "recursive_prove": {
+        "wall_seconds": 736.2412345190023,
+        "peak_rss_bytes": 497254920192,
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 0,
+        "srs_cache_misses": 1
+      },
+      "fri_cpu_verify": {
+        "wall_seconds": 4.0220716949988855,
+        "peak_rss_bytes": 1853497344,
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 1,
+        "srs_cache_misses": 0
+      },
+      "recursive_cpu_verify": {
+        "wall_seconds": 23.610523039998952,
+        "peak_rss_bytes": 28064432128,
+        "fixed_cache_hits": 0,
+        "fixed_cache_misses": 0,
+        "srs_cache_hits": 1,
+        "srs_cache_misses": 0
+      }
+    },
+    "recursive_verification": {
+      "claim_bytes": 144,
+      "development_srs": true,
+      "external_pairings_pass": true,
+      "negative_tests_pass": true,
+      "packet_bytes": 2709,
+      "pairing_bytes": 480,
+      "profile_bytes": 32,
+      "proof_bytes": 2053,
+      "total_seconds": 735.762213738,
+      "verify_seconds": 0.01485612
+    },
+    "quotient_and_lookup_profile": {
+      "constraint_timer_note": "These binaries logged constraint_seconds before the constraint loop. The recorded values measure preparation only and are invalid as sweep timings. Total phase and per-coset wall times remain valid. The source timer was corrected after the complete run started; its frozen binaries retain the old timer.",
+      "fri_prove": {
+        "lookup_seconds": 79.456301572,
+        "materialized_lde_seconds": 105.517207971,
+        "streaming_lde_seconds": 0,
+        "selector_seconds": 8.160909273,
+        "pre_loop_seconds_mislabeled_as_constraint_seconds": 1.706224868
+      },
+      "recursive_prove": {
+        "lookup_seconds": 94.44314028800001,
+        "materialized_lde_seconds": 0,
+        "streaming_lde_seconds": 135.96881673099998,
+        "selector_seconds": 12.630537204,
+        "pre_loop_seconds_mislabeled_as_constraint_seconds": 2.658848428
+      }
+    },
+    "independent_cpu_verification": "both passed",
+    "recursive_fixed_columns": 15,
+    "recursive_fixed_payload_bytes": 128849018880
+  },
+  "pipeline_review_validation": {
+    "document": "experiments/kzg-pipeline-review.md",
+    "fixed_in_source_after_measured_binaries_were_frozen": [
+      "Move quotient constraint timer after the parallel sweep",
+      "Separate lookup evaluation reconstruction, trace construction, and commitment timers",
+      "Report GPU utilization mean and zero-sample share with explicit whole-run sampling scope"
+    ],
+    "historical_stage1_lookup_seconds": 86.161884614,
+    "historical_stage1_main_widths": [
+      3,
+      3,
+      3,
+      3,
+      3,
+      3,
+      3,
+      3,
+      3,
+      3,
+      3,
+      1,
+      32,
+      40,
+      32,
+      40,
+      12,
+      4,
+      1,
+      1,
+      1
+    ],
+    "main_commitments_remaining_after_only_merging_arithmetic_partitions": 167,
+    "recursive_fixed_columns": 15,
+    "recursive_fixed_payload_bytes": 128849018880,
+    "regenerated_recursive_constraint_sweep_plus_interleave_timestamp_bounds_seconds": [
+      11.758972,
+      11.945123,
+      0.002039
+    ],
+    "constraint_bound_note": "Differences between the pre-loop event and the following per-coset event include constraint evaluation and copying the resulting chunk into the quotient; these are upper bounds, not isolated sweep measurements.",
+    "srs_2pow28_cached_reload_seconds": 23.287761554,
+    "fri_compression_already_uses_cuda": true,
+    "fri_parameters": {
+      "log_blowup": 2,
+      "expansion_factor": 4,
+      "num_queries": 100,
+      "query_proof_of_work_bits": 20
+    },
+    "caveats": [
+      "The cited 237408925 rows belong to the recursive circuit, not stage 1.",
+      "The 18-minute cached floor and 3-to-8-minute roadmap are projections, not measurements.",
+      "A recursion-system version alone does not identify the complete verifier profile; activation, log heights, claims shape and key also matter.",
+      "Recursive fixed preprocessing currently binds the expected statement because of constant-gate allocation before public-slot rebinding.",
+      "Changing trace partitioning or FRI parameters changes profiles, keys and proof bytes; it requires new CPU/GPU parity fixtures.",
+      "The proposed 34-query security equivalence is unsupported by the cited source; no security parameters were changed."
+    ],
+    "historical_arithmetic_padded_rows": 167804928,
+    "single_2pow28_arithmetic_padding_ratio": 1.5996875610232377,
+    "stage1_sweep_plus_cleanup_seconds_for_first_18_of_19_circuits": 21.945486704,
+    "stage1_sweep_bound_note": "Derived from sequential pre-loop and next-materialization timestamps, subtracting the next LDE duration. Includes previous sweep and cleanup; the tiny last circuit has no following materialization event."
+  },
+  "complete_cached_pipeline": {
+    "report": "experiments/kzg-cuda-validation/sub30-complete-report.json",
+    "raw_output": "/opt/dlami/nvme/multi-stark-kzg-sub30-complete-20261009",
+    "pipeline_seconds": 1390.017792808001,
+    "boundary": "aggregation root to verified final packet",
+    "including_independent_cpu_verification_seconds": 1418.4184564020034,
+    "fri_compression_rerun": true,
+    "fixed_cache_hits": 2,
+    "srs_regenerated": false,
+    "witness_reused": false,
+    "phases": {
+      "fri_compress": {
+        "wall_seconds": 171.18590379299712,
+        "peak_rss_bytes": 249678135296,
+        "fixed_cache_hits": 0,
+        "srs_cache_hits": 0
+      },
+      "fri_stage": {
+        "wall_seconds": 197.63647605699953,
+        "peak_rss_bytes": 68292313088,
+        "fixed_cache_hits": 1,
+        "srs_cache_hits": 0
+      },
+      "fri_prove": {
+        "wall_seconds": 387.01434288600285,
+        "peak_rss_bytes": 207579705344,
+        "fixed_cache_hits": 0,
+        "srs_cache_hits": 1
+      },
+      "recursive_stage": {
+        "wall_seconds": 139.44078173199523,
+        "peak_rss_bytes": 90346971136,
+        "fixed_cache_hits": 1,
+        "srs_cache_hits": 1
+      },
+      "recursive_prove": {
+        "wall_seconds": 494.735918270002,
+        "peak_rss_bytes": 497326821376,
+        "fixed_cache_hits": 0,
+        "srs_cache_hits": 1
+      },
+      "fri_cpu_verify": {
+        "wall_seconds": 4.069103672998608,
+        "peak_rss_bytes": 1851940864,
+        "fixed_cache_hits": 0,
+        "srs_cache_hits": 1
+      },
+      "recursive_cpu_verify": {
+        "wall_seconds": 23.61363174100552,
+        "peak_rss_bytes": 28056252416,
+        "fixed_cache_hits": 0,
+        "srs_cache_hits": 1
+      }
+    },
+    "artifacts": {
+      "fri-to-kzg": {
+        "proof.compact.bin": {
+          "bytes": 49557,
+          "sha256": "60743ce900113029b9f95eae72ee7f3134420c84a2c4e5a9abc6cbfbda306f8d",
+          "equals_cache_populating_run": true
+        },
+        "packet.bin": {
+          "bytes": 49733,
+          "sha256": "1c9cd6b0c1edeef6e6babe0a07713e0518265f99d563d0274f07a2488bf31554",
+          "equals_cache_populating_run": true
+        },
+        "profile-id.bin": {
+          "bytes": 32,
+          "sha256": "e816255cfe6d15472b53627c4ad32a939fd3b0ff7f57a821042414ce6d71d242",
+          "equals_cache_populating_run": true
+        }
+      },
+      "recursive": {
+        "proof.compact.bin": {
+          "bytes": 2053,
+          "sha256": "c11227de7fbdec5aad81043233cd3e9afa48972fb7a9e59be78fd59982f9c971",
+          "equals_cache_populating_run": true
+        },
+        "packet.bin": {
+          "bytes": 2709,
+          "sha256": "89ee32757b0d4faeef6071e23838c7cf7e48c582a63070cd2f3a491a8410ece4",
+          "equals_cache_populating_run": true
+        },
+        "profile-id.bin": {
+          "bytes": 32,
+          "sha256": "e922e6ed5e1621cf61b22eb55f7deaa247671ddb51147aeab62b09acfbb65362",
+          "equals_cache_populating_run": true
+        }
+      }
+    },
+    "recursive_verification": {
+      "claim_bytes": 144,
+      "development_srs": true,
+      "external_pairings_pass": true,
+      "negative_tests_pass": true,
+      "packet_bytes": 2709,
+      "pairing_bytes": 480,
+      "profile_bytes": 32,
+      "proof_bytes": 2053,
+      "total_seconds": 494.228725215,
+      "verify_seconds": 0.014842738
+    },
+    "independent_cpu_verification": "both stages passed",
+    "gpu_summary": {
+      "scope": "whole run including independent CPU verification after pipeline timing",
+      "sampling_seconds": 2,
+      "devices": {
+        "0": {
+          "peak_memory_mib": 95257,
+          "peak_utilization_percent": 100,
+          "sample_count": 709,
+          "zero_utilization_samples": 619,
+          "mean_utilization_percent": 4.28490832157969,
+          "zero_utilization_sample_percent": 87.30606488011283
+        },
+        "1": {
+          "peak_memory_mib": 8911,
+          "peak_utilization_percent": 91,
+          "sample_count": 709,
+          "zero_utilization_samples": 641,
+          "mean_utilization_percent": 2.926657263751763,
+          "zero_utilization_sample_percent": 90.40902679830748
+        },
+        "2": {
+          "peak_memory_mib": 8911,
+          "peak_utilization_percent": 94,
+          "sample_count": 709,
+          "zero_utilization_samples": 646,
+          "mean_utilization_percent": 2.6445698166431595,
+          "zero_utilization_sample_percent": 91.11424541607899
+        },
+        "3": {
+          "peak_memory_mib": 8911,
+          "peak_utilization_percent": 97,
+          "sample_count": 709,
+          "zero_utilization_samples": 652,
+          "mean_utilization_percent": 2.7122708039492243,
+          "zero_utilization_sample_percent": 91.9605077574048
+        }
+      }
+    },
+    "post_measurement_source_changes": [
+      "src/ark_adapter/config.rs",
+      "experiments/kzg-cuda-bench.py"
+    ],
+    "post_measurement_change_scope": "Correct and split diagnostic timers; add mean and zero-sample GPU utilization to future benchmark summaries. Frozen measured sources and binaries are retained.",
+    "limitations": [
+      "Fixed preprocessing and development SRS were populated before timing. Root aggregation input generation is outside the measured boundary.",
+      "The recursive fixed cache binds the expected statement; this is a cached Init fixture result, not a demonstrated reusable cache across arbitrary changed public statements.",
+      "The regenerated FRI profile has 19 circuits rather than the historical 22; old and new pipeline timings are not identical-workload comparisons.",
+      "The measured binaries contain the pre-loop constraint timer bug; total phase and per-coset wall times remain valid.",
+      "The SRS has a known development trapdoor; this is a correctness and performance experiment."
+    ]
+  },
+  "corrected_timer_diagnostic": {
+    "log": "experiments/kzg-cuda-validation/sub30-corrected-timer-trace.txt",
+    "trace_rows": 16777216,
+    "trace_source": "/opt/dlami/nvme/multi-stark-kzg-sub30-cache-setup-20261009/fri-to-kzg/0",
+    "wall_seconds": 44.78,
+    "peak_rss_bytes": 52250718208,
+    "lookup_seconds": {
+      "evaluation_seconds": 3.34893727,
+      "trace_seconds": 2.029767474,
+      "commit_seconds": 1.202010543,
+      "seconds": 6.6105139170000005
+    },
+    "quotient_seconds": {
+      "lde_seconds": 9.044474592,
+      "selector_seconds": 0.7986954669999999,
+      "constraint_preparation_and_sweep_seconds": 1.526645351,
+      "total_seconds": 13.147414658
+    },
+    "source_sha256": "a14c7442c547a8e345e421a4128795bb7db39ff085878ce4f7abef54d587e278",
+    "binary_sha256": "269abe7a22e87116b0e5d961e7499ba5c8bc65ab410592a900dc5d4c230ce2f0",
+    "scope": "One real 2^24 staged trace with streaming quotient evaluation, run after the complete pipeline. Timers do not change arithmetic or proof bytes.",
+    "checks": [
+      "focused release build passed",
+      "diagnostic exit code 0",
+      "Rust formatting checks passed for both workspaces",
+      "git diff --check passed",
+      "GPU summary checked against known sample values and historical CSV"
+    ]
+  },
+  "latest_gpu_feeding_iteration": {
+    "results": "experiments/kzg-cuda-gpu-feeding-results.json",
+    "pipeline_seconds": 869.4707562330004,
+    "includes_fri_compression": true,
+    "uses_populated_fixed_and_srs_caches": true,
+    "same_proofs_as_prior_cached_pipeline": true
+  }
+}

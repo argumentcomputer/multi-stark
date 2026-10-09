@@ -1,0 +1,46 @@
+Development SRS: 6.328820928s
+2026-10-08T23:15:15.019527Z  INFO multi_stark::ark_adapter::cuda: KZG sppark CUDA backend ids=[0, 1, 2, 3] chunk_points=16777216
+Prepared 0/21: 25.842027702s
+Prepared 1/21: 44.18671645s
+Prepared 2/21: 62.426619266s
+Prepared 3/21: 80.950639618s
+Prepared 4/21: 99.746872858s
+Prepared 5/21: 118.494034468s
+Prepared 6/21: 137.045796446s
+Prepared 7/21: 156.167200178s
+Prepared 8/21: 174.899906521s
+Prepared 9/21: 194.062180867s
+Prepared 10/21: 194.210994043s
+Prepared 11/21: 194.323102152s
+Prepared 12/21: 208.389905991s
+Prepared 13/21: 224.665785061s
+Prepared 14/21: 238.768730874s
+Prepared 15/21: 255.030979071s
+Prepared 16/21: 256.147727778s
+Prepared 17/21: 259.642534456s
+Prepared 18/21: 259.714923443s
+Prepared 19/21: 259.727222895s
+Prepared 20/21: 259.734643417s
+Proving all 21 partitions together: 259.734740013s
+2026-10-08T23:19:23.131718Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=0 seconds=6.610936397
+2026-10-08T23:19:29.747318Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=1 seconds=6.615559746
+2026-10-08T23:19:36.391051Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=2 seconds=6.643684015
+2026-10-08T23:19:43.014866Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=3 seconds=6.623773571
+2026-10-08T23:19:49.666296Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=4 seconds=6.651396494
+2026-10-08T23:19:56.395039Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=5 seconds=6.728705523
+2026-10-08T23:20:03.098275Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=6 seconds=6.703197854
+2026-10-08T23:20:09.993947Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=7 seconds=6.895633602
+2026-10-08T23:20:16.275731Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=8 seconds=6.281740289
+2026-10-08T23:20:22.855104Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=9 seconds=6.579333933
+2026-10-08T23:20:22.965968Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=10 seconds=0.110818232
+2026-10-08T23:20:23.005416Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=11 seconds=0.039422424
+2026-10-08T23:20:27.103855Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=12 seconds=4.098416261
+2026-10-08T23:20:31.926865Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=13 seconds=4.822974497
+2026-10-08T23:20:36.031251Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=14 seconds=4.104343334
+2026-10-08T23:20:40.866319Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=15 seconds=4.835032284
+2026-10-08T23:20:41.345457Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=16 seconds=0.479079518
+2026-10-08T23:20:42.643563Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=17 seconds=1.298071462
+2026-10-08T23:20:42.675509Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=18 seconds=0.03190574
+2026-10-08T23:20:42.680756Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=19 seconds=0.005219575
+2026-10-08T23:20:42.683417Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=20 seconds=0.002639863
+VERIFIED: proof_bytes=53157 packet_bytes=53333 verify_seconds=0.126147627 total_seconds=536.464434163 altered_claims_rejected=18 development_srs=true

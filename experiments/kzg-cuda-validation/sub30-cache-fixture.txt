@@ -1,0 +1,10 @@
+   Compiling multi-stark v0.1.0 (/home/sam/repos/multi-stark)
+    Finished `release` profile [optimized] target(s) in 2.26s
+     Running unittests examples/init_fri_kzg_prove.rs (target/release/examples/init_fri_kzg_prove-170955c016f247cf)
+
+running 2 tests
+test storage::tests::parallel_frames_and_legacy_streams_are_interoperable ... ok
+test tests::staged_hash_fixture_proves_and_resumes_verification ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.82s
+

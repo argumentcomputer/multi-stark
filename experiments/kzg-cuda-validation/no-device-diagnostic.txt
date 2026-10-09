@@ -1,0 +1,15 @@
+
+running 1 test
+
+thread 'ark_adapter::cuda::tests::cuda_msm_matches_arkworks_with_chunks_and_exceptional_points' (247869) panicked at src/ark_adapter/cuda.rs:74:13:
+kzg-cuda requires a visible CUDA GPU; use MULTI_STARK_KZG_BACKEND=cpu for CPU execution
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test ark_adapter::cuda::tests::cuda_msm_matches_arkworks_with_chunks_and_exceptional_points ... FAILED
+
+failures:
+
+failures:
+    ark_adapter::cuda::tests::cuda_msm_matches_arkworks_with_chunks_and_exceptional_points
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 122 filtered out; finished in 0.83s
+

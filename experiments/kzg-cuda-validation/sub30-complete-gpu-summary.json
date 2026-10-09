@@ -1,0 +1,38 @@
+{
+  "scope": "whole run including independent CPU verification after pipeline timing",
+  "sampling_seconds": 2,
+  "devices": {
+    "0": {
+      "peak_memory_mib": 95257,
+      "peak_utilization_percent": 100,
+      "sample_count": 709,
+      "zero_utilization_samples": 619,
+      "mean_utilization_percent": 4.28490832157969,
+      "zero_utilization_sample_percent": 87.30606488011283
+    },
+    "1": {
+      "peak_memory_mib": 8911,
+      "peak_utilization_percent": 91,
+      "sample_count": 709,
+      "zero_utilization_samples": 641,
+      "mean_utilization_percent": 2.926657263751763,
+      "zero_utilization_sample_percent": 90.40902679830748
+    },
+    "2": {
+      "peak_memory_mib": 8911,
+      "peak_utilization_percent": 94,
+      "sample_count": 709,
+      "zero_utilization_samples": 646,
+      "mean_utilization_percent": 2.6445698166431595,
+      "zero_utilization_sample_percent": 91.11424541607899
+    },
+    "3": {
+      "peak_memory_mib": 8911,
+      "peak_utilization_percent": 97,
+      "sample_count": 709,
+      "zero_utilization_samples": 652,
+      "mean_utilization_percent": 2.7122708039492243,
+      "zero_utilization_sample_percent": 91.9605077574048
+    }
+  }
+}

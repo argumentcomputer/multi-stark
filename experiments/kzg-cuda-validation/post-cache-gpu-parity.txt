@@ -1,0 +1,59 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling multi-stark v0.1.0 (/home/sam/repos/multi-stark)
+warning: unused import: `Zero`
+  --> src/ark_adapter/srs/cache.rs:13:21
+   |
+13 | use ark_ff::{Field, Zero};
+   |                     ^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `multi-stark` (lib test) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 14.60s
+     Running unittests src/lib.rs (target/release/deps/multi_stark-b1106e9cea6d0a24)
+
+running 40 tests
+test ark_adapter::cuda::tests::cuda_fft_2pow29 ... ignored, allocates 32 GiB of host memory and a 16 GiB GPU transform
+test ark_adapter::cuda::tests::cuda_msm_2pow29 ... ignored, allocates approximately 70 GiB of host memory; exercises all selected GPUs
+test ark_adapter::cuda::tests::cuda_fft_rejects_overflowing_domain_stride ... ok
+test ark_adapter::cuda::tests::cuda_primitive_benchmark ... ignored, measures CPU/GPU crossover and repeated-column MSM throughput
+test ark_adapter::domain::tests::disjoint_domain_is_disjoint ... ok
+test ark_adapter::domain::tests::next_point_walks_the_domain ... ok
+test ark_adapter::field::tests::inverse_and_powers ... ok
+test ark_adapter::field::tests::serde_round_trip ... ok
+test ark_adapter::field::tests::two_adicity_matches_ark ... ok
+test ark_adapter::transcript::tests::consecutive_samples_differ ... ok
+test ark_adapter::transcript::tests::deterministic_and_sensitive ... ok
+test ark_adapter::transcript::tests::slice_observation_flat ... ok
+test ark_adapter::domain::tests::coset_selectors_match_pointwise ... ok
+test ark_adapter::srs::cache::tests::cache_rejects_a_different_seed_even_with_valid_checksum ... ok
+test ark_adapter::config::tests::quotient_slices_fit_an_srs_exactly_as_large_as_the_trace ... ok
+test ark_adapter::pcs::degree_tests::mixed_degree_openings_enforce_every_bound ... ok
+test ark_adapter::srs::cache::tests::damaged_cache_fails_without_regeneration ... ok
+test ark_adapter::config::tests::batch_messages_work_with_scalar_challenges ... ok
+test ark_adapter::compact::tests::roundtrip_and_reject_malformed_transport ... ok
+test ark_adapter::srs::tests::corrupted_power_rejected ... ok
+test ark_adapter::srs::tests::mismatched_tau_g2_rejected ... ok
+test ark_adapter::config::tests::streamed_lookups_preserve_proof_bytes ... ok
+test ark_adapter::srs::tests::dev_setup_validates ... ok
+test ark_adapter::srs::cache::tests::concurrent_cache_writers_publish_complete_files ... ok
+test ark_adapter::config::tests::opens_next_rows_only_when_the_graph_reads_them ... ok
+test ark_adapter::compact::tests::merged_tables_do_not_allow_cross_table_substitution ... ok
+test ark_adapter::config::tests::kzg_wrong_claim_rejected ... ok
+test ark_adapter::config::tests::kzg_prove_verify ... ok
+test ark_adapter::config::tests::kzg_serialization_round_trip ... ok
+test ark_adapter::config::tests::lookup_tiles_match_serial_trace_across_waves_and_next_rows ... ok
+test ark_adapter::config::tests::kzg_two_circuits_two_heights ... ok
+test ark_adapter::config::tests::kzg_tampering_rejected ... ok
+test ark_adapter::srs::cache::tests::cache_round_trip_and_key_separation ... ok
+test ark_adapter::pcs::degree_tests::batched_openings_preserve_point_column_and_transcript_order ... ok
+test ark_adapter::cuda::tests::cuda_msm_matches_arkworks_with_chunks_and_exceptional_points ... ok
+test ark_adapter::cuda::tests::cuda_resident_msm_columns_match_arkworks ... ok
+test ark_adapter::cuda::tests::cuda_msm_normalizes_structured_columns ... ok
+test ark_adapter::cuda::tests::cuda_polynomial_evaluation_and_division_match_horner ... ok
+test ark_adapter::cuda::tests::cuda_polynomial_evaluates_all_points_in_order ... ok
+test ark_adapter::cuda::tests::cuda_fft_matches_arkworks_on_subgroups_and_arbitrary_cosets ... ok
+
+test result: ok. 37 passed; 0 failed; 3 ignored; 0 measured; 92 filtered out; finished in 1.68s
+

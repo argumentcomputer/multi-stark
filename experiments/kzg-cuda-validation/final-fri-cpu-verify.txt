@@ -1,0 +1,23 @@
+Development SRS: 40.761412062s
+Prepared 0/21: 40.762449563s
+Prepared 1/21: 40.763401281s
+Prepared 2/21: 40.764361285s
+Prepared 3/21: 40.765352501s
+Prepared 4/21: 40.766341477s
+Prepared 5/21: 40.767290977s
+Prepared 6/21: 40.768247169s
+Prepared 7/21: 40.769228618s
+Prepared 8/21: 40.770081233s
+Prepared 9/21: 40.771008934s
+Prepared 10/21: 40.77224194s
+Prepared 11/21: 40.773074549s
+Prepared 12/21: 40.774481089s
+Prepared 13/21: 40.775868532s
+Prepared 14/21: 40.777275612s
+Prepared 15/21: 40.778643686s
+Prepared 16/21: 40.779695011s
+Prepared 17/21: 40.781317471s
+Prepared 18/21: 40.782164301s
+Prepared 19/21: 40.782967436s
+Prepared 20/21: 40.783579063s
+VERIFIED: proof_bytes=53157 packet_bytes=53333 verify_seconds=0.124716967 total_seconds=43.358478399 altered_claims_rejected=18 development_srs=true

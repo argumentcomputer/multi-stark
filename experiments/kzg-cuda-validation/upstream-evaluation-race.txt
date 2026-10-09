@@ -1,0 +1,36 @@
+========= COMPUTE-SANITIZER
+
+running 1 test
+========= Error: Race reported between Write access at void d_evaluate<(int)2, bls12_381::fr_t>(T2 *, const T2 *, int, const T2 *, unsigned long, unsigned long, T2 *)+0xb0d0 in evaluate.cuh:227
+=========     and Write access at void d_evaluate<(int)2, bls12_381::fr_t>(T2 *, const T2 *, int, const T2 *, unsigned long, unsigned long, T2 *)+0x7080 in evaluate.cuh:108 [240 hazards]
+=========     and Read access at void d_evaluate<(int)2, bls12_381::fr_t>(T2 *, const T2 *, int, const T2 *, unsigned long, unsigned long, T2 *)+0x71c0 in evaluate.cuh:115 [192 hazards]
+========= 
+========= Error: Race reported between Write access at void d_evaluate<(int)2, bls12_381::fr_t>(T2 *, const T2 *, int, const T2 *, unsigned long, unsigned long, T2 *)+0xb0b0 in evaluate.cuh:227
+=========     and Write access at void d_evaluate<(int)2, bls12_381::fr_t>(T2 *, const T2 *, int, const T2 *, unsigned long, unsigned long, T2 *)+0x70a0 in evaluate.cuh:107 [240 hazards]
+=========     and Read access at void d_evaluate<(int)2, bls12_381::fr_t>(T2 *, const T2 *, int, const T2 *, unsigned long, unsigned long, T2 *)+0x71a0 in evaluate.cuh:114 [176 hazards]
+========= 
+========= Error: Race reported between Write access at void d_evaluate<(int)2, bls12_381::fr_t>(T2 *, const T2 *, int, const T2 *, unsigned long, unsigned long, T2 *)+0xb0a0 in evaluate.cuh:227
+=========     and Write access at void d_evaluate<(int)2, bls12_381::fr_t>(T2 *, const T2 *, int, const T2 *, unsigned long, unsigned long, T2 *)+0x7090 in evaluate.cuh:107 [180 hazards]
+=========     and Read access at void d_evaluate<(int)2, bls12_381::fr_t>(T2 *, const T2 *, int, const T2 *, unsigned long, unsigned long, T2 *)+0x7180 in evaluate.cuh:114 [192 hazards]
+========= 
+========= Error: Race reported between Write access at void d_evaluate<(int)2, bls12_381::fr_t>(T2 *, const T2 *, int, const T2 *, unsigned long, unsigned long, T2 *)+0xb0c0 in evaluate.cuh:227
+=========     and Write access at void d_evaluate<(int)2, bls12_381::fr_t>(T2 *, const T2 *, int, const T2 *, unsigned long, unsigned long, T2 *)+0x7070 in evaluate.cuh:108 [180 hazards]
+=========     and Read access at void d_evaluate<(int)2, bls12_381::fr_t>(T2 *, const T2 *, int, const T2 *, unsigned long, unsigned long, T2 *)+0x71b0 in evaluate.cuh:115 [192 hazards]
+========= 
+
+thread 'ark_adapter::cuda::tests::cuda_polynomial_evaluates_all_points_in_order' (1562190) panicked at src/ark_adapter/cuda.rs:619:17:
+assertion `left == right` failed: n=2, points=2
+  left: [48176064044334554157306731653792112829945379983431504551962092117169907285315, 42446458410109491553430233018893568056847154266348760190164724336788258298410]
+ right: [46417361289291262747563242174532077801802017415659437961773642430202345221295, 42446458410109491553430233018893568056847154266348760190164724336788258298410]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test ark_adapter::cuda::tests::cuda_polynomial_evaluates_all_points_in_order ... FAILED
+
+failures:
+
+failures:
+    ark_adapter::cuda::tests::cuda_polynomial_evaluates_all_points_in_order
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 125 filtered out; finished in 2.62s
+
+========= Target application returned an error
+========= RACECHECK SUMMARY: 4 hazards displayed (4 errors, 0 warnings)

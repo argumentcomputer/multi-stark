@@ -1,0 +1,58 @@
+Preparing development SRS for 2^28 rows
+VmHWM:	27668444 kB VmRSS:	27644252 kB
+VmHWM:	27668444 kB VmRSS:	27640536 kB
+VmHWM:	27668444 kB VmRSS:	27655704 kB
+Generated and cached development SRS /opt/dlami/nvme/multi-stark-kzg-sub30-srs-cache/1d6bb915e14b784d5ec3244950e35b82e7abcdafba2d40c53b3a89c80df51133.dev-srs in 119.341020789s
+Outer development SRS ready: 119.351087945s
+VmHWM:	28065000 kB VmRSS:	28065000 kB
+VmHWM:	55915628 kB VmRSS:	55900492 kB
+VmHWM:	83942096 kB VmRSS:	83917812 kB
+VmHWM:	112026656 kB VmRSS:	112000592 kB
+VmHWM:	140196180 kB VmRSS:	140196180 kB
+Committing recursive fixed trace 0: 254.077204381s
+VmHWM:	231102904 kB VmRSS:	231102904 kB
+2026-10-09T00:24:41.384889Z  INFO multi_stark::ark_adapter::cuda: KZG sppark CUDA backend ids=[0, 1, 2, 3] chunk_points=16777216
+VmHWM:	438817092 kB VmRSS:	438817092 kB
+VmHWM:	438802040 kB VmRSS:	153687104 kB
+VmHWM:	438802040 kB VmRSS:	157551808 kB
+Committing recursive main trace 0: 382.958025984s
+VmHWM:	438802040 kB VmRSS:	182009676 kB
+Prepared recursive trace 0: 401.552367848s
+Committing recursive fixed trace 1: 401.584313191s
+Committing recursive main trace 1: 401.663611446s
+Prepared recursive trace 1: 401.681501734s
+Proving recursive KZG wrapper: 401.681526919s
+VmHWM:	438802040 kB VmRSS:	311368076 kB
+VmHWM:	438802040 kB VmRSS:	349698424 kB
+VmHWM:	438802040 kB VmRSS:	375578436 kB
+2026-10-09T00:28:10.165860Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=0 seconds=94.403452224
+2026-10-09T00:28:10.205587Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=1 seconds=0.039688064
+VmHWM:	438802040 kB VmRSS:	393330984 kB
+VmHWM:	478273820 kB VmRSS:	478273820 kB
+VmHWM:	485599456 kB VmRSS:	439337248 kB
+2026-10-09T00:29:28.411560Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=268435456 selector_seconds=6.282289634 constraint_seconds=1.323202282
+2026-10-09T00:29:40.170532Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=0 coset=0 lde_seconds=67.955774548 seconds=89.96489904
+VmHWM:	485599456 kB VmRSS:	373777324 kB
+VmHWM:	485607176 kB VmRSS:	485607176 kB
+VmHWM:	485600508 kB VmRSS:	452052708 kB
+2026-10-09T00:30:56.348486Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=268435456 selector_seconds=6.338473147 constraint_seconds=1.334538052
+2026-10-09T00:31:08.293609Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=0 coset=1 lde_seconds=67.99805924099999 seconds=178.087975596
+VmHWM:	485600508 kB VmRSS:	265428772 kB
+2026-10-09T00:31:28.734480Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient committed circuit=0 seconds=198.528845469
+2026-10-09T00:31:28.760826Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=131072 selector_seconds=0.009774423 constraint_seconds=0.001108094
+2026-10-09T00:31:28.762865Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=1 coset=0 lde_seconds=0.014982942 seconds=0.028339729
+2026-10-09T00:31:28.779765Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient committed circuit=1 seconds=0.045241016
+VmHWM:	485600508 kB VmRSS:	247306064 kB
+{
+  "claim_bytes": 144,
+  "development_srs": true,
+  "external_pairings_pass": true,
+  "negative_tests_pass": true,
+  "packet_bytes": 2709,
+  "pairing_bytes": 480,
+  "profile_bytes": 32,
+  "proof_bytes": 2053,
+  "total_seconds": 735.762213738,
+  "verify_seconds": 0.01485612
+}
+Published fixed preprocessing: /opt/dlami/nvme/multi-stark-kzg-sub30-fixed-cache/5fa3512c004ef0b85cf8fa2cc8c3219b6a4828f742814b0ffb1f50f0dfadeedc

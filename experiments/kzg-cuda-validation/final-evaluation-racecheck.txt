@@ -1,0 +1,8 @@
+========= COMPUTE-SANITIZER
+
+running 1 test
+test ark_adapter::cuda::tests::cuda_polynomial_evaluates_all_points_in_order ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 125 filtered out; finished in 17.96s
+
+========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)

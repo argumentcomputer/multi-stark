@@ -1,0 +1,30 @@
+CPU threads: 96
+read_fixed_seconds=10.224456
+srs_seconds=6.426101
+2026-10-09T00:58:10.383603Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=17 height=16777216 seconds=0.414085282
+2026-10-09T00:58:11.361584Z  INFO multi_stark::ark_adapter::cuda: KZG sppark CUDA backend ids=[0, 1, 2, 3] chunk_points=16777216
+2026-10-09T00:58:12.337096Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=17 height=16777216 seconds=1.953462519
+2026-10-09T00:58:13.410524Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=12 seconds=0.834703546
+commit_fixed_seconds=5.255565
+encode_fixed_seconds=0.127346
+read_main_seconds=1.740352
+2026-10-09T00:58:15.396375Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=3 height=16777216 seconds=0.117777553
+2026-10-09T00:58:15.702736Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=3 height=16777216 seconds=0.306337446
+2026-10-09T00:58:16.032319Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=3 seconds=0.324899301
+commit_main_seconds=0.753817
+encode_main_seconds=0.024729
+2026-10-09T00:58:21.626692Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=5 height=16777216 seconds=0.161022819
+2026-10-09T00:58:22.220805Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=5 height=16777216 seconds=0.594080774
+2026-10-09T00:58:22.667553Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=5 seconds=0.438530305
+2026-10-09T00:58:22.667677Z  INFO multi_stark::ark_adapter::config: KZG lookup committed circuit=0 evaluation_seconds=3.34893727 trace_seconds=2.029767474 commit_seconds=1.202010543 seconds=6.6105139170000005
+commit_lookup_seconds=6.610520
+2026-10-09T00:58:28.509038Z  INFO multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=16777216 selector_seconds=0.396503942 constraint_seconds=0.762776087
+2026-10-09T00:58:28.636332Z  INFO multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=0 coset=0 lde_seconds=4.520752246 seconds=5.968638237
+2026-10-09T00:58:34.363235Z  INFO multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=16777216 selector_seconds=0.402191525 constraint_seconds=0.763869264
+2026-10-09T00:58:34.514165Z  INFO multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=0 coset=1 lde_seconds=4.523722346 seconds=11.846469556
+2026-10-09T00:58:34.732487Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=1 height=33554432 seconds=0.180856897
+2026-10-09T00:58:35.298495Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=1 height=33554432 seconds=0.565987853
+2026-10-09T00:58:35.815030Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=2 seconds=0.272117451
+2026-10-09T00:58:35.815108Z  INFO multi_stark::ark_adapter::config: KZG quotient committed circuit=0 seconds=13.147414658
+commit_quotient_seconds=13.147427
+wall_seconds=44.78 peak_rss_kib=51026092 exit_code=0

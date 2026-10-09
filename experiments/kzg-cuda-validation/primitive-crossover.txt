@@ -1,0 +1,12 @@
+
+running 1 test
+crossover lg=10 cpu_fft=0.000386 gpu_fft=0.000062 cpu_eval=0.000021 gpu_eval=0.000061 cpu_divide=0.000022 gpu_divide=0.000481
+crossover lg=12 cpu_fft=0.001558 gpu_fft=0.000100 cpu_eval=0.000092 gpu_eval=0.000077 cpu_divide=0.000098 gpu_divide=0.000564
+crossover lg=14 cpu_fft=0.003204 gpu_fft=0.000588 cpu_eval=0.000407 gpu_eval=0.000305 cpu_divide=0.000576 gpu_divide=0.001095
+crossover lg=16 cpu_fft=0.005277 gpu_fft=0.000960 cpu_eval=0.001668 gpu_eval=0.000368 cpu_divide=0.001826 gpu_divide=0.001528
+crossover lg=18 cpu_fft=0.013742 gpu_fft=0.004811 cpu_eval=0.006693 gpu_eval=0.001504 cpu_divide=0.007637 gpu_divide=0.003735
+resident_columns lg=24 columns=4 separate_seconds=0.896001 batch_seconds=0.365633
+test ark_adapter::cuda::tests::cuda_primitive_benchmark ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 122 filtered out; finished in 43.76s
+

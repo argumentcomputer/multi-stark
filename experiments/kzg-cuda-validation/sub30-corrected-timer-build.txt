@@ -1,0 +1,2 @@
+   Compiling multi-stark v0.1.0 (/home/sam/repos/multi-stark)
+    Finished `release` profile [optimized] target(s) in 10.57s

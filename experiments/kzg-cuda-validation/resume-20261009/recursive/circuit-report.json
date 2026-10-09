@@ -1,0 +1,31 @@
+{
+  "build_seconds": 26.758286342,
+  "circuit_satisfied": true,
+  "development_srs": true,
+  "external_pairings_pass": true,
+  "gates": 162558992,
+  "input_proof_blake3": "89bef9fbea54d2f84a6e22d8fb4a5be2a48f94b2af8bc9344d062f81010b3305",
+  "input_proof_bytes": 49557,
+  "load_and_native_verify_seconds": 1.680602779,
+  "lookups": 58068412,
+  "msm_terms": [
+    330,
+    4,
+    7,
+    6,
+    7,
+    28,
+    30,
+    248,
+    583,
+    9
+  ],
+  "outer_proof_generated": false,
+  "pairing_points": 10,
+  "public_values": 38,
+  "rows": 220627443,
+  "scope": "Full saved Init KZG proof checked by recursive constraints and external pairings; no outer proof yet",
+  "total_seconds": 80.610203107,
+  "values": 214553237,
+  "witness_seconds": 52.171124826
+}

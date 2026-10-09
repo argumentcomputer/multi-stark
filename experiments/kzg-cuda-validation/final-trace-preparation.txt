@@ -1,0 +1,38 @@
+CPU threads: 96
+read_fixed_seconds=14.246016
+srs_seconds=40.082621
+2026-10-08T21:05:12.894310Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=17 height=16777216 seconds=3.874231129
+2026-10-08T21:05:13.878927Z  INFO multi_stark::ark_adapter::cuda: KZG sppark CUDA backend ids=[0, 1, 2, 3] chunk_points=16777216
+2026-10-08T21:05:14.857035Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=17 height=16777216 seconds=1.962701707
+2026-10-08T21:05:16.046388Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=12 seconds=0.948660845
+commit_fixed_seconds=8.891154
+encode_fixed_seconds=3.787545
+read_main_seconds=2.506505
+2026-10-08T21:05:22.794144Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=3 height=16777216 seconds=0.453335129
+2026-10-08T21:05:23.187416Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=3 height=16777216 seconds=0.393250286
+2026-10-08T21:05:23.521231Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=3 seconds=0.32814941
+commit_main_seconds=1.180524
+encode_main_seconds=0.659826
+	Command being timed: "target/release/examples/kzg_cuda_prepare_bench /opt/dlami/nvme/multi-stark-kzg-cuda-20261008/fri-to-kzg 0"
+	User time (seconds): 3664.09
+	System time (seconds): 13.21
+	Percent of CPU this job got: 5127%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:11.71
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 30964884
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 682681
+	Voluntary context switches: 261539
+	Involuntary context switches: 54846
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

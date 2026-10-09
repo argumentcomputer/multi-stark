@@ -38,5 +38,29 @@ For bounded trace memory, use `lower_to_multi_stark_sharded` and
 `with_streaming_quotient` evaluates one trace-sized coset at a time.
 `KzgProverData` checkpoints and `System::prove_committed` reuse committed traces.
 
-See [the Init pipeline](../experiments/kzg-wrap/README.md) for commands and measured
-results. Wrapping a proof does not raise its underlying security level.
+## GPU acceleration
+
+The `kzg-cuda` feature runs BLS12-381 MSMs, scalar-field FFTs, polynomial
+evaluations and opening-witness division on CUDA through the pinned
+`argumentcomputer/sppark` fork, preserving the CPU transcript, checkpoint
+format and proof bytes. It coexists with the Goldilocks `cuda` feature.
+Interpolated columns stay resident on their device within a per-device
+budget and feed later FFTs, MSMs and evaluations without re-upload; lookup
+and constraint evaluation still run on the CPU from downloaded evaluations.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MULTI_STARK_KZG_BACKEND` | `cuda` | `cpu` bypasses the GPU in the same binary |
+| `MULTI_STARK_KZG_CUDA_DEVICES` | all | Comma-separated CUDA ordinals to use |
+| `MULTI_STARK_KZG_MSM_CHUNK_POINTS` | `16777216` | Maximum SRS points per MSM chunk |
+| `MULTI_STARK_KZG_CUDA_RESIDENT_GIB` | half of VRAM | Per-device budget for resident coefficients |
+| `MULTI_STARK_KZG_DEV_SRS_CACHE` | unset | Trusted local cache of development SRS files |
+| `MULTI_STARK_KZG_FIXED_CACHE` | unset | Trusted local cache of fixed preprocessing, keyed by executable and plan identity |
+
+Both caches are development conveniences bound to the exact executable; the
+recursive fixed cache also binds the public statement. See
+[the Init pipeline](../experiments/kzg-wrap/README.md) for commands and measured
+results, [the benchmark record](cuda-benchmarks.md) for dated figures, and
+[upstream GPU orchestration](upstream-gpu-orchestration.md) for how SP1 and
+ZisK structure the same work. Wrapping a proof does not raise its underlying
+security level.

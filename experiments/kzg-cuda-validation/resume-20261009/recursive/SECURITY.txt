@@ -1,0 +1,1 @@
+Development SRS with known trapdoor; not production-secure. The final verifier must check the 18-word Init claim and both external pairing equations.

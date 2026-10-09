@@ -1,0 +1,81 @@
+Loaded development SRS cache /opt/dlami/nvme/multi-stark-kzg-sub30-srs-cache/50664d8c92de07b40c102be45cdb7c87837511bc767f775e0a24b06e841f3137.dev-srs in 1.500528171s
+Development SRS: 1.50058051s
+2026-10-09T00:39:06.848885Z  INFO multi_stark::ark_adapter::cuda: KZG sppark CUDA backend ids=[0, 1, 2, 3] chunk_points=16777216
+Prepared 0/19: 12.115877896s
+Prepared 1/19: 21.608112352s
+Prepared 2/19: 31.243257082s
+Prepared 3/19: 40.71078547s
+Prepared 4/19: 50.25327659s
+Prepared 5/19: 59.877463561s
+Prepared 6/19: 69.417523317s
+Prepared 7/19: 78.803702243s
+Prepared 8/19: 88.27748181s
+Prepared 9/19: 88.33864871s
+Prepared 10/19: 97.889948194s
+Prepared 11/19: 109.299207692s
+Prepared 12/19: 118.90324579s
+Prepared 13/19: 130.258421866s
+Prepared 14/19: 130.972608183s
+Prepared 15/19: 132.55577146s
+Prepared 16/19: 132.596157423s
+Prepared 17/19: 132.608808536s
+Prepared 18/19: 132.618647765s
+Proving all 19 partitions together: 132.618724295s
+2026-10-09T00:41:15.072873Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=0 seconds=6.573376935
+2026-10-09T00:41:21.650273Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=1 seconds=6.577356142
+2026-10-09T00:41:28.195854Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=2 seconds=6.545546378
+2026-10-09T00:41:34.745654Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=3 seconds=6.549761163
+2026-10-09T00:41:41.307929Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=4 seconds=6.562232663
+2026-10-09T00:41:47.865586Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=5 seconds=6.557622359
+2026-10-09T00:41:54.749357Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=6 seconds=6.883730416
+2026-10-09T00:42:00.975765Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=7 seconds=6.226370873
+2026-10-09T00:42:07.479184Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=8 seconds=6.503374434
+2026-10-09T00:42:07.518744Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=9 seconds=0.039524879
+2026-10-09T00:42:11.694750Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=10 seconds=4.175976496
+2026-10-09T00:42:16.583257Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=11 seconds=4.888467168
+2026-10-09T00:42:20.711105Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=12 seconds=4.127810974
+2026-10-09T00:42:25.664539Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=13 seconds=4.953398136
+2026-10-09T00:42:26.128671Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=14 seconds=0.464091223
+2026-10-09T00:42:27.463539Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=15 seconds=1.334829408
+2026-10-09T00:42:27.496711Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=16 seconds=0.033135599
+2026-10-09T00:42:27.502287Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=17 seconds=0.005554427
+2026-10-09T00:42:27.505144Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=18 seconds=0.002836367
+2026-10-09T00:42:36.540545Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=9.035310285
+2026-10-09T00:42:37.502202Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=33554432 selector_seconds=0.795689741 constraint_seconds=0.165929533
+2026-10-09T00:42:48.400970Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=9.012653796
+2026-10-09T00:42:49.358549Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=33554432 selector_seconds=0.789894779 constraint_seconds=0.167633771
+2026-10-09T00:43:00.280685Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=9.040582061
+2026-10-09T00:43:01.248261Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=33554432 selector_seconds=0.801891417 constraint_seconds=0.165647124
+2026-10-09T00:43:12.081926Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=8.951812864
+2026-10-09T00:43:13.043556Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=33554432 selector_seconds=0.794749135 constraint_seconds=0.166845162
+2026-10-09T00:43:23.939083Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=9.006614333
+2026-10-09T00:43:24.904958Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=33554432 selector_seconds=0.798725028 constraint_seconds=0.167111931
+2026-10-09T00:43:35.802966Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=9.015372311
+2026-10-09T00:43:36.767770Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=33554432 selector_seconds=0.799150794 constraint_seconds=0.165614175
+2026-10-09T00:43:48.210468Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=9.561370996
+2026-10-09T00:43:49.171843Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=33554432 selector_seconds=0.794912629 constraint_seconds=0.166423836
+2026-10-09T00:43:59.369102Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=8.302153587
+2026-10-09T00:44:00.331181Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=33554432 selector_seconds=0.796098248 constraint_seconds=0.165943585
+2026-10-09T00:44:11.104030Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=8.913305747
+2026-10-09T00:44:12.075273Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=33554432 selector_seconds=0.802794681 constraint_seconds=0.168409588
+2026-10-09T00:44:13.970256Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=0.016945854
+2026-10-09T00:44:13.979060Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=131072 selector_seconds=0.007692587 constraint_seconds=0.001061958
+2026-10-09T00:44:19.182492Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=5.200536122
+2026-10-09T00:44:19.428273Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=8388608 selector_seconds=0.203606512 constraint_seconds=0.042136687
+2026-10-09T00:44:26.356202Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=5.888569238
+2026-10-09T00:44:26.603619Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=8388608 selector_seconds=0.205044698 constraint_seconds=0.042330968
+2026-10-09T00:44:33.218183Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=5.361600449
+2026-10-09T00:44:33.464873Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=8388608 selector_seconds=0.203819648 constraint_seconds=0.042830359
+2026-10-09T00:44:40.531018Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=6.024112266
+2026-10-09T00:44:40.782531Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=8388608 selector_seconds=0.20906183 constraint_seconds=0.042401955
+2026-10-09T00:44:42.356001Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=0.323244476
+2026-10-09T00:44:42.382328Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=1048576 selector_seconds=0.022324529 constraint_seconds=0.003966519
+2026-10-09T00:44:43.855259Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=1.397250263
+2026-10-09T00:44:43.980534Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=4194304 selector_seconds=0.104278915 constraint_seconds=0.020959383
+2026-10-09T00:44:44.291103Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=0.005909318
+2026-10-09T00:44:44.295872Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=65536 selector_seconds=0.00432307 constraint_seconds=0.000411894
+2026-10-09T00:44:44.298580Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=0.001036059
+2026-10-09T00:44:44.298776Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=512 selector_seconds=0.000175101 constraint_seconds=7.35e-6
+2026-10-09T00:44:44.299177Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient evaluations materialized seconds=0.000200061
+2026-10-09T00:44:44.299259Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient constraints evaluated rows=256 selector_seconds=7.3561e-5 constraint_seconds=6.75e-6
+VERIFIED: proof_bytes=49557 packet_bytes=49733 verify_seconds=0.119876479 total_seconds=386.55954302 altered_claims_rejected=18 development_srs=true

@@ -1,0 +1,43 @@
+CPU threads: 96
+read_fixed_seconds=14.084450
+srs_seconds=40.335059
+2026-10-08T21:33:12.051491Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=17 height=16777216 seconds=3.86294737
+2026-10-08T21:33:13.048205Z  INFO multi_stark::ark_adapter::cuda: KZG sppark CUDA backend ids=[0, 1, 2, 3] chunk_points=16777216
+2026-10-08T21:33:14.021764Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=17 height=16777216 seconds=1.970250676
+2026-10-08T21:33:15.093973Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=12 seconds=0.83264816
+commit_fixed_seconds=8.744194
+encode_fixed_seconds=3.768022
+read_main_seconds=2.505514
+2026-10-08T21:33:21.820539Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=3 height=16777216 seconds=0.452661029
+2026-10-08T21:33:22.123394Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=3 height=16777216 seconds=0.302836348
+2026-10-08T21:33:22.454711Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=3 seconds=0.326849105
+commit_main_seconds=1.086929
+encode_main_seconds=0.666308
+2026-10-08T21:33:29.905027Z DEBUG multi_stark::ark_adapter::pcs: KZG transpose columns width=5 height=16777216 seconds=0.759714523
+2026-10-08T21:33:30.492842Z DEBUG multi_stark::ark_adapter::pcs: KZG column interpolation width=5 height=16777216 seconds=0.587794171
+2026-10-08T21:33:30.940316Z DEBUG multi_stark::ark_adapter::pcs: KZG column MSMs count=16777216 columns=5 seconds=0.44002024
+2026-10-08T21:33:30.940455Z  INFO multi_stark::ark_adapter::config: KZG lookup committed circuit=0 seconds=7.819321211
+commit_lookup_seconds=7.819326
+	Command being timed: "target/release/examples/kzg_cuda_prepare_bench /opt/dlami/nvme/multi-stark-kzg-cuda-20261008/fri-to-kzg 0"
+	User time (seconds): 3798.80
+	System time (seconds): 40.90
+	Percent of CPU this job got: 4832%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:19.45
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 51261016
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 1265998
+	Voluntary context switches: 269636
+	Involuntary context switches: 63291
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

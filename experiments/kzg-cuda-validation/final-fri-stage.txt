@@ -1,0 +1,28 @@
+Saved 1530149-byte recursive FRI proof verified; all 18 altered Init claim words rejected
+Source circuit: 3.335467382s; CircuitStats { hash_calls: 52171, hash_compressions: 60297, values: 46477269, inputs: 1454641, gates: 39256939, lookups: 7503584, tables: 3, publics: 18, hint_calls: 3275123, hint_outputs: 9269911 }
+Source witness satisfied: 4.833787564s
+Scalar translation: 60.748044305s; CircuitStats { hash_calls: 52171, hash_compressions: 60297, values: 147741842, inputs: 46477148, gates: 126776495, lookups: 35688166, tables: 4, publics: 18, hint_calls: 47263732, hint_outputs: 47263732 }
+Scalar witness satisfied: 113.557621899s
+Lowered 21 circuits: 140.38864075s
+Staged 0/21: 173.728278579s
+Staged 1/21: 188.354069639s
+Staged 2/21: 202.481003169s
+Staged 3/21: 217.118332777s
+Staged 4/21: 231.334421362s
+Staged 5/21: 245.544610612s
+Staged 6/21: 259.830274049s
+Staged 7/21: 274.200365965s
+Staged 8/21: 288.894900037s
+Staged 9/21: 304.577226064s
+Staged 10/21: 304.616002405s
+Staged 11/21: 308.695372773s
+Staged 12/21: 319.242513397s
+Staged 13/21: 331.308783494s
+Staged 14/21: 341.946444479s
+Staged 15/21: 353.789213899s
+Staged 16/21: 354.68282341s
+Staged 17/21: 356.386511978s
+Staged 18/21: 357.701807124s
+Staged 19/21: 358.446845881s
+Staged 20/21: 359.122697998s
+STAGING COMPLETE: 359.122768892s

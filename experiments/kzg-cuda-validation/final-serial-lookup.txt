@@ -1,0 +1,38 @@
+   Compiling ark-std v0.5.0
+   Compiling ark-serialize v0.5.0
+   Compiling ark-ff v0.5.0
+   Compiling ark-poly v0.5.0
+   Compiling ark-ec v0.5.0
+   Compiling ark-bls12-381 v0.5.0
+   Compiling multi-stark v0.1.0 (/home/sam/repos/multi-stark)
+warning: unnecessary qualification
+   --> src/verifier.rs:953:30
+    |
+953 |         let hash: [u8; 32] = p3_blake3::Blake3.hash_iter(bytes.iter().copied());
+    |                              ^^^^^^^^^^^^^^^^^
+    |
+    = note: requested on the command line with `-W unused-qualifications`
+help: remove the unnecessary path segments
+    |
+953 -         let hash: [u8; 32] = p3_blake3::Blake3.hash_iter(bytes.iter().copied());
+953 +         let hash: [u8; 32] = Blake3.hash_iter(bytes.iter().copied());
+    |
+
+warning: `multi-stark` (lib test) generated 1 warning (run `cargo fix --lib -p multi-stark --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 17.55s
+     Running unittests src/lib.rs (target/release/deps/multi_stark-3737ec7525f48a60)
+
+running 10 tests
+test ark_adapter::config::tests::lookup_tiles_match_serial_trace_across_waves_and_next_rows ... ok
+test ark_adapter::config::tests::quotient_slices_fit_an_srs_exactly_as_large_as_the_trace ... ok
+test ark_adapter::config::tests::batch_messages_work_with_scalar_challenges ... ok
+test ark_adapter::config::tests::streamed_lookups_preserve_proof_bytes ... ok
+test ark_adapter::config::tests::opens_next_rows_only_when_the_graph_reads_them ... ok
+test ark_adapter::config::tests::kzg_prove_verify ... ok
+test ark_adapter::config::tests::kzg_wrong_claim_rejected ... ok
+test ark_adapter::config::tests::kzg_serialization_round_trip ... ok
+test ark_adapter::config::tests::kzg_two_circuits_two_heights ... ok
+test ark_adapter::config::tests::kzg_tampering_rejected ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 109 filtered out; finished in 0.06s
+

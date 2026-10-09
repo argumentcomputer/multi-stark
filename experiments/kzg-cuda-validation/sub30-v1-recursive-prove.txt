@@ -1,0 +1,52 @@
+Preparing development SRS for 2^28 rows
+VmHWM:	27653108 kB VmRSS:	27653108 kB
+VmHWM:	27644576 kB VmRSS:	27644576 kB
+VmHWM:	27688860 kB VmRSS:	27688860 kB
+Outer development SRS ready: 99.681241575s
+VmHWM:	48519924 kB VmRSS:	48501844 kB
+VmHWM:	79558296 kB VmRSS:	79558296 kB
+VmHWM:	110665148 kB VmRSS:	110635972 kB
+VmHWM:	141829552 kB VmRSS:	141800996 kB
+Committing recursive fixed trace 0: 221.157087964s
+VmHWM:	244088656 kB VmRSS:	244088656 kB
+2026-10-08T23:31:54.306129Z  INFO multi_stark::ark_adapter::cuda: KZG sppark CUDA backend ids=[0, 1, 2, 3] chunk_points=16777216
+VmHWM:	438808500 kB VmRSS:	408732076 kB
+VmHWM:	438808500 kB VmRSS:	153687784 kB
+VmHWM:	438808500 kB VmRSS:	159432528 kB
+Committing recursive main trace 0: 353.564115675s
+VmHWM:	438808500 kB VmRSS:	229153244 kB
+Prepared recursive trace 0: 372.194444014s
+Committing recursive fixed trace 1: 372.227264099s
+Committing recursive main trace 1: 372.299267646s
+Prepared recursive trace 1: 372.317525448s
+Proving recursive KZG wrapper: 372.317552164s
+VmHWM:	438808500 kB VmRSS:	338265392 kB
+VmHWM:	438808500 kB VmRSS:	341818708 kB
+VmHWM:	438808500 kB VmRSS:	374642632 kB
+2026-10-08T23:35:26.933418Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=0 seconds=94.935381318
+2026-10-08T23:35:26.975475Z  INFO stark/lookup_construction: multi_stark::ark_adapter::config: KZG lookup committed circuit=1 seconds=0.042019057
+VmHWM:	438808500 kB VmRSS:	391811992 kB
+VmHWM:	469000876 kB VmRSS:	469000876 kB
+VmHWM:	484079132 kB VmRSS:	429759140 kB
+2026-10-08T23:36:56.860195Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=0 coset=0 seconds=89.884673844
+VmHWM:	484079132 kB VmRSS:	391835580 kB
+VmHWM:	484079132 kB VmRSS:	482969520 kB
+VmHWM:	484098060 kB VmRSS:	443662264 kB
+2026-10-08T23:38:24.983899Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=0 coset=1 seconds=178.008377346
+VmHWM:	484098060 kB VmRSS:	259694504 kB
+2026-10-08T23:38:45.258818Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient committed circuit=0 seconds=198.283296858
+2026-10-08T23:38:45.282108Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient coset evaluated circuit=1 coset=0 seconds=0.023256953
+2026-10-08T23:38:45.301799Z  INFO stark/quotient: multi_stark::ark_adapter::config: KZG quotient committed circuit=1 seconds=0.042948237
+VmHWM:	484098060 kB VmRSS:	240846600 kB
+{
+  "claim_bytes": 144,
+  "development_srs": true,
+  "external_pairings_pass": true,
+  "negative_tests_pass": true,
+  "packet_bytes": 2757,
+  "pairing_bytes": 528,
+  "profile_bytes": 32,
+  "proof_bytes": 2053,
+  "total_seconds": 706.741959806,
+  "verify_seconds": 0.015594606
+}

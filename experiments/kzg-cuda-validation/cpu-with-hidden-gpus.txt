@@ -1,0 +1,28 @@
+
+running 23 tests
+test ark_adapter::domain::tests::disjoint_domain_is_disjoint ... ok
+test ark_adapter::domain::tests::next_point_walks_the_domain ... ok
+test ark_adapter::field::tests::serde_round_trip ... ok
+test ark_adapter::field::tests::inverse_and_powers ... ok
+test ark_adapter::field::tests::two_adicity_matches_ark ... ok
+test ark_adapter::transcript::tests::consecutive_samples_differ ... ok
+test ark_adapter::transcript::tests::deterministic_and_sensitive ... ok
+test ark_adapter::transcript::tests::slice_observation_flat ... ok
+test ark_adapter::domain::tests::coset_selectors_match_pointwise ... ok
+test ark_adapter::compact::tests::roundtrip_and_reject_malformed_transport ... ok
+test ark_adapter::pcs::degree_tests::mixed_degree_openings_enforce_every_bound ... ok
+test ark_adapter::config::tests::batch_messages_work_with_scalar_challenges ... ok
+test ark_adapter::config::tests::quotient_slices_fit_an_srs_exactly_as_large_as_the_trace ... ok
+test ark_adapter::srs::tests::corrupted_power_rejected ... ok
+test ark_adapter::srs::tests::dev_setup_validates ... ok
+test ark_adapter::srs::tests::mismatched_tau_g2_rejected ... ok
+test ark_adapter::config::tests::opens_next_rows_only_when_the_graph_reads_them ... ok
+test ark_adapter::compact::tests::merged_tables_do_not_allow_cross_table_substitution ... ok
+test ark_adapter::config::tests::kzg_prove_verify ... ok
+test ark_adapter::config::tests::kzg_wrong_claim_rejected ... ok
+test ark_adapter::config::tests::kzg_serialization_round_trip ... ok
+test ark_adapter::config::tests::kzg_two_circuits_two_heights ... ok
+test ark_adapter::config::tests::kzg_tampering_rejected ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out; finished in 0.08s
+

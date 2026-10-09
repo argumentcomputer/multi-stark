@@ -1,0 +1,1 @@
+{"wall_seconds":23.60,"peak_rss_kib":27401660,"exit_code":0}
