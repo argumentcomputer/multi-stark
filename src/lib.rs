@@ -10,10 +10,12 @@ pub mod expr;
 pub mod graph;
 pub mod lookup;
 pub mod p3_adapter;
+pub mod plonkish;
 pub mod prover;
 pub mod system;
 #[cfg(test)]
 mod test_circuits;
+pub mod traits;
 pub mod types;
 pub mod verifier;
 pub mod witness;

@@ -2,7 +2,7 @@
 //! challenges, so that lookup messages may be pushed in one proof and pulled
 //! in another.
 //!
-//! A single [`Proof`](crate::prover::Proof) establishes a lookup identity over
+//! A single [`Proof`] establishes a lookup identity over
 //! its own rows: the pushed and pulled multisets cancel, so the final
 //! accumulator is zero. Splitting the rows of one execution across K proofs —
 //! trace shards — breaks that per-proof identity: a message pushed in shard 0
@@ -68,11 +68,9 @@ use crate::system::{ProverKey, System, SystemWitness};
 use crate::verifier::VerificationError;
 use crate::{ensure, ensure_eq};
 
+use crate::traits::{Algebra, Field, Transcript, TwoAdicField};
 use bincode::error::{DecodeError, EncodeError};
 use bincode::serde::{decode_from_slice, encode_to_vec};
-use p3_challenger::CanObserve;
-use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
 use serde::{Deserialize, Serialize};
 
 /// What a shard publishes after round one: everything about it that the
@@ -278,25 +276,25 @@ impl<SC: StarkGenericConfig> System<SC> {
         let mut challenger = self.config.initialise_challenger();
         self.observe_shape(&mut challenger);
         if let Some(commit) = &self.preprocessed_commit {
-            challenger.observe(commit.clone());
+            challenger.observe_commitment(commit.clone());
         }
-        challenger.observe(Val::<SC>::from_usize(preamble.headers.len()));
+        challenger.observe_field(Val::<SC>::from_usize(preamble.headers.len()));
         for header in &preamble.headers {
             for &is_active in &header.active {
-                challenger.observe(Val::<SC>::from_bool(is_active));
+                challenger.observe_field(Val::<SC>::from_bool(is_active));
             }
-            challenger.observe(header.stage_1_trace.clone());
-            challenger.observe(Val::<SC>::from_usize(header.log_degrees.len()));
+            challenger.observe_commitment(header.stage_1_trace.clone());
+            challenger.observe_field(Val::<SC>::from_usize(header.log_degrees.len()));
             for &log_degree in &header.log_degrees {
-                challenger.observe(Val::<SC>::from_u8(log_degree));
+                challenger.observe_field(Val::<SC>::from_u8(log_degree));
             }
             observe_claims::<SC>(&mut challenger, &claim_slices::<SC>(&header.claims));
         }
-        challenger.observe(Val::<SC>::from_usize(preamble.messages.len()));
+        challenger.observe_field(Val::<SC>::from_usize(preamble.messages.len()));
         for message in &preamble.messages {
-            challenger.observe(Val::<SC>::from_usize(message.args.len()));
-            challenger.observe_slice(&message.args);
-            challenger.observe(message.multiplicity);
+            challenger.observe_field(Val::<SC>::from_usize(message.args.len()));
+            challenger.observe_field_slice(&message.args);
+            challenger.observe_field(message.multiplicity);
         }
         let (lookup_argument_challenge, fingerprint_challenge) =
             sample_lookup_challenges::<SC>(&mut challenger);
@@ -310,7 +308,7 @@ impl<SC: StarkGenericConfig> System<SC> {
         fingerprint_challenge: &SC::Challenge,
         messages: &[BatchMessage<SC>],
     ) -> SC::Challenge {
-        let mut acc = SC::Challenge::ZERO;
+        let mut acc = <SC::Challenge as Algebra<SC::Challenge>>::ZERO;
         for message in messages {
             let m = lookup_argument_challenge
                 + fingerprint(fingerprint_challenge, message.args.iter().cloned());
@@ -328,7 +326,7 @@ impl<SC: StarkGenericConfig> System<SC> {
         proof: &Proof<SC>,
     ) -> Result<SC::Challenge, VerificationError<PcsError<SC>>>
     where
-        Val<SC>: TwoAdicField,
+        Val<SC>: TwoAdicField + Ord,
         Com<SC>: PartialEq,
     {
         let (challenger, lookup_argument_challenge, fingerprint_challenge) =
@@ -353,7 +351,7 @@ impl<SC: StarkGenericConfig> System<SC> {
         fingerprint_challenge: SC::Challenge,
     ) -> Result<SC::Challenge, VerificationError<PcsError<SC>>>
     where
-        Val<SC>: TwoAdicField,
+        Val<SC>: TwoAdicField + Ord,
         Com<SC>: PartialEq,
     {
         let header = preamble
@@ -369,7 +367,7 @@ impl<SC: StarkGenericConfig> System<SC> {
                 && header.log_degrees == proof.log_degrees,
             VerificationError::BatchShapeMismatch
         );
-        challenger.observe(Val::<SC>::from_usize(shard));
+        challenger.observe_field(Val::<SC>::from_usize(shard));
         let acc = claims_accumulator::<SC>(
             lookup_argument_challenge,
             &fingerprint_challenge,
@@ -397,7 +395,7 @@ impl<SC: StarkGenericConfig> System<SC> {
         batch: &BatchProof<SC>,
     ) -> Result<(), VerificationError<PcsError<SC>>>
     where
-        Val<SC>: TwoAdicField,
+        Val<SC>: TwoAdicField + Ord,
         Com<SC>: PartialEq,
         SC::Challenger: Clone,
     {
@@ -425,7 +423,7 @@ impl<SC: StarkGenericConfig> System<SC> {
         }
         ensure_eq!(
             total,
-            SC::Challenge::ZERO,
+            <SC::Challenge as Algebra<SC::Challenge>>::ZERO,
             VerificationError::UnbalancedBatch
         );
         Ok(())
@@ -435,8 +433,7 @@ impl<SC: StarkGenericConfig> System<SC> {
 impl<SC> System<SC>
 where
     SC: StarkGenericConfig,
-    Val<SC>: TwoAdicField,
-    SC::Dft: TwoAdicSubgroupDft<Val<SC>>,
+    Val<SC>: TwoAdicField + Ord,
 {
     /// Round two for one shard: forks the batch transcript at the shard
     /// index and proves from the committed stage 1. `claims` must be the
@@ -452,7 +449,7 @@ where
     ) -> Proof<SC> {
         let (mut challenger, lookup_argument_challenge, fingerprint_challenge) =
             self.batch_challenger(preamble);
-        challenger.observe(Val::<SC>::from_usize(shard));
+        challenger.observe_field(Val::<SC>::from_usize(shard));
         let acc =
             claims_accumulator::<SC>(lookup_argument_challenge, &fingerprint_challenge, claims);
         self.prove_after_challenges(
@@ -837,9 +834,9 @@ mod tests {
         let r1 = system
             .verify_batch_shard(&batch.preamble, 1, &batch.proofs[1])
             .unwrap();
-        assert_ne!(r0, ExtVal::ZERO);
-        assert_ne!(r1, ExtVal::ZERO);
-        assert_eq!(r0 + r1, ExtVal::ZERO);
+        assert_ne!(r0, <ExtVal as p3_field::PrimeCharacteristicRing>::ZERO);
+        assert_ne!(r1, <ExtVal as p3_field::PrimeCharacteristicRing>::ZERO);
+        assert_eq!(r0 + r1, <ExtVal as p3_field::PrimeCharacteristicRing>::ZERO);
     }
 
     #[test]
@@ -967,7 +964,8 @@ mod tests {
         let (system, key) = byte_system(config());
         let mut batch = system.prove_batch(&key, two_shards(&system), vec![]);
         let last = batch.proofs[0].intermediate_accumulators.len() - 1;
-        batch.proofs[0].intermediate_accumulators[last] += ExtVal::ONE;
+        batch.proofs[0].intermediate_accumulators[last] +=
+            <ExtVal as p3_field::PrimeCharacteristicRing>::ONE;
         assert!(system.verify_batch(&batch).is_err());
     }
 

@@ -45,11 +45,7 @@
 //! [`MAX_LOOKUP_GROUP`] so the evaluator's scratch space stays on the
 //! stack.
 
-#[cfg(feature = "cuda")]
-use p3_field::BasedVectorSpace;
-use p3_field::{
-    Algebra, ExtensionField, Field, PrimeCharacteristicRing, batch_multiplicative_inverse,
-};
+use crate::traits::{Algebra, ExtensionOf, Field, batch_inverse};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
 
@@ -58,7 +54,7 @@ use crate::expr::{Expr, ExtExpr, RowOffset};
 /// A lookup: a multiplicity and a vector of arguments. `E` is a frontend
 /// expression in a [`crate::system::CircuitInputs`] and a node id once
 /// compiled.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Lookup<E> {
     pub multiplicity: E,
     pub args: Vec<E>,
@@ -69,7 +65,7 @@ impl<E> Lookup<E> {
     #[inline]
     pub fn empty() -> Self
     where
-        E: PrimeCharacteristicRing,
+        E: Field,
     {
         Self {
             multiplicity: E::ZERO,
@@ -196,6 +192,47 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
 ) {
     let group_size = group_size.max(1);
     debug_assert!(group_size <= MAX_LOOKUP_GROUP);
+    // Native-field PCS backends need no coordinate vectors. Keep grouped
+    // message products on the stack, including zero-message cases.
+    if d == 1 {
+        let injection = is_last_row * delta_scaled[0];
+        if lookups.is_empty() {
+            out.push(stage2_next[0] - stage2[0] + injection);
+            return;
+        }
+        let last_group = lookups.len().div_ceil(group_size) - 1;
+        for (g, chunk) in lookups.chunks(group_size).enumerate() {
+            let target = if g == last_group {
+                stage2_next[0] + injection
+            } else {
+                stage2[g + 1]
+            };
+            let mut messages = [A::ZERO; MAX_LOOKUP_GROUP];
+            for (message, lookup) in messages.iter_mut().zip(chunk) {
+                *message = lookup
+                    .args
+                    .iter()
+                    .rev()
+                    .fold(A::ZERO, |v, id| v * publics[1] + node_vals[id.index()])
+                    + publics[0];
+            }
+            let len = chunk.len();
+            let mut prefix = [A::ONE; MAX_LOOKUP_GROUP + 1];
+            let mut suffix = [A::ONE; MAX_LOOKUP_GROUP + 1];
+            for j in 0..len {
+                prefix[j + 1] = prefix[j] * messages[j];
+            }
+            for j in (0..len).rev() {
+                suffix[j] = messages[j] * suffix[j + 1];
+            }
+            let mut value = prefix[len] * (target - stage2[g]);
+            for (j, lookup) in chunk.iter().enumerate() {
+                value -= prefix[j] * suffix[j + 1] * node_vals[lookup.multiplicity.index()];
+            }
+            out.push(value);
+        }
+        return;
+    }
     // Allocation-free Karatsuba fast path for the reference degree-2
     // extension; this runs per point-packet on the prover's quotient
     // domain, so it must not touch the heap. Group products use
@@ -516,13 +553,13 @@ pub fn synthesize_lookups<F: Field>(
 #[inline]
 pub(crate) fn fingerprint<F, I, Iter>(r: &F, coeffs: Iter) -> F
 where
-    F: PrimeCharacteristicRing,
+    F: Field,
     I: Into<F>,
     Iter: DoubleEndedIterator<Item = I>,
 {
     coeffs
         .rev()
-        .fold(F::ZERO, |acc, coeff| acc * r.clone() + coeff.into())
+        .fold(F::ZERO, |acc, coeff| acc * *r + coeff.into())
 }
 
 /// Concrete lookup values of one circuit, stored flat.
@@ -645,7 +682,7 @@ impl<F: Field> LookupValues<F> {
     /// Computes the stage 2 traces and the intermediate accumulators for each
     /// circuit given a lookup challenge, a fingerprint challenge and the current
     /// accumulator value (computed from the initial claims).
-    pub fn stage_2_traces<EF: ExtensionField<F>>(
+    pub fn stage_2_traces<EF: ExtensionOf<F>>(
         circuits: &[Self],
         group_sizes: &[usize],
         lookup_challenge: EF,
@@ -677,8 +714,8 @@ impl<F: Field> LookupValues<F> {
         drop(_g);
 
         // Compute the inverses of all messages in batch.
-        let messages_inverses = tracing::info_span!("stark/batch_inverse")
-            .in_scope(|| batch_multiplicative_inverse(&messages));
+        let messages_inverses =
+            tracing::info_span!("stark/batch_inverse").in_scope(|| batch_inverse(&messages));
         // Only the inverses are consumed below.
         drop(messages);
 
@@ -700,7 +737,7 @@ impl<F: Field> LookupValues<F> {
                 // Pass-through accumulator column; the committed values are
                 // gauge-free (only differences are constrained), zero by
                 // convention.
-                vec![EF::ZERO; circuit.height]
+                vec![<EF as Algebra<EF>>::ZERO; circuit.height]
             } else {
                 // One partial accumulator per lookup GROUP: `acc_g` is the
                 // running sum ENTERING group g's step; the last group's
@@ -710,7 +747,7 @@ impl<F: Field> LookupValues<F> {
                 // accumulator; the circuit's total contribution is added to
                 // the global chain at the end.
                 let mut vec = Vec::with_capacity(circuit.height * num_slots);
-                let mut local = EF::ZERO;
+                let mut local = <EF as Algebra<EF>>::ZERO;
                 for (row_multiplicities, row_messages_inverses) in circuit
                     .multiplicities
                     .chunks_exact(circuit.num_lookups)
@@ -743,7 +780,7 @@ impl<F: Field> LookupValues<F> {
 
 #[cfg(feature = "cuda")]
 impl LookupValues<p3_goldilocks::Goldilocks> {
-    pub(crate) fn cuda_stage_2_deltas<EF: ExtensionField<p3_goldilocks::Goldilocks>>(
+    pub(crate) fn cuda_stage_2_deltas<EF: ExtensionOf<p3_goldilocks::Goldilocks>>(
         &self,
         rows: core::ops::Range<usize>,
         group_size: usize,
@@ -753,10 +790,7 @@ impl LookupValues<p3_goldilocks::Goldilocks> {
         self.require_payload();
         assert!(rows.start <= rows.end && rows.end <= self.height);
         assert!(self.num_lookups != 0);
-        assert_eq!(
-            <EF as BasedVectorSpace<p3_goldilocks::Goldilocks>>::DIMENSION,
-            2
-        );
+        assert_eq!(<EF as ExtensionOf<p3_goldilocks::Goldilocks>>::D, 2);
         let group_size = group_size.max(1);
         let slots = lookup_groups(self.num_lookups, group_size);
         let message_start = rows.start * self.num_lookups;
@@ -773,7 +807,7 @@ impl LookupValues<p3_goldilocks::Goldilocks> {
                     )
             })
             .collect::<Vec<_>>();
-        let inverses = batch_multiplicative_inverse(&messages);
+        let inverses = batch_inverse(&messages);
         drop(messages);
         (0..(rows.end - rows.start) * slots)
             .into_par_iter()
@@ -784,7 +818,7 @@ impl LookupValues<p3_goldilocks::Goldilocks> {
                 let end = (begin + group_size).min(self.num_lookups);
                 let row = rows.start + local_row;
                 let inverse_row = local_row * self.num_lookups;
-                let mut delta = EF::ZERO;
+                let mut delta = <EF as Algebra<EF>>::ZERO;
                 for lookup in begin..end {
                     let multiplicity = self.multiplicities[row * self.num_lookups + lookup];
                     delta += EF::from(multiplicity) * inverses[inverse_row + lookup];
@@ -937,7 +971,6 @@ impl<F: Field> LookupRowMut<'_, F> {
 #[cfg(test)]
 mod tests {
     use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
-    use p3_field::Field;
 
     use crate::{
         p3_adapter::{LookupAir, SymbolicExpression, var},
@@ -956,10 +989,9 @@ mod tests {
     /// textbook Lagrange basis product, at arbitrary points, several sizes.
     #[test]
     fn selector_normalization_constants() {
-        use crate::config::StarkGenericConfig;
+        use crate::config::ProofConfig;
+        use crate::traits::{Algebra, EvaluationDomain, TwoAdicField};
         use crate::types::ExtVal;
-        use p3_commit::PolynomialSpace;
-        use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 
         let config = GoldilocksBlake3Config::new(
             CommitmentParameters {
@@ -977,12 +1009,8 @@ mod tests {
         for log_n in [2usize, 3, 5, 8] {
             let n = 1usize << log_n;
             let g = Val::two_adic_generator(log_n);
-            let domain: crate::types::Domain = <crate::types::Pcs as p3_commit::Pcs<
-                ExtVal,
-                crate::types::Challenger,
-            >>::natural_domain_for_degree(
-                config.pcs(), n
-            );
+            let domain: crate::types::Domain =
+                crate::traits::Pcs::natural_domain_for_degree(config.pcs(), n);
             for seed in [3u64, 12345, 0xdead_beef] {
                 let zeta: ExtVal =
                     ExtVal::from_u64(seed).exp_u64(7) + ExtVal::from_u64(seed * 31 + 1);
@@ -990,7 +1018,7 @@ mod tests {
                 // Textbook Lagrange basis of the last row:
                 // Π_{i≠n−1} (ζ − g^i)/(g^{n−1} − g^i).
                 let last = g.exp_u64((n - 1) as u64);
-                let mut ref_last = ExtVal::ONE;
+                let mut ref_last = <ExtVal as Algebra<ExtVal>>::ONE;
                 for i in 0..n - 1 {
                     let gi = g.exp_u64(i as u64);
                     ref_last *= (zeta - ExtVal::from(gi)) * ExtVal::from(last - gi).inverse();
@@ -1001,7 +1029,7 @@ mod tests {
                     ref_last,
                     "last-row normalization, log_n={log_n}"
                 );
-                let mut ref_first = ExtVal::ONE;
+                let mut ref_first = <ExtVal as Algebra<ExtVal>>::ONE;
                 for i in 1..n {
                     let gi = g.exp_u64(i as u64);
                     ref_first *= (zeta - ExtVal::from(gi)) * ExtVal::from(Val::ONE - gi).inverse();
@@ -1024,14 +1052,13 @@ mod tests {
     fn direct_logup_matches_synthesized_reference() {
         use crate::eval::{VarValues, eval_expr, eval_ext_expr};
         use crate::graph::ExtensionParams;
-        use p3_field::PrimeCharacteristicRing;
 
         let params = crate::system::extension_params::<GoldilocksBlake3Config>();
-        let (w, d) = (params.w, params.degree);
+        let w = params.w;
 
         // Lookups with assorted shapes: multi-arg with a product, single
         // arg, and the degenerate empty-args case.
-        let lookups = vec![
+        let lookups = [
             Lookup::push(
                 Expr::main(0),
                 vec![
@@ -1046,10 +1073,12 @@ mod tests {
                 args: vec![],
             },
         ];
-        // Cover the ungrouped argument, an uneven grouping (3 lookups in
-        // groups of 2 → a full pair plus a singleton tail), and one full
-        // group of 3.
-        for group_size in [1, 2, 3] {
+        // Both native and quadratic fields, empty lookups, uneven groups,
+        // and the maximum stack-array width.
+        for (d, group_size, count) in [1, params.degree].into_iter().flat_map(|d| {
+            (1..=MAX_LOOKUP_GROUP).flat_map(move |g| [0, 3, 9].map(|count| (d, g, count)))
+        }) {
+            let lookups: Vec<_> = lookups.iter().cycle().take(count).cloned().collect();
             let synthesized = synthesize_lookups(&lookups, d, group_size);
 
             // Deterministic pseudo-random base-field values (an equality of
@@ -1066,7 +1095,12 @@ mod tests {
             let s2_width = stage2_width(lookups.len(), group_size, d);
             let s2_cur: Vec<Val> = (0..s2_width).map(|_| next()).collect();
             let s2_next: Vec<Val> = (0..s2_width).map(|_| next()).collect();
-            let publics: Vec<Val> = (0..num_publics(d)).map(|_| next()).collect();
+            let mut publics: Vec<Val> = (0..num_publics(d)).map(|_| next()).collect();
+            // Empty-argument messages are zero in the scalar case; products
+            // must work without dividing by individual messages.
+            if group_size % 2 == 0 {
+                publics[0] = Val::ZERO;
+            }
             let (isf, isl, ist) = (next(), next(), next());
 
             let empty: [Val; 0] = [];

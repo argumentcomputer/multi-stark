@@ -13,6 +13,11 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Cached build scripts and proc macros run on different hosted CPUs.
+  # Override the local native target with a portable, cache-keyed target.
+  RUSTFLAGS: "-Ctarget-cpu=x86-64"
+
 jobs:
   linux-test:
     runs-on: ubuntu-latest
@@ -20,9 +25,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The action denies warnings through cargo's build.warnings, which
-      # covers clippy too, and leaves RUSTFLAGS unset so codegen comes from
-      # .cargo/config.toml.
+      # Deny warnings through cargo's build.warnings while preserving the
+      # portable RUSTFLAGS above for both host and target code.
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
@@ -80,9 +84,8 @@ jobs:
         run: |
           apt-get update
           apt-get install --yes --no-install-recommends curl
-      # Codegen comes from .cargo/config.toml, as in the other jobs. The action
-      # sets build.warnings=deny, which makes cargo fail on clippy warnings
-      # too, so the clippy command below does not repeat -D warnings.
+      # Use the same portable host codegen as the other jobs. The action
+      # sets build.warnings=deny, including clippy warnings.
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
       - name: Compile and lint CUDA targets
         run: cargo clippy --release --locked --all-targets --features parallel,cuda

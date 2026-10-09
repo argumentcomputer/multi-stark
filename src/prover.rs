@@ -9,7 +9,7 @@
 //! The proving protocol proceeds in several stages sharing one Fiat-Shamir
 //! transcript. The challenger starts from a seed binding a domain tag and all
 //! protocol parameters (see the transcript contract on
-//! [`StarkGenericConfig::initialise_challenger`]), and the system shape
+//! [`ProofConfig::initialise_challenger`]), and the system shape
 //! (circuit count, widths, constraint counts, degrees)
 //! is observed before any commitment.
 //!
@@ -179,25 +179,23 @@
 //! the prover's work.
 
 use crate::config::{
-    Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsData, PcsProof,
-    StarkGenericConfig, Val,
+    Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsData, PcsProof, ProofConfig,
+    Val,
 };
 use crate::eval::VarValues;
 use crate::lookup::{LookupValues, fingerprint};
 use crate::system::{ProverKey, System, SystemWitness};
+use crate::traits::{
+    Algebra, EvaluationDomain, ExtensionOf, Field, LagrangeSelectors, OpenedValuesForRound, Packed,
+    PackedExtension, Pcs, Transcript, TwoAdicField, flatten_to_base,
+};
 
 use bincode::config::{Configuration, Fixint, LittleEndian, standard};
 use bincode::error::{DecodeError, EncodeError};
 use bincode::serde::{decode_from_slice, encode_to_vec};
-use p3_challenger::{CanObserve, FieldChallenger};
-use p3_commit::{LagrangeSelectors, OpenedValuesForRound, Pcs, PolynomialSpace};
-use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{
-    Algebra, BasedVectorSpace, Field, PackedValue, PrimeCharacteristicRing, TwoAdicField,
-};
-use p3_matrix::{Matrix, bitrev::BitReversibleMatrix, dense::RowMajorMatrix};
+use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
-use p3_util::{log2_strict_usize, reverse_bits_len};
+use p3_util::log2_strict_usize;
 use serde::{Deserialize, Serialize};
 
 /// Polynomial commitments included in the proof.
@@ -214,7 +212,7 @@ pub struct Commitments<Com> {
 /// A STARK proof for a multi-circuit system.
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct Proof<SC: StarkGenericConfig> {
+pub struct Proof<SC: ProofConfig> {
     /// Activation bitmap over the system's canonical circuit set: circuit i
     /// is covered by this proof iff `active[i]`. Inactive circuits (empty
     /// execution traces) are not committed, opened, accumulated, or
@@ -239,7 +237,7 @@ pub struct Proof<SC: StarkGenericConfig> {
     pub stage_2_opened_values: OpenedValuesForRound<SC::Challenge>,
 }
 
-impl<SC: StarkGenericConfig> Clone for Proof<SC> {
+impl<SC: ProofConfig> Clone for Proof<SC> {
     fn clone(&self) -> Self {
         Self {
             active: self.active.clone(),
@@ -264,7 +262,7 @@ impl<SC: StarkGenericConfig> Clone for Proof<SC> {
 /// after reading [`Stage1::active`], [`Stage1::log_degrees`] and
 /// [`Stage1::stage_1_trace_commit`], and recommit the same witness later —
 /// the commitment is deterministic.
-pub struct Stage1<SC: StarkGenericConfig> {
+pub struct Stage1<SC: ProofConfig> {
     /// Activation bitmap over the canonical circuit set (see [`Proof::active`]).
     pub active: Vec<bool>,
     /// Canonical index of each active circuit, in order.
@@ -282,37 +280,34 @@ pub struct Stage1<SC: StarkGenericConfig> {
 /// Observes length-prefixed claims: the claim count, then each claim's
 /// length and elements, so distinct claim structures (e.g. `[[a, b]]` vs
 /// `[[a], [b]]`) yield distinct transcripts.
-pub(crate) fn observe_claims<SC: StarkGenericConfig>(
-    challenger: &mut SC::Challenger,
-    claims: &[&[Val<SC>]],
-) {
-    challenger.observe(Val::<SC>::from_usize(claims.len()));
+pub fn observe_claims<SC: ProofConfig>(challenger: &mut SC::Challenger, claims: &[&[Val<SC>]]) {
+    challenger.observe_field(Val::<SC>::from_usize(claims.len()));
     for claim in claims {
-        challenger.observe(Val::<SC>::from_usize(claim.len()));
-        challenger.observe_slice(claim);
+        challenger.observe_field(Val::<SC>::from_usize(claim.len()));
+        challenger.observe_field_slice(claim);
     }
 }
 
 /// Samples the lookup argument challenge β and the fingerprint challenge γ,
 /// observing each back into the transcript.
-pub(crate) fn sample_lookup_challenges<SC: StarkGenericConfig>(
+pub fn sample_lookup_challenges<SC: ProofConfig>(
     challenger: &mut SC::Challenger,
 ) -> (SC::Challenge, SC::Challenge) {
-    let lookup_argument_challenge: SC::Challenge = challenger.sample_algebra_element();
-    challenger.observe_algebra_element(lookup_argument_challenge);
-    let fingerprint_challenge: SC::Challenge = challenger.sample_algebra_element();
-    challenger.observe_algebra_element(fingerprint_challenge);
+    let lookup_argument_challenge: SC::Challenge = challenger.sample_challenge();
+    challenger.observe_challenge(lookup_argument_challenge);
+    let fingerprint_challenge: SC::Challenge = challenger.sample_challenge();
+    challenger.observe_challenge(fingerprint_challenge);
     (lookup_argument_challenge, fingerprint_challenge)
 }
 
 /// The accumulator contributed by public claims: each claim is one message
 /// pushed with multiplicity one, `Σ (β + fingerprint(γ, claim))⁻¹`.
-pub(crate) fn claims_accumulator<SC: StarkGenericConfig>(
+pub(crate) fn claims_accumulator<SC: ProofConfig>(
     lookup_argument_challenge: SC::Challenge,
     fingerprint_challenge: &SC::Challenge,
     claims: &[&[Val<SC>]],
 ) -> SC::Challenge {
-    let mut acc = SC::Challenge::ZERO;
+    let mut acc = <SC::Challenge as Algebra<SC::Challenge>>::ZERO;
     for claim in claims {
         let message =
             lookup_argument_challenge + fingerprint(fingerprint_challenge, claim.iter().cloned());
@@ -321,7 +316,7 @@ pub(crate) fn claims_accumulator<SC: StarkGenericConfig>(
     acc
 }
 
-impl<SC: StarkGenericConfig> Proof<SC> {
+impl<SC: ProofConfig> Proof<SC> {
     pub(crate) fn serde_config() -> Configuration<LittleEndian, Fixint> {
         standard().with_little_endian().with_fixed_int_encoding()
     }
@@ -342,12 +337,11 @@ impl<SC: StarkGenericConfig> Proof<SC> {
 
 impl<SC> System<SC>
 where
-    SC: StarkGenericConfig,
+    SC: ProofConfig,
     // Two-adicity is needed to slice the quotient into coefficient slices
     // and rebuild their committed LDE from those coefficients; every
     // FRI-based config is two-adic anyway.
-    Val<SC>: TwoAdicField,
-    SC::Dft: TwoAdicSubgroupDft<Val<SC>>,
+    Val<SC>: TwoAdicField + Ord,
 {
     /// Generates a STARK proof for the system with a single claim.
     ///
@@ -381,6 +375,16 @@ where
         witness: SystemWitness<Val<SC>>,
     ) -> Proof<SC> {
         let stage_1 = self.prove_stage_1(witness);
+        self.prove_committed(key, claims, stage_1)
+    }
+
+    /// Continue an ordinary proof from independently prepared stage-one data.
+    pub fn prove_committed(
+        &self,
+        key: &ProverKey<SC>,
+        claims: &[&[Val<SC>]],
+        stage_1: Stage1<SC>,
+    ) -> Proof<SC> {
         let mut challenger = self.config.initialise_challenger();
 
         // Bind the system shape into the transcript. The protocol parameters
@@ -390,19 +394,19 @@ where
         // The activation bitmap is bound into the transcript before any
         // commitment or challenge (see `Stage1::active`).
         for &is_active in &stage_1.active {
-            challenger.observe(Val::<SC>::from_bool(is_active));
+            challenger.observe_field(Val::<SC>::from_bool(is_active));
         }
 
         if let Some(commit) = &self.preprocessed_commit {
-            challenger.observe(commit.clone());
+            challenger.observe_commitment(commit.clone());
         }
-        challenger.observe(stage_1.stage_1_trace_commit.clone());
+        challenger.observe_commitment(stage_1.stage_1_trace_commit.clone());
 
         // Observe the traces' heights. This binds the proof to specific domain
         // sizes; the verifier reads these from the (untrusted) proof, so they
         // must influence every subsequent challenge.
         for log_degree in &stage_1.log_degrees {
-            challenger.observe(Val::<SC>::from_usize(*log_degree));
+            challenger.observe_field(Val::<SC>::from_usize(*log_degree));
         }
 
         // Observe the claims, length-prefixed so that distinct claim
@@ -593,23 +597,23 @@ where
                 let evaluations = stage_2_traces.into_iter().map(|trace| {
                     let degree = trace.height();
                     let trace_domain = pcs.natural_domain_for_degree(degree);
-                    (trace_domain, trace.flatten_to_base())
+                    (trace_domain, flatten_to_base(trace))
                 });
-                let (commitment, data) = pcs.commit(evaluations);
+                let (commitment, data) = pcs.commit(evaluations.collect());
                 drop(_g);
                 (commitment, data, intermediate_accumulators)
             };
-        challenger.observe(stage_2_trace_commit.clone());
+        challenger.observe_commitment(stage_2_trace_commit.clone());
 
         // Observe the intermediate accumulators. They enter the constraints as
         // public values, so later challenges (α, ζ) must depend on them
         // directly rather than only through the quotient commitment.
         for acc in &intermediate_accumulators {
-            challenger.observe_algebra_element(*acc);
+            challenger.observe_challenge(*acc);
         }
 
         // Constraint challenge.
-        let constraint_challenge: SC::Challenge = challenger.sample_algebra_element();
+        let constraint_challenge: SC::Challenge = challenger.sample_challenge();
 
         // Cost: "Quotient computation and commit" — constraint evaluation on
         // the quotient domain (Σ n_i·q_i·eval_cost(k_i)), the forward DFT of
@@ -618,8 +622,6 @@ where
         let _g = tracing::info_span!("stark/quotient").entered();
         debug_assert_eq!(intermediate_accumulators.len(), active_indices.len());
         debug_assert_eq!(log_degrees.len(), active_indices.len());
-        let dft = self.config.dft();
-        let log_blowup = self.config.log_blowup();
         let mut quotient_inputs = Vec::with_capacity(active_indices.len());
         for (pos, ((&ci, log_degree), next_acc)) in active_indices
             .iter()
@@ -661,12 +663,6 @@ where
             acc = *next_acc;
         }
 
-        // `commit_ldes` and the fused accelerator both bypass the
-        // randomization a hiding PCS applies inside `commit`.
-        assert!(
-            !<SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::ZK,
-            "committing the quotient from coefficients bypasses hiding-PCS randomization"
-        );
         let (quotient_commit, quotient_data) = if let Some(committed) = self
             .config
             .accelerated_quotient_commit(&quotient_inputs, constraint_challenge)
@@ -721,33 +717,13 @@ where
                             )
                         });
                     let quotient_flat =
-                        RowMajorMatrix::new_col(quotient_values).flatten_to_base::<Val<SC>>();
-                    // The quotient has degree greater than the trace polynomials,
-                    // so for FRI to work it must be split into `quotient_degree`
-                    // sub-polynomials of trace degree. Slice its COEFFICIENTS:
-                    // `Q(X) = Σᵢ X^{i·n}·cᵢ(X)` with each `cᵢ` of degree < n, and
-                    // commit all slices as ONE `q·D`-column matrix on the trace
-                    // domain — instead of one matrix per slice on the split
-                    // cosets — so the opening phase pays its per-matrix costs
-                    // once per circuit rather than once per slice. The committed
-                    // LDE is built straight from these coefficients: evaluating
-                    // them onto the trace domain only for `Pcs::commit` to
-                    // inverse-DFT that evaluation right back would waste two
-                    // size-n transforms per column. The slicing itself is fused
-                    // with the iDFT's scaling passes into one parallel gather
-                    // (see `shifted_quotient_slices`).
-                    let sliced = shifted_quotient_slices(
-                        dft,
-                        quotient_flat,
-                        input.quotient_domain.first_point(),
-                        quotient_degree,
-                    );
-                    lde_from_shifted_coefficients(dft, sliced, log_blowup)
+                        flatten_to_base::<Val<SC>, _>(RowMajorMatrix::new_col(quotient_values));
+                    (input.quotient_domain, quotient_flat, quotient_degree)
                 })
                 .collect();
-            pcs.commit_ldes(quotient_ldes)
+            pcs.commit_quotient(quotient_ldes)
         };
-        challenger.observe(quotient_commit.clone());
+        challenger.observe_commitment(quotient_commit.clone());
         drop(_g);
 
         let commitments = Commitments {
@@ -759,17 +735,19 @@ where
         // Cost: "FRI opening" — barycentric interpolation (Σ n_i·B·W_i),
         // FRI folding (≈ H), and FRI queries (Q·R·log₂ H hash ops).
         let _g = tracing::info_span!("stark/fri_open").entered();
-        let zeta: SC::Challenge = challenger.sample_algebra_element();
+        let zeta: SC::Challenge = challenger.sample_challenge();
         let mut round0_openings = vec![];
         let mut round1_openings = vec![];
         let mut round2_openings = vec![];
         let mut round3_openings = vec![];
-        for &log_degree in log_degrees.iter() {
+        for (&ci, &log_degree) in active_indices.iter().zip(&log_degrees) {
             let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
-            let zeta_next = trace_domain
-                .next_point(zeta)
-                .expect("domain has no next point");
-            round1_openings.push(vec![zeta, zeta_next]);
+            let zeta_next = trace_domain.next_point(zeta);
+            round1_openings.push(if self.opens_next_row(ci, crate::expr::Source::Main) {
+                vec![zeta, zeta_next]
+            } else {
+                vec![zeta]
+            });
             round2_openings.push(vec![zeta, zeta_next]);
             // One wide matrix per circuit holds all its quotient slices.
             round3_openings.push(vec![zeta]);
@@ -777,23 +755,39 @@ where
         // The preprocessed commitment is built once over ALL preprocessed
         // traces at system construction, so its round must carry one entry
         // per preprocessed matrix regardless of activation. An inactive
-        // circuit's preprocessed matrix is opened at ζ alone: no constraint
+        // circuit's preprocessed matrix is normally opened at ζ alone: no constraint
         // reads the value, but the PCS pins every matrix's width to the
         // claimed values at its first opening point (the leaf hash flattens
         // same-height rows into one stream, so a matrix opened nowhere would
         // leave its row boundary unauthenticated) and rejects a matrix with
-        // no opening points.
-        for (prep_index, &pos) in self.preprocessed_indices.iter().zip(&active_pos) {
+        // no opening points. A PCS with independent column commitments can
+        // explicitly opt out of these otherwise-unused openings.
+        for (ci, (prep_index, &pos)) in self
+            .preprocessed_indices
+            .iter()
+            .zip(&active_pos)
+            .enumerate()
+        {
             if prep_index.is_some() {
                 match pos {
                     Some(pos) => {
                         let trace_domain = pcs.natural_domain_for_degree(1 << log_degrees[pos]);
-                        let zeta_next = trace_domain
-                            .next_point(zeta)
-                            .expect("domain has no next point");
-                        round0_openings.push(vec![zeta, zeta_next]);
+                        let zeta_next = trace_domain.next_point(zeta);
+                        round0_openings.push(
+                            if self.opens_next_row(ci, crate::expr::Source::Preprocessed) {
+                                vec![zeta, zeta_next]
+                            } else {
+                                vec![zeta]
+                            },
+                        );
                     }
-                    None => round0_openings.push(vec![zeta]),
+                    None => {
+                        round0_openings.push(if self.config.omit_inactive_preprocessed_openings() {
+                            vec![]
+                        } else {
+                            vec![zeta]
+                        })
+                    }
                 }
             }
         }
@@ -831,175 +825,10 @@ where
     }
 }
 
-/// From the quotient's evaluations on its disjoint domain — `q·n` rows of
-/// `D` base columns on the coset `shift·H` with `|H| = q·n` — produce the
-/// `n`-row, `q·D`-column matrix of slice coefficients with the committed
-/// LDE's `GENERATOR` shift already folded in: the input
-/// [`lde_from_shifted_coefficients`] expects.
-///
-/// Semantically this is three steps: coset iDFT to coefficients, slicing
-/// `Q(X) = Σₖ X^{k·n}·cₖ(X)` into rows `[c₀ | … | c_{q−1}]`, and
-/// pre-scaling row `r` by `GENERATOR^r`. Executed literally (the library
-/// entry points) those steps cost a bit-reversal materialization, a serial
-/// row-swap pass, two serial full-matrix scaling passes, and a serial
-/// gather. But the composition collapses: with `N = q·n` and `S` the raw
-/// bit-reversed storage of the forward DFT,
-///
-/// ```text
-///   idft(f)ⱼ = N⁻¹ · dft(f)_{(N−j) mod N} = N⁻¹ · S[rev((N−j) mod N)]
-/// ```
-///
-/// and the coset-unscale factor `shift^{−j}` at `j = k·n + r` splits into
-/// `shift^{−k·n} · shift^{−r}`, whose row-dependent part cancels the LDE
-/// pre-scale `GENERATOR^r` exactly, because the disjoint quotient domain's
-/// shift IS the generator (asserted below; `create_disjoint_domain` on a
-/// natural trace domain guarantees it). What survives is a single parallel
-/// gather off the DFT storage with ONE constant weight per slice:
-/// `wₖ = N⁻¹ · GENERATOR^{−k·n}`.
-fn shifted_quotient_slices<F, Dft>(
-    dft: &Dft,
-    quotient_evals: RowMajorMatrix<F>,
-    domain_shift: F,
-    quotient_degree: usize,
-) -> RowMajorMatrix<F>
-where
-    F: TwoAdicField,
-    Dft: TwoAdicSubgroupDft<F>,
-{
-    assert_eq!(
-        domain_shift,
-        F::GENERATOR,
-        "quotient domain shift must equal the LDE shift for the scalings to cancel"
-    );
-    let ext_degree = quotient_evals.width();
-    let big_height = quotient_evals.height();
-    let log_big_height = log2_strict_usize(big_height);
-    debug_assert_eq!(big_height % quotient_degree, 0);
-    let n = big_height / quotient_degree;
-    let width = quotient_degree * ext_degree;
-    // Bit-reversed storage of the forward DFT: natural index `k` lives at
-    // row `rev(k)`. This conversion is copy-free for Radix2DitParallel's
-    // native output and materializes the same layout for other backends.
-    let storage = dft
-        .dft_batch(quotient_evals)
-        .bit_reverse_rows()
-        .to_row_major_matrix();
-    let n_inv = F::ONE.div_2exp_u64(log_big_height as u64);
-    let weight_step = F::GENERATOR.exp_u64(n as u64).inverse();
-    let weights: Vec<F> = weight_step
-        .powers()
-        .take(quotient_degree)
-        .map(|w| w * n_inv)
-        .collect();
-    let mut values = F::zero_vec(n * width);
-    values
-        .par_chunks_mut(width)
-        .enumerate()
-        .for_each(|(row, out)| {
-            for (chunk, weight) in weights.iter().enumerate() {
-                let j = chunk * n + row;
-                let src = reverse_bits_len(
-                    big_height.wrapping_sub(j) & (big_height - 1),
-                    log_big_height,
-                );
-                let src = &storage.values[src * ext_degree..(src + 1) * ext_degree];
-                for (out, src) in out[chunk * ext_degree..(chunk + 1) * ext_degree]
-                    .iter_mut()
-                    .zip(src)
-                {
-                    *out = *src * *weight;
-                }
-            }
-        });
-    RowMajorMatrix::new(values, width)
-}
-
-/// Low-degree extension of column polynomials given by their COEFFICIENTS
-/// with the `GENERATOR` coset shift already folded in (row `j`
-/// pre-multiplied by `GENERATOR^j`, which [`shifted_quotient_slices`]
-/// produces for free), in the exact layout `Pcs::commit` stores for
-/// evaluations on the natural domain: `2^log_blowup` row blocks, where
-/// block `b` holds the evaluations on the coset `GENERATOR · w^rev(b) · H`
-/// in bit-reversed row order (`H` is the size-`n` subgroup, `w` generates
-/// the size-`2^log_blowup · n` subgroup, and `rev` reverses `log_blowup`
-/// bits). Globally that is the bit-reversal of the natural order of the
-/// whole blown-up coset — i.e.
-/// `coset_lde_batch(evals, log_blowup, GENERATOR).bit_reverse_rows()`,
-/// which is what `TwoAdicFriPcs::commit` computes.
-///
-/// Committing the result via `Pcs::commit_ldes` is therefore bit-identical
-/// to `Pcs::commit` on the columns' trace-domain evaluations — field
-/// arithmetic is exact, so equal polynomials give equal evaluations no
-/// matter which transform produced them — while skipping both that
-/// evaluation DFT and the inverse DFT `commit` would open with.
-///
-/// The whole extension is ONE size-`2^log_blowup · n` transform: zero-pad
-/// the shifted coefficients to the LDE height (which leaves the column
-/// polynomials unchanged) and DFT. That spends `log_blowup` more butterfly
-/// layers than `2^log_blowup` separate size-`n` coset DFTs would, but one
-/// batched transform is what the memory traffic wants: no per-coset matrix
-/// clones, no per-coset serial shift-scaling passes inside
-/// `coset_dft_batch`, no reassembly copies, and `Radix2DitParallel`'s
-/// native output order is already the bit-reversed storage order, so the
-/// final unwrap is copy-free.
-fn lde_from_shifted_coefficients<F, Dft>(
-    dft: &Dft,
-    mut coefficients: RowMajorMatrix<F>,
-    log_blowup: usize,
-) -> RowMajorMatrix<F>
-where
-    F: TwoAdicField,
-    Dft: TwoAdicSubgroupDft<F>,
-{
-    let height = coefficients.height();
-    coefficients.pad_to_height(height << log_blowup, F::ZERO);
-    dft.dft_batch(coefficients)
-        .bit_reverse_rows()
-        .to_row_major_matrix()
-}
-
-/// Reference form of [`lde_from_shifted_coefficients`] taking PLAIN
-/// coefficients: folds the `GENERATOR` shift in explicitly. Only the
-/// pinning tests need it; the prover gets the shift for free inside
-/// [`shifted_quotient_slices`].
-#[cfg(test)]
-fn lde_from_coefficients<F, Dft>(
-    dft: &Dft,
-    mut coefficients: RowMajorMatrix<F>,
-    log_blowup: usize,
-) -> RowMajorMatrix<F>
-where
-    F: TwoAdicField,
-    Dft: TwoAdicSubgroupDft<F>,
-{
-    scale_rows_by_powers(&mut coefficients, F::GENERATOR);
-    lde_from_shifted_coefficients(dft, coefficients, log_blowup)
-}
-
-/// Multiplies row `j` of `mat` by `base^j`, in parallel: each chunk of rows
-/// pays one exponentiation and steps serially from there.
-#[cfg(test)]
-fn scale_rows_by_powers<F: Field>(mat: &mut RowMajorMatrix<F>, base: F) {
-    const ROWS_PER_CHUNK: usize = 512;
-    let width = mat.width();
-    mat.values
-        .par_chunks_mut(ROWS_PER_CHUNK * width)
-        .enumerate()
-        .for_each(|(chunk, rows)| {
-            let mut weight = base.exp_u64((chunk * ROWS_PER_CHUNK) as u64);
-            for row in rows.chunks_mut(width) {
-                for value in row {
-                    *value *= weight;
-                }
-                weight *= base;
-            }
-        });
-}
-
 /// Evaluates the folded constraints on the quotient domain and divides by
 /// the vanishing polynomial, producing the quotient values.
 #[allow(clippy::too_many_arguments)]
-fn quotient_values<SC>(
+pub(crate) fn quotient_values<SC>(
     circuit: &crate::system::Circuit<Val<SC>>,
     lookup_publics: &[Val<SC>],
     trace_domain: Domain<SC>,
@@ -1011,8 +840,8 @@ fn quotient_values<SC>(
     constraint_count: usize,
 ) -> Vec<SC::Challenge>
 where
-    SC: StarkGenericConfig,
-    Val<SC>: TwoAdicField,
+    SC: ProofConfig,
+    Val<SC>: TwoAdicField + Ord,
 {
     let quotient_size = quotient_domain.size();
     let main_width = circuit.main_width;
@@ -1033,25 +862,25 @@ where
     let next_step = 1 << qdb;
 
     for _ in quotient_size..PackedVal::<SC>::WIDTH {
-        sels.is_first_row.push(Val::<SC>::default());
-        sels.is_last_row.push(Val::<SC>::default());
-        sels.is_transition.push(Val::<SC>::default());
-        sels.inv_vanishing.push(Val::<SC>::default());
+        sels.is_first_row.push(Val::<SC>::ZERO);
+        sels.is_last_row.push(Val::<SC>::ZERO);
+        sels.is_transition.push(Val::<SC>::ZERO);
+        sels.inv_vanishing.push(Val::<SC>::ZERO);
     }
 
     // α powers in reverse (constraint i of k weighted by α^{k-1-i}),
     // decomposed per basis coordinate for the batched base-field fold.
-    let mut alpha_powers = alpha.powers().collect_n(constraint_count);
+    let mut alpha_powers: Vec<SC::Challenge> = alpha.powers().take(constraint_count).collect();
     alpha_powers.reverse();
-    let decomposed_alpha_powers: Vec<Vec<Val<SC>>> =
-        (0..<SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION)
-            .map(|i| {
-                alpha_powers
-                    .iter()
-                    .map(|x| x.as_basis_coefficients_slice()[i])
-                    .collect()
-            })
-            .collect();
+    let decomposed_alpha_powers: Vec<Vec<Val<SC>>> = (0
+        ..<SC::Challenge as ExtensionOf<Val<SC>>>::D)
+        .map(|i| {
+            alpha_powers
+                .iter()
+                .map(|x| x.as_basis_coefficients_slice()[i])
+                .collect()
+        })
+        .collect();
 
     // Public coordinates broadcast to packed base values.
     let publics_packed: Vec<PackedVal<SC>> = lookup_publics
@@ -1061,7 +890,7 @@ where
 
     // Δ/(n·g) per coordinate, broadcast: the logUp boundary injection with
     // the last-row selector's normalization constant pre-absorbed.
-    let ext_d = <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
+    let ext_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
     let delta_scaled: Vec<PackedVal<SC>> = (0..ext_d)
         .map(|k| {
             PackedVal::<SC>::from(
@@ -1128,8 +957,8 @@ fn quotient_values_inner<SC>(
     ext_degree: usize,
 ) -> impl Iterator<Item = SC::Challenge>
 where
-    SC: StarkGenericConfig,
-    Val<SC>: TwoAdicField,
+    SC: ProofConfig,
+    Val<SC>: TwoAdicField + Ord,
 {
     let i_range = i_start..i_start + PackedVal::<SC>::WIDTH;
     let is_first_row = *PackedVal::<SC>::from_slice(&sels.is_first_row[i_range.clone()]);
@@ -1140,11 +969,11 @@ where
     // Packed two-row windows of each trace, as base columns.
     let preprocessed_pair: Option<Vec<PackedVal<SC>>> = preprocessed_on_quotient_domain
         .as_ref()
-        .map(|m| m.vertically_packed_row_pair::<PackedVal<SC>>(i_start, next_step));
+        .map(|m| PackedVal::<SC>::packed_row_pair(m, i_start, next_step));
     let stage_1_pair =
-        stage_1_on_quotient_domain.vertically_packed_row_pair::<PackedVal<SC>>(i_start, next_step);
+        PackedVal::<SC>::packed_row_pair(stage_1_on_quotient_domain, i_start, next_step);
     let stage_2_pair =
-        stage_2_on_quotient_domain.vertically_packed_row_pair::<PackedVal<SC>>(i_start, next_step);
+        PackedVal::<SC>::packed_row_pair(stage_2_on_quotient_domain, i_start, next_step);
 
     let (stage_1_cur, stage_1_next) = stage_1_pair.split_at(main_width);
     let (stage_2_cur, stage_2_next) = stage_2_pair.split_at(stage_2_width);
@@ -1200,130 +1029,9 @@ where
 
     (0..quotient_size.min(PackedVal::<SC>::WIDTH)).map(move |idx_in_packing| {
         SC::Challenge::from_basis_coefficients_fn(|coeff_idx| {
-            <PackedChallenge<SC> as BasedVectorSpace<PackedVal<SC>>>::as_basis_coefficients_slice(
-                &quotient,
-            )[coeff_idx]
+            PackedExtension::<Val<SC>, SC::Challenge>::as_basis_coefficients_slice(&quotient)
+                [coeff_idx]
                 .as_slice()[idx_in_packing]
         })
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::Val;
-    use p3_dft::{NaiveDft, Radix2DitParallel};
-    use rand::{RngExt, SeedableRng, rngs::SmallRng};
-
-    /// `lde_from_coefficients` must reproduce, value for value, the matrix
-    /// `TwoAdicFriPcs::commit` stores for the same polynomials given as
-    /// trace-domain evaluations: `coset_lde_batch` with the generator shift
-    /// (the natural domain's shift is one), then a bit-reversal. This pins
-    /// the exact substitution the quotient commit relies on.
-    #[test]
-    fn lde_from_coefficients_matches_commit_transform() {
-        let mut rng = SmallRng::seed_from_u64(0);
-        let dft = Radix2DitParallel::<Val>::default();
-        for log_height in [0usize, 1, 2, 5, 8] {
-            for log_blowup in [1usize, 2, 3] {
-                for width in [1usize, 2, 7] {
-                    let height = 1 << log_height;
-                    let coefficients = RowMajorMatrix::new(
-                        (0..height * width).map(|_| rng.random()).collect(),
-                        width,
-                    );
-                    let evaluations = dft
-                        .coset_dft_batch(coefficients.clone(), Val::ONE)
-                        .to_row_major_matrix();
-                    let expected = dft
-                        .coset_lde_batch(evaluations, log_blowup, Val::GENERATOR)
-                        .bit_reverse_rows()
-                        .to_row_major_matrix();
-                    let got = lde_from_coefficients(&dft, coefficients, log_blowup);
-                    assert_eq!(got, expected, "h=2^{log_height} B=2^{log_blowup} w={width}");
-                }
-            }
-        }
-    }
-
-    /// `shifted_quotient_slices` must reproduce, value for value, the naive
-    /// composition it replaces: coset iDFT off the quotient domain, slicing
-    /// the coefficients into `q` chunks per row, and folding the committed
-    /// LDE's `GENERATOR` shift into the rows. This pins the scaling
-    /// cancellation the fused gather relies on.
-    #[test]
-    fn shifted_quotient_slices_matches_naive_composition() {
-        let mut rng = SmallRng::seed_from_u64(1);
-        let dft = Radix2DitParallel::<Val>::default();
-        for log_n in [0usize, 1, 2, 5, 7] {
-            for quotient_degree in [1usize, 2, 4] {
-                for ext_degree in [1usize, 2] {
-                    let n = 1 << log_n;
-                    let big_height = n * quotient_degree;
-                    let evals = RowMajorMatrix::new(
-                        (0..big_height * ext_degree).map(|_| rng.random()).collect(),
-                        ext_degree,
-                    );
-                    // Naive path: coset iDFT, slice, fold the LDE shift in.
-                    let coefficients = dft.coset_idft_batch(evals.clone(), Val::GENERATOR);
-                    let width = quotient_degree * ext_degree;
-                    let mut sliced = Vec::with_capacity(n * width);
-                    for row in 0..n {
-                        for chunk in 0..quotient_degree {
-                            sliced.extend_from_slice(
-                                &coefficients.values[(chunk * n + row) * ext_degree
-                                    ..(chunk * n + row + 1) * ext_degree],
-                            );
-                        }
-                    }
-                    let mut expected = RowMajorMatrix::new(sliced, width);
-                    scale_rows_by_powers(&mut expected, Val::GENERATOR);
-                    let got = shifted_quotient_slices(&dft, evals, Val::GENERATOR, quotient_degree);
-                    assert_eq!(
-                        got, expected,
-                        "n=2^{log_n} q={quotient_degree} D={ext_degree}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// The quotient path must depend only on `TwoAdicSubgroupDft` semantics,
-    /// not on `Radix2DitParallel`'s bit-reversed storage representation. This
-    /// is the contract a CUDA adapter will implement.
-    #[test]
-    fn quotient_transforms_are_dft_backend_independent() {
-        let mut rng = SmallRng::seed_from_u64(2);
-        let radix = Radix2DitParallel::<Val>::default();
-        let naive = NaiveDft;
-
-        for log_n in [0usize, 1, 3] {
-            for quotient_degree in [1usize, 2, 4] {
-                for ext_degree in [1usize, 2] {
-                    let big_height = (1 << log_n) * quotient_degree;
-                    let evals = RowMajorMatrix::new(
-                        (0..big_height * ext_degree).map(|_| rng.random()).collect(),
-                        ext_degree,
-                    );
-                    let radix_slices = shifted_quotient_slices(
-                        &radix,
-                        evals.clone(),
-                        Val::GENERATOR,
-                        quotient_degree,
-                    );
-                    let naive_slices =
-                        shifted_quotient_slices(&naive, evals, Val::GENERATOR, quotient_degree);
-                    assert_eq!(naive_slices, radix_slices);
-
-                    for log_blowup in [1usize, 2] {
-                        let radix_lde =
-                            lde_from_shifted_coefficients(&radix, radix_slices.clone(), log_blowup);
-                        let naive_lde =
-                            lde_from_shifted_coefficients(&naive, naive_slices.clone(), log_blowup);
-                        assert_eq!(naive_lde, radix_lde);
-                    }
-                }
-            }
-        }
-    }
 }
