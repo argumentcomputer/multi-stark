@@ -16,3 +16,5 @@ The domain and quotient limits must match the backend's actual capabilities.
 - `compute_lookup_values_range` evaluates chunks with full-trace row semantics.
 - `observe_claims` and `sample_lookup_challenges` share transcript conventions
   with external verifier implementations; neither verifies a proof.
+
+See [the Plonkish API](plonkish.md) for circuit construction and translation.

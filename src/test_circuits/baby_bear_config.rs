@@ -227,6 +227,46 @@ impl ProofConfig for BabyBearPoseidon2Config {
 /// push/pull lookup pair to exercise the stage 2 machinery.
 struct MulAir;
 
+/// The Plonkish frontend and its lowering use the configured native field,
+/// including a different extension degree and PCS hash from Goldilocks.
+#[test]
+fn plonkish_baby_bear_native_field_proof() {
+    use crate::plonkish::CircuitBuilder;
+
+    let mut builder = CircuitBuilder::<Val>::new();
+    let x = builder.public_input("x");
+    let square = builder.mul(x, x);
+    let inverse = builder.inverse(x);
+    let result = builder.mul(square, inverse);
+    builder.expose_public(result);
+    let circuit = builder
+        .finish()
+        .lower_to_multi_stark(Val::from_u32(71))
+        .unwrap();
+    let config = BabyBearPoseidon2Config::new(
+        CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        },
+        FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 20,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        },
+    );
+    let (system, key) = System::new(config, circuit.circuit_inputs());
+    let mut witness = circuit.witness();
+    witness.set(x, Val::from_u32(7)).unwrap();
+    let assignment = witness.generate().unwrap();
+    let claims = circuit.claims(&[Val::from_u32(7); 2]).unwrap();
+    let claims: Vec<_> = claims.iter().map(Vec::as_slice).collect();
+    let witness = SystemWitness::from_stage_1(circuit.traces(&assignment).unwrap(), &system);
+    let proof = system.prove_multiple_claims(&key, &claims, witness);
+    system.verify_multiple_claims(&claims, &proof).unwrap();
+}
+
 impl<F> BaseAir<F> for MulAir {
     fn width(&self) -> usize {
         3
