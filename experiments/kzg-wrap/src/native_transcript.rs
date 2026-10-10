@@ -19,7 +19,7 @@ fn greater_than(b: &mut Builder, bytes: &ByteGadgets, input: &[ByteValue], bound
     assert_eq!(input.len(), bound.len());
     let mut borrow = b.constant(Scalar::ZERO);
     for (&value, &limit) in input.iter().zip(bound) {
-        let out = b.hint_many::<2>("byte subtraction", &[value.value(), borrow], move |v| {
+        let out = b.hint_many_pure::<2>("byte subtraction", &[value.value(), borrow], move |v| {
             let x = i64::try_from(v[0].canonical_limbs_le()[0]).map_err(|e| e.to_string())?;
             let d = i64::from(limit)
                 - x
@@ -78,7 +78,7 @@ pub fn scalar_bytes(b: &mut Builder, bytes: &ByteGadgets, v: Value) -> [ByteValu
 pub fn fq_bytes(b: &mut Builder, bytes: &ByteGadgets, v: FqVar) -> [ByteValue; 48] {
     let mut result = Vec::new();
     for (i, &limb) in v.0.iter().enumerate() {
-        let raw = b.hint_many::<10>("Fq limb bytes", &[limb], |v| {
+        let raw = b.hint_many_pure::<10>("Fq limb bytes", &[limb], |v| {
             let mut data = integer(v[0]).to_bytes_le();
             data.resize(10, 0);
             Ok(std::array::from_fn(|i| Scalar::from_u8(data[i])))

@@ -1,8 +1,8 @@
 //! KZG parameters: G1 powers, G2 anchors and G2 powers for degree checks.
 //! Imported parameters need validated point decoding, [`Srs::validate`] and
 //! trusted provenance. Consistency does not establish an unknown trapdoor.
-//! The full available G1 degree range and every required G2 degree key must
-//! be represented; truncating public parameters does not reduce that range.
+//! Public-setup metadata records the full available G1 degree range even
+//! when only an honest prover's prefix is loaded. Truncation is not a degree proof.
 //! [`Srs::unsafe_dev_setup`] reveals its trapdoor and is only for tests.
 
 use ark_bls12_381::{Bls12_381, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
@@ -15,6 +15,15 @@ use ark_serialize::CanonicalSerialize;
 use p3_maybe_rayon::prelude::*;
 
 mod cache;
+pub mod filecoin;
+
+/// Authenticated public parameters and their complete polynomial degree allowance.
+/// The identity names the ceremony, independently of the locally loaded prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublicSetup {
+    pub max_degree: usize,
+    pub id: [u8; 32],
+}
 
 fn dev_tau(seed: &[u8]) -> Fr {
     let mut wide = [0u8; 64];
@@ -33,13 +42,55 @@ pub struct Srs {
     pub tau_g2: G2Affine,
     /// Entry k is τ^(max_len - 2^k) H, for degree-bound checks.
     pub degree_keys: Vec<G2Affine>,
+    pub(crate) public_setup: Option<PublicSetup>,
 }
 
 impl Srs {
-    /// The largest polynomial length (degree + 1) this SRS can commit.
+    /// Number of locally loaded G1 powers, not the adversary's degree allowance.
     #[inline]
     pub fn max_len(&self) -> usize {
         self.g1.len()
+    }
+
+    pub fn public_setup(&self) -> Option<PublicSetup> {
+        self.public_setup
+    }
+
+    /// Whether a trace needs the legacy shifted degree commitment.
+    pub fn requires_shifted_commitment(&self, height: usize) -> bool {
+        self.public_setup.is_none() && height < self.max_len()
+    }
+
+    /// Construct parameters for globally bounded polynomial identities.
+    ///
+    /// The caller authenticates the ceremony identity and full public degree
+    /// range. Point and progression checks establish consistency, not provenance
+    /// or secrecy of the trapdoor. A two-point prefix suffices for verification.
+    pub fn from_public_powers(
+        g1: Vec<G1Affine>,
+        g2: G2Affine,
+        tau_g2: G2Affine,
+        setup: PublicSetup,
+    ) -> Result<Self, &'static str> {
+        let srs = Self {
+            g1,
+            g2,
+            tau_g2,
+            degree_keys: vec![],
+            public_setup: Some(setup),
+        };
+        if srs
+            .g1
+            .par_iter()
+            .any(|p| !p.is_on_curve() || !p.is_in_correct_subgroup_assuming_on_curve())
+            || [&srs.g2, &srs.tau_g2]
+                .into_iter()
+                .any(|p| !p.is_on_curve() || !p.is_in_correct_subgroup_assuming_on_curve())
+        {
+            return Err("invalid public parameter point");
+        }
+        srs.validate()?;
+        Ok(srs)
     }
 
     /// Consistency check for user-supplied parameters: the G1 powers
@@ -49,9 +100,8 @@ impl Srs {
     /// 2-pairing product with a random combiner derived from the SRS
     /// bytes themselves (whoever fixed the SRS could not predict it).
     ///
-    /// Subgroup membership is NOT checked here: obtain the points
-    /// through validated deserialization (the arkworks default), which
-    /// already enforces it.
+    /// Curve and subgroup membership are not checked here; callers must
+    /// establish both before checking the progression.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.g1.len() < 2 || !self.g1.len().is_power_of_two() {
             return Err("SRS length must be a power of two >= 2");
@@ -63,9 +113,15 @@ impl Srs {
         {
             return Err("SRS anchor is the identity");
         }
-        let logs = p3_util::log2_strict_usize(self.max_len());
-        if self.degree_keys.len() != logs + 1 {
-            return Err("missing degree keys");
+        if let Some(setup) = self.public_setup {
+            if setup.max_degree < self.max_len() - 1 || !self.degree_keys.is_empty() {
+                return Err("inconsistent public degree policy");
+            }
+        } else {
+            let logs = p3_util::log2_strict_usize(self.max_len());
+            if self.degree_keys.len() != logs + 1 {
+                return Err("missing degree keys");
+            }
         }
         for (k, key) in self.degree_keys.iter().enumerate() {
             let shift = self.max_len() - (1 << k);
@@ -82,33 +138,44 @@ impl Srs {
             }
         }
 
-        let mut bytes = Vec::new();
-        self.g1
-            .serialize_compressed(&mut bytes)
-            .expect("serialization into a Vec cannot fail");
-        self.g2
-            .serialize_compressed(&mut bytes)
-            .expect("serialization into a Vec cannot fail");
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"multi-stark/kzg/srs-validate/v2");
+        hasher.update(&(self.g1.len() as u64).to_le_bytes());
+        let mut bytes = Vec::with_capacity(192);
+        for point in &self.g1 {
+            bytes.clear();
+            point.serialize_compressed(&mut bytes).expect("Vec write");
+            hasher.update(&bytes);
+        }
+        bytes.clear();
+        self.g2.serialize_compressed(&mut bytes).expect("Vec write");
         self.tau_g2
             .serialize_compressed(&mut bytes)
-            .expect("serialization into a Vec cannot fail");
+            .expect("Vec write");
+        hasher.update(&bytes);
         let mut wide = [0u8; 64];
-        blake3::Hasher::new()
-            .update(b"multi-stark/kzg/srs-validate")
-            .update(&bytes)
-            .finalize_xof()
-            .fill(&mut wide);
+        hasher.finalize_xof().fill(&mut wide);
         let r = Fr::from_le_bytes_mod_order(&wide);
-
-        let mut r_powers = Vec::with_capacity(self.g1.len() - 1);
-        let mut acc = Fr::ONE;
-        for _ in 0..self.g1.len() - 1 {
-            r_powers.push(acc);
-            acc *= r;
+        if r.is_zero() {
+            return Err("zero parameter-validation challenge");
         }
-        let low =
-            G1Projective::msm(&self.g1[..self.g1.len() - 1], &r_powers).expect("equal lengths");
-        let high = G1Projective::msm(&self.g1[1..], &r_powers).expect("equal lengths");
+        const BLOCK_POINTS: usize = 1 << 16;
+        let mut r_powers = Vec::with_capacity(BLOCK_POINTS);
+        let mut acc = Fr::ONE;
+        let mut low = G1Projective::zero();
+        let mut high = G1Projective::zero();
+        for offset in (0..self.g1.len() - 1).step_by(BLOCK_POINTS) {
+            let count = BLOCK_POINTS.min(self.g1.len() - 1 - offset);
+            r_powers.clear();
+            for _ in 0..count {
+                r_powers.push(acc);
+                acc *= r;
+            }
+            low += G1Projective::msm(&self.g1[offset..offset + count], &r_powers)
+                .expect("equal lengths");
+            high += G1Projective::msm(&self.g1[offset + 1..offset + count + 1], &r_powers)
+                .expect("equal lengths");
+        }
         // e(high, H) = e(low, τH)  ⇔  e(high, H)·e(−low, τH) = 1.
         let check = Bls12_381::multi_pairing(
             [high.into_affine(), (-low).into_affine()],
@@ -158,6 +225,7 @@ impl Srs {
             degree_keys: (0..=p3_util::log2_strict_usize(max_len))
                 .map(|k| (g2_gen * tau.pow([(max_len - (1 << k)) as u64])).into_affine())
                 .collect(),
+            public_setup: None,
         }
     }
 }

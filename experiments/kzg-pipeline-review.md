@@ -1,5 +1,9 @@
 # Init KZG Pipeline Review
 
+Current measurements, implementation plans, and recovery instructions are in
+[KZG performance](../docs/kzg-performance.md). This file retains the earlier
+review and its dated corrections.
+
 Read-only review of the uncommitted `kzg-cuda` work on
 `ap/init-recursive-kzg-minimal`, the saved run records, and a second
 reviewer's findings, as of 2026-10-09. No builds or GPU runs were made for

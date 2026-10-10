@@ -14,7 +14,7 @@ use ark_ff::Field;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use p3_maybe_rayon::prelude::*;
 
-use super::{Srs, dev_tau};
+use super::{PublicSetup, Srs, dev_tau};
 
 const MAGIC: &[u8] = b"multi-stark/bls12-381/dev-srs/v1\0";
 const G1_BYTES: usize = 96;
@@ -23,6 +23,68 @@ const BLOCK_POINTS: usize = 1 << 18;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 impl Srs {
+    /// Development parameters with a declared public degree independent of the
+    /// loaded G1 prefix. TESTS AND DEVELOPMENT ONLY: the seed reveals the
+    /// trapdoor, so these parameters do not provide binding commitments.
+    ///
+    /// The identity is derived from the seed and public degree, never from a
+    /// caller-supplied ceremony identity or the loaded prefix. It is explicitly
+    /// distinct from the Filecoin ceremony. The declared degree selects the
+    /// public-degree protocol; it does not establish a trusted ceremony.
+    ///
+    /// Reuses [`Self::unsafe_dev_setup_with_cache`] and its trusted-local-cache
+    /// contract, without repeating full subgroup or progression validation.
+    /// The cache retains its legacy format and degree keys; the returned SRS
+    /// contains only the G1 prefix, G2 anchors and public-degree metadata.
+    pub fn unsafe_dev_public_setup_with_cache(
+        max_len: usize,
+        public_max_degree: usize,
+        seed: &[u8],
+        cache_dir: Option<&Path>,
+    ) -> io::Result<Self> {
+        let invalid_input = |message| io::Error::new(io::ErrorKind::InvalidInput, message);
+        if max_len < 2 || !max_len.is_power_of_two() {
+            return Err(invalid_input("SRS length must be a power of two >= 2"));
+        }
+        if public_max_degree < max_len - 1 {
+            return Err(invalid_input("public degree is smaller than the G1 prefix"));
+        }
+        let public_len = public_max_degree
+            .checked_add(1)
+            .and_then(|length| u64::try_from(length).ok())
+            .ok_or_else(|| invalid_input("public degree range overflows"))?;
+        if max_len
+            .checked_mul(size_of::<G1Affine>())
+            .is_none_or(|bytes| bytes > isize::MAX as usize)
+        {
+            return Err(invalid_input("SRS allocation length overflows"));
+        }
+        let cache_overhead = MAGIC.len() + 8 + 32 + (max_len.ilog2() as usize + 3) * G2_BYTES + 32;
+        u64::try_from(max_len)
+            .ok()
+            .and_then(|length| length.checked_mul(G1_BYTES as u64))
+            .and_then(|bytes| bytes.checked_add(cache_overhead as u64))
+            .ok_or_else(|| invalid_input("SRS cache length overflows"))?;
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"multi-stark/kzg/known-trapdoor-public-degree/v1");
+        hasher.update(&(public_len - 1).to_le_bytes());
+        hasher.update(blake3::hash(seed).as_bytes());
+        let id = *hasher.finalize().as_bytes();
+        if id == super::filecoin::filecoin_setup_id() {
+            return Err(invalid_input(
+                "development identity matches the Filecoin ceremony",
+            ));
+        }
+        let mut srs = Self::unsafe_dev_setup_with_cache(max_len, seed, cache_dir)?;
+        srs.degree_keys.clear();
+        srs.public_setup = Some(PublicSetup {
+            max_degree: public_max_degree,
+            id,
+        });
+        Ok(srs)
+    }
+
     /// Generate development parameters, or reuse a local cache if a directory
     /// is supplied. `None` always performs fresh generation.
     ///
@@ -178,6 +240,7 @@ fn read_cache(
         g2,
         tau_g2,
         degree_keys,
+        public_setup: None,
     })
 }
 
@@ -260,6 +323,161 @@ mod tests {
     impl Drop for TestDirectory {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn public_development_identity_is_prefix_independent_and_seed_degree_bound() {
+        let directory = TestDirectory::new();
+        let seed = b"public-development-prefix";
+        let load = |length, degree, seed: &[u8]| {
+            Srs::unsafe_dev_public_setup_with_cache(length, degree, seed, Some(&directory.0))
+                .unwrap()
+        };
+        let prover = load(16, 31, seed);
+        let verifier = load(2, 31, seed);
+        let fresh = Srs::unsafe_dev_public_setup_with_cache(2, 31, seed, None).unwrap();
+        for actual in [&verifier, &fresh] {
+            assert_eq!(actual.public_setup(), prover.public_setup());
+            assert_eq!(actual.g1, prover.g1[..2]);
+            assert_eq!(actual.g2, prover.g2);
+            assert_eq!(actual.tau_g2, prover.tau_g2);
+            assert!(actual.degree_keys.is_empty());
+            actual.validate().unwrap();
+        }
+        assert!(prover.degree_keys.is_empty());
+        assert!(!prover.requires_shifted_commitment(2));
+        prover.validate().unwrap();
+        let metadata = prover.public_setup().unwrap();
+        assert_eq!(metadata.max_degree, 31);
+        assert_ne!(metadata.id, super::super::filecoin::filecoin_setup_id());
+
+        let larger_degree = load(16, 63, seed);
+        let minimum_degree = load(16, 15, seed);
+        let another_seed = load(16, 31, b"another-public-development-seed");
+        assert_eq!(larger_degree.g1, prover.g1);
+        assert_eq!(larger_degree.g2, prover.g2);
+        assert_eq!(larger_degree.tau_g2, prover.tau_g2);
+        assert_eq!(minimum_degree.g1, prover.g1);
+        for actual in [&larger_degree, &minimum_degree, &another_seed] {
+            assert_ne!(actual.public_setup().unwrap().id, metadata.id);
+            assert_ne!(
+                actual.public_setup().unwrap().id,
+                super::super::filecoin::filecoin_setup_id()
+            );
+        }
+        assert_ne!(another_seed.g1[1], prover.g1[1]);
+        assert_ne!(another_seed.tau_g2, prover.tau_g2);
+    }
+
+    #[test]
+    fn public_development_setup_rejects_invalid_ranges_before_cache_io() {
+        let directory = TestDirectory::new();
+        let absent = directory.0.join("invalid-input-must-not-create-cache");
+        for (length, degree) in [
+            (0, 31),
+            (1, 31),
+            (3, 31),
+            (2, 0),
+            (16, 14),
+            (2, usize::MAX),
+            (1usize << (usize::BITS - 1), usize::MAX - 1),
+        ] {
+            let error = Srs::unsafe_dev_public_setup_with_cache(
+                length,
+                degree,
+                b"invalid-public-development-range",
+                Some(&absent),
+            )
+            .err()
+            .expect("invalid public development range");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(!absent.exists());
+        }
+    }
+
+    #[test]
+    fn public_development_setup_preserves_legacy_cache_and_damage_errors() {
+        let directory = TestDirectory::new();
+        let seed = b"shared-development-cache";
+        let legacy = Srs::unsafe_dev_setup_with_cache(16, seed, Some(&directory.0)).unwrap();
+        let path = directory.path(16, seed);
+        let bytes = fs::read(&path).unwrap();
+        let public =
+            Srs::unsafe_dev_public_setup_with_cache(16, 31, seed, Some(&directory.0)).unwrap();
+        assert_eq!(public.g1, legacy.g1);
+        assert_eq!(public.g2, legacy.g2);
+        assert_eq!(public.tau_g2, legacy.tau_g2);
+        assert!(public.degree_keys.is_empty());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        let reloaded = Srs::unsafe_dev_setup_with_cache(16, seed, Some(&directory.0)).unwrap();
+        assert_eq!(reloaded.degree_keys, legacy.degree_keys);
+        assert!(reloaded.public_setup().is_none());
+        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
+
+        let mut damaged = bytes;
+        *damaged.last_mut().unwrap() ^= 1;
+        fs::write(&path, &damaged).unwrap();
+        let error = Srs::unsafe_dev_public_setup_with_cache(16, 31, seed, Some(&directory.0))
+            .err()
+            .expect("damaged development cache");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&path).unwrap(), damaged);
+        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn public_development_proof_verifies_with_separately_loaded_anchors() {
+        use crate::{
+            ark_adapter::{KzgConfig, Scalar},
+            expr::Expr,
+            system::{CircuitInputs, System, SystemWitness},
+            traits::Field as _,
+        };
+        use p3_matrix::dense::RowMajorMatrix;
+        use std::sync::Arc;
+
+        let directory = TestDirectory::new();
+        let seed = b"public-development-proof";
+        let load = |length, degree, seed: &[u8]| {
+            Arc::new(
+                Srs::unsafe_dev_public_setup_with_cache(length, degree, seed, Some(&directory.0))
+                    .unwrap(),
+            )
+        };
+        let prover = KzgConfig::new(load(16, 31, seed), 2);
+        let verifier = KzgConfig::with_max_trace_len(load(2, 31, seed), 16, 2);
+        assert_eq!(prover.transcript_seed(), verifier.transcript_seed());
+        let traces: Vec<_> = [(4, 7), (2, 9)]
+            .into_iter()
+            .map(|(height, start)| {
+                RowMajorMatrix::new_col(
+                    (0..height)
+                        .map(|row| Scalar::from_usize(start + row))
+                        .collect(),
+                )
+            })
+            .collect();
+        let definitions: Vec<_> = traces
+            .iter()
+            .map(|trace| CircuitInputs {
+                main_width: 1,
+                preprocessed: Some(trace.clone()),
+                constraints: vec![Expr::main(0) - Expr::preprocessed(0)],
+                ..Default::default()
+            })
+            .collect();
+        let (mut system, key) = System::new(prover, definitions);
+        let proof =
+            system.prove_multiple_claims(&key, &[], SystemWitness::from_stage_1(traces, &system));
+        system.config = verifier;
+        system.verify_multiple_claims(&[], &proof).unwrap();
+        for (degree, seed) in [
+            (63, seed.as_slice()),
+            (31, b"different-proof-seed".as_slice()),
+        ] {
+            system.config = KzgConfig::with_max_trace_len(load(2, degree, seed), 16, 2);
+            assert!(system.verify_multiple_claims(&[], &proof).is_err());
         }
     }
 

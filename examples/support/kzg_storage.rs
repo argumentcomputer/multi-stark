@@ -106,12 +106,20 @@ pub fn read_matrix(path: &Path) -> Result<RowMajorMatrix<Scalar>> {
     read_matrix_bounded(path, 1 << 24)
 }
 pub fn read_matrix_bounded(path: &Path, max_height: usize) -> Result<RowMajorMatrix<Scalar>> {
-    read_matrix_with_codec(path, max_height, trace_codec()?)
+    read_matrix_with_codec(path, max_height, trace_codec()?, None)
+}
+pub fn read_matrix_with_shape(
+    path: &Path,
+    width: usize,
+    height: usize,
+) -> Result<RowMajorMatrix<Scalar>> {
+    read_matrix_with_codec(path, height, trace_codec()?, Some((width, height)))
 }
 fn read_matrix_with_codec(
     path: &Path,
     max_height: usize,
     codec: &str,
+    expected: Option<(usize, usize)>,
 ) -> Result<RowMajorMatrix<Scalar>> {
     let mut child = ReapedChild(
         Command::new(codec)
@@ -128,6 +136,9 @@ fn read_matrix_with_codec(
     let height = usize::try_from(u64::from_le_bytes(b))?;
     if width == 0 || !height.is_power_of_two() || width > 1024 || height > max_height {
         return Err("bad matrix dimensions".into());
+    }
+    if expected.is_some_and(|shape| shape != (width, height)) {
+        return Err("matrix dimensions differ from the staged manifest".into());
     }
     let count = width.checked_mul(height).ok_or("matrix overflow")?;
     let values = encoding::read_scalars(&mut r, count)?;
@@ -178,10 +189,129 @@ mod tests {
             let path = dir.join(format!("{encoder}.zst"));
             write_matrix_with_codec(&path, &matrix, encoder)?;
             for decoder in &codecs {
-                assert_eq!(matrix, read_matrix_with_codec(&path, 1 << 17, decoder)?);
+                assert_eq!(
+                    matrix,
+                    read_matrix_with_codec(&path, 1 << 17, decoder, None)?
+                );
+                assert!(
+                    read_matrix_with_codec(&path, 1 << 17, decoder, Some((3, 1 << 17))).is_err()
+                );
             }
         }
         fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "480 MiB fixed-matrix handoff, five alternating disk/direct pairs"]
+    fn fixed_matrix_handoff_benchmark() -> Result<()> {
+        use std::time::Instant;
+
+        const ROWS: usize = 1 << 20;
+        const WIDTH: usize = 15;
+
+        fn generate() -> RowMajorMatrix<Scalar> {
+            let mut values = Scalar::zero_vec(ROWS * WIDTH);
+            let rows_per_thread =
+                ROWS.div_ceil(std::thread::available_parallelism().unwrap().get());
+            std::thread::scope(|scope| {
+                for (block, values) in values.chunks_mut(rows_per_thread * WIDTH).enumerate() {
+                    scope.spawn(move || {
+                        for (offset, values) in values.chunks_exact_mut(WIDTH).enumerate() {
+                            let row = block * rows_per_thread + offset;
+                            values[0] = Scalar::ONE;
+                            values[1] = -Scalar::from_usize(row % 2);
+                            values[2] = Scalar::from_usize(row % 8);
+                            values[3] = -Scalar::from_usize(row % 4);
+                            values[4] = Scalar::from_usize(row % 3);
+                            for column in 0..3 {
+                                values[5 + column] = Scalar::from_usize(row * 3 + column);
+                                values[8 + column] =
+                                    Scalar::from_usize(((row * 7919 + 17) % ROWS) * 3 + column);
+                            }
+                            if row.is_multiple_of(4096) {
+                                values[11] = Scalar::ONE;
+                                values[12] = Scalar::from_usize(row / 4096);
+                            }
+                            if row.is_multiple_of(64) {
+                                values[13] = Scalar::ONE;
+                                values[14] = Scalar::from_usize(row % 16384);
+                            }
+                        }
+                    });
+                }
+            });
+            RowMajorMatrix::new(values, WIDTH)
+        }
+
+        struct HashWriter(blake3::Hasher);
+        impl Write for HashWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.update(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let directory =
+            std::env::temp_dir().join(format!("kzg-fixed-matrix-handoff-{}", std::process::id()));
+        fs::create_dir(&directory)?;
+        let codec = trace_codec()?;
+        let mut reference = None;
+        for iteration in 0..5 {
+            let path = directory.join(format!("{iteration}.fixed.zst"));
+            let mut matrices: [Option<RowMajorMatrix<Scalar>>; 2] = [None, None];
+            let mut timings = [0.0; 2];
+            let mut generation = [0.0; 2];
+            let mut write_seconds = 0.0;
+            let mut read_seconds = 0.0;
+            let order = if iteration % 2 == 0 { [0, 1] } else { [1, 0] };
+            for leg in order {
+                let started = Instant::now();
+                let matrix = generate();
+                generation[leg] = started.elapsed().as_secs_f64();
+                matrices[leg] = Some(if leg == 0 {
+                    let write_started = Instant::now();
+                    write_matrix_with_codec(&path, &matrix, codec)?;
+                    write_seconds = write_started.elapsed().as_secs_f64();
+                    drop(matrix);
+                    let read_started = Instant::now();
+                    let restored = read_matrix_with_codec(&path, ROWS, codec, Some((WIDTH, ROWS)))?;
+                    read_seconds = read_started.elapsed().as_secs_f64();
+                    restored
+                } else {
+                    matrix
+                });
+                timings[leg] = started.elapsed().as_secs_f64();
+            }
+            assert_eq!(matrices[0], matrices[1]);
+            let mut hash = HashWriter(blake3::Hasher::new());
+            encoding::write_scalars(&mut hash, &matrices[0].as_ref().unwrap().values)?;
+            let checksum = hash.0.finalize().to_hex().to_string();
+            if let Some(expected) = &reference {
+                assert_eq!(&checksum, expected);
+            } else {
+                reference = Some(checksum.clone());
+            }
+            println!(
+                "fixed_input_handoff_pair={}",
+                serde_json::json!({
+                    "iteration": iteration, "order": order, "rows": ROWS, "width": WIDTH,
+                    "field_bytes": ROWS * WIDTH * size_of::<Scalar>(), "codec": codec,
+                    "disk_seconds": timings[0], "direct_seconds": timings[1],
+                    "generation_seconds": generation, "write_seconds": write_seconds,
+                    "read_seconds": read_seconds, "compressed_bytes": fs::metadata(&path)?.len(),
+                    "checksum": checksum, "complete_matrix_parity": true,
+                    "filesystem_cache_state": "uncontrolled; same-process write then read",
+                    "scope": "synthetic fixed matrix; generation and handoff only; no commitment or proof"
+                })
+            );
+            fs::remove_file(path)?;
+        }
+        fs::remove_dir(directory)?;
         Ok(())
     }
 }

@@ -1,5 +1,7 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::{collections::HashMap, fmt};
+
+use p3_maybe_rayon::prelude::*;
 
 use crate::traits::Field;
 
@@ -111,6 +113,25 @@ pub(super) enum Recipe<F> {
     Hint(usize),
 }
 
+pub(super) enum InputName {
+    Owned(String),
+    #[cfg(feature = "kzg")]
+    Indexed {
+        prefix: &'static str,
+        index: usize,
+    },
+}
+
+impl fmt::Display for InputName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Owned(name) => formatter.write_str(name),
+            #[cfg(feature = "kzg")]
+            Self::Indexed { prefix, index } => write!(formatter, "{prefix}[{index}]"),
+        }
+    }
+}
+
 /// Exact frontend counts, independent of any backend's row placement.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CircuitStats {
@@ -151,7 +172,11 @@ pub struct Circuit<F: Field> {
     pub(super) hashes: Option<super::hash::Compact>,
     pub(super) owner: u64,
     pub(super) recipes: Vec<Recipe<F>>,
-    pub(super) input_names: Vec<String>,
+    #[cfg(feature = "kzg")]
+    pub(super) witness_chunks: Vec<usize>,
+    #[cfg(feature = "kzg")]
+    pub(super) witness_prefix: bool,
+    pub(super) input_names: Vec<InputName>,
     pub(super) hints: Vec<HintDefinition<F>>,
     hint_outputs: usize,
     pub(super) gates: Vec<Gate<F>>,
@@ -221,6 +246,7 @@ pub struct CircuitBuilder<F: Field> {
     circuit: Circuit<F>,
     constants: HashMap<F, Value>,
     census: Option<Census<F>>,
+    has_opaque_hints: bool,
 }
 
 struct Census<F> {
@@ -245,6 +271,10 @@ impl<F: Field> CircuitBuilder<F> {
                 hashes: None,
                 owner,
                 recipes: vec![Recipe::Constant(F::ZERO)],
+                #[cfg(feature = "kzg")]
+                witness_chunks: vec![],
+                #[cfg(feature = "kzg")]
+                witness_prefix: false,
                 input_names: vec![],
                 hints: vec![],
                 hint_outputs: 0,
@@ -259,12 +289,15 @@ impl<F: Field> CircuitBuilder<F> {
             },
             constants: HashMap::from([(F::ZERO, zero)]),
             census: None,
+            has_opaque_hints: false,
         }
     }
 
     /// Executes the same builder operations without retaining constraints or recipes.
+    /// Read the resulting counts with [`Self::stats`]; [`Self::finish`] panics for
+    /// a counting builder because no executable circuit is retained.
     #[cfg(feature = "kzg")]
-    pub(super) fn counting() -> Self {
+    pub fn counting() -> Self {
         let mut builder = Self::new();
         builder.census = Some(Census {
             stats: builder.stats(),
@@ -288,6 +321,54 @@ impl<F: Field> CircuitBuilder<F> {
             .reserve_exact(stats.inputs.saturating_sub(c.input_names.len()));
         c.publics
             .reserve_exact(stats.publics.saturating_sub(c.publics.len()));
+    }
+
+    #[cfg(feature = "kzg")]
+    pub(super) fn fresh_witness_plan(&self) -> bool {
+        self.census.is_none()
+            && self.circuit.hashes.is_none()
+            && self.stats()
+                == (CircuitStats {
+                    values: 1,
+                    gates: 1,
+                    ..CircuitStats::default()
+                })
+    }
+
+    /// Only internally generated pure hints may opt into independent execution.
+    /// Dependency validation cannot establish purity of an arbitrary closure.
+    #[cfg(feature = "kzg")]
+    pub(super) fn certify_witness_chunks(&mut self, ends: Vec<usize>) -> bool {
+        self.circuit.witness_chunks.clear();
+        self.circuit.witness_prefix = false;
+        if self.census.is_some() || !self.circuit.independent_witness_chunks(&ends) {
+            return false;
+        }
+        self.circuit.witness_chunks = ends;
+        true
+    }
+
+    /// Permit independent execution of the recipes emitted so far, followed
+    /// by ordinary serial execution of any recipes appended afterwards.
+    ///
+    /// `ends` contains increasing exclusive value counts, obtainable from
+    /// [`Self::stats`], and must end at the current value count. Each hint in
+    /// this prefix must use [`Self::hint_pure`] or [`Self::hint_many_pure`].
+    /// Chunks may share earlier inputs and constants, but no derived values.
+    /// A hint's complete output span must lie within one chunk.
+    ///
+    /// Returns false for counting builders, fewer than two chunks, opaque
+    /// hints or invalid dependencies/boundaries, and clears any previous
+    /// schedule. Without the `parallel` feature execution remains serial.
+    #[cfg(feature = "kzg")]
+    pub fn try_parallel_witness_prefix(&mut self, ends: Vec<usize>) -> bool {
+        self.circuit.witness_chunks.clear();
+        self.circuit.witness_prefix = false;
+        if self.has_opaque_hints || !self.certify_witness_chunks(ends) {
+            return false;
+        }
+        self.circuit.witness_prefix = true;
+        true
     }
 
     fn check(&self, value: Value) {
@@ -352,6 +433,14 @@ impl<F: Field> CircuitBuilder<F> {
             .map_or_else(|| self.circuit.stats(), |c| c.stats)
     }
 
+    /// Fixed table dimensions as `(rows, columns)`, including when counting.
+    pub fn table_dimensions(&self) -> impl ExactSizeIterator<Item = (usize, usize)> + '_ {
+        self.circuit
+            .tables
+            .iter()
+            .map(|table| (table.rows.len(), table.width()))
+    }
+
     /// Measure an ordinary gadget call without retaining profiling metadata.
     /// Nested measurements are inclusive. Reused constants cost nothing.
     pub fn measure<R>(&mut self, build: impl FnOnce(&mut Self) -> R) -> (R, CircuitStats) {
@@ -384,11 +473,20 @@ impl<F: Field> CircuitBuilder<F> {
     /// Allocates an externally assigned private input. Expose it separately if
     /// it is part of the public statement.
     pub fn input(&mut self, name: impl Into<String>) -> Value {
+        self.input_named(|| InputName::Owned(name.into()))
+    }
+
+    #[cfg(feature = "kzg")]
+    pub(super) fn input_indexed(&mut self, prefix: &'static str, index: usize) -> Value {
+        self.input_named(|| InputName::Indexed { prefix, index })
+    }
+
+    fn input_named(&mut self, name: impl FnOnce() -> InputName) -> Value {
         let slot = self.stats().inputs;
         if let Some(census) = &mut self.census {
             census.stats.inputs += 1;
         } else {
-            self.circuit.input_names.push(name.into());
+            self.circuit.input_names.push(name());
         }
         self.allocate(Recipe::Input(slot))
     }
@@ -622,6 +720,24 @@ impl<F: Field> CircuitBuilder<F> {
         self.hint_many(name, dependencies, move |args| compute(args).map(|v| [v]))[0]
     }
 
+    /// Records an order-independent witness computation with the same
+    /// constraint obligations as [`Self::hint`].
+    ///
+    /// The caller promises deterministic outputs and errors from the declared
+    /// dependencies and immutable captured constants, with no externally
+    /// observable side effects or dependence on callback order. A certified
+    /// prefix may evaluate this callback concurrently with other chunks, even
+    /// when an earlier chunk fails. Invalid inputs must produce `Err` rather
+    /// than panic. Marking a hint alone does not schedule it.
+    pub fn hint_pure(
+        &mut self,
+        name: impl Into<String>,
+        dependencies: &[Value],
+        compute: impl Fn(&[F]) -> Result<F, String> + Send + Sync + 'static,
+    ) -> Value {
+        self.hint_many_pure(name, dependencies, move |args| compute(args).map(|v| [v]))[0]
+    }
+
     /// One witness-only call with a fixed, nonzero output count. The callback
     /// runs once per assignment; EVERY output needs its own appropriate
     /// constraints. Batching adds no relations and exposes no public values.
@@ -631,7 +747,30 @@ impl<F: Field> CircuitBuilder<F> {
         dependencies: &[Value],
         compute: impl Fn(&[F]) -> Result<[F; N], String> + Send + Sync + 'static,
     ) -> [Value; N] {
+        self.hint_many_impl(name, dependencies, compute, false)
+    }
+
+    /// Batched variant of [`Self::hint_pure`], with the same purity contract.
+    /// All outputs still require constraints. A successful assignment executes
+    /// the callback once and retains its complete output batch in one chunk.
+    pub fn hint_many_pure<const N: usize>(
+        &mut self,
+        name: impl Into<String>,
+        dependencies: &[Value],
+        compute: impl Fn(&[F]) -> Result<[F; N], String> + Send + Sync + 'static,
+    ) -> [Value; N] {
+        self.hint_many_impl(name, dependencies, compute, true)
+    }
+
+    fn hint_many_impl<const N: usize>(
+        &mut self,
+        name: impl Into<String>,
+        dependencies: &[Value],
+        compute: impl Fn(&[F]) -> Result<[F; N], String> + Send + Sync + 'static,
+        pure: bool,
+    ) -> [Value; N] {
         assert!(N > 0, "hint must have at least one output");
+        self.has_opaque_hints |= !pure;
         for &value in dependencies {
             self.check(value);
         }
@@ -763,26 +902,133 @@ impl<F: Field> CircuitBuilder<F> {
 }
 
 impl<F: Field> Circuit<F> {
+    #[cfg(feature = "kzg")]
+    pub(super) fn independent_witness_chunks(&self, ends: &[usize]) -> bool {
+        if ends.len() < 2
+            || ends[0] == 0
+            || ends.last() != Some(&self.recipes.len())
+            || ends.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return false;
+        }
+        ends.par_iter().enumerate().all(|(chunk, &end)| {
+            let start = chunk.checked_sub(1).map_or(0, |i| ends[i]);
+            let dependency = |index: usize, current: usize| {
+                index < current
+                    && (index >= start
+                        || matches!(self.recipes[index], Recipe::Input(_) | Recipe::Constant(_)))
+            };
+            let mut index = start;
+            while index < end {
+                match &self.recipes[index] {
+                    Recipe::Input(slot) => {
+                        if *slot >= self.input_names.len() {
+                            return false;
+                        }
+                    }
+                    Recipe::Constant(_) => {}
+                    Recipe::Arithmetic(gate) => {
+                        let Some(gate) = self.gates.get(*gate) else {
+                            return false;
+                        };
+                        let [a, b, output] = gate.wires;
+                        if gate.wires.iter().any(|wire| wire.owner != self.owner)
+                            || output.index != index
+                            || gate.coefficients[3] != F::NEG_ONE
+                            || !dependency(a.index, index)
+                            || !dependency(b.index, index)
+                        {
+                            return false;
+                        }
+                    }
+                    Recipe::Hint(hint_index) => {
+                        let Some(hint) = self.hints.get(*hint_index) else {
+                            return false;
+                        };
+                        let Some(hint_end) = hint.start.checked_add(hint.len) else {
+                            return false;
+                        };
+                        if hint.start != index
+                            || hint.len == 0
+                            || hint_end > end
+                            || hint.dependencies.iter().any(|&i| !dependency(i, index))
+                            || self.recipes[index..hint_end]
+                                .iter()
+                                .any(|recipe| !matches!(recipe, Recipe::Hint(i) if i == hint_index))
+                        {
+                            return false;
+                        }
+                        index = hint_end;
+                        continue;
+                    }
+                }
+                index += 1;
+            }
+            true
+        })
+    }
+
     pub(super) fn check_values(&self, values: &[F]) -> Result<(), WitnessError> {
+        let started = std::time::Instant::now();
         if let Some(hashes) = &self.hashes {
             hashes.check_values(values)?;
         }
-        for (index, gate) in self.gates.iter().enumerate() {
-            if gate.evaluate(values) != F::ZERO {
-                return Err(WitnessError::UnsatisfiedGate { index });
-            }
+        let hash_seconds = started.elapsed().as_secs_f64();
+        let started = std::time::Instant::now();
+        const GATE_CHUNK: usize = 1 << 12;
+        if let Some(index) = self
+            .gates
+            .par_chunks(GATE_CHUNK)
+            .enumerate()
+            .filter_map(|(chunk, gates)| {
+                gates
+                    .iter()
+                    .position(|gate| gate.evaluate(values) != F::ZERO)
+                    .map(|offset| chunk * GATE_CHUNK + offset)
+            })
+            .min()
+        {
+            return Err(WitnessError::UnsatisfiedGate { index });
         }
-        let mut row = Vec::new();
-        for lookup in &self.lookups {
-            let table = &self.tables[lookup.table.index];
-            row.clear();
-            row.extend(lookup.values.iter().map(|v| values[v.index]));
-            if !table.indices.contains_key(&row) {
-                return Err(WitnessError::LookupMissing {
-                    table: table.name.clone(),
-                });
-            }
+        let gate_seconds = started.elapsed().as_secs_f64();
+        let started = std::time::Instant::now();
+        const LOOKUP_CHUNK: usize = 1 << 10;
+        let first_missing = AtomicUsize::new(self.lookups.len());
+        self.lookups
+            .par_chunks(LOOKUP_CHUNK)
+            .enumerate()
+            .for_each_init(Vec::new, |row, (chunk, lookups)| {
+                let start = chunk * LOOKUP_CHUNK;
+                if start >= first_missing.load(Ordering::Relaxed) {
+                    return;
+                }
+                for (offset, lookup) in lookups.iter().enumerate() {
+                    row.clear();
+                    row.extend(lookup.values.iter().map(|v| values[v.index]));
+                    if !self.tables[lookup.table.index].indices.contains_key(row) {
+                        // Earlier chunks must finish to preserve the first error.
+                        first_missing.fetch_min(start + offset, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            });
+        if let Some(lookup) = self.lookups.get(first_missing.load(Ordering::Relaxed)) {
+            return Err(WitnessError::LookupMissing {
+                table: self.tables[lookup.table.index].name.clone(),
+            });
         }
+        tracing::info!(
+            gates = self.gates.len(),
+            lookups = self.lookups.len(),
+            hash_seconds,
+            gate_seconds,
+            lookup_seconds = started.elapsed().as_secs_f64(),
+            "Plonkish witness relations checked"
+        );
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "tests/validation.rs"]
+mod validation_tests;

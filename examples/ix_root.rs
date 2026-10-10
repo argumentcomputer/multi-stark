@@ -1,4 +1,6 @@
 //! Check/prove verification of an exported Ix root with its unchanged 100-query profile.
+#[path = "support/binary_capabilities.rs"]
+mod binary_capabilities;
 #[path = "support/ix_vk.rs"]
 mod ix_vk;
 use multi_stark::{
@@ -112,6 +114,11 @@ fn check_aiur_policy(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.len() == 1 && args[0] == "capabilities" {
+        binary_capabilities::print("ix_root");
+        return Ok(());
+    }
     std::thread::spawn(|| {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(30));
@@ -126,7 +133,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
-    let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() < 2 {
         return Err("usage: ix_root <ix-artifacts> <output-dir> [--native-only | --check-only | --prove-outer]".into());
     }

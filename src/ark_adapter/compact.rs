@@ -7,8 +7,10 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use super::{KzgCommitment, KzgConfig, KzgProof, Scalar};
 use crate::{
     config::ProofConfig,
+    expr::{RowOffset, Source},
+    graph::Node,
     prover::{Commitments, Proof},
-    system::System,
+    system::{Circuit, System},
     traits::Algebra,
 };
 
@@ -31,11 +33,43 @@ pub struct FixedProofCodec {
 }
 
 impl FixedProofCodec {
-    pub fn new(system: &System<KzgConfig>, log_degrees: &[u8]) -> Result<Self, CompactProofError> {
-        if log_degrees.len() != system.circuits.len() || log_degrees.is_empty() {
+    /// Encoded length for an exact opening-witness count. This is a transport
+    /// projection, not evidence that a proof with that shape is valid.
+    pub fn encoded_len(&self, opening_witnesses: usize) -> Result<usize, CompactProofError> {
+        if opening_witnesses == 0
+            || opening_witnesses > self.max_openings
+            || u8::try_from(opening_witnesses).is_err()
+        {
             return Err(CompactProofError);
         }
-        let max_log = system.config.max_log_degree();
+        opening_witnesses
+            .checked_mul(48)
+            .and_then(|bytes| bytes.checked_add(self.body_bytes))
+            .and_then(|bytes| bytes.checked_add(5))
+            .ok_or(CompactProofError)
+    }
+
+    pub fn new(system: &System<KzgConfig>, log_degrees: &[u8]) -> Result<Self, CompactProofError> {
+        Self::for_profile(
+            &system.circuits,
+            log_degrees,
+            system.config.max_log_degree(),
+            system.config.requires_shifted_commitment(1),
+        )
+    }
+
+    /// Derive the transport shape from authenticated circuit metadata, without
+    /// loading SRS powers or preprocessed coefficients. Decoding still needs
+    /// ordinary verification before any proof can be accepted.
+    pub fn for_profile(
+        circuits: &[Circuit<Scalar>],
+        log_degrees: &[u8],
+        max_log: usize,
+        shifted_degree_bounds: bool,
+    ) -> Result<Self, CompactProofError> {
+        if log_degrees.len() != circuits.len() || log_degrees.is_empty() {
+            return Err(CompactProofError);
+        }
         let mut commitments = [
             KzgCommitment(vec![], vec![]),
             KzgCommitment(vec![], vec![]),
@@ -43,7 +77,7 @@ impl FixedProofCodec {
         ];
         let mut rounds = [vec![], vec![], vec![], vec![]];
         let mut heights = Vec::new();
-        for (ci, (c, &log)) in system.circuits.iter().zip(log_degrees).enumerate() {
+        for (c, &log) in circuits.iter().zip(log_degrees) {
             let height = 1usize
                 .checked_shl(u32::from(log))
                 .ok_or(CompactProofError)?;
@@ -55,6 +89,11 @@ impl FixedProofCodec {
             if !heights.contains(&log) {
                 heights.push(log);
             }
+            let opens_next = |source| {
+                c.graph.nodes.iter().any(|node| {
+                    matches!(node, Node::Var(col) if col.source == source && col.offset == RowOffset::Next)
+                })
+            };
             for (i, width) in [c.main_width, c.stage_2_width, c.quotient_degree()]
                 .into_iter()
                 .enumerate()
@@ -62,10 +101,14 @@ impl FixedProofCodec {
                 commitments[i].0.push(vec![G1Affine::default(); width]);
                 commitments[i].1.push(vec![
                     G1Affine::default();
-                    if usize::from(log) < max_log { width } else { 0 }
+                    if shifted_degree_bounds && usize::from(log) < max_log {
+                        width
+                    } else {
+                        0
+                    }
                 ]);
                 let count = match i {
-                    0 => 1 + usize::from(system.opens_next_row(ci, crate::expr::Source::Main)),
+                    0 => 1 + usize::from(opens_next(Source::Main)),
                     1 => 2,
                     _ => 1,
                 };
@@ -74,10 +117,7 @@ impl FixedProofCodec {
             if c.preprocessed_width != 0 {
                 rounds[3].push(vec![
                     vec![Scalar::ZERO; c.preprocessed_width];
-                    1 + usize::from(system.opens_next_row(
-                        ci,
-                        crate::expr::Source::Preprocessed
-                    ))
+                    1 + usize::from(opens_next(Source::Preprocessed))
                 ]);
             }
         }
@@ -101,7 +141,7 @@ impl FixedProofCodec {
             stage_1_opened_values,
             stage_2_opened_values,
             quotient_opened_values,
-            preprocessed_opened_values: system.preprocessed_commit.as_ref().map(|_| prep),
+            preprocessed_opened_values: (!prep.is_empty()).then_some(prep),
         };
         let body_bytes = points(&template).count() * 48 + fields(&template).count() * 32;
         Ok(Self {
@@ -159,11 +199,17 @@ impl FixedProofCodec {
             for point in commitment.0.iter_mut().chain(&mut commitment.1).flatten() {
                 *point = G1Affine::deserialize_compressed(&mut input)
                     .map_err(|_error| CompactProofError)?;
+                if !point.is_on_curve() {
+                    return Err(CompactProofError);
+                }
             }
         }
         for point in &mut proof.opening_proof.0 {
             *point =
                 G1Affine::deserialize_compressed(&mut input).map_err(|_error| CompactProofError)?;
+            if !point.is_on_curve() {
+                return Err(CompactProofError);
+            }
         }
         let accumulator_count = proof.intermediate_accumulators.len() - 1;
         for value in proof
@@ -329,6 +375,8 @@ mod tests {
         );
         let codec = FixedProofCodec::new(&system, &[2]).unwrap();
         let bytes = codec.encode(&proof).unwrap();
+        let metadata_codec = FixedProofCodec::for_profile(&system.circuits, &[2], 3, true).unwrap();
+        assert_eq!(metadata_codec.encode(&proof).unwrap(), bytes);
         let decoded = codec.decode(&bytes).unwrap();
         assert_eq!(decoded.to_bytes().unwrap(), proof.to_bytes().unwrap());
         system.verify_multiple_claims(&[], &decoded).unwrap();

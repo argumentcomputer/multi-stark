@@ -6,6 +6,7 @@
 //! All public protocol types and serialized proofs remain unchanged.
 
 pub(crate) mod mmcs;
+mod offload;
 #[doc(hidden)]
 pub mod pcs;
 pub(crate) mod sppark;
@@ -39,6 +40,7 @@ pub struct CudaDft {
     device_id: i32,
     cpu: Radix2DitParallel<Goldilocks>,
     planner: sppark::Planner,
+    host_lde_devices: offload::HostLdeDevices,
 }
 
 impl Default for CudaDft {
@@ -57,15 +59,44 @@ pub(crate) fn configured_device() -> i32 {
 
 impl CudaDft {
     /// Selects the zero-based CUDA device used by subsequent transforms.
+    /// `MULTI_STARK_CUDA_AUX_DEVICES` optionally reserves comma-separated CUDA
+    /// ordinals for host-backed LDEs that do not remain on the primary device.
     #[must_use]
     pub fn new(device_id: i32) -> Self {
+        let devices = offload::configured_devices(device_id);
+        Self::without_auxiliary_devices(device_id).with_auxiliary_devices(&devices)
+    }
+
+    fn without_auxiliary_devices(device_id: i32) -> Self {
         assert!(device_id >= 0, "CUDA device id must be non-negative");
         let _ = device_memory_info(device_id);
         Self {
             device_id,
             cpu: Radix2DitParallel::default(),
             planner: sppark::Planner::new(device_id),
+            host_lde_devices: offload::HostLdeDevices::default(),
         }
+    }
+
+    /// Reserves auxiliary CUDA ordinals for host-backed LDE computation.
+    ///
+    /// These devices must be distinct from the primary device and reserved by
+    /// the caller. Ordinals follow `CUDA_VISIBLE_DEVICES`. Clones and other
+    /// auxiliary pools serialize transforms that target the same device.
+    #[must_use]
+    pub fn with_auxiliary_devices(mut self, devices: &[i32]) -> Self {
+        self.host_lde_devices = offload::HostLdeDevices::new(self.device_id, devices);
+        self
+    }
+
+    pub(crate) fn try_auxiliary_coset_lde(
+        &self,
+        matrix: &RowMajorMatrix<Goldilocks>,
+        added_bits: usize,
+        shift: Goldilocks,
+    ) -> Option<RowMajorMatrix<Goldilocks>> {
+        self.host_lde_devices
+            .try_coset_lde(matrix, added_bits, shift)
     }
 
     /// Returns the selected CUDA device id.
@@ -476,8 +507,8 @@ impl CudaLde {
         self.width
     }
 
-    /// Copies the bit-reversed committed storage to a host matrix. This is an
-    /// oracle/debug escape hatch; resident PCS code should retain the handle.
+    /// Copies the bit-reversed committed storage to a host matrix when the
+    /// matrix cannot remain resident, or for comparison with a CPU reference.
     #[must_use]
     pub(crate) fn to_row_major_matrix(&self) -> RowMajorMatrix<Goldilocks> {
         let len = self.height * self.width;
@@ -3401,6 +3432,8 @@ mod tests {
     use p3_symmetric::CryptographicHasher;
     use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
+    mod quotient;
+
     #[test]
     fn device_coset_selectors_match_cpu() {
         use p3_commit::PolynomialSpace;
@@ -3891,6 +3924,31 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires exclusive access to a CUDA device"]
+    fn admission_release_restores_pool_capacity() {
+        let gpu = CudaDft::without_auxiliary_devices(configured_device());
+        let matrix = RowMajorMatrix::new(vec![Goldilocks::ONE; (1 << 16) * 8], 8);
+        let released_bytes = matrix.values.len() * size_of::<Goldilocks>() * 5;
+        for _ in 0..3 {
+            let resident = gpu.coset_lde_batch_resident(&matrix, 2, Goldilocks::GENERATOR);
+            let output = resident.to_row_major_matrix();
+            assert!(output.values.iter().all(|&value| value == Goldilocks::ONE));
+            let held = device_memory_info(gpu.device_id).0;
+            // SAFETY: creation and host materialization have completed, and
+            // no subsequent operation reads this resident payload or trace.
+            unsafe { resident.release_values() };
+            let released = device_memory_info(gpu.device_id).0;
+            assert!(
+                released >= held + released_bytes,
+                "admission missed released capacity: held={held}, released={released}, payload={released_bytes}"
+            );
+            // SAFETY: the same synchronized release is idempotent.
+            unsafe { resident.release_values() };
+            assert_eq!(device_memory_info(gpu.device_id).0, released);
         }
     }
 

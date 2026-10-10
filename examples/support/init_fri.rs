@@ -3,7 +3,7 @@
 mod init_claim;
 #[cfg(test)]
 pub(crate) use init_claim::INIT_PUBLIC_WORDS;
-pub(crate) use init_claim::expected_words;
+pub(crate) use init_claim::{expected_words, expected_words_from_path};
 use multi_stark::{
     plonkish::verifier::*,
     prover::Proof,
@@ -22,14 +22,20 @@ pub(crate) struct Fixture {
 }
 
 pub(crate) fn load(dir: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
+    load_with_expected(dir, &expected_words()?)
+}
+
+pub(crate) fn load_with_expected(
+    dir: &Path,
+    expected: &[u64; 18],
+) -> Result<Fixture, Box<dyn std::error::Error>> {
     let key = VerifierKey::from_bytes(&fs::read(dir.join("outer-vk.bin"))?)?;
     let bytes = fs::read(dir.join("outer-proof.bin"))?;
     let proof = Proof::<GoldilocksBlake3Config>::from_bytes(&bytes)?;
     if proof.to_bytes()? != bytes {
         return Err("noncanonical proof".into());
     }
-    // This experiment's independently expected Init public values.
-    let public = expected_words()?.map(Val::from_u64);
+    let public = expected.map(Val::from_u64);
     // The verifier lowering has three scalar tables and nine compact-hash
     // traces after the arithmetic partitions, with six hash activation anchors.
     let count = key.system().circuits.len();
@@ -61,11 +67,9 @@ pub(crate) fn load(dir: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
             encoded.extend_from_slice(&value.as_canonical_u64().to_le_bytes());
         }
     }
-    assert_eq!(
-        encoded,
-        fs::read(dir.join("outer-claims.bin"))?,
-        "claim mapping differs from the verifier lowering"
-    );
+    if encoded != fs::read(dir.join("outer-claims.bin"))? {
+        return Err("claim mapping differs from the independently expected statement".into());
+    }
     let refs: Vec<_> = claims.iter().map(Vec::as_slice).collect();
     key.system()
         .verify_multiple_claims(&refs, &proof)
@@ -93,8 +97,9 @@ pub(crate) fn load(dir: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
         .iter()
         .map(|c| u8::try_from(c.preprocessed_height.ilog2()).unwrap())
         .collect();
-    assert_eq!(proof.active, active);
-    assert_eq!(proof.log_degrees, logs);
+    if proof.active != active || proof.log_degrees != logs {
+        return Err("saved proof differs from the expected active trace profile".into());
+    }
     let profile = ProofProfile {
         envelope: Envelope::Ordinary,
         active,

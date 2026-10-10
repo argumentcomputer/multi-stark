@@ -11,6 +11,7 @@
 
 use crate::traits::{ExtensionOf, Field};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
+use p3_maybe_rayon::prelude::*;
 
 use crate::config::{Com, PcsData, ProofConfig, Val};
 use crate::lookup::LookupValues;
@@ -285,6 +286,7 @@ impl<F: Field> SystemWitness<F> {
             system.circuits.len(),
             "expected one trace per circuit"
         );
+        let started = std::time::Instant::now();
         let lookups = traces
             .iter()
             .zip(&system.circuits)
@@ -302,6 +304,11 @@ impl<F: Field> SystemWitness<F> {
                 compute_lookup_values(circuit, trace)
             })
             .collect();
+        tracing::info!(
+            circuits = traces.len(),
+            seconds = started.elapsed().as_secs_f64(),
+            "Lookup expressions materialized"
+        );
         Self { traces, lookups }
     }
 }
@@ -344,39 +351,43 @@ pub(crate) fn compute_lookup_values_range<F: Field>(
 
     let empty: [F; 0] = [];
     let mut builder = LookupValues::builder(rows.len(), &slot_widths);
-    let mut buf = Vec::new();
-    let mut args = Vec::new();
-    let mut writers = builder.rows_mut();
-    for (r, writer) in rows.zip(writers.iter_mut()) {
-        let r_next = (r + 1) % height;
-        let main_cur = trace.row_slice(r).unwrap();
-        let main_next = trace.row_slice(r_next).unwrap();
-        let preprocessed_rows =
-            preprocessed.map(|pp| (pp.row_slice(r).unwrap(), pp.row_slice(r_next).unwrap()));
-        let (pp_cur, pp_next): (&[F], &[F]) = match &preprocessed_rows {
-            Some((cur, next)) => (cur, next),
-            None => (&empty, &empty),
-        };
-        let view = VarValues {
-            preprocessed: [pp_cur, pp_next],
-            main: [&main_cur, &main_next],
-            stage2: [&empty, &empty],
-            publics: &empty,
-            is_first_row: if r == 0 { F::ONE } else { F::ZERO },
-            is_last_row: if r == height - 1 { F::ONE } else { F::ZERO },
-            is_transition: if r == height - 1 { F::ZERO } else { F::ONE },
-        };
-        circuit.graph.sweep_lookup_prefix(&view, &mut buf);
-        for (slot, lookup) in circuit.graph.lookups.iter().enumerate() {
-            let multiplicity = buf[lookup.multiplicity.index()];
-            args.clear();
-            args.extend(lookup.args.iter().map(|a| buf[a.index()]));
-            // The multiplicity expression already carries its sign, so store
-            // it as-is (push semantics).
-            writer.push(slot, multiplicity, &args);
-        }
-    }
-    drop(writers);
+    builder
+        .par_rows_mut()
+        .enumerate()
+        .with_min_len(1 << 12)
+        .for_each_init(
+            || (Vec::new(), Vec::new()),
+            |(buf, args), (offset, mut writer)| {
+                // Selectors and the next-row window refer to the full trace,
+                // even when only a range of lookup rows is materialized.
+                let r = rows.start + offset;
+                let r_next = (r + 1) % height;
+                let main_cur = trace.row_slice(r).unwrap();
+                let main_next = trace.row_slice(r_next).unwrap();
+                let preprocessed_rows = preprocessed
+                    .map(|pp| (pp.row_slice(r).unwrap(), pp.row_slice(r_next).unwrap()));
+                let (pp_cur, pp_next): (&[F], &[F]) = match &preprocessed_rows {
+                    Some((cur, next)) => (cur, next),
+                    None => (&empty, &empty),
+                };
+                let view = VarValues {
+                    preprocessed: [pp_cur, pp_next],
+                    main: [&main_cur, &main_next],
+                    stage2: [&empty, &empty],
+                    publics: &empty,
+                    is_first_row: if r == 0 { F::ONE } else { F::ZERO },
+                    is_last_row: if r == height - 1 { F::ONE } else { F::ZERO },
+                    is_transition: if r == height - 1 { F::ZERO } else { F::ONE },
+                };
+                circuit.graph.sweep_lookup_prefix(&view, buf);
+                for (slot, lookup) in circuit.graph.lookups.iter().enumerate() {
+                    let multiplicity = buf[lookup.multiplicity.index()];
+                    args.clear();
+                    args.extend(lookup.args.iter().map(|a| buf[a.index()]));
+                    writer.push(slot, multiplicity, args);
+                }
+            },
+        );
     builder.finish()
 }
 
@@ -393,6 +404,8 @@ pub(crate) fn extension_params<SC: ProofConfig>() -> ExtensionParams<Val<SC>> {
 
 #[cfg(test)]
 mod tests {
+    mod lookup_values;
+
     use super::*;
     use crate::p3_adapter::LookupAir;
     use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};

@@ -13,3 +13,11 @@ __pycache__/
 # Nix
 .direnv/
 result*
+
+# KZG benchmark outputs, binaries and source snapshots; retain reproduction scripts.
+/experiments/kzg-cuda-validation/*
+!/experiments/kzg-cuda-validation/*/
+/experiments/kzg-cuda-validation/*/*
+!/experiments/kzg-cuda-validation/*/*.py
+!/experiments/kzg-cuda-validation/*/*.sh
+!/experiments/kzg-cuda-validation/*/*.md

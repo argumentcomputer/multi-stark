@@ -84,6 +84,9 @@ using a U32 addition circuit with lookups and a preprocessed byte table.
 Use `--features parallel` for representative numbers. Native SIMD instructions
 are enabled by default via `.cargo/config.toml`.
 
+See [KZG performance](docs/kzg-performance.md) for full-pipeline measurements,
+the five-minute roadmap, and targeted optimization experiments.
+
 ## CUDA acceleration
 
 The optional `cuda` feature routes the production Goldilocks configuration's

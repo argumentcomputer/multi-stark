@@ -24,6 +24,7 @@ pub struct KzgConfig {
     max_log_degree: usize,
     stream_lookups: bool,
     stream_quotient: bool,
+    partition_prefetch_bytes: usize,
 }
 
 impl KzgConfig {
@@ -34,14 +35,46 @@ impl KzgConfig {
     /// Panics if the SRS length is not a power of two (trace domains
     /// are, and `max_log_degree` is read off the SRS).
     pub fn new(srs: Arc<Srs>, max_quotient_degree: usize) -> Self {
+        let max_trace_len = srs.max_len();
+        Self::with_max_trace_len(srs, max_trace_len, max_quotient_degree)
+    }
+
+    /// Admit trace domains independently of the loaded public-parameter prefix.
+    /// A verifier needs only the anchors; a prover must load every power it uses.
+    /// Legacy shifted bounds retain their complete, power-of-two parameter range.
+    pub fn with_max_trace_len(
+        srs: Arc<Srs>,
+        max_trace_len: usize,
+        max_quotient_degree: usize,
+    ) -> Self {
         assert!(
             srs.max_len() >= 2 && srs.max_len().is_power_of_two(),
             "SRS length must be a power of two"
         );
-        let max_log_degree = p3_util::log2_strict_usize(srs.max_len());
-        let mut transcript_seed = b"multi-stark/kzg/v3".to_vec();
+        assert!(max_trace_len >= 2 && max_trace_len.is_power_of_two());
+        assert!(max_quotient_degree.is_power_of_two());
+        let max_log_degree = p3_util::log2_strict_usize(max_trace_len);
+        assert!(max_log_degree <= <Scalar as crate::traits::TwoAdicField>::TWO_ADICITY);
+        let mut transcript_seed = if let Some(setup) = srs.public_setup() {
+            assert!(
+                max_trace_len - 1 <= setup.max_degree,
+                "trace cap exceeds public parameters"
+            );
+            b"multi-stark/kzg/v4".to_vec()
+        } else {
+            assert_eq!(
+                max_trace_len,
+                srs.max_len(),
+                "legacy trace cap must match degree keys"
+            );
+            b"multi-stark/kzg/v3".to_vec()
+        };
         for parameter in [max_log_degree, max_quotient_degree] {
             transcript_seed.extend(u64::try_from(parameter).unwrap().to_le_bytes());
+        }
+        if let Some(setup) = srs.public_setup() {
+            transcript_seed.extend(u64::try_from(setup.max_degree).unwrap().to_le_bytes());
+            transcript_seed.extend(setup.id);
         }
         // Bind the anchors and their τ multiples; validated powers follow.
         srs.g1[0]
@@ -57,12 +90,25 @@ impl KzgConfig {
             .serialize_compressed(&mut transcript_seed)
             .expect("serialization into a Vec cannot fail");
         Self {
-            pcs: KzgPcs::new(srs, max_quotient_degree),
+            pcs: KzgPcs::with_max_trace_len(srs, max_trace_len, max_quotient_degree),
             transcript_seed,
             max_log_degree,
             stream_lookups: false,
             stream_quotient: false,
+            partition_prefetch_bytes: 0,
         }
+    }
+
+    pub fn transcript_seed(&self) -> &[u8] {
+        &self.transcript_seed
+    }
+
+    pub fn srs(&self) -> &Srs {
+        self.pcs.srs()
+    }
+
+    pub fn requires_shifted_commitment(&self, height: usize) -> bool {
+        self.pcs.requires_shifted_commitment(height)
     }
 
     /// Reconstruct and commit one lookup trace at a time from committed columns.
@@ -77,9 +123,34 @@ impl KzgConfig {
         self.stream_quotient = true;
         self
     }
+
+    /// Overlap host lookup/constraint work with neighboring device operations.
+    /// The byte limit bounds one additional prepared evaluation payload, not
+    /// total prover memory or the current partition's compute scratch. Inputs
+    /// larger than the limit run alone; zero disables overlap. Row-level CPU
+    /// parallelism and transcript order are unchanged.
+    pub fn with_partition_pipeline(mut self, prefetch_bytes: usize) -> Self {
+        self.partition_prefetch_bytes = prefetch_bytes;
+        self
+    }
 }
 
-fn lookup_trace(
+fn evaluation_bytes(
+    rows: usize,
+    matrices: &[Option<(&super::pcs::KzgProverData, usize)>],
+) -> usize {
+    matrices
+        .iter()
+        .flatten()
+        .try_fold(0usize, |total, (data, slot)| {
+            rows.checked_mul(data.matrices[*slot].width())
+                .and_then(|values| values.checked_mul(size_of::<Scalar>()))
+                .and_then(|bytes| total.checked_add(bytes))
+        })
+        .unwrap_or(usize::MAX)
+}
+
+pub(super) fn lookup_trace(
     circuit: &crate::system::Circuit<Scalar>,
     main: &p3_matrix::dense::RowMajorMatrix<Scalar>,
     fixed: Option<&p3_matrix::dense::RowMajorMatrix<Scalar>>,
@@ -87,6 +158,8 @@ fn lookup_trace(
     gamma: Scalar,
     tile_rows: usize,
 ) -> (p3_matrix::dense::RowMajorMatrix<Scalar>, Scalar) {
+    #[cfg(feature = "kzg-cuda")]
+    let _profile = super::cuda::ProfileRange::new(c"kzg/lookup-trace-cpu");
     use crate::traits::Algebra;
     use p3_matrix::{Matrix, dense::RowMajorMatrix};
     use p3_maybe_rayon::prelude::*;
@@ -149,6 +222,8 @@ fn scalar_quotient_values(
     alpha: Scalar,
     constraint_count: usize,
 ) -> Vec<Scalar> {
+    #[cfg(feature = "kzg-cuda")]
+    let _profile = super::cuda::ProfileRange::new(c"kzg/quotient-values-cpu");
     use crate::traits::{Algebra, EvaluationDomain, Field, Packed};
     use p3_matrix::{Matrix, dense::RowMajorMatrix};
     use p3_maybe_rayon::prelude::*;
@@ -227,103 +302,83 @@ fn scalar_quotient_values(
     values
 }
 
-impl ProofConfig for KzgConfig {
-    fn accelerated_quotient_values(
-        &self,
-        circuit: &crate::system::Circuit<Scalar>,
-        publics: &[Scalar],
-        trace_domain: super::domain::Radix2Coset,
-        quotient_domain: super::domain::Radix2Coset,
-        preprocessed: Option<(&super::pcs::KzgProverData, usize)>,
-        stage_1: (&super::pcs::KzgProverData, usize),
-        stage_2: (&super::pcs::KzgProverData, usize),
-        alpha: Scalar,
-        constraint_count: usize,
-    ) -> Option<Vec<Scalar>> {
-        let started = std::time::Instant::now();
-        let fixed = preprocessed.map(|(data, index)| {
-            self.pcs
-                .get_evaluations_on_domain(data, index, quotient_domain)
-        });
-        let main = self
-            .pcs
-            .get_evaluations_on_domain(stage_1.0, stage_1.1, quotient_domain);
-        let lookup = self
-            .pcs
-            .get_evaluations_on_domain(stage_2.0, stage_2.1, quotient_domain);
-        tracing::info!(
-            seconds = started.elapsed().as_secs_f64(),
-            "KZG quotient evaluations materialized"
-        );
-        Some(scalar_quotient_values(
-            circuit,
-            publics,
-            trace_domain,
-            quotient_domain,
-            fixed.as_ref(),
-            &main,
-            &lookup,
-            alpha,
-            constraint_count,
-        ))
-    }
-
-    fn accelerated_lookup_commit(
-        &self,
-        inputs: &[crate::config::LookupCommitInput<'_, Self>],
-        beta: Scalar,
-        gamma: Scalar,
-        mut acc: Scalar,
-    ) -> Option<crate::config::AcceleratedLookupCommitment<Self>> {
-        if !self.stream_lookups {
-            return None;
-        }
-        let mut parts = Vec::new();
-        let mut accumulators = Vec::new();
-        for (i, input) in inputs.iter().enumerate() {
-            let start = std::time::Instant::now();
-            let domain = input.stage_1.0.matrices[input.stage_1.1].domain;
-            let fixed = input
-                .preprocessed
-                .map(|(data, slot)| self.pcs.get_evaluations_on_domain(data, slot, domain));
-            let main = self
-                .pcs
-                .get_evaluations_on_domain(input.stage_1.0, input.stage_1.1, domain);
-            let evaluation_seconds = start.elapsed().as_secs_f64();
-            let trace_started = std::time::Instant::now();
-            let (trace, local) =
-                lookup_trace(input.circuit, &main, fixed.as_ref(), beta, gamma, 1 << 16);
-            let trace_seconds = trace_started.elapsed().as_secs_f64();
-            drop(main);
-            drop(fixed);
-            acc += local;
-            accumulators.push(acc);
-            let commit_started = std::time::Instant::now();
-            let (_, data) = self.pcs.commit(vec![(domain, trace)]);
-            let commit_seconds = commit_started.elapsed().as_secs_f64();
-            parts.push(data);
-            tracing::info!(
-                circuit = i,
-                evaluation_seconds,
-                trace_seconds,
-                commit_seconds,
-                seconds = start.elapsed().as_secs_f64(),
-                "KZG lookup committed"
-            );
-        }
-        let (commitment, data) = super::pcs::KzgProverData::concatenate(parts);
-        Some((commitment, data, accumulators))
-    }
-
-    fn accelerated_quotient_commit(
+impl KzgConfig {
+    fn host_quotient_commit(
         &self,
         inputs: &[crate::config::QuotientCommitInput<'_, Self>],
         alpha: Scalar,
     ) -> Option<(super::pcs::KzgCommitment, super::pcs::KzgProverData)> {
-        if !self.stream_quotient {
-            return None;
-        }
         use crate::traits::{Algebra, EvaluationDomain, TwoAdicField};
+        if !self.stream_quotient {
+            if self.partition_prefetch_bytes == 0 {
+                return None;
+            }
+            let parts = super::pipeline::map(
+                inputs.len(),
+                self.partition_prefetch_bytes,
+                |i| {
+                    let input = &inputs[i];
+                    evaluation_bytes(
+                        input.quotient_domain.size(),
+                        &[input.preprocessed, Some(input.stage_1), Some(input.stage_2)],
+                    )
+                },
+                |i| {
+                    let input = &inputs[i];
+                    let started = std::time::Instant::now();
+                    let fixed = input.preprocessed.map(|(data, slot)| {
+                        self.pcs
+                            .get_evaluations_on_domain(data, slot, input.quotient_domain)
+                    });
+                    let main = self.pcs.get_evaluations_on_domain(
+                        input.stage_1.0,
+                        input.stage_1.1,
+                        input.quotient_domain,
+                    );
+                    let stage2 = self.pcs.get_evaluations_on_domain(
+                        input.stage_2.0,
+                        input.stage_2.1,
+                        input.quotient_domain,
+                    );
+                    tracing::info!(
+                        circuit = i,
+                        seconds = started.elapsed().as_secs_f64(),
+                        "KZG quotient evaluations materialized"
+                    );
+                    (fixed, main, stage2, started)
+                },
+                |i, (fixed, main, stage2, started)| {
+                    let input = &inputs[i];
+                    let values = scalar_quotient_values(
+                        input.circuit,
+                        &input.lookup_publics,
+                        input.trace_domain,
+                        input.quotient_domain,
+                        fixed.as_ref(),
+                        &main,
+                        &stage2,
+                        alpha,
+                        input.constraint_count,
+                    );
+                    (values, started)
+                },
+                |i, (values, started)| {
+                    let input = &inputs[i];
+                    let (_, data) = self.pcs.commit_quotient(vec![(
+                        input.quotient_domain,
+                        p3_matrix::dense::RowMajorMatrix::new_col(values),
+                        input.quotient_domain.size() / input.trace_domain.size(),
+                    )]);
+                    tracing::info!(
+                        circuit = i,
+                        seconds = started.elapsed().as_secs_f64(),
+                        "KZG quotient committed"
+                    );
+                    data
+                },
+            );
+            return Some(super::pcs::KzgProverData::concatenate(parts));
+        }
         let mut parts = Vec::with_capacity(inputs.len());
         for (i, input) in inputs.iter().enumerate() {
             let start = std::time::Instant::now();
@@ -384,6 +439,205 @@ impl ProofConfig for KzgConfig {
             );
         }
         Some(super::pcs::KzgProverData::concatenate(parts))
+    }
+}
+
+impl KzgConfig {
+    fn host_lookup_parts(
+        &self,
+        inputs: &[crate::config::LookupCommitInput<'_, Self>],
+        beta: Scalar,
+        gamma: Scalar,
+    ) -> Vec<(super::pcs::KzgProverData, Scalar)> {
+        use crate::traits::EvaluationDomain;
+        let results = super::pipeline::map(
+            inputs.len(),
+            self.partition_prefetch_bytes,
+            |i| {
+                let input = &inputs[i];
+                evaluation_bytes(
+                    input.stage_1.0.matrices[input.stage_1.1].domain.size(),
+                    &[input.preprocessed, Some(input.stage_1)],
+                )
+            },
+            |i| {
+                let input = &inputs[i];
+                let start = std::time::Instant::now();
+                let domain = input.stage_1.0.matrices[input.stage_1.1].domain;
+                let fixed = input
+                    .preprocessed
+                    .map(|(data, slot)| self.pcs.get_evaluations_on_domain(data, slot, domain));
+                let main =
+                    self.pcs
+                        .get_evaluations_on_domain(input.stage_1.0, input.stage_1.1, domain);
+                let seconds = start.elapsed().as_secs_f64();
+                (fixed, main, start, seconds)
+            },
+            |i, (fixed, main, start, evaluation_seconds)| {
+                let trace_started = std::time::Instant::now();
+                let (trace, local) = lookup_trace(
+                    inputs[i].circuit,
+                    &main,
+                    fixed.as_ref(),
+                    beta,
+                    gamma,
+                    1 << 16,
+                );
+                (
+                    trace,
+                    local,
+                    start,
+                    evaluation_seconds,
+                    trace_started.elapsed().as_secs_f64(),
+                )
+            },
+            |i, (trace, local, start, evaluation_seconds, trace_seconds)| {
+                let domain = inputs[i].stage_1.0.matrices[inputs[i].stage_1.1].domain;
+                let commit_started = std::time::Instant::now();
+                let (_, data) = self.pcs.commit(vec![(domain, trace)]);
+                tracing::info!(
+                    circuit = i,
+                    evaluation_seconds,
+                    trace_seconds,
+                    commit_seconds = commit_started.elapsed().as_secs_f64(),
+                    seconds = start.elapsed().as_secs_f64(),
+                    "KZG lookup committed"
+                );
+                (data, local)
+            },
+        );
+        results
+    }
+}
+
+impl ProofConfig for KzgConfig {
+    fn accelerated_quotient_values(
+        &self,
+        circuit: &crate::system::Circuit<Scalar>,
+        publics: &[Scalar],
+        trace_domain: super::domain::Radix2Coset,
+        quotient_domain: super::domain::Radix2Coset,
+        preprocessed: Option<(&super::pcs::KzgProverData, usize)>,
+        stage_1: (&super::pcs::KzgProverData, usize),
+        stage_2: (&super::pcs::KzgProverData, usize),
+        alpha: Scalar,
+        constraint_count: usize,
+    ) -> Option<Vec<Scalar>> {
+        let started = std::time::Instant::now();
+        let fixed = preprocessed.map(|(data, index)| {
+            self.pcs
+                .get_evaluations_on_domain(data, index, quotient_domain)
+        });
+        let main = self
+            .pcs
+            .get_evaluations_on_domain(stage_1.0, stage_1.1, quotient_domain);
+        let lookup = self
+            .pcs
+            .get_evaluations_on_domain(stage_2.0, stage_2.1, quotient_domain);
+        tracing::info!(
+            seconds = started.elapsed().as_secs_f64(),
+            "KZG quotient evaluations materialized"
+        );
+        Some(scalar_quotient_values(
+            circuit,
+            publics,
+            trace_domain,
+            quotient_domain,
+            fixed.as_ref(),
+            &main,
+            &lookup,
+            alpha,
+            constraint_count,
+        ))
+    }
+
+    fn accelerated_lookup_commit(
+        &self,
+        inputs: &[crate::config::LookupCommitInput<'_, Self>],
+        beta: Scalar,
+        gamma: Scalar,
+        mut acc: Scalar,
+    ) -> Option<crate::config::AcceleratedLookupCommitment<Self>> {
+        if !self.stream_lookups {
+            return None;
+        }
+        #[cfg(feature = "kzg-cuda")]
+        let results = if super::cuda::lookup::enabled() {
+            use rayon::prelude::*;
+            let mut parts: Vec<_> = inputs
+                .par_iter()
+                .map(|input| {
+                    super::cuda::lookup::coefficients(input, beta, gamma).map(|(columns, local)| {
+                        let domain = input.stage_1.0.matrices[input.stage_1.1].domain;
+                        (
+                            self.pcs.commit_trace_coefficients(domain.log_size, columns),
+                            local,
+                        )
+                    })
+                })
+                .collect();
+            for (input, part) in inputs.iter().zip(&mut parts) {
+                if part.is_none() {
+                    *part = self
+                        .host_lookup_parts(core::slice::from_ref(input), beta, gamma)
+                        .pop();
+                }
+            }
+            parts.into_iter().map(Option::unwrap).collect::<Vec<_>>()
+        } else {
+            self.host_lookup_parts(inputs, beta, gamma)
+        };
+        #[cfg(not(feature = "kzg-cuda"))]
+        let results = self.host_lookup_parts(inputs, beta, gamma);
+        let mut parts = Vec::with_capacity(results.len());
+        let mut accumulators = Vec::with_capacity(results.len());
+        // Local traces start at zero; only the ordered public totals depend
+        // on the preceding circuit's accumulator.
+        for (data, local) in results {
+            parts.push(data);
+            acc += local;
+            accumulators.push(acc);
+        }
+        let (commitment, data) = super::pcs::KzgProverData::concatenate(parts);
+        Some((commitment, data, accumulators))
+    }
+
+    fn accelerated_quotient_commit(
+        &self,
+        inputs: &[crate::config::QuotientCommitInput<'_, Self>],
+        alpha: Scalar,
+    ) -> Option<(super::pcs::KzgCommitment, super::pcs::KzgProverData)> {
+        #[cfg(feature = "kzg-cuda")]
+        if super::cuda::quotient::enabled() {
+            use rayon::prelude::*;
+            let mut parts: Vec<_> = inputs
+                .par_iter()
+                .map(|input| {
+                    super::cuda::quotient::coefficients(input, alpha).map(|columns| {
+                        self.pcs
+                            .commit_quotient_coefficients(input.trace_domain.log_size, columns)
+                    })
+                })
+                .collect();
+            // Rejected partitions keep one trace-sized host working set. Running
+            // their CPU fallbacks concurrently would bypass the prefetch budget.
+            for (input, part) in inputs.iter().zip(&mut parts) {
+                if part.is_none() {
+                    let mut fallback = self.clone();
+                    fallback.stream_quotient = true;
+                    *part = Some(
+                        fallback
+                            .host_quotient_commit(core::slice::from_ref(input), alpha)
+                            .unwrap()
+                            .1,
+                    );
+                }
+            }
+            return Some(super::pcs::KzgProverData::concatenate(
+                parts.into_iter().map(Option::unwrap),
+            ));
+        }
+        self.host_quotient_commit(inputs, alpha)
     }
 
     fn omit_inactive_preprocessed_openings(&self) -> bool {
@@ -600,6 +854,153 @@ mod tests {
     }
 
     #[test]
+    fn public_degree_mixed_heights_verify_with_anchor_only_parameters() {
+        use super::super::{PublicSetup, compact::FixedProofCodec};
+        let powers = Srs::unsafe_dev_setup(16, b"public-degree-system");
+        let metadata = PublicSetup {
+            max_degree: 31,
+            id: [19; 32],
+        };
+        let verifier_powers = powers.g1[..2].to_vec();
+        let g2 = powers.g2;
+        let tau_g2 = powers.tau_g2;
+        let srs = Arc::new(Srs::from_public_powers(powers.g1, g2, tau_g2, metadata).unwrap());
+        let config = KzgConfig::new(srs, 2)
+            .with_streaming_lookups()
+            .with_streaming_quotient()
+            .with_partition_pipeline(1 << 20);
+        let definitions: Vec<_> = [(4, 7), (2, 9)]
+            .into_iter()
+            .map(|(height, value)| CircuitInputs {
+                main_width: 1,
+                preprocessed: Some(RowMajorMatrix::new_col(
+                    (0..height)
+                        .map(|row| Scalar::from_usize(value + row))
+                        .collect(),
+                )),
+                constraints: vec![Expr::main_next(0) - Expr::preprocessed_next(0)],
+                lookups: vec![
+                    Lookup::push(Expr::constant(Scalar::ONE), vec![Expr::main(0)]),
+                    Lookup::pull(Expr::constant(Scalar::ONE), vec![Expr::preprocessed(0)]),
+                ],
+                lookup_group_size: 2,
+                ..Default::default()
+            })
+            .collect();
+        let (mut system, key) = System::new(config, definitions);
+        let traces = [(4, 7), (2, 9)]
+            .into_iter()
+            .map(|(height, value)| {
+                RowMajorMatrix::new_col(
+                    (0..height)
+                        .map(|row| Scalar::from_usize(value + row))
+                        .collect(),
+                )
+            })
+            .collect();
+        let proof =
+            system.prove_multiple_claims(&key, &[], SystemWitness::from_stage_1(traces, &system));
+        for commitment in [
+            &proof.commitments.stage_1_trace,
+            &proof.commitments.stage_2_trace,
+            &proof.commitments.quotient_chunks,
+            system.preprocessed_commit.as_ref().unwrap(),
+        ] {
+            assert!(commitment.1.iter().all(Vec::is_empty));
+        }
+        let codec = FixedProofCodec::new(&system, &proof.log_degrees).unwrap();
+        let bytes = codec.encode(&proof).unwrap();
+        let proof = codec.decode(&bytes).unwrap();
+        let verifier_config = |setup, trace_cap| {
+            KzgConfig::with_max_trace_len(
+                Arc::new(
+                    Srs::from_public_powers(verifier_powers.clone(), g2, tau_g2, setup).unwrap(),
+                ),
+                trace_cap,
+                2,
+            )
+        };
+        system.config = verifier_config(metadata, 16);
+        system.verify_multiple_claims(&[], &proof).unwrap();
+        for setup in [
+            PublicSetup {
+                id: [20; 32],
+                ..metadata
+            },
+            PublicSetup {
+                max_degree: 63,
+                ..metadata
+            },
+        ] {
+            system.config = verifier_config(setup, 16);
+            assert!(system.verify_multiple_claims(&[], &proof).is_err());
+        }
+        system.config = verifier_config(metadata, 32);
+        assert!(system.verify_multiple_claims(&[], &proof).is_err());
+        system.config = verifier_config(metadata, 16);
+        let mut wrong = proof.clone();
+        wrong.quotient_opened_values[0][0][0] += Scalar::ONE;
+        assert!(system.verify_multiple_claims(&[], &wrong).is_err());
+        let mut wrong = proof;
+        wrong.intermediate_accumulators[0] += Scalar::ONE;
+        assert!(system.verify_multiple_claims(&[], &wrong).is_err());
+    }
+
+    #[cfg(feature = "kzg-cuda")]
+    #[test]
+    #[ignore = "run separately with CPU and CUDA backends and compare the printed digest"]
+    fn public_degree_backend_parity_fixture() {
+        use super::super::{PublicSetup, compact::FixedProofCodec};
+        let powers = Srs::unsafe_dev_setup(1 << 16, b"public-degree-backend-fixture");
+        let srs = Srs::from_public_powers(
+            powers.g1,
+            powers.g2,
+            powers.tau_g2,
+            PublicSetup {
+                max_degree: (1 << 28) - 2,
+                id: super::super::srs::filecoin::filecoin_setup_id(),
+            },
+        )
+        .unwrap();
+        let config = KzgConfig::new(Arc::new(srs), 2)
+            .with_streaming_lookups()
+            .with_streaming_quotient()
+            .with_partition_pipeline(1 << 27);
+        let traces = [1 << 15, 1 << 16]
+            .map(|rows| {
+                RowMajorMatrix::new(
+                    (0..rows)
+                        .flat_map(|row| {
+                            let a = Scalar::from_usize(row % 17 + 2);
+                            let b = Scalar::from_usize(row % 31 + 3);
+                            [a, b, a * b]
+                        })
+                        .collect(),
+                    3,
+                )
+            })
+            .to_vec();
+        let definitions = [mul_circuit(), mul_circuit()].map(|mut definition| {
+            definition.lookup_group_size = 2;
+            definition
+        });
+        let (system, key) = System::new(config, definitions);
+        let proof =
+            system.prove_multiple_claims(&key, &[], SystemWitness::from_stage_1(traces, &system));
+        system.verify_multiple_claims(&[], &proof).unwrap();
+        let codec = FixedProofCodec::new(&system, &proof.log_degrees).unwrap();
+        let bytes = codec.encode(&proof).unwrap();
+        system
+            .verify_multiple_claims(&[], &codec.decode(&bytes).unwrap())
+            .unwrap();
+        println!(
+            "public_degree_fixture bytes={} blake3={}",
+            bytes.len(),
+            blake3::hash(&bytes).to_hex()
+        );
+    }
+
+    #[test]
     fn streamed_lookups_preserve_proof_bytes() {
         let config = KzgConfig::new(Arc::new(Srs::unsafe_dev_setup(16, b"streamed-lookups")), 8);
         let definitions = vec![
@@ -630,6 +1031,109 @@ mod tests {
             &streamed_key,
             &[],
             SystemWitness::from_stage_1(traces, &streamed),
+        );
+        assert_eq!(actual.to_bytes().unwrap(), expected.to_bytes().unwrap());
+        serial.verify_multiple_claims(&[], &actual).unwrap();
+    }
+
+    #[test]
+    fn partition_pipeline_preserves_cross_circuit_accumulators_and_proof_bytes() {
+        let config = KzgConfig::new(Arc::new(Srs::unsafe_dev_setup(16, b"pipeline-order")), 8);
+        let definitions = vec![
+            CircuitInputs {
+                main_width: 1,
+                preprocessed: Some(RowMajorMatrix::new_col(vec![Scalar::ONE; 8])),
+                constraints: vec![Expr::main_next(0) - Expr::main(0)],
+                lookups: vec![Lookup::push(
+                    Expr::preprocessed(0),
+                    vec![Expr::main(0), Expr::main_next(0)],
+                )],
+                ..Default::default()
+            },
+            CircuitInputs {
+                main_width: 1,
+                preprocessed: Some(RowMajorMatrix::new_col(vec![Scalar::from_u8(2); 4])),
+                lookups: vec![Lookup::pull(
+                    Expr::preprocessed(0),
+                    vec![Expr::main(0), Expr::main_next(0)],
+                )],
+                ..Default::default()
+            },
+            CircuitInputs {
+                main_width: 1,
+                constraints: vec![Expr::main(0) - Expr::constant(Scalar::from_u8(5))],
+                ..Default::default()
+            },
+            mul_circuit(),
+        ];
+        let traces = vec![
+            RowMajorMatrix::new_col(vec![Scalar::from_u8(7); 8]),
+            RowMajorMatrix::new_col(vec![Scalar::from_u8(7); 4]),
+            RowMajorMatrix::new_col(vec![Scalar::from_u8(5); 2]),
+            RowMajorMatrix::new(vec![], 3),
+        ];
+        let (serial, key) = System::new(config.clone(), definitions.clone());
+        let expected = serial.prove_multiple_claims(
+            &key,
+            &[],
+            SystemWitness::from_stage_1(traces.clone(), &serial),
+        );
+        assert_ne!(expected.intermediate_accumulators[0], Scalar::ZERO);
+        assert_eq!(expected.active, [true, true, true, false]);
+        for limit in [1, 1024, usize::MAX] {
+            let (pipelined, key) = System::new(
+                config
+                    .clone()
+                    .with_streaming_lookups()
+                    .with_partition_pipeline(limit),
+                definitions.clone(),
+            );
+            let actual = pipelined.prove_multiple_claims(
+                &key,
+                &[],
+                SystemWitness::from_stage_1(traces.clone(), &pipelined),
+            );
+            assert_eq!(actual.to_bytes().unwrap(), expected.to_bytes().unwrap());
+            serial.verify_multiple_claims(&[], &actual).unwrap();
+        }
+    }
+
+    #[cfg(feature = "kzg-cuda")]
+    #[test]
+    fn partition_pipeline_preserves_cuda_proof_bytes() {
+        let config = KzgConfig::new(Arc::new(Srs::unsafe_dev_setup(4096, b"cuda-pipeline")), 8)
+            .with_streaming_lookups();
+        let traces = [1024, 2048, 4096]
+            .map(|rows| {
+                RowMajorMatrix::new(
+                    (0..rows)
+                        .flat_map(|i| {
+                            let a = Scalar::from_usize(i % 17 + 2);
+                            let b = Scalar::from_usize(i % 31 + 3);
+                            [a, b, a * b]
+                        })
+                        .collect(),
+                    3,
+                )
+            })
+            .to_vec();
+        let (serial, key) = System::new(
+            config.clone(),
+            [mul_circuit(), mul_circuit(), mul_circuit()],
+        );
+        let expected = serial.prove_multiple_claims(
+            &key,
+            &[],
+            SystemWitness::from_stage_1(traces.clone(), &serial),
+        );
+        let (pipeline, key) = System::new(
+            config.with_partition_pipeline(1 << 26),
+            [mul_circuit(), mul_circuit(), mul_circuit()],
+        );
+        let actual = pipeline.prove_multiple_claims(
+            &key,
+            &[],
+            SystemWitness::from_stage_1(traces, &pipeline),
         );
         assert_eq!(actual.to_bytes().unwrap(), expected.to_bytes().unwrap());
         serial.verify_multiple_claims(&[], &actual).unwrap();

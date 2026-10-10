@@ -165,7 +165,8 @@
 use crate::config::{PcsError, ProofConfig, Val};
 use crate::ensure_eq;
 use crate::eval::VarValues;
-use crate::prover::{Proof, claims_accumulator, observe_claims, sample_lookup_challenges};
+use crate::lookup::fingerprint;
+use crate::prover::{Proof, observe_claims, sample_lookup_challenges};
 use crate::system::System;
 use crate::traits::{Algebra, EvaluationDomain, ExtensionOf, Field, Pcs, Transcript, TwoAdicField};
 
@@ -179,6 +180,8 @@ pub enum VerificationError<PcsErr> {
     /// Note: this variant is not currently returned by any verification path.
     /// It is reserved for future claim validation checks.
     InvalidClaim,
+    /// A transcript challenge makes an evaluation or lookup denominator invalid.
+    InvalidChallenge,
     /// The PCS opening proof failed to verify.
     InvalidOpeningArgument(PcsErr),
     /// The proof has an unexpected shape (wrong number of opened values, etc.).
@@ -196,6 +199,21 @@ pub enum VerificationError<PcsErr> {
     /// The shards' lookup residuals and the batch's public messages did not
     /// sum to zero.
     UnbalancedBatch,
+}
+
+pub(crate) fn checked_claims_accumulator<SC: ProofConfig>(
+    beta: SC::Challenge,
+    gamma: &SC::Challenge,
+    claims: &[&[Val<SC>]],
+) -> Result<SC::Challenge, VerificationError<PcsError<SC>>> {
+    let mut accumulator = <SC::Challenge as Algebra<SC::Challenge>>::ZERO;
+    for claim in claims {
+        let message = beta + fingerprint(gamma, claim.iter().copied());
+        accumulator += message
+            .try_inverse()
+            .ok_or(VerificationError::InvalidChallenge)?;
+    }
+    Ok(accumulator)
 }
 
 impl<SC: ProofConfig> System<SC> {
@@ -278,8 +296,11 @@ impl<SC: ProofConfig> System<SC> {
             sample_lookup_challenges::<SC>(&mut challenger);
 
         // construct the accumulator from the claims
-        let acc =
-            claims_accumulator::<SC>(lookup_argument_challenge, &fingerprint_challenge, claims);
+        let acc = checked_claims_accumulator::<SC>(
+            lookup_argument_challenge,
+            &fingerprint_challenge,
+            claims,
+        )?;
 
         self.verify_after_challenges(
             proof,
@@ -352,6 +373,9 @@ impl<SC: ProofConfig> System<SC> {
         // Soundness: OOD evaluation. ζ is sampled after all commitments are fixed.
         // A nonzero polynomial of degree ≤ D vanishes at ζ with probability ≤ D/|F_ext|.
         let zeta: SC::Challenge = challenger.sample_challenge();
+        // Zero merges rotated opening points, while roots of a trace domain
+        // make the selector and quotient denominators undefined.
+        crate::ensure!(!zeta.is_zero(), VerificationError::InvalidChallenge);
 
         // Reconstruct the PCS opening rounds (identical to the prover).
         let mut stage_1_trace_evaluations = vec![];
@@ -360,6 +384,12 @@ impl<SC: ProofConfig> System<SC> {
         for pos in 0..active_indices.len() {
             let log_degree = log_degrees[pos];
             let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
+            let unshifted = zeta * SC::Challenge::from(trace_domain.first_point().inverse());
+            crate::ensure!(
+                unshifted.exp_power_of_2(usize::from(log_degree))
+                    != <SC::Challenge as Algebra<SC::Challenge>>::ONE,
+                VerificationError::InvalidChallenge
+            );
             let zeta_next = trace_domain.next_point(zeta);
             stage_1_trace_evaluations.push((
                 trace_domain,
@@ -562,11 +592,16 @@ impl<SC: ProofConfig> System<SC> {
             // ≥ 1 - D/|F_ext| (Schwartz-Zippel). Combined with the FRI check above,
             // this ensures that the opened values are consistent with actually
             // low-degree polynomials satisfying all constraints.
-            ensure_eq!(
-                composition * sels.inv_vanishing,
-                quotient,
-                VerificationError::OodEvaluationMismatch
-            );
+            if composition * sels.inv_vanishing != quotient {
+                tracing::debug!(
+                    circuit = ci,
+                    active_position = pos,
+                    degree,
+                    quotient_degree,
+                    "out-of-domain constraint evaluation mismatch"
+                );
+                return Err(VerificationError::OodEvaluationMismatch);
+            }
             // the accumulator must become the next accumulator for the next iteration
             acc = next_acc;
         }
@@ -761,6 +796,10 @@ impl<SC: ProofConfig> System<SC> {
         Ok(quotient_degrees)
     }
 }
+
+#[cfg(all(test, feature = "kzg"))]
+#[path = "verifier/challenge_tests.rs"]
+mod challenge_tests;
 
 /// Reassembles an extension element from its base coordinates.
 fn from_ext_basis<F: Field, EF: ExtensionOf<F>>(coeffs: &[EF]) -> EF {

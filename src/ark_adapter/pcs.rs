@@ -3,8 +3,9 @@
 //! Commitments are per column: interpolate each column of a committed
 //! matrix over its domain (radix-2 iFFT) and MSM the coefficients
 //! against the SRS — a round's commitment is the vector of G1 points,
-//! 48 bytes per column. Shorter polynomials also carry a shifted commitment
-//! checked against the SRS degree key. There are no FRI queries.
+//! 48 bytes per column. The legacy policy also checks shifted commitments
+//! for shorter polynomials. Public parameters instead bind the complete public
+//! degree allowance for the polynomial-identity argument. There are no FRI queries.
 //!
 //! Opening batches per distinct point: all polynomials opened at `z`
 //! (across every round and matrix) are folded with powers of one
@@ -123,6 +124,36 @@ pub struct CommittedMatrix {
 }
 
 impl CommittedMatrix {
+    /// Evaluation domain represented by the stored coefficient columns.
+    pub fn domain(&self) -> Radix2Coset {
+        self.domain
+    }
+
+    /// Number of polynomial columns.
+    pub fn width(&self) -> usize {
+        self.columns.len()
+    }
+
+    #[cfg(feature = "kzg-cuda")]
+    pub(super) fn cuda_columns(
+        &self,
+    ) -> Vec<(&[Fr], Option<&super::cuda::ResidentPolynomial>, bool)> {
+        let constants = self.constant_columns();
+        let resident = self.resident.get();
+        self.columns
+            .iter()
+            .enumerate()
+            .zip(constants)
+            .map(|((index, column), &constant)| {
+                (
+                    column.as_slice(),
+                    resident.and_then(|columns| columns[index].as_deref()),
+                    constant,
+                )
+            })
+            .collect()
+    }
+
     fn new(domain: Radix2Coset, columns: Vec<Vec<Fr>>) -> Self {
         Self {
             domain,
@@ -142,7 +173,7 @@ impl CommittedMatrix {
     }
 
     #[cfg(feature = "kzg-cuda")]
-    fn resident_columns(&self) -> &[Option<Arc<super::cuda::ResidentPolynomial>>] {
+    pub(super) fn resident_columns(&self) -> &[Option<Arc<super::cuda::ResidentPolynomial>>] {
         self.resident.get_or_init(|| {
             let constants = self.constant_columns();
             map_columns(
@@ -166,6 +197,24 @@ pub struct KzgProverData {
 }
 
 impl KzgProverData {
+    /// Detach device coefficients while retaining the host key and commitment.
+    /// Later GPU operations may hydrate the same immutable coefficients again.
+    /// Drop all other request data before releasing the backend's idle memory.
+    pub fn release_device_residency(&mut self) {
+        #[cfg(feature = "kzg-cuda")]
+        for matrix in &mut self.matrices {
+            drop(matrix.resident.take());
+        }
+    }
+
+    #[cfg(all(test, feature = "kzg-cuda"))]
+    pub(super) fn coefficient_fixture(domain: Radix2Coset, columns: Vec<Vec<Fr>>) -> Self {
+        Self {
+            commitment: KzgCommitment(vec![vec![]], vec![vec![]]),
+            matrices: vec![CommittedMatrix::new(domain, columns)],
+        }
+    }
+
     /// Save a local prover checkpoint. This is not a verifier-key format.
     pub fn write_checkpoint(
         &self,
@@ -265,21 +314,181 @@ pub enum KzgError {
     /// The batched pairing equation does not hold.
     PairingCheckFailed,
     DegreeBoundFailed,
+    InvalidPoint,
+}
+
+/// Device memory at a synchronized idle boundary. Current and default pool
+/// counters refer to the same pages when `current_pool_is_default` is true.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct KzgDeviceMemorySnapshot {
+    pub driver_free_bytes: u64,
+    pub total_bytes: u64,
+    pub current_pool_reserved_bytes: u64,
+    pub current_pool_used_bytes: u64,
+    pub default_pool_reserved_bytes: u64,
+    pub default_pool_used_bytes: u64,
+    pub current_pool_is_default: bool,
+    /// Includes reserved coefficient capacity of operations waiting for a lease.
+    pub resident_coefficient_bytes: usize,
+    pub srs_point_bytes: usize,
+    pub msm_workspace_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct KzgDeviceMemoryRelease {
+    pub device: i32,
+    pub before: KzgDeviceMemorySnapshot,
+    pub after: KzgDeviceMemorySnapshot,
+    pub released_srs_point_bytes: usize,
+    pub released_msm_workspace_bytes: usize,
+}
+
+/// CPU execution and a CUDA backend with no initialized devices have no device
+/// reports. `quiesced` confirms an actual synchronized release on every selected
+/// device; live NTT tables, contexts, and other owners' allocations remain valid.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct KzgIdleMemoryRelease {
+    pub cuda_enabled: bool,
+    pub initialized: bool,
+    pub quiesced: bool,
+    pub devices: Vec<KzgDeviceMemoryRelease>,
 }
 
 /// See the module docs.
 #[derive(Clone)]
 pub struct KzgPcs {
     srs: Arc<Srs>,
+    #[cfg(feature = "kzg-cuda")]
+    srs_owner: Arc<super::cuda::srs_cache::Owner>,
     max_quotient_degree: usize,
+    max_trace_len: usize,
 }
 
 impl KzgPcs {
+    /// Commit stored natural-domain coefficients under this PCS's SRS and degree
+    /// policy, ignoring all prior commitment points. Coefficient allocations and
+    /// any device residency are retained; no interpolation is performed.
+    ///
+    /// Every matrix is checked before any MSM. Returns [`KzgError::ShapeMismatch`]
+    /// for a non-natural or unsupported domain, empty or incorrectly sized
+    /// columns, or a domain exceeding the trace cap or locally loaded SRS prefix.
+    /// This does not validate a witness or authenticate its checkpoint source.
+    pub fn recommit(
+        &self,
+        mut data: KzgProverData,
+    ) -> Result<(KzgCommitment, KzgProverData), KzgError> {
+        for matrix in &data.matrices {
+            let log = u32::try_from(matrix.domain.log_size).map_err(|_| KzgError::ShapeMismatch)?;
+            let size = 1usize.checked_shl(log).ok_or(KzgError::ShapeMismatch)?;
+            if matrix.domain.log_size > <Scalar as crate::traits::TwoAdicField>::TWO_ADICITY
+                || matrix.domain.shift != crate::traits::Algebra::<Scalar>::ONE
+                || size > self.max_trace_len
+                || size > self.srs.max_len()
+                || matrix.columns.is_empty()
+                || matrix.columns.iter().any(|column| column.len() != size)
+            {
+                return Err(KzgError::ShapeMismatch);
+            }
+        }
+        let commitment = KzgCommitment(
+            data.matrices
+                .iter()
+                .map(|matrix| self.commit_matrix_columns(matrix, 0))
+                .collect(),
+            data.matrices
+                .iter()
+                .map(|matrix| {
+                    if self.requires_shifted_commitment(matrix.domain.size()) {
+                        self.commit_matrix_columns(
+                            matrix,
+                            self.srs.max_len() - matrix.domain.size(),
+                        )
+                    } else {
+                        vec![]
+                    }
+                })
+                .collect(),
+        );
+        data.commitment = commitment.clone();
+        Ok((commitment, data))
+    }
+
+    /// Evict process-wide KZG SRS caches and trim unused CUDA pool pages without
+    /// resetting devices. Release retained prover-data residency and drop request
+    /// temporaries first. Callers must stop submitting work to keep devices idle
+    /// after this method returns; concurrent submissions wait for its leases.
+    pub fn release_idle_device_memory() -> KzgIdleMemoryRelease {
+        #[cfg(feature = "kzg-cuda")]
+        if super::cuda::enabled() {
+            return super::cuda::release_idle_device_memory();
+        }
+        KzgIdleMemoryRelease::default()
+    }
+
+    #[cfg(feature = "kzg-cuda")]
+    pub(super) fn commit_quotient_coefficients(
+        &self,
+        trace_log_size: usize,
+        columns: Vec<Vec<Fr>>,
+    ) -> KzgProverData {
+        assert!(!columns.is_empty() && columns.len() <= self.max_quotient_degree);
+        self.commit_trace_coefficients(trace_log_size, columns)
+    }
+
+    #[cfg(feature = "kzg-cuda")]
+    pub(super) fn commit_trace_coefficients(
+        &self,
+        trace_log_size: usize,
+        columns: Vec<Vec<Fr>>,
+    ) -> KzgProverData {
+        let n = 1usize.checked_shl(trace_log_size as u32).unwrap();
+        assert!(n <= self.max_trace_len && n <= self.srs.max_len());
+        assert!(!columns.is_empty());
+        assert!(columns.iter().all(|column| column.len() == n));
+        let matrix = CommittedMatrix::new(
+            Radix2Coset {
+                log_size: trace_log_size,
+                shift: crate::traits::Algebra::<Scalar>::ONE,
+            },
+            columns,
+        );
+        let commitments = self.commit_matrix_columns(&matrix, 0);
+        let shifted = if self.requires_shifted_commitment(n) {
+            self.commit_matrix_columns(&matrix, self.srs.max_len() - n)
+        } else {
+            Vec::new()
+        };
+        KzgProverData {
+            commitment: KzgCommitment(vec![commitments], vec![shifted]),
+            matrices: vec![matrix],
+        }
+    }
+
+    pub fn srs(&self) -> &Srs {
+        &self.srs
+    }
+
     pub fn new(srs: Arc<Srs>, max_quotient_degree: usize) -> Self {
+        let max_trace_len = srs.max_len();
+        Self::with_max_trace_len(srs, max_trace_len, max_quotient_degree)
+    }
+
+    pub(crate) fn with_max_trace_len(
+        srs: Arc<Srs>,
+        max_trace_len: usize,
+        max_quotient_degree: usize,
+    ) -> Self {
         Self {
+            #[cfg(feature = "kzg-cuda")]
+            srs_owner: super::cuda::srs_cache::Owner::new(Arc::clone(&srs)),
             srs,
             max_quotient_degree,
+            max_trace_len,
         }
+    }
+
+    pub fn requires_shifted_commitment(&self, height: usize) -> bool {
+        self.srs.requires_shifted_commitment(height)
     }
 
     /// The arkworks FFT domain realizing one of ours.
@@ -314,7 +523,12 @@ impl KzgPcs {
             if !active.is_empty() {
                 let scalars: Vec<_> = active.iter().map(|&i| columns[i].as_slice()).collect();
                 let started = std::time::Instant::now();
-                let points = super::cuda::msm_columns(&self.srs.g1[shift..shift + count], &scalars);
+                let points = if super::cuda::srs_cache::enabled() {
+                    let inputs: Vec<_> = scalars.iter().map(|&column| (column, None)).collect();
+                    super::cuda::srs_cache::msm_columns(&self.srs_owner, shift, &inputs)
+                } else {
+                    super::cuda::msm_columns(&self.srs.g1[shift..shift + count], &scalars)
+                };
                 tracing::debug!(
                     count,
                     columns = active.len(),
@@ -349,8 +563,11 @@ impl KzgPcs {
                 .collect();
             let started = std::time::Instant::now();
             let count = matrix.domain.size();
-            let points =
-                super::cuda::msm_columns_resident(&self.srs.g1[shift..shift + count], &inputs);
+            let points = if super::cuda::srs_cache::enabled() {
+                super::cuda::srs_cache::msm_columns(&self.srs_owner, shift, &inputs)
+            } else {
+                super::cuda::msm_columns_resident(&self.srs.g1[shift..shift + count], &inputs)
+            };
             for (i, point) in active.iter().copied().zip(points) {
                 commits[i] = point;
             }
@@ -384,6 +601,13 @@ impl KzgPcs {
         }
         #[cfg(feature = "kzg-cuda")]
         if super::cuda::enabled() && coeffs.len() >= 1 << 12 {
+            if super::cuda::srs_cache::enabled() {
+                return super::cuda::srs_cache::msm_columns(
+                    &self.srs_owner,
+                    shift,
+                    &[(coeffs, None)],
+                )[0];
+            }
             return super::cuda::msm(&self.srs.g1[shift..shift + coeffs.len()], coeffs);
         }
         G1Projective::msm(&self.srs.g1[shift..shift + coeffs.len()], coeffs).expect("equal lengths")
@@ -405,7 +629,7 @@ impl KzgPcs {
     }
 
     /// Interpolate each column of `matrix` over `domain`.
-    fn interpolate_columns(
+    pub(super) fn interpolate_columns(
         domain: Radix2Coset,
         matrix: &RowMajorMatrix<Scalar>,
     ) -> CommittedMatrix {
@@ -521,7 +745,13 @@ impl Pcs for KzgPcs {
     ) -> (KzgCommitment, KzgProverData) {
         let matrices: Vec<CommittedMatrix> = evaluations
             .into_iter()
-            .map(|(domain, matrix)| Self::interpolate_columns(domain, &matrix))
+            .map(|(domain, matrix)| {
+                assert!(
+                    domain.size() <= self.max_trace_len && domain.size() <= self.srs.max_len(),
+                    "trace exceeds admitted or loaded parameters"
+                );
+                Self::interpolate_columns(domain, &matrix)
+            })
             .collect();
         let commitment = KzgCommitment(
             matrices
@@ -531,10 +761,10 @@ impl Pcs for KzgPcs {
             matrices
                 .iter()
                 .map(|m| {
-                    let shift = self.srs.max_len() - m.domain.size();
-                    if shift == 0 {
+                    if !self.requires_shifted_commitment(m.domain.size()) {
                         return vec![];
                     }
+                    let shift = self.srs.max_len() - m.domain.size();
                     self.commit_matrix_columns(m, shift)
                 })
                 .collect(),
@@ -558,6 +788,10 @@ impl Pcs for KzgPcs {
                 let big = quotient_domain.size();
                 debug_assert_eq!(big % quotient_degree, 0);
                 let n = big / quotient_degree;
+                assert!(
+                    n <= self.max_trace_len && n <= self.srs.max_len(),
+                    "quotient slice exceeds admitted or loaded parameters"
+                );
                 let coefficient_columns =
                     Self::interpolate_columns(quotient_domain, &evaluations).columns;
                 // Slice `Q(X) = Σₖ X^{k·n}·cₖ(X)`: slice k of coordinate d
@@ -588,10 +822,10 @@ impl Pcs for KzgPcs {
             matrices
                 .iter()
                 .map(|m| {
-                    let shift = self.srs.max_len() - m.domain.size();
-                    if shift == 0 {
+                    if !self.requires_shifted_commitment(m.domain.size()) {
                         return vec![];
                     }
+                    let shift = self.srs.max_len() - m.domain.size();
                     self.commit_matrix_columns(m, shift)
                 })
                 .collect(),
@@ -611,6 +845,8 @@ impl Pcs for KzgPcs {
         idx: usize,
         domain: Radix2Coset,
     ) -> RowMajorMatrix<Scalar> {
+        #[cfg(feature = "kzg-cuda")]
+        let _profile = super::cuda::ProfileRange::new(c"kzg/evaluation-reconstruction");
         let matrix = &data.matrices[idx];
         assert!(
             domain.size() <= matrix.domain.size() * self.max_quotient_degree,
@@ -685,7 +921,9 @@ impl Pcs for KzgPcs {
                 challenger.observe_canonical(&(m.domain.log_size as u64));
             }
         }
-        let _degree_challenge = challenger.sample_challenge();
+        if self.srs.public_setup().is_none() {
+            let _degree_challenge = challenger.sample_challenge();
+        }
         // Pass 1: evaluate everything, observing values in traversal
         // order, and batch (polynomial, value) pairs per distinct point.
         struct PointBatch<'a> {
@@ -775,6 +1013,25 @@ impl Pcs for KzgPcs {
                 }
                 // The constant offset −Σ vⁱ·yᵢ only shifts the remainder;
                 // the witness quotient ignores it.
+                #[cfg(feature = "kzg-cuda")]
+                if super::cuda::enabled() && max_len >= 1 << 16 {
+                    let witness = if super::cuda::srs_cache::enabled() {
+                        super::cuda::srs_cache::single_device_opening(
+                            &self.srs_owner,
+                            &combined,
+                            batch.z,
+                        )
+                    } else {
+                        super::cuda::single_device_opening(
+                            &self.srs.g1[..max_len - 1],
+                            &combined,
+                            batch.z,
+                        )
+                    };
+                    if let Some(witness) = witness {
+                        return witness;
+                    }
+                }
                 self.msm(&divide_by_linear(&combined, batch.z))
             })
             .collect();
@@ -795,13 +1052,29 @@ impl Pcs for KzgPcs {
         proof: &KzgProof,
         challenger: &mut Blake3Transcript,
     ) -> Result<(), KzgError> {
+        use p3_maybe_rayon::prelude::*;
+        let points: Vec<_> = rounds
+            .iter()
+            .flat_map(|(commitment, _)| commitment.0.iter().chain(&commitment.1).flatten())
+            .chain(&proof.0)
+            .collect();
+        if points
+            .par_iter()
+            .any(|point| !point.is_on_curve() || !point.is_in_correct_subgroup_assuming_on_curve())
+        {
+            return Err(KzgError::InvalidPoint);
+        }
         for (commitment, matrices) in &rounds {
             challenger.observe_commitment(commitment.clone());
             for (domain, _) in matrices {
                 challenger.observe_canonical(&(domain.log_size as u64));
             }
         }
-        let degree_challenge = challenger.sample_challenge().0;
+        let degree_challenge = self
+            .srs
+            .public_setup()
+            .is_none()
+            .then(|| challenger.sample_challenge().0);
         let mut weight = Fr::ONE;
         let mut shifted_sum = G1Projective::zero();
         let mut by_degree = vec![G1Projective::zero(); self.srs.degree_keys.len()];
@@ -813,21 +1086,21 @@ impl Pcs for KzgPcs {
                 commitment.0.iter().zip(&commitment.1).zip(matrices)
             {
                 let log = domain.log_size;
-                if log >= by_degree.len() {
+                if log > self.max_trace_len.ilog2() as usize {
                     return Err(KzgError::ShapeMismatch);
                 }
-                if domain.size() == self.srs.max_len() {
+                if !self.requires_shifted_commitment(domain.size()) {
                     if !shifted.is_empty() {
                         return Err(KzgError::ShapeMismatch);
                     }
                 } else {
-                    if shifted.len() != columns.len() {
+                    if shifted.len() != columns.len() || log >= by_degree.len() {
                         return Err(KzgError::ShapeMismatch);
                     }
                     for (&c, &s) in columns.iter().zip(shifted) {
                         by_degree[log] += c * weight;
                         shifted_sum += s * weight;
-                        weight *= degree_challenge;
+                        weight *= degree_challenge.ok_or(KzgError::ShapeMismatch)?;
                     }
                 }
             }
@@ -840,7 +1113,7 @@ impl Pcs for KzgPcs {
                 g2.push(*key);
             }
         }
-        if !Bls12_381::multi_pairing(g1, g2).is_zero() {
+        if degree_challenge.is_some() && !Bls12_381::multi_pairing(g1, g2).is_zero() {
             return Err(KzgError::DegreeBoundFailed);
         }
         // Mirror `open`'s traversal exactly: observe claimed values and
@@ -968,9 +1241,140 @@ fn divide_by_linear(p: &[Fr], z: Fr) -> Vec<Fr> {
 }
 
 #[cfg(test)]
+#[path = "pcs/recommit_tests.rs"]
+mod recommit_tests;
+
+#[cfg(test)]
 mod degree_tests {
     use super::*;
-    use crate::traits::Field;
+    use crate::traits::{Algebra, Field};
+
+    #[test]
+    fn releasing_device_residency_preserves_host_checkpoint() {
+        let pcs = KzgPcs::new(Arc::new(Srs::unsafe_dev_setup(8, b"release-host-key")), 4);
+        let (_, mut data) = pcs.commit(vec![(
+            pcs.natural_domain_for_degree(8),
+            RowMajorMatrix::new((0..16).map(Scalar::from_u64).collect(), 2),
+        )]);
+        #[cfg(feature = "kzg-cuda")]
+        for matrix in &data.matrices {
+            let _ = matrix.resident.set(vec![None; matrix.width()]);
+        }
+        let mut expected = Vec::new();
+        data.write_checkpoint(&mut expected).unwrap();
+        for _ in 0..2 {
+            data.release_device_residency();
+            #[cfg(feature = "kzg-cuda")]
+            assert!(
+                data.matrices
+                    .iter()
+                    .all(|matrix| matrix.resident.get().is_none())
+            );
+            let mut actual = Vec::new();
+            data.write_checkpoint(&mut actual).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[cfg(not(feature = "kzg-cuda"))]
+    #[test]
+    fn idle_memory_release_without_cuda_is_explicit_noop() {
+        assert_eq!(
+            KzgPcs::release_idle_device_memory(),
+            KzgIdleMemoryRelease::default()
+        );
+    }
+
+    #[test]
+    fn public_degree_openings_allow_domain_aliases_and_reject_wrong_values() {
+        use super::super::PublicSetup;
+        let powers = Srs::unsafe_dev_setup(16, b"public-degree-alias");
+        let srs = Srs::from_public_powers(
+            powers.g1,
+            powers.g2,
+            powers.tau_g2,
+            PublicSetup {
+                max_degree: 30,
+                id: [7; 32],
+            },
+        )
+        .unwrap();
+        let pcs = KzgPcs::new(Arc::new(srs), 2);
+        let domain = pcs.natural_domain_for_degree(2);
+        // X^2 restricts to the constant one on the two-row trace domain.
+        let columns = vec![vec![Fr::ZERO, Fr::ZERO, Fr::ONE]];
+        let commitment = KzgCommitment(vec![pcs.commit_columns(&columns)], vec![vec![]]);
+        let data = KzgProverData {
+            commitment: commitment.clone(),
+            matrices: vec![CommittedMatrix::new(domain, columns)],
+        };
+        let points = vec![Scalar::from_u8(19), Scalar::from_u8(23)];
+        let mut prover = Blake3Transcript::new();
+        let (opened, proof) = pcs.open(vec![(&data, vec![points.clone()])], &mut prover);
+        let rounds = vec![(
+            commitment,
+            vec![(
+                domain,
+                points.iter().copied().zip(opened[0][0].clone()).collect(),
+            )],
+        )];
+        let mut verifier = Blake3Transcript::new();
+        pcs.verify(rounds.clone(), &proof, &mut verifier).unwrap();
+        assert_eq!(prover.sample_challenge(), verifier.sample_challenge());
+        let mut wrong_value = rounds.clone();
+        wrong_value[0].1[0].1[1].1[0] += Scalar::ONE;
+        assert!(
+            pcs.verify(wrong_value, &proof, &mut Blake3Transcript::new())
+                .is_err()
+        );
+        let mut extra_shift = rounds.clone();
+        extra_shift[0].0.1[0].push(pcs.srs.g1[0]);
+        assert!(matches!(
+            pcs.verify(extra_shift, &proof, &mut Blake3Transcript::new()),
+            Err(KzgError::ShapeMismatch)
+        ));
+        let mut over_cap = rounds.clone();
+        over_cap[0].1[0].0.log_size = 5;
+        assert!(matches!(
+            pcs.verify(over_cap, &proof, &mut Blake3Transcript::new()),
+            Err(KzgError::ShapeMismatch)
+        ));
+        let mut wrong_point = rounds;
+        wrong_point[0].0.0[0][0] =
+            G1Affine::new_unchecked(ark_bls12_381::Fq::from(7u8), ark_bls12_381::Fq::from(9u8));
+        assert!(matches!(
+            pcs.verify(wrong_point, &proof, &mut Blake3Transcript::new()),
+            Err(KzgError::InvalidPoint)
+        ));
+    }
+
+    #[test]
+    fn public_tail_defeats_a_prefix_relative_degree_claim() {
+        let public = Srs::unsafe_dev_setup(16, b"prefix-tail");
+        let prefix = Srs::unsafe_dev_setup(8, b"prefix-tail");
+        let pcs = KzgPcs::new(Arc::new(prefix), 2);
+        let domain = pcs.natural_domain_for_degree(2);
+        // The public tail supplies tau^8 for the claimed shift 8 - 2.
+        let commitment = KzgCommitment(vec![vec![public.g1[2]]], vec![vec![public.g1[8]]]);
+        let data = KzgProverData {
+            commitment: commitment.clone(),
+            matrices: vec![CommittedMatrix::new(
+                domain,
+                vec![vec![Fr::ZERO, Fr::ZERO, Fr::ONE]],
+            )],
+        };
+        let z = Scalar::from_u8(19);
+        let (opened, proof) = pcs.open(vec![(&data, vec![vec![z]])], &mut Blake3Transcript::new());
+        pcs.verify(
+            vec![(
+                commitment,
+                vec![(domain, vec![(z, opened[0][0][0].clone())])],
+            )],
+            &proof,
+            &mut Blake3Transcript::new(),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn parallel_checkpoint_encoding_preserves_canonical_format() {
@@ -1029,10 +1433,10 @@ mod degree_tests {
 
     #[test]
     fn batched_openings_preserve_point_column_and_transcript_order() {
-        let n = 1 << 12;
+        let n = 1 << 16;
         let pcs = KzgPcs::new(Arc::new(Srs::unsafe_dev_setup(n, b"opening-order")), 4);
         let domain = pcs.natural_domain_for_degree(n);
-        let columns: Vec<Vec<Fr>> = [3u64, 11]
+        let mut columns: Vec<Vec<Fr>> = [3u64, 11]
             .into_iter()
             .map(|factor| {
                 (0..n)
@@ -1040,6 +1444,9 @@ mod degree_tests {
                     .collect()
             })
             .collect();
+        let mut constant = vec![Fr::ZERO; n];
+        constant[0] = Fr::from(23);
+        columns.push(constant);
         let commits: Vec<_> = columns
             .iter()
             .map(|c| G1Projective::msm(&pcs.srs.g1, c).unwrap())
@@ -1058,6 +1465,43 @@ mod degree_tests {
                 .map(|points| (&data, vec![points.clone()]))
                 .collect(),
             &mut prover,
+        );
+        let mut reference = Blake3Transcript::new();
+        for _ in &points {
+            reference.observe_commitment(commitment.clone());
+            reference.observe_canonical(&(domain.log_size as u64));
+        }
+        let _degree = reference.sample_challenge();
+        for &value in opened.iter().flatten().flatten().flatten() {
+            reference.observe_challenge(value);
+        }
+        let v = reference.sample_challenge().0;
+        let expected: Vec<_> = [Fr::ZERO, Fr::from(19), Fr::from(5)]
+            .into_iter()
+            .map(|z| {
+                let mut combined = vec![Fr::ZERO; n];
+                let mut power = Fr::ONE;
+                for &point in points.iter().flatten() {
+                    if point.0 == z {
+                        for column in &data.matrices[0].columns {
+                            fold_polynomial(&mut combined, column, power);
+                            power *= v;
+                        }
+                    }
+                }
+                let mut quotient = vec![Fr::ZERO; n - 1];
+                let mut carry = Fr::ZERO;
+                for i in (1..n).rev() {
+                    carry = combined[i] + z * carry;
+                    quotient[i - 1] = carry;
+                }
+                G1Projective::msm(&pcs.srs.g1[..n - 1], &quotient).unwrap()
+            })
+            .collect();
+        let expected = KzgProof(G1Projective::normalize_batch(&expected));
+        assert_eq!(
+            bincode::serde::encode_to_vec(&proof, bincode::config::standard()).unwrap(),
+            bincode::serde::encode_to_vec(&expected, bincode::config::standard()).unwrap(),
         );
         let mut rounds = Vec::new();
         for (values, points) in opened.iter().zip(&points) {

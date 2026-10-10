@@ -2,6 +2,8 @@
 
 #include <array>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -17,7 +19,7 @@ bool transfer_profiling() {
 }
 
 struct TransferStats {
-    double upload_ms = 0, download_ms = 0, kernel_ms = 0, host_copy_ms = 0;
+    double upload_ms = 0, download_ms = 0, kernel_ms = 0, host_copy_ms = 0, call_ms = 0;
     size_t upload_bytes = 0, download_bytes = 0, device_copy_bytes = 0;
 
     void report(int device, const char* operation, size_t count) const {
@@ -25,9 +27,9 @@ struct TransferStats {
         std::fprintf(stderr,
             "KZG CUDA profile device=%d operation=%s elements=%zu "
             "upload_ms=%.3f kernel_ms=%.3f download_ms=%.3f host_copy_ms=%.3f "
-            "upload_bytes=%zu download_bytes=%zu device_copy_bytes=%zu\n",
+            "upload_bytes=%zu download_bytes=%zu device_copy_bytes=%zu call_ms=%.3f\n",
             device, operation, count, upload_ms, kernel_ms, download_ms,
-            host_copy_ms, upload_bytes, download_bytes, device_copy_bytes);
+            host_copy_ms, upload_bytes, download_bytes, device_copy_bytes, call_ms);
     }
 };
 

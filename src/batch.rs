@@ -65,7 +65,7 @@ use crate::config::{Com, PcsError, StarkGenericConfig, Val};
 use crate::lookup::fingerprint;
 use crate::prover::{Proof, Stage1, claims_accumulator, observe_claims, sample_lookup_challenges};
 use crate::system::{ProverKey, System, SystemWitness};
-use crate::verifier::VerificationError;
+use crate::verifier::{VerificationError, checked_claims_accumulator};
 use crate::{ensure, ensure_eq};
 
 use crate::traits::{Algebra, Field, Transcript, TwoAdicField};
@@ -368,11 +368,11 @@ impl<SC: StarkGenericConfig> System<SC> {
             VerificationError::BatchShapeMismatch
         );
         challenger.observe_field(Val::<SC>::from_usize(shard));
-        let acc = claims_accumulator::<SC>(
+        let acc = checked_claims_accumulator::<SC>(
             lookup_argument_challenge,
             &fingerprint_challenge,
             &claim_slices::<SC>(&header.claims),
-        );
+        )?;
         self.verify_after_challenges(
             proof,
             &quotient_degrees,
@@ -406,11 +406,15 @@ impl<SC: StarkGenericConfig> System<SC> {
         );
         let (challenger, lookup_argument_challenge, fingerprint_challenge) =
             self.batch_challenger(preamble);
-        let mut total = Self::messages_accumulator(
-            lookup_argument_challenge,
-            &fingerprint_challenge,
-            &preamble.messages,
-        );
+        let mut total = <SC::Challenge as Algebra<SC::Challenge>>::ZERO;
+        for message in &preamble.messages {
+            let denominator = lookup_argument_challenge
+                + fingerprint(&fingerprint_challenge, message.args.iter().copied());
+            let inverse = denominator
+                .try_inverse()
+                .ok_or(VerificationError::InvalidChallenge)?;
+            total += inverse * SC::Challenge::from(message.multiplicity);
+        }
         for (shard, proof) in proofs.iter().enumerate() {
             total += self.verify_batch_shard_from(
                 preamble,

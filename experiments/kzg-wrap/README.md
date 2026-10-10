@@ -1,13 +1,26 @@
 Recursive verification of the saved Init KZG proof, using native Fr Plonkish
 arithmetic and bounded Fq limbs. The circuit checks the transcript, AIR,
 lookups, curve membership, subgroups and both KZG batching equations. Its
-public claim contains the 18 Init words and 11 compressed pairing inputs.
+public claim contains the 18 Init words and the profile's compressed pairing inputs.
 The final verifier checks both external pairing equations against fixed keys.
+
+The current Filecoin v4 migration uses two pairing inputs and a `2^27` maximum
+computation trace. Its setup requirements, exact construction counts and
+validation status are maintained in [the KZG performance document](../../docs/kzg-performance.md#decision-and-next-evidence).
+The current `stage-and-prove-many` command retains a compatible frontend and
+outer key across fresh requests; see its [statement-file interface and validation scope](../../docs/kzg-performance.md#retain-the-recursive-frontend-and-outer-key).
+The `serve` command accepts sequential JSONL requests and releases idle GPU
+memory between proofs; see the [worker protocol and measured boundaries](../../docs/kzg-performance.md#schedule-requests-through-retained-workers).
+The `count-saved` command checks a Filecoin saved proof's recursive layout and
+projected packet size before staging; see its [usage and acceptance scope](../../docs/kzg-performance.md#count-a-saved-proof-with-the-filecoin-setup).
+The measurements and commands below describe legacy development profiles;
+set `MULTI_STARK_KZG_SETUP=development` explicitly to reproduce them.
 
 The input is the saved 1,530,149-byte FRI compression of the Init root proof in
 `../init-fri-artifacts`. Rebuild its intermediate KZG proof with:
 
 ```sh
+export MULTI_STARK_KZG_SETUP=development
 cargo build --release --features kzg,parallel --example init_fri_kzg_prove
 target/release/examples/init_fri_kzg_prove stage experiments/init-fri-artifacts target/init-fri-kzg
 target/release/examples/init_fri_kzg_prove prove target/init-fri-kzg
@@ -34,10 +47,12 @@ See `../init-kzg-recursive-circuit.json` and `../init-kzg-recursive-proof.json`.
 
 The saved packet and verification metadata are in `../init-kzg-recursive-artifacts`.
 Run `init-kzg-wrap verify experiments/init-kzg-recursive-artifacts` to recheck
-them; by default the harness regenerates the development SRS. The optimized
-fixed-base setup takes about 100 seconds for this domain on the Blackwell host.
-Affine formulas constrain nonzero denominators; exceptional intermediate
-sums reject. This restriction was tested against the saved full proof.
+them with explicit development setup selection. Without a populated development
+cache, verification regenerates those parameters; the historical fixed-base
+setup took about 100 seconds for this domain on the Blackwell host. The original
+wrapper's affine formulas rejected exceptional intermediate sums. The current
+[MSM completeness repair](../../docs/kzg-performance.md#decision-and-next-evidence)
+supports those cases while retaining subgroup checks.
 
 Known-trapdoor development SRS only; these artifacts are not production-secure.
 
@@ -84,9 +99,10 @@ sweeps still leave substantial idle time: sampled mean utilization in the
 cached KZG proving phases was about 6–9% per GPU. Residency and transfer
 improvements reduced wall time; this is not a fully device-only prover.
 
-This is a cached Init fixture measurement. The recursive cache currently
-binds the public statement, so reuse across arbitrary changed statements has
-not been demonstrated. Cache population and upstream root aggregation are
+This is a cached Init fixture measurement. Its recursive cache binds the
+public statement; it predates the reusable frontend's typed claim schema.
+The current worker's small-fixture parity checks do not establish reuse or
+latency for this production-size profile. Cache population and upstream root aggregation are
 outside the timing boundary. The regenerated root certifies the same Init
 claim but produces a 19-circuit FRI profile, versus the historical 22; these
 timings are not an identical-workload comparison with the older runs below.
@@ -211,7 +227,34 @@ Opening evaluation retains point and column order. The pinned sppark
 multi-point evaluation kernel has a shared-memory race, so each point uses a
 single-point kernel against the same resident coefficients. CPU lookup and
 constraint sweeps still need downloaded evaluations; opening-polynomial folding
-and the tiled division carry pass also remain on the CPU. Controls:
+and the tiled division carry pass also remain on the CPU.
+
+The stage-one example prefetches one witness while committing its predecessor.
+Lookup and full-domain quotient processing also keep one partition's evaluations
+ahead: host computation overlaps the preceding commitment and next evaluation
+reconstruction. Both device operations occupy the same pipeline branch, so
+nested Rayon work cannot recursively request another partition's device lease.
+The shared CPU pool retains its default width. Lookup totals and all commitments
+are returned in transcript order.
+
+The lookahead cap applies to the extra row-major evaluation or witness payload;
+retained coefficients, current compute scratch and commitment buffers are
+additional. Oversized evaluation partitions drain the pipeline. The library
+enables this through `KzgConfig::with_partition_pipeline(bytes)`; the stage-one
+example and diagnostic expose the environment control below. Recursive
+trace-sized quotient cosets retain their existing schedule.
+
+On the regenerated 19-circuit Init fixture, a cached run with a 32 GiB
+lookahead reduced stage-one proving from 155.627 s to 123.970 s (20.34%).
+The complete root-to-packet boundary fell from 871.835 s to 839.988 s (3.65%);
+peak stage-one host RAM rose from 190.9 GiB to 218.8 GiB. Both stages retain
+byte-identical proofs, packets and profile identifiers. These are single
+full-chain samples; a separate four-partition comparison using one binary
+reduced lookup-plus-quotient time by 15.9%, and Nsight confirmed overlap.
+See the [KZG performance document](../../docs/kzg-performance.md#bounded-partition-pipeline)
+and [preserved reports](../kzg-cuda-validation/partition-pipeline-20261009/summary.json).
+
+Controls:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -219,7 +262,8 @@ and the tiled division carry pass also remain on the CPU. Controls:
 | `MULTI_STARK_KZG_CUDA_DEVICES` | all | Comma-separated CUDA ordinals, after `CUDA_VISIBLE_DEVICES` filtering; consistent with the Goldilocks backend. |
 | `MULTI_STARK_KZG_MSM_CHUNK_POINTS` | `16777216` | Maximum points in each MSM chunk; runtime admission can reduce it further. |
 | `MULTI_STARK_KZG_CUDA_RESIDENT_GIB` | half of device VRAM | Per-device coefficient budget, capped at half of total VRAM; `0` disables retention. Runtime admission also checks free memory and reserves scratch space. |
-| `MULTI_STARK_KZG_CUDA_PROFILE` | unset | `1` emits per-call CUDA-event transfer/compute intervals, host-copy wall time and byte counts. Intervals across devices overlap and must not be summed as wall time. MSM entries report transfer costs only; division's compute interval includes its host carry pass. |
+| `MULTI_STARK_KZG_CUDA_PROFILE` | unset | `1` emits CUDA-event transfer/compute intervals, host-copy wall time, byte counts, and NVTX ranges. `msm-compute` separates GPU intervals (`kernel_ms`) from the synchronous invocation (`call_ms`). Intervals across streams/devices overlap; division's compute interval includes its host carry pass. |
+| `MULTI_STARK_KZG_PREFETCH_GIB` | `32` | Stage-one example and diagnostic: extra prefetched payload budget in GiB. `0` disables witness/evaluation overlap for a comparison using the same binary and cache identity. This is not a total host-memory limit. |
 | `MULTI_STARK_KZG_DEV_SRS_CACHE` | unset | Optional trusted local directory for reusing known-trapdoor development parameters. |
 | `MULTI_STARK_KZG_FIXED_CACHE` | unset | Trusted local fixed coefficients, commitments and circuit metadata; no witness or opening data. |
 | `MULTI_STARK_INIT_EXPECTED_CLAIMS` | historical Init statement | Independently supplied root-claims file for verifying a regenerated input. |
@@ -259,6 +303,16 @@ their in-process verification are inside it. Independent CPU verification
 is an additional check timed separately. A regenerated root can have a
 different trace profile despite certifying the same Init statement, so its
 packet is verified rather than compared to the historical CPU packet.
+
+For byte parity on a regenerated root, pass `--baseline /path/to/verified-run`.
+The baseline directory must contain `report.json` and both stages' compact
+proofs, packets and profile identifiers. The preserved
+`experiments/kzg-cuda-validation/resume-20261009` directory is a compatible
+baseline for its saved root. The driver requires identical root/compressed-FRI
+input hashes, compares all six output artifacts, and still runs independent
+CPU verification. Its report records the baseline report digest and expected
+artifact hashes. Without `--baseline`, regenerated inputs receive verification
+but no comparison to a previous regenerated proof.
 
 With `MULTI_STARK_KZG_DEV_SRS_CACHE=/opt/dlami/nvme/kzg-dev-srs`, proving
 and verification reuse development parameters after the first generation.
@@ -351,3 +405,38 @@ MULTI_STARK_CUDA_ARCHS=120 cargo run --release --locked \
 This reports loading, fixed/main/lookup commitment, and checkpoint-encoding costs;
 append `quotient` to include quotient evaluation and commitment. Checkpoint bytes
 go to `/dev/null`, so the encoding measurement excludes disk latency.
+
+Use comma-separated indices to measure partition overlap. A single trace uses
+trace-sized quotient cosets; multiple traces use the stage-one full quotient
+domains. For a comparison with identical binaries and inputs:
+
+```sh
+MULTI_STARK_KZG_PREFETCH_GIB=0 target/release/examples/kzg_cuda_prepare_bench \
+  /path/to/staged/fri-to-kzg 0,1,2,3 quotient
+MULTI_STARK_KZG_PREFETCH_GIB=32 target/release/examples/kzg_cuda_prepare_bench \
+  /path/to/staged/fri-to-kzg 0,1,2,3 quotient
+```
+
+After building the diagnostic, capture its CUDA, NVTX and host-runtime timeline
+with Nsight Systems:
+
+```sh
+MULTI_STARK_KZG_CUDA_PROFILE=1 nsys profile \
+  --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --cuda-memory-usage=true --output=/path/to/kzg-one-trace \
+  target/release/examples/kzg_cuda_prepare_bench \
+  /path/to/staged/fri-to-kzg 0 quotient
+```
+
+CPU sampling and context-switch tracing are disabled here; application CPU
+parallelism is unchanged. Run the diagnostic separately from timing runs.
+`msm-compute.kernel_ms` sums event intervals around scalar digit processing,
+bucket accumulation/integration, and optional scalar normalization. These
+intervals exclude explicit result downloads and host bucket reduction, but
+can contain launch gaps and overlap across streams. `call_ms` measures the
+whole synchronous invocation, including its waits and host reduction. Use the
+Nsight kernel timeline to distinguish launch gaps from device execution; do
+not subtract summed intervals from pipeline wall time. Other NVTX ranges mark
+FFTs, opening operations, evaluation reconstruction, and CPU lookup/quotient
+sweeps. The report's `host_operation_totals_overlap` also contains nested wall
+timers, so it is an attribution aid rather than an additive wall-time ledger.

@@ -11,7 +11,8 @@ independent CPU verification. Fresh fixed preprocessing with cached SRS took
 20m01s. The regenerated root has a 19-circuit profile; it is not the historical
 22-circuit workload. The SRS remains development-only.
 
-See the [KZG CUDA handoff](kzg-cuda-handoff.md) for preserved shutdown/recovery
+See the [KZG performance document](kzg-performance.md) for newer measurements,
+the five-minute roadmap, and preserved shutdown/recovery
 artifacts, validation scope, implementation status and resumption commands,
 and the [measurement record](../experiments/kzg-cuda-gpu-feeding-results.json)
 for exact phase times and hashes.

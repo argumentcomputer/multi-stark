@@ -29,13 +29,13 @@ fn goldilocks_byte_boundary_rejects_forged_zero_tests_and_aliases() {
                 assignment.value(valid.value()).unwrap(),
                 Val::from_bool(integer < Val::ORDER_U64)
             );
-            let mut forged = assignment.values.clone();
+            let mut forged = assignment.values().to_vec();
             forged[valid.value().index()] = Val::ONE - forged[valid.value().index()];
             assert!(circuit.check_values(&forged).is_err());
             if integer >= Val::ORDER_U64 {
                 // Forge all inverse hints, then recompute the arithmetic so
                 // the false acceptance bit has consistent dependent advice.
-                let mut forged = assignment.values;
+                let mut forged = assignment.values().to_vec();
                 for (index, recipe) in circuit.recipes.iter().enumerate() {
                     match recipe {
                         Recipe::Hint(h) if circuit.hints[*h].name == "zero-test inverse" => {
@@ -66,7 +66,7 @@ fn goldilocks_byte_boundary_rejects_forged_zero_tests_and_aliases() {
     for original in [0u64, 1] {
         let mut w = circuit.witness();
         w.set(input, Val::from_u64(original)).unwrap();
-        let mut forged = w.generate().unwrap().values;
+        let mut forged = w.generate().unwrap().values().to_vec();
         let mut index = 0;
         while index < forged.len() {
             match &circuit.recipes[index] {
@@ -333,7 +333,7 @@ fn batched_hints_execute_once_and_preserve_input_and_output_roles() {
         system.verify_multiple_claims(&refs, &proof).unwrap();
         // Bypass every recipe and corrupt individual logical values.
         for output in [plus, square, sum] {
-            let mut values = assignment.values.clone();
+            let mut values = assignment.values().to_vec();
             values[output.index()] += Val::ONE;
             assert!(compiled.circuit().check_values(&values).is_err());
         }
@@ -357,7 +357,7 @@ fn hint_batches_are_not_implicit_constraints() {
     let [a, c] = b.hint_many("unconstrained", &[], |_| Ok([Val::ONE, Val::TWO]));
     let circuit = b.finish();
     let assignment = circuit.witness().generate().unwrap();
-    let mut changed = assignment.values;
+    let mut changed = assignment.values().to_vec();
     changed[a.index()] = Val::from_u32(99);
     changed[c.index()] = Val::from_u32(123);
     assert!(

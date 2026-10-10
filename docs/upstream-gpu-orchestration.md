@@ -198,7 +198,7 @@ Not yet present, in the order the upstream designs suggest:
    cost, which favors this over a standalone constraint kernel.
 
 Before applying items 1 to 3, read the constraints in
-[the KZG CUDA handoff](kzg-cuda-handoff.md), section "Next work": sppark's
+[the KZG scheduling and memory plan](kzg-performance.md#cuda-scheduling-and-memory-constraints): sppark's
 `msm_t` captures the selected device's zero and flip-flop streams, the pinned
 rings are keyed by device and lane, completion callbacks must not call CUDA,
 and retained coefficients, SRS points, scratch and pool reserve must share one

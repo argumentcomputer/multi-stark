@@ -2,14 +2,18 @@
 #include <ec/jacobian_t.hpp>
 #include <ec/xyzz_t.hpp>
 #include <ntt/ntt.cuh>
+#include "kzg_profile.cuh"
 #define SPPARK_DONT_INSTANTIATE_TEMPLATES
 #define TAKE_RESPONSIBILITY_FOR_ERROR_MESSAGE
 #include <msm/pippenger.cuh>
+#include <polynomial/div_by_x_minus_z.cuh>
 #include <polynomial/evaluate.cuh>
 
 #include <exception>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <cstddef>
 #include <memory>
 #include <vector>
 
@@ -23,6 +27,33 @@ using msm_impl = msm_t<bucket_t, point_t, affine_t, fr_t>;
 static_assert(sizeof(fr_t) == 32);
 static_assert(sizeof(affine_t) == 96);
 static_assert(sizeof(point_t) == 144);
+
+struct ArkAffine {
+    uint64_t coordinates[12];
+    uint8_t infinity;
+};
+static_assert(sizeof(ArkAffine) == 104);
+static_assert(offsetof(ArkAffine, infinity) == 96);
+
+__global__ void unpack_affine(affine_t* output, const ArkAffine* input, size_t count) {
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+         i < count; i += size_t(gridDim.x) * blockDim.x) {
+        affine_t point;
+        if (input[i].infinity)
+            memset(&point, 0, sizeof(point));
+        else
+            memcpy(&point, input[i].coordinates, sizeof(point));
+        output[i] = point;
+    }
+}
+
+extern "C" void multi_stark_kzg_range_push(const char* name) {
+    if (transfer_profiling()) nvtxRangePushA(name);
+}
+
+extern "C" void multi_stark_kzg_range_pop() {
+    if (transfer_profiling()) nvtxRangePop();
+}
 
 static int failure(int code, const char* message) {
     // Complete queued host transfers before Rust releases its limb buffers.
@@ -59,8 +90,61 @@ static const gpu_t& device_gpu(int ordinal) {
 
 extern "C" int multi_stark_kzg_memory(int device, size_t* free, size_t* total) {
     try {
+        if (!free || !total) return cudaErrorInvalidValue;
         device_gpu(device);
-        return cudaMemGetInfo(free, total);
+        CUDA_OK(cudaMemGetInfo(free, total));
+        cudaMemPool_t pool = nullptr;
+        CUDA_OK(cudaDeviceGetMemPool(&pool, device));
+        uint64_t reserved = 0, used = 0;
+        CUDA_OK(cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &reserved));
+        CUDA_OK(cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used));
+        // Every KZG allocation uses cudaMallocAsync. Unused pool pages remain
+        // reusable even when cudaMemGetInfo excludes them from driver-free bytes.
+        *free = std::min(*free, *total);
+        const uint64_t reusable = reserved > used ? reserved - used : 0;
+        *free += std::min<uint64_t>(reusable, *total - *free);
+        return 0;
+    } catch (const cuda_error& e) { return failure(e.code(), e.what()); }
+      catch (const std::exception& e) { return failure(cudaErrorUnknown, e.what()); }
+}
+
+struct IdleMemory {
+    uint64_t driver_free_bytes, total_bytes;
+    uint64_t current_pool_reserved_bytes, current_pool_used_bytes;
+    uint64_t default_pool_reserved_bytes, default_pool_used_bytes;
+    uint64_t current_pool_is_default;
+};
+static_assert(sizeof(IdleMemory) == 7 * sizeof(uint64_t));
+
+extern "C" int multi_stark_kzg_idle_memory(int device, bool trim, IdleMemory* report) {
+    try {
+        if (!report) return cudaErrorInvalidValue;
+        device_gpu(device);
+        CUDA_OK(cudaDeviceSynchronize());
+        cudaMemPool_t current = nullptr, standard = nullptr;
+        CUDA_OK(cudaDeviceGetMemPool(&current, device));
+        CUDA_OK(cudaDeviceGetDefaultMemPool(&standard, device));
+        if (trim) {
+            // Sppark's cudaMallocAsync uses the current pool. A different
+            // default pool can retain pages from other completed CUDA phases.
+            CUDA_OK(cudaMemPoolTrimTo(current, 0));
+            if (standard != current) CUDA_OK(cudaMemPoolTrimTo(standard, 0));
+            CUDA_OK(cudaDeviceSynchronize());
+        }
+        size_t free = 0, total = 0;
+        CUDA_OK(cudaMemGetInfo(&free, &total));
+        report->driver_free_bytes = free;
+        report->total_bytes = total;
+        CUDA_OK(cudaMemPoolGetAttribute(current, cudaMemPoolAttrReservedMemCurrent,
+                                       &report->current_pool_reserved_bytes));
+        CUDA_OK(cudaMemPoolGetAttribute(current, cudaMemPoolAttrUsedMemCurrent,
+                                       &report->current_pool_used_bytes));
+        CUDA_OK(cudaMemPoolGetAttribute(standard, cudaMemPoolAttrReservedMemCurrent,
+                                       &report->default_pool_reserved_bytes));
+        CUDA_OK(cudaMemPoolGetAttribute(standard, cudaMemPoolAttrUsedMemCurrent,
+                                       &report->default_pool_used_bytes));
+        report->current_pool_is_default = current == standard;
+        return 0;
     } catch (const cuda_error& e) { return failure(e.code(), e.what()); }
       catch (const std::exception& e) { return failure(cudaErrorUnknown, e.what()); }
 }
@@ -84,10 +168,11 @@ int msm_result(RustError status) {
 }
 } // namespace
 
-// Coordinates and scalars are explicit little-endian Montgomery limbs;
-// affine infinity is (0, 0), projective infinity has Z = 0.
+// Arkworks coordinates and scalars use little-endian Montgomery limbs.
+// Sppark affine infinity is (0, 0); projective infinity has Z = 0.
 extern "C" int multi_stark_kzg_msm_create(int device, void** out,
-                                          const affine_t* points, size_t count) {
+                                          const ArkAffine* points, size_t count) {
+    ProfileRange range("kzg/msm-points");
     try {
         if (!out || !points || count == 0 || count > (size_t(1) << 28))
             return cudaErrorInvalidValue;
@@ -95,11 +180,18 @@ extern "C" int multi_stark_kzg_msm_create(int device, void** out,
         // an allocation before its cudaMallocAsync stream has completed.
         const auto& gpu = device_gpu(device);
         auto context = std::make_unique<MsmContext>(gpu, count);
+        dev_ptr_t<ArkAffine> input(count, gpu);
         TransferStats stats;
         auto& transfer = transfer_lane(gpu);
-        transfer.upload.upload(gpu, gpu, context->points, points, count * sizeof(affine_t), stats);
+        transfer.upload.upload(gpu, gpu, input, points, count * sizeof(ArkAffine), stats);
+        TimedKernel kernel;
+        kernel.start(gpu);
+        unpack_affine<<<gpu.sm_count() * 4, 256, 0, gpu>>>(context->points, input, count);
+        CUDA_OK(cudaGetLastError());
+        kernel.end(gpu);
         gpu.sync();
         transfer.upload.finish_upload(stats);
+        kernel.collect(stats);
         stats.report(device, "msm-points", count);
         *out = context.release();
         return 0;
@@ -109,6 +201,7 @@ extern "C" int multi_stark_kzg_msm_create(int device, void** out,
 
 extern "C" int multi_stark_kzg_msm_invoke(int device, void* context, point_t* out,
                                           const fr_t* scalars, size_t count) {
+    ProfileRange range("kzg/msm-host-scalars");
     try {
         if (!context || !out || !scalars || count == 0)
             return cudaErrorInvalidValue;
@@ -121,8 +214,15 @@ extern "C" int multi_stark_kzg_msm_invoke(int device, void* context, point_t* ou
         transfer.upload.upload(gpu, gpu, data, scalars, count * sizeof(fr_t), stats);
         gpu.sync();
         transfer.upload.finish_upload(stats);
-        const int code = msm_result(msm.msm.invoke(*out, msm.points, count, data, true));
         stats.report(device, "msm-scalars", count);
+        MsmKernelTimings kernels;
+        TransferStats compute;
+        const auto started = std::chrono::steady_clock::now();
+        const int code = msm_result(msm.msm.invoke(*out, msm.points, count, data, true));
+        compute.call_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        if (code == 0) kernels.collect(compute);
+        compute.report(device, "msm-compute", count);
         return code;
     } catch (const cuda_error& e) { return failure(e.code(), e.what()); }
       catch (const std::exception& e) { return failure(cudaErrorUnknown, e.what()); }
@@ -157,6 +257,34 @@ struct ResidentPolynomial {
         : device(gpu.cid()), count(count), data(count, stream) {}
 };
 
+class DivisionStream {
+    const stream_t& stream;
+    size_t count;
+  public:
+    DivisionStream(const stream_t& stream, size_t count) : stream(stream), count(count) {}
+    int sm_count() const { return stream.sm_count(); }
+
+    template<typename... Types>
+    void launch_coop(void(*kernel)(Types...), launch_params_t params, Types... args) const {
+        // sppark e10e107 reads xchg[laneid] even when a small grid's launcher
+        // reserves fewer than 32 field elements. Every lane needs valid storage.
+        params.shared = std::max(params.shared, WARP_SZ * sizeof(fr_t));
+        // A partial final cooperative tile can read the preceding tile's carry
+        // before it is published. Exact tiles or one block avoid that race.
+        while (params.gridDim.x > 1 && count % (2 * params.blockDim.x * params.gridDim.x) != 0)
+            --params.gridDim.x;
+        stream.launch_coop(kernel, params, args...);
+    }
+};
+
+void divide_in_place(const gpu_t& gpu, fr_t* data, size_t count, const fr_t& z) {
+    // The upstream launcher caches its block size in a mutable function static.
+    // Serialize host launches while allowing kernels on different GPUs to overlap.
+    static std::mutex launch_mutex;
+    std::lock_guard<std::mutex> lock(launch_mutex);
+    div_by_x_minus_z<true>(data, count, z, DivisionStream(gpu, count));
+}
+
 struct FftJob {
     const fr_t* input;
     const ResidentPolynomial* resident_input;
@@ -183,6 +311,12 @@ void transform(const gpu_t& gpu, stream_t& stream, fr_t* data,
 }
 
 } // namespace
+
+#include "kzg_quotient.cuh"
+#include "kzg_distributed.cuh"
+#include "kzg_quotient_distributed.cuh"
+#include "kzg_lookup.cuh"
+#include "kzg_lookup_distributed.cuh"
 
 extern "C" int multi_stark_kzg_polynomial_upload(int device, const fr_t* input,
                                                   size_t count, void** output) {
@@ -222,6 +356,7 @@ extern "C" int multi_stark_kzg_msm_invoke_resident(int device, void* context,
                                                   point_t* out, const void* polynomial,
                                                   size_t offset, size_t count,
                                                   const fr_t* normalization) {
+    ProfileRange range("kzg/msm-resident-scalars");
     try {
         if (!context || !out || !polynomial || !count) return cudaErrorInvalidValue;
         const auto& gpu = device_gpu(device);
@@ -232,21 +367,34 @@ extern "C" int multi_stark_kzg_msm_invoke_resident(int device, void* context,
             return cudaErrorInvalidValue;
         dev_ptr_t<fr_t> normalized(normalization ? count : 0, gpu);
         fr_t* input = const_cast<fr_t*>(&coefficients.data[offset]);
+        MsmKernelTimings kernels;
+        TransferStats compute;
+        const auto started = std::chrono::steady_clock::now();
         if (normalization) {
+            auto* timer = kzg_msm_profile_start(gpu);
             scale_values<<<gpu.sm_count() * 4, 256, 0, gpu>>>(normalized, input, count, *normalization);
             CUDA_OK(cudaGetLastError());
+            kzg_msm_profile_end(timer, gpu);
             gpu.sync();
             input = normalized;
         }
         dev_ptr_t<fr_t> scalars(input, count);
-        return msm_result(msm.msm.invoke(*out, msm.points, count, scalars, true));
+        const int code = msm_result(msm.msm.invoke(*out, msm.points, count, scalars, true));
+        compute.call_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        if (code == 0) kernels.collect(compute);
+        compute.report(device, "msm-compute", count);
+        return code;
     } catch (const cuda_error& e) { return failure(e.code(), e.what()); }
       catch (const std::exception& e) { return failure(cudaErrorUnknown, e.what()); }
 }
 
+#include "kzg_srs.cuh"
+
 extern "C" int multi_stark_kzg_fft_batch(int device, const FftJob* jobs,
                                           size_t job_count, uint32_t lg, bool inverse,
                                           const fr_t* shift, size_t slots) {
+    ProfileRange range(inverse ? "kzg/ifft-batch" : "kzg/fft-batch");
     try {
         if (!jobs || !shift || lg > 31 || slots < 1 || slots > 2)
             return cudaErrorInvalidValue;
@@ -330,32 +478,10 @@ extern "C" int multi_stark_kzg_fft(int device, fr_t* values, uint32_t lg,
                                     values, lg, inverse, shift);
 }
 
-constexpr size_t DIVISION_TILE = 256;
-
-__global__ void division_tiles(fr_t* data, size_t count, fr_t z, fr_t* carries,
-                               bool apply_carry) {
-    const size_t tile = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const size_t begin = tile * DIVISION_TILE;
-    if (begin >= count) return;
-    const size_t end = min(begin + DIVISION_TILE, count);
-    fr_t carry;
-    carry.zero();
-    if (apply_carry) carry = carries[tile];
-    for (size_t i = end; i-- > begin;) {
-        carry *= z;
-        if (apply_carry) {
-            data[i] += carry;
-        } else {
-            carry += data[i];
-            data[i] = carry;
-        }
-    }
-    if (!apply_carry) carries[tile] = carry;
-}
-
 extern "C" int multi_stark_kzg_evaluate_resident(int device, const fr_t* coefficients,
                                         const void* resident_pointer, size_t count,
                                         const fr_t* points, size_t point_count, fr_t* results) {
+    ProfileRange range("kzg/evaluate");
     try {
         if ((!coefficients && !resident_pointer) || !points || !results || count < 2 || point_count == 0)
             return cudaErrorInvalidValue;
@@ -396,42 +522,22 @@ extern "C" int multi_stark_kzg_evaluate(int device, const fr_t* coefficients,
                                             points, point_count, results);
 }
 
-extern "C" int multi_stark_kzg_divide(int device, fr_t* values, size_t count,
+extern "C" int multi_stark_kzg_divide(int device, const fr_t* input, fr_t* output, size_t count,
                                       const fr_t* z) {
-    // Keep transfer buffers alive through error-path synchronization.
-    std::vector<fr_t> host;
+    ProfileRange range("kzg/divide");
     try {
-        if (!values || !z || count < 2) return cudaErrorInvalidValue;
+        if (!input || !output || !z || count < 2) return cudaErrorInvalidValue;
         const auto& gpu = device_gpu(device);
         dev_ptr_t<fr_t> data(count, gpu);
         auto& transfer = transfer_lane(gpu);
         TransferStats stats;
-        transfer.upload.upload(gpu, gpu, data, values, count * sizeof(fr_t), stats);
+        transfer.upload.upload(gpu, gpu, data, input, count * sizeof(fr_t), stats);
         TimedKernel kernel;
         kernel.start(gpu);
-        const size_t tiles = (count + DIVISION_TILE - 1) / DIVISION_TILE;
-        dev_ptr_t<fr_t> carries(tiles, gpu);
-        host.resize(tiles);
-        const unsigned grid = static_cast<unsigned>((tiles + 127) / 128);
-        division_tiles<<<grid, 128, 0, gpu>>>(&data[0], count, *z, &carries[0], false);
-        CUDA_OK(cudaGetLastError());
-        gpu.DtoH(host.data(), &carries[0], tiles);
-        gpu.sync();
-        // One carry per tile bounds host work and avoids any inter-block
-        // synchronization or reads from partially overwritten coefficients.
-        fr_t carry = 0;
-        const fr_t step = *z ^ static_cast<unsigned>(DIVISION_TILE);
-        for (size_t i = tiles; i-- > 0;) {
-            const fr_t local = host[i];
-            host[i] = carry;
-            carry *= step;
-            carry += local;
-        }
-        gpu.HtoD(&carries[0], host.data(), tiles);
-        division_tiles<<<grid, 128, 0, gpu>>>(&data[0], count, *z, &carries[0], true);
-        CUDA_OK(cudaGetLastError());
+        // Rotation leaves the quotient at the front and the remainder last.
+        divide_in_place(gpu, &data[0], count, *z);
         kernel.end(gpu);
-        transfer.download.download(gpu, gpu, values, &data[1], (count - 1) * sizeof(fr_t), stats);
+        transfer.download.download(gpu, gpu, output, &data[0], (count - 1) * sizeof(fr_t), stats);
         gpu.sync();
         transfer.upload.finish_upload(stats);
         kernel.collect(stats);
@@ -442,4 +548,55 @@ extern "C" int multi_stark_kzg_divide(int device, fr_t* values, size_t count,
     } catch (const std::exception& e) {
         return failure(cudaErrorUnknown, e.what());
     }
+}
+
+extern "C" int multi_stark_kzg_divide_resident(int device, const fr_t* input,
+                                               size_t count, const fr_t* z, void** output) {
+    ProfileRange range("kzg/divide-resident");
+    try {
+        if (!input || !z || !output || count < 2) return cudaErrorInvalidValue;
+        const auto& gpu = device_gpu(device);
+        auto polynomial = std::make_unique<ResidentPolynomial>(gpu, count, gpu);
+        auto& transfer = transfer_lane(gpu);
+        TransferStats stats;
+        transfer.upload.upload(gpu, gpu, polynomial->data, input, count * sizeof(fr_t), stats);
+        TimedKernel kernel;
+        kernel.start(gpu);
+        divide_in_place(gpu, &polynomial->data[0], count, *z);
+        kernel.end(gpu);
+        gpu.sync();
+        transfer.upload.finish_upload(stats);
+        kernel.collect(stats);
+        stats.report(device, "divide-resident", count);
+        polynomial->count = count - 1;
+        *output = polynomial.release();
+        return 0;
+    } catch (const cuda_error& e) { return failure(e.code(), e.what()); }
+      catch (const std::exception& e) { return failure(cudaErrorUnknown, e.what()); }
+}
+
+__global__ void sample_scalars(fr_t* samples, const fr_t* data, size_t count) {
+    const size_t i = threadIdx.x;
+    samples[i] = data[(i * size_t(0x9e3779b97f4a7c15)) % count];
+}
+
+extern "C" int multi_stark_kzg_polynomial_sample(int device, const void* pointer,
+                                                 size_t offset, size_t count, fr_t* samples) {
+    try {
+        if (!pointer || !samples || !count) return cudaErrorInvalidValue;
+        const auto& gpu = device_gpu(device);
+        const auto& polynomial = *static_cast<const ResidentPolynomial*>(pointer);
+        if (polynomial.device != device || offset > polynomial.count ||
+            count > polynomial.count - offset) return cudaErrorInvalidValue;
+        dev_ptr_t<fr_t> output(128, gpu);
+        sample_scalars<<<1, 128, 0, gpu>>>(output, &polynomial.data[offset], count);
+        CUDA_OK(cudaGetLastError());
+        gpu.DtoH(samples, &output[0], 128);
+        gpu.sync();
+        TransferStats stats;
+        stats.download_bytes = 128 * sizeof(fr_t);
+        stats.report(device, "msm-sample", count);
+        return 0;
+    } catch (const cuda_error& e) { return failure(e.code(), e.what()); }
+      catch (const std::exception& e) { return failure(cudaErrorUnknown, e.what()); }
 }

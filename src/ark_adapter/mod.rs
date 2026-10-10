@@ -37,6 +37,7 @@ pub use config::KzgConfig;
 pub use domain::Radix2Coset;
 pub use field::Scalar;
 pub use pcs::{KzgCommitment, KzgPcs, KzgProof};
-pub use srs::Srs;
+pub use srs::{PublicSetup, Srs};
 pub use transcript::Blake3Transcript;
 mod buffer;
+mod pipeline;

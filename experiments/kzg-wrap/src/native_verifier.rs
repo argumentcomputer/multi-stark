@@ -9,46 +9,122 @@ use ark_bls12_381::{Bls12_381, G1Affine, G2Affine};
 use ark_ec::{CurveGroup, pairing::Pairing};
 use ark_ff::Zero;
 use ark_serialize::CanonicalSerialize;
+#[cfg(test)]
+use multi_stark::ark_adapter::Srs;
 use multi_stark::{
-    ark_adapter::{KzgCommitment, KzgConfig, Scalar, Srs},
+    ark_adapter::{KzgCommitment, KzgConfig, Scalar},
     config::ProofConfig,
     expr::{RowOffset, Source},
     graph::Node,
     plonkish::{
-        Circuit, Value,
+        Circuit, CircuitStats, Value,
         gadgets::{ByteGadgets, ByteValue},
     },
     prover::Proof,
     system::System,
-    traits::{Algebra, Field, Pcs, TwoAdicField},
+    traits::{Algebra, Field, TwoAdicField},
 };
 use std::collections::BTreeMap;
+
+mod bindings;
+pub(crate) mod development_metadata;
+#[cfg(test)]
+mod parallel_prefix_tests;
+mod plan;
+#[cfg(test)]
+mod reuse_tests;
+mod shape;
+
+pub(crate) use bindings::{Bindings, Compiled};
+use bindings::{PointBinding, PointSource, ScalarSource};
+pub(crate) use plan::{ClaimSchema, ClaimSlot, LayoutPolicy, Plan};
+use shape::{MatrixShape, Round, Shape};
 
 type Commitment = (Vec<Vec<usize>>, Vec<Vec<usize>>);
 type Openings = Vec<Vec<Vec<Value>>>;
 
+/// A compiled circuit paired with one request's assignments and proof points.
 pub struct Built {
     pub circuit: Circuit<Scalar>,
     pub inputs: Vec<(Value, Scalar)>,
     pub points: Vec<G1Affine>,
-    pub pairing_outputs: Vec<Affine>,
+    pub pairing_outputs: Vec<PointInput>,
     pub pairing_keys: Vec<G2Affine>,
     pub degree_output_count: usize,
     pub terms: Vec<Vec<(usize, Value)>>,
 }
+
+#[derive(Clone, Copy)]
+pub struct Profile<'a> {
+    pub circuits: &'a [multi_stark::system::Circuit<Scalar>],
+    pub fixed: &'a KzgCommitment,
+    pub transcript_seed: &'a [u8],
+    pub generator: G1Affine,
+    pub g2: G2Affine,
+    pub tau_g2: G2Affine,
+    pub degree_keys: &'a [G2Affine],
+    pub max_log_degree: usize,
+    pub shifted_degree_bounds: bool,
+}
+
+pub struct Counts {
+    pub stats: CircuitStats,
+    pub table_dimensions: Vec<(usize, usize)>,
+    pub degree_output_count: usize,
+    pub msm_terms: Vec<usize>,
+}
+
+struct Construction {
+    context: Context,
+    pairing_outputs: Vec<PointInput>,
+    pairing_keys: Vec<G2Affine>,
+    degree_output_count: usize,
+    terms: Vec<Vec<(usize, Value)>>,
+}
+
+impl Construction {
+    fn finish(self, plan: &Plan<'_>) -> Compiled {
+        let stats = self.context.b.stats();
+        Compiled {
+            circuit: self.context.b.finish(),
+            bindings: Bindings {
+                identity: plan.identity,
+                shape: plan.shape.clone(),
+                claims: plan.claims.clone(),
+                scalars: self.context.inputs,
+                points: self.context.points,
+                pairing_outputs: self.pairing_outputs,
+                pairing_keys: self.pairing_keys,
+                degree_output_count: self.degree_output_count,
+                terms: self.terms,
+                stats,
+            },
+        }
+    }
+
+    fn counts(&self) -> Counts {
+        Counts {
+            stats: self.context.b.stats(),
+            table_dimensions: self.context.b.table_dimensions().collect(),
+            degree_output_count: self.degree_output_count,
+            msm_terms: self.terms.iter().map(Vec::len).collect(),
+        }
+    }
+}
+
 struct Context {
     b: Builder,
     f: FqGadget,
     bytes: ByteGadgets,
-    inputs: Vec<(Value, Scalar)>,
+    inputs: Vec<(Value, ScalarSource)>,
     bases: Vec<Base>,
-    points: Vec<G1Affine>,
+    points: Vec<PointBinding>,
+    point_ends: Vec<usize>,
     encodings: Vec<[ByteValue; 48]>,
     scalar_encodings: BTreeMap<usize, [ByteValue; 32]>,
 }
 impl Context {
-    fn new() -> Self {
-        let mut b = Builder::new();
+    fn new(mut b: Builder) -> Self {
         let f = FqGadget::new(&mut b);
         let bytes = ByteGadgets::new(&mut b);
         Self {
@@ -58,18 +134,28 @@ impl Context {
             inputs: vec![],
             bases: vec![],
             points: vec![],
+            point_ends: vec![],
             encodings: vec![],
             scalar_encodings: BTreeMap::new(),
         }
     }
-    fn scalar(&mut self, name: &str, value: Scalar) -> Value {
+    fn scalar(&mut self, name: &str, source: ScalarSource) -> Value {
         let v = self.b.input(name);
-        self.inputs.push((v, value));
+        self.inputs.push((v, source));
         v
     }
-    fn point(&mut self, value: G1Affine, fixed: bool) -> usize {
+    fn point(&mut self, source: PointSource) -> usize {
         let id = self.points.len();
-        let p = if fixed {
+        let source = match source {
+            PointSource::Fixed(value) if value.infinity => PointSource::Fixed(G1Affine::identity()),
+            other => other,
+        };
+        let fixed = if let PointSource::Fixed(value) = source {
+            Some(value)
+        } else {
+            None
+        };
+        let p = if let Some(value) = fixed {
             let point = Affine {
                 x: self.f.constant(&mut self.b, value.x),
                 y: self.f.constant(
@@ -85,46 +171,94 @@ impl Context {
             let infinity = self.b.assert_bool(flag);
             PointInput { point, infinity }
         } else {
-            let p = PointInput::new(&mut self.b, &self.f, &format!("point{id}"));
-            self.inputs.extend(p.inputs(value));
-            p
+            PointInput::new(&mut self.b, &self.f, &format!("point{id}"))
         };
-        let encoded = if fixed {
+        let encoded = if let Some(value) = fixed {
             let mut encoded = vec![];
             value.serialize_compressed(&mut encoded).unwrap();
             std::array::from_fn(|i| self.bytes.constant(&mut self.b, encoded[i]))
         } else {
             native_transcript::point_bytes(&mut self.b, &self.bytes, p)
         };
-        self.bases.push(Base::new(p, fixed.then_some(value)));
-        self.points.push(value);
+        self.bases.push(Base::new(p, fixed));
+        self.points.push(PointBinding { source, point: p });
         self.encodings.push(encoded);
+        let end = self.b.stats().values;
+        if self.point_ends.last() != Some(&end) {
+            self.point_ends.push(end);
+        }
         if id % 64 == 63 {
             eprintln!("Allocated {} curve points: {:?}", id + 1, self.b.stats());
         }
         id
     }
-    fn commitment(&mut self, c: &KzgCommitment, fixed: bool) -> Commitment {
+    fn seal_point_prefix(&mut self) -> bool {
+        self.b
+            .try_parallel_witness_prefix(std::mem::take(&mut self.point_ends))
+    }
+    fn fixed_commitment(&mut self, c: &KzgCommitment) -> Commitment {
         (
             c.0.iter()
-                .map(|row| row.iter().map(|&p| self.point(p, fixed)).collect())
+                .map(|row| {
+                    row.iter()
+                        .map(|&p| self.point(PointSource::Fixed(p)))
+                        .collect()
+                })
                 .collect(),
             c.1.iter()
-                .map(|row| row.iter().map(|&p| self.point(p, fixed)).collect())
+                .map(|row| {
+                    row.iter()
+                        .map(|&p| self.point(PointSource::Fixed(p)))
+                        .collect()
+                })
                 .collect(),
         )
     }
-    fn openings(&mut self, name: &str, values: &[Vec<Vec<Scalar>>]) -> Openings {
-        values
+    fn commitment(&mut self, round: Round, shape: &MatrixShape) -> Commitment {
+        let mut allocate = |widths: &[usize], shifted| {
+            widths
+                .iter()
+                .enumerate()
+                .map(|(matrix, &width)| {
+                    (0..width)
+                        .map(|column| {
+                            self.point(PointSource::Commitment {
+                                round,
+                                shifted,
+                                matrix,
+                                column,
+                            })
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        (
+            allocate(&shape.widths, false),
+            allocate(&shape.shifted, true),
+        )
+    }
+    fn openings(&mut self, name: &str, round: Round, shape: &MatrixShape) -> Openings {
+        shape
+            .widths
             .iter()
+            .zip(&shape.opening_rows)
             .enumerate()
-            .map(|(i, rows)| {
-                rows.iter()
-                    .enumerate()
-                    .map(|(j, row)| {
-                        row.iter()
-                            .enumerate()
-                            .map(|(k, &v)| self.scalar(&format!("{name}.{i}.{j}.{k}"), v))
+            .map(|(matrix, (&width, &rows))| {
+                (0..rows)
+                    .map(|row| {
+                        (0..width)
+                            .map(|column| {
+                                self.scalar(
+                                    &format!("{name}.{matrix}.{row}.{column}"),
+                                    ScalarSource::Opening {
+                                        round,
+                                        matrix,
+                                        row,
+                                        column,
+                                    },
+                                )
+                            })
                             .collect()
                     })
                     .collect()
@@ -176,6 +310,7 @@ fn combine(b: &mut Builder, terms: Vec<(usize, Value)>) -> Vec<(usize, Value)> {
     unique.into_iter().collect()
 }
 
+#[cfg(test)]
 pub fn build(
     system: &System<KzgConfig>,
     srs: &Srs,
@@ -183,77 +318,114 @@ pub fn build(
     claims: &[Vec<Scalar>],
     public_locations: &[(usize, usize)],
 ) -> Result<Built, String> {
-    let quotients = system
-        .verify_shape(proof)
-        .map_err(|e| format!("shape: {e:?}"))?;
-    if !proof.active.iter().all(|&v| v)
-        || system
-            .preprocessed_indices
-            .iter()
-            .enumerate()
-            .any(|(i, &s)| s != Some(i))
+    let configured = system.config.srs();
+    if srs.g1.get(..2) != configured.g1.get(..2)
+        || srs.g2 != configured.g2
+        || srs.tau_g2 != configured.tau_g2
+        || srs.degree_keys != configured.degree_keys
     {
-        return Err(
-            "wrapper requires every circuit active and one fixed matrix per circuit".into(),
-        );
+        return Err("wrapper SRS differs from the authenticated configuration".into());
     }
-    let logs = &proof.log_degrees;
-    let mut c = Context::new();
-    let fixed = c.commitment(
-        system
-            .preprocessed_commit
-            .as_ref()
-            .ok_or("missing fixed commitment")?,
-        true,
-    );
-    let main = c.commitment(&proof.commitments.stage_1_trace, false);
-    let stage2 = c.commitment(&proof.commitments.stage_2_trace, false);
-    let quotient = c.commitment(&proof.commitments.quotient_chunks, false);
-    let witnesses: Vec<_> = proof
-        .opening_proof
-        .0
-        .iter()
-        .map(|&p| c.point(p, false))
+    let plan = Plan::new(
+        system,
+        &proof.log_degrees,
+        ClaimSchema::from_claims(claims, public_locations)?,
+        LayoutPolicy::legacy(),
+    )?;
+    plan.build(proof, claims)
+}
+
+/// Count the ordinary wrapper constraints without retaining an IR or generating
+/// a witness. This measures a profile; it does not verify its proof or its SRS.
+pub fn count(
+    profile: &Profile<'_>,
+    proof: &Proof<KzgConfig>,
+    claims: &[Vec<Scalar>],
+    public_locations: &[(usize, usize)],
+) -> Result<Counts, String> {
+    let plan = Plan::from_profile(
+        *profile,
+        &proof.log_degrees,
+        ClaimSchema::from_claims(claims, public_locations)?,
+        LayoutPolicy::legacy(),
+    )?;
+    plan.validate_request(proof, claims)?;
+    plan.count()
+}
+
+fn construct(
+    profile: &Profile<'_>,
+    shape: &Shape,
+    claims: &ClaimSchema,
+    builder: Builder,
+) -> Result<Construction, String> {
+    let circuits = profile.circuits;
+    let quotients: Vec<_> = circuits.iter().map(|c| c.quotient_degree()).collect();
+    let logs = &shape.logs;
+    let mut c = Context::new(builder);
+    let fixed = c.fixed_commitment(profile.fixed);
+    let main = c.commitment(Round::Main, &shape.rounds[Round::Main.index()]);
+    let stage2 = c.commitment(Round::Stage2, &shape.rounds[Round::Stage2.index()]);
+    let quotient = c.commitment(Round::Quotient, &shape.rounds[Round::Quotient.index()]);
+    let witnesses: Vec<_> = (0..shape.opening_generators.len())
+        .map(|index| c.point(PointSource::Witness(index)))
         .collect();
-    let generator = c.point(srs.g1[0], true);
+    let generator = c.point(PointSource::Fixed(profile.generator));
+    let prefix_blocks = c.point_ends.len();
+    let prefix_values = c.b.stats().values;
+    let parallel_prefix = c.seal_point_prefix();
     eprintln!("Curve inputs complete: {:?}", c.b.stats());
-    let accs: Vec<_> = proof
-        .intermediate_accumulators
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| c.scalar(&format!("acc{i}"), v))
+    eprintln!(
+        "Point witness prefix: admitted={parallel_prefix}, blocks={prefix_blocks}, values={prefix_values}"
+    );
+    let accs: Vec<_> = (0..logs.len())
+        .map(|i| c.scalar(&format!("acc{i}"), ScalarSource::Accumulator(i)))
         .collect();
     c.b.assert_zero(*accs.last().ok_or("empty accumulators")?);
-    let main_open = c.openings("main", &proof.stage_1_opened_values);
-    let stage2_open = c.openings("stage2", &proof.stage_2_opened_values);
-    let quotient_open = c.openings("quotient", &proof.quotient_opened_values);
-    let fixed_open = c.openings(
-        "fixed",
-        proof
-            .preprocessed_opened_values
-            .as_ref()
-            .ok_or("missing fixed openings")?,
+    let main_open = c.openings("main", Round::Main, &shape.rounds[Round::Main.index()]);
+    let stage2_open = c.openings(
+        "stage2",
+        Round::Stage2,
+        &shape.rounds[Round::Stage2.index()],
     );
+    let quotient_open = c.openings(
+        "quotient",
+        Round::Quotient,
+        &shape.rounds[Round::Quotient.index()],
+    );
+    let fixed_open = c.openings("fixed", Round::Fixed, &shape.rounds[Round::Fixed.index()]);
     let mut claim_vars: Vec<Vec<_>> = claims
+        .rows
         .iter()
-        .map(|row| row.iter().map(|&v| c.b.constant(v)).collect())
+        .map(|row| {
+            row.iter()
+                .map(|slot| match slot {
+                    ClaimSlot::Constant(value) => Some(c.b.constant(*value)),
+                    ClaimSlot::PublicU64 => None,
+                })
+                .collect()
+        })
         .collect();
-    for &(i, j) in public_locations {
-        let v = c.scalar(&format!("claim.{i}.{j}"), claims[i][j]);
+    for &(i, j) in &claims.public_locations {
+        let v = c.scalar(
+            &format!("claim.{i}.{j}"),
+            ScalarSource::Claim { row: i, column: j },
+        );
         c.f.range(&mut c.b, v, 64);
         c.b.expose_public(v);
-        claim_vars[i][j] = v;
+        claim_vars[i][j] = Some(v);
     }
-    let mut seed = b"multi-stark/kzg/v3".to_vec();
-    seed.extend((system.config.max_log_degree() as u64).to_le_bytes());
-    seed.extend((system.config.pcs().max_quotient_degree() as u64).to_le_bytes());
-    srs.g1[0].serialize_compressed(&mut seed).unwrap();
-    srs.g2.serialize_compressed(&mut seed).unwrap();
-    srs.g1[1].serialize_compressed(&mut seed).unwrap();
-    srs.tau_g2.serialize_compressed(&mut seed).unwrap();
-    let mut t = Transcript::new(&mut c.b, &c.bytes, &seed);
-    c.observe_constant(&mut t, system.circuits.len());
-    for circuit in &system.circuits {
+    let claim_vars: Vec<Vec<_>> = claim_vars
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|value| value.expect("validated public claim schema"))
+                .collect()
+        })
+        .collect();
+    let mut t = Transcript::new(&mut c.b, &c.bytes, profile.transcript_seed);
+    c.observe_constant(&mut t, circuits.len());
+    for circuit in circuits {
         for v in [
             circuit.constraint_count(),
             circuit.max_constraint_degree(),
@@ -274,7 +446,7 @@ pub fn build(
     for &log in logs {
         c.observe_constant(&mut t, usize::from(log));
     }
-    c.observe_constant(&mut t, claims.len());
+    c.observe_constant(&mut t, claims.rows.len());
     for row in &claim_vars {
         c.observe_constant(&mut t, row.len());
         for &v in row {
@@ -312,25 +484,32 @@ pub fn build(
             t.constant(&mut c.b, &c.bytes, &u64::from(log).to_le_bytes());
         }
     }
-    let degree_challenge = c.sample(&mut t);
     let mut degree_groups = BTreeMap::<u8, Vec<(usize, Value)>>::new();
     let mut shifted = vec![];
-    let mut weight = c.b.constant(Scalar::ONE);
-    for (commit, _) in rounds {
-        for (i, &log) in logs.iter().enumerate() {
-            if usize::from(log) < system.config.max_log_degree() {
-                if commit.0[i].len() != commit.1[i].len() {
-                    return Err("shifted commitment width".into());
+    if profile.shifted_degree_bounds {
+        let degree_challenge = c.sample(&mut t);
+        let mut weight = c.b.constant(Scalar::ONE);
+        for (commit, _) in rounds {
+            for (i, &log) in logs.iter().enumerate() {
+                if usize::from(log) < profile.max_log_degree {
+                    if commit.0[i].len() != commit.1[i].len() {
+                        return Err("shifted commitment width".into());
+                    }
+                    for (&p, &s) in commit.0[i].iter().zip(&commit.1[i]) {
+                        degree_groups.entry(log).or_default().push((p, weight));
+                        shifted.push((s, weight));
+                        weight = c.b.mul(weight, degree_challenge);
+                    }
+                } else if !commit.1[i].is_empty() {
+                    return Err("unexpected shifted commitments".into());
                 }
-                for (&p, &s) in commit.0[i].iter().zip(&commit.1[i]) {
-                    degree_groups.entry(log).or_default().push((p, weight));
-                    shifted.push((s, weight));
-                    weight = c.b.mul(weight, degree_challenge);
-                }
-            } else if !commit.1[i].is_empty() {
-                return Err("unexpected shifted commitments".into());
             }
         }
+    } else if rounds
+        .iter()
+        .any(|(commit, _)| commit.1.iter().any(|row| !row.is_empty()))
+    {
+        return Err("unexpected shifted commitments".into());
     }
     let mut batches: Vec<(Scalar, Vec<usize>, Vec<Value>)> = vec![];
     for (commit, openings) in rounds {
@@ -387,7 +566,7 @@ pub fn build(
     }
     // All AIR roots and logUp constraints, in the native folding order.
     let mut acc = initial_acc;
-    for (i, circuit) in system.circuits.iter().enumerate() {
+    for (i, circuit) in circuits.iter().enumerate() {
         let one = c.b.constant(Scalar::ONE);
         let mut z_n = zeta;
         for _ in 0..logs[i] {
@@ -504,7 +683,7 @@ pub fn build(
     let mut keys = vec![];
     if !shifted.is_empty() {
         terms.push(combine(&mut c.b, shifted));
-        keys.push(srs.g2);
+        keys.push(profile.g2);
     }
     for (log, group) in degree_groups {
         let group = group
@@ -512,17 +691,22 @@ pub fn build(
             .map(|(id, v)| (id, c.b.scale(v, Scalar::NEG_ONE)))
             .collect();
         terms.push(combine(&mut c.b, group));
-        keys.push(srs.degree_keys[usize::from(log)]);
+        keys.push(
+            *profile
+                .degree_keys
+                .get(usize::from(log))
+                .ok_or("missing degree key")?,
+        );
     }
     let degree_output_count = terms.len();
     terms.push(combine(&mut c.b, lhs));
-    keys.push(srs.g2);
+    keys.push(profile.g2);
     let rhs = rhs
         .into_iter()
         .map(|(id, v)| (id, c.b.scale(v, Scalar::NEG_ONE)))
         .collect();
     terms.push(combine(&mut c.b, rhs));
-    keys.push(srs.tau_g2);
+    keys.push(profile.tau_g2);
     let mut outputs = vec![];
     for (i, terms) in terms.iter().enumerate() {
         eprintln!("MSM {i}/{}: {} bases", keys.len(), terms.len());
@@ -534,18 +718,8 @@ pub fn build(
             terms,
             &format!("pairing{i}"),
         );
-        // Canonicalize before exposing the compressed pairing input.
-        let x = c.f.hint(&mut c.b, "output x", &[point.x], |v| Ok(v[0]));
-        c.f.equal(&mut c.b, x, point.x);
-        c.f.canonical(&mut c.b, x);
-        let y = c.f.hint(&mut c.b, "output y", &[point.y], |v| Ok(v[0]));
-        c.f.equal(&mut c.b, y, point.y);
-        c.f.canonical(&mut c.b, y);
-        let point = Affine { x, y };
-        let zero = c.b.constant(Scalar::ZERO);
-        let infinity = c.b.assert_bool(zero);
-        let encoded =
-            native_transcript::point_bytes(&mut c.b, &c.bytes, PointInput { point, infinity });
+        let point = point.canonical(&mut c.b, &c.f);
+        let encoded = native_transcript::point_bytes(&mut c.b, &c.bytes, point);
         for chunk in encoded.as_chunks::<24>().0 {
             let mut coefficient = Scalar::ONE;
             let terms: Vec<_> = chunk
@@ -562,10 +736,8 @@ pub fn build(
         outputs.push(point);
         eprintln!("MSM {i} complete: {:?}", c.b.stats());
     }
-    Ok(Built {
-        circuit: c.b.finish(),
-        inputs: c.inputs,
-        points: c.points,
+    Ok(Construction {
+        context: c,
         pairing_outputs: outputs,
         pairing_keys: keys,
         degree_output_count,
@@ -592,37 +764,20 @@ impl Built {
         let start = std::time::Instant::now();
         let a = w.generate()?;
         eprintln!("Complete circuit witness checked: {:?}", start.elapsed());
-        let mut outputs = vec![];
-        for (point, terms) in self.pairing_outputs.iter().zip(&self.terms) {
-            let x = crate::native_field::fq_value(&point.x.0.map(|v| a.value(v).unwrap()));
-            let y = crate::native_field::fq_value(&point.y.0.map(|v| a.value(v).unwrap()));
-            let point = G1Affine::new_unchecked(x, y);
-            let expected = terms
-                .iter()
-                .map(|&(id, s)| self.points[id] * a.value(s).unwrap().0)
-                .sum::<ark_bls12_381::G1Projective>()
-                .into_affine();
-            if point != expected {
-                return Err("MSM differs from native computation".into());
-            }
-            outputs.push(point);
-        }
-        for range in [
-            0..self.degree_output_count,
-            self.degree_output_count..outputs.len(),
-        ] {
-            if !Bls12_381::multi_pairing(
-                outputs[range.clone()].to_vec(),
-                self.pairing_keys[range].to_vec(),
-            )
-            .is_zero()
-            {
-                return Err("external pairing check failed".into());
-            }
-        }
-        let stats = self.circuit.stats();
+        bindings::check_outputs(
+            &a,
+            &self.points,
+            &self.pairing_outputs,
+            &self.pairing_keys,
+            self.degree_output_count,
+            &self.terms,
+        )?;
         Ok((
-            serde_json::json!({"gates":stats.gates,"lookups":stats.lookups,"values":stats.values,"rows":stats.gates+stats.lookups+stats.publics+1,"public_values":stats.publics,"pairing_points":outputs.len(),"msm_terms":self.terms.iter().map(Vec::len).collect::<Vec<_>>(),"witness_seconds":start.elapsed().as_secs_f64(),"circuit_satisfied":true,"external_pairings_pass":true,"outer_proof_generated":false}),
+            bindings::report(
+                self.circuit.stats(),
+                &self.terms,
+                start.elapsed().as_secs_f64(),
+            ),
             a,
         ))
     }
@@ -635,6 +790,78 @@ mod tests {
     use std::sync::Arc;
     #[test]
     fn complete_wrapper_fixture_and_changed_claim() {
+        wrapper_fixture(false);
+    }
+
+    #[test]
+    fn public_degree_development_wrapper_fixture_and_changed_claim() {
+        wrapper_fixture(true);
+    }
+
+    #[test]
+    fn public_degree_constant_proof_has_canonical_identity_pairing_outputs() {
+        use multi_stark::{expr::Expr, system::CircuitInputs};
+        use p3_matrix::dense::RowMajorMatrix;
+        let mut public = Srs::unsafe_dev_setup(8, b"identity-wrapper-public-test");
+        public.g1.truncate(4);
+        let srs = Arc::new(
+            Srs::from_public_powers(
+                public.g1,
+                public.g2,
+                public.tau_g2,
+                multi_stark::ark_adapter::PublicSetup {
+                    max_degree: 6,
+                    id: *blake3::hash(b"development identity-wrapper public setup").as_bytes(),
+                },
+            )
+            .unwrap(),
+        );
+        let trace = RowMajorMatrix::new_col(vec![Scalar::from_u8(7); 4]);
+        let (system, key) = System::new(
+            KzgConfig::new(srs.clone(), 2),
+            [CircuitInputs {
+                main_width: 1,
+                preprocessed: Some(trace.clone()),
+                constraints: vec![Expr::main(0) - Expr::preprocessed(0)],
+                ..Default::default()
+            }],
+        );
+        let proof = system.prove_multiple_claims(
+            &key,
+            &[],
+            SystemWitness::from_stage_1(vec![trace], &system),
+        );
+        system.verify_multiple_claims(&[], &proof).unwrap();
+        assert!(proof.opening_proof.0.iter().all(|p| p.infinity));
+        let built = build(&system, &srs, &proof, &[], &[]).unwrap();
+        let (_, assignment) = built.check_and_assign().unwrap();
+        for point in &built.pairing_outputs {
+            assert_eq!(
+                assignment.value(point.infinity.value()).unwrap(),
+                Scalar::ONE
+            );
+            assert!(
+                point
+                    .point
+                    .x
+                    .0
+                    .into_iter()
+                    .chain(point.point.y.0)
+                    .all(|v| assignment.value(v).unwrap() == Scalar::ZERO)
+            );
+        }
+        assert_eq!(
+            assignment.public_values(),
+            [
+                Scalar::from_u8(0xc0),
+                Scalar::ZERO,
+                Scalar::from_u8(0xc0),
+                Scalar::ZERO,
+            ]
+        );
+    }
+
+    fn wrapper_fixture(public_degree: bool) {
         let mut b = Builder::new();
         let table = b.fixed_table("small", vec![vec![Scalar::ONE], vec![Scalar::TWO]]);
         let x = b.input("x");
@@ -652,7 +879,23 @@ mod tests {
             .unwrap();
         let claims = lowered.claims(a.public_values()).unwrap();
         let refs: Vec<_> = claims.iter().map(Vec::as_slice).collect();
-        let srs = Arc::new(Srs::unsafe_dev_setup(32, b"native-wrapper-test"));
+        let srs = if public_degree {
+            let mut public = Srs::unsafe_dev_setup(64, b"native-wrapper-public-test");
+            public.g1.truncate(32);
+            Srs::from_public_powers(
+                public.g1,
+                public.g2,
+                public.tau_g2,
+                multi_stark::ark_adapter::PublicSetup {
+                    max_degree: 62,
+                    id: *blake3::hash(b"development wrapper test public setup").as_bytes(),
+                },
+            )
+            .unwrap()
+        } else {
+            Srs::unsafe_dev_setup(32, b"native-wrapper-test")
+        };
+        let srs = Arc::new(srs);
         let (system, key) = System::new(
             KzgConfig::new(srs.clone(), 2),
             lowered.kzg_circuit_inputs(32, 2).unwrap(),
@@ -664,6 +907,46 @@ mod tests {
         );
         system.verify_multiple_claims(&refs, &proof).unwrap();
         let mut built = build(&system, &srs, &proof, &claims, &[(1, 3)]).unwrap();
+        let profile = Profile {
+            circuits: &system.circuits,
+            fixed: system.preprocessed_commit.as_ref().unwrap(),
+            transcript_seed: system.config.transcript_seed(),
+            generator: srs.g1[0],
+            g2: srs.g2,
+            tau_g2: srs.tau_g2,
+            degree_keys: &srs.degree_keys,
+            max_log_degree: system.config.max_log_degree(),
+            shifted_degree_bounds: !public_degree,
+        };
+        let counted = count(&profile, &proof, &claims, &[(1, 3)]).unwrap();
+        let encoded =
+            multi_stark::ark_adapter::compact::FixedProofCodec::new(&system, &proof.log_degrees)
+                .unwrap()
+                .encode(&proof)
+                .unwrap();
+        assert_eq!(
+            Shape::new(&profile, &proof.log_degrees)
+                .unwrap()
+                .checked_compact_len()
+                .unwrap(),
+            encoded.len()
+        );
+        assert_eq!(counted.stats, built.circuit.stats());
+        assert_eq!(
+            counted.table_dimensions,
+            built
+                .circuit
+                .tables()
+                .iter()
+                .map(|table| (table.rows().len(), table.width()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(counted.degree_output_count, built.degree_output_count);
+        assert_eq!(built.degree_output_count == 0, public_degree);
+        assert_eq!(
+            counted.msm_terms,
+            built.terms.iter().map(Vec::len).collect::<Vec<_>>()
+        );
         eprintln!("{}", built.check().unwrap());
         let public = built.circuit.public_values()[0];
         let slot = built.inputs.iter().position(|&(v, _)| v == public).unwrap();

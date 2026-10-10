@@ -573,6 +573,7 @@ where
 /// arguments), so all multiplicities and argument values are kept in two
 /// row-major vectors instead of nested per-row, per-lookup allocations.
 #[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub struct LookupValues<F> {
     /// Number of trace rows.
     height: usize,
@@ -920,6 +921,29 @@ impl<F: Field> LookupValuesBuilder<F> {
                 arg_offsets,
             })
             .collect()
+    }
+
+    pub(crate) fn par_rows_mut(
+        &mut self,
+    ) -> impl IndexedParallelIterator<Item = LookupRowMut<'_, F>> {
+        assert!(self.num_lookups > 0, "builder has no lookup slots");
+        let Self {
+            num_lookups,
+            arg_offsets,
+            row_stride,
+            multiplicities,
+            args,
+            ..
+        } = self;
+        let arg_offsets = arg_offsets.as_slice();
+        multiplicities
+            .par_chunks_exact_mut(*num_lookups)
+            .zip(args.par_chunks_exact_mut(*row_stride))
+            .map(|(multiplicities, args)| LookupRowMut {
+                multiplicities,
+                args,
+                arg_offsets,
+            })
     }
 
     /// Finalizes into [`LookupValues`].

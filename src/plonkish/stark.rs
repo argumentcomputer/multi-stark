@@ -31,6 +31,10 @@ use crate::system::CircuitInputs;
 
 use super::{Assignment, Circuit, Value, Witness, WitnessError};
 
+mod multiplicities;
+#[cfg(feature = "kzg")]
+mod profile;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoweringError {
     SizeOverflow,
@@ -51,6 +55,79 @@ impl fmt::Display for LoweringError {
 }
 
 impl std::error::Error for LoweringError {}
+
+fn computation_relations<F: Field>(
+    namespace: F,
+    width: usize,
+    has_custom_traces: bool,
+) -> (Expr<F>, Vec<Lookup<Expr<F>>>) {
+    let main = |i| Expr::main(u32::try_from(i).expect("checked column"));
+    let prep = |i| Expr::preprocessed(u32::try_from(i).expect("checked column"));
+    let constant = Expr::constant;
+    let a = main(0);
+    let b = main(1);
+    let c = main(2);
+    let relation =
+        prep(0) * a.clone() * b.clone() + prep(1) * a.clone() + prep(2) * b + prep(3) * c + prep(4);
+    let mut lookups = Vec::new();
+    for col in 0..width {
+        lookups.push(Lookup::push(
+            constant(F::ONE),
+            vec![
+                constant(namespace),
+                constant(F::ZERO),
+                prep(5 + col),
+                main(col),
+            ],
+        ));
+        lookups.push(Lookup::pull(
+            constant(F::ONE),
+            vec![
+                constant(namespace),
+                constant(F::ZERO),
+                prep(5 + width + col),
+                main(col),
+            ],
+        ));
+    }
+    let public_enable = 5 + 2 * width;
+    lookups.push(Lookup::pull(
+        prep(public_enable),
+        vec![
+            constant(namespace),
+            constant(F::ONE),
+            prep(public_enable + 1),
+            a,
+        ],
+    ));
+    let mut table_args = vec![
+        constant(namespace),
+        constant(F::TWO),
+        prep(public_enable + 3),
+    ];
+    table_args.extend((0..width).map(main));
+    lookups.push(Lookup::pull(prep(public_enable + 2), table_args));
+    if has_custom_traces {
+        lookups.push(Lookup::push(
+            prep(public_enable + 4),
+            vec![
+                constant(namespace),
+                constant(F::from_u8(4)),
+                constant(F::from_u8(4)),
+                prep(public_enable + 3),
+                prep(public_enable + 1),
+                main(0),
+            ],
+        ));
+    }
+    (relation, lookups)
+}
+
+fn merged_table_lookup<F: Field>(namespace: F, width: usize) -> Lookup<Expr<F>> {
+    let mut args = vec![Expr::constant(namespace), Expr::constant(F::TWO)];
+    args.extend((0..width).map(|i| Expr::preprocessed(u32::try_from(i).expect("checked column"))));
+    Lookup::push(Expr::main(0), args)
+}
 
 /// A fixed circuit and its multi-stark row layout.
 ///
@@ -79,6 +156,10 @@ pub struct TraceShards<'a, F: Field> {
 }
 
 impl<F: Field> TraceShards<'_, F> {
+    pub fn compiled(&self) -> &MultiStarkCircuit<F> {
+        self.compiled
+    }
+
     pub fn len(&self) -> usize {
         self.compiled.main_heights.len()
             + usize::from(self.compiled.auxiliary_widths().next().is_some())
@@ -109,11 +190,11 @@ impl<F: Field> TraceShards<'_, F> {
         if aux < tables {
             return Ok(c.table_traces(self.assignment).remove(aux));
         }
-        c.circuit.hashes.as_ref().unwrap().trace(
-            &self.assignment.values,
+        Ok(c.circuit.hashes.as_ref().unwrap().trace(
+            self.assignment.prepared_hash(&c.circuit)?,
             &c.hash_definitions,
             aux - tables,
-        )
+        ))
     }
 
     pub fn traces(&self, shard: usize) -> Result<Vec<RowMajorMatrix<F>>, WitnessError> {
@@ -365,9 +446,8 @@ impl<F: Field> Circuit<F> {
         let mut successors = vec![0; layout.main_height * compiled.width];
         let mut endpoints = vec![(usize::MAX, usize::MAX); compiled.circuit.num_values()];
         let mut wires = vec![compiled.circuit.zero; compiled.width];
-        let mut fixed = vec![F::ZERO; compiled.fixed.width()];
         for row in 0..layout.main_height {
-            compiled.layout_row(row, &mut wires, &mut fixed);
+            compiled.layout_wires(row, &mut wires);
             for (col, value) in wires.iter().enumerate() {
                 let cell = row * compiled.width + col;
                 let (first, last) = &mut endpoints[value.index];
@@ -395,7 +475,7 @@ impl<F: Field> Circuit<F> {
         let fixed_len = layout.main_height * fixed_width;
 
         let mut wires = vec![self.zero; cells];
-        let mut fixed = vec![F::ZERO; fixed_len];
+        let mut fixed = F::zero_vec(fixed_len);
         if layout.main_heights.len() > 1 {
             // A fixed indicator, not a witness-controlled activation flag.
             let mut offset = 0;
@@ -547,6 +627,30 @@ impl<F: Field> MultiStarkCircuit<F> {
         self.selected_inputs(None)
     }
 
+    /// Canonical (height, width), without materializing preprocessing or witness data.
+    pub fn trace_dimensions(&self, index: usize) -> Option<(usize, usize)> {
+        if let Some(&height) = self.main_heights.get(index) {
+            return Some((height, self.width));
+        }
+        let aux = index.checked_sub(self.main_heights.len())?;
+        let tables = if let Some(height) = self.merged_table_height {
+            if aux == 0 {
+                return Some((height, 1));
+            }
+            1
+        } else {
+            if let Some(table) = self.circuit.tables.get(aux) {
+                return Some((table.rows.len().max(2).next_power_of_two(), 1));
+            }
+            self.circuit.tables.len()
+        };
+        let definition = self.hash_definitions.get(aux.checked_sub(tables)?)?;
+        Some((
+            definition.preprocessed.as_ref()?.height(),
+            definition.main_width,
+        ))
+    }
+
     /// Generate setup data for one circuit, without cloning the other fixed matrices.
     pub fn circuit_input(&self, index: usize) -> Option<CircuitInputs<F>> {
         self.selected_inputs(Some(index)).pop()
@@ -557,65 +661,11 @@ impl<F: Field> MultiStarkCircuit<F> {
         let main = |i| Expr::main(u32::try_from(i).expect("checked column"));
         let prep = |i| Expr::preprocessed(u32::try_from(i).expect("checked column"));
         let constant = Expr::constant;
-        let a = main(0);
-        let b = main(1);
-        let c = main(2);
-        let relation = prep(0) * a.clone() * b.clone()
-            + prep(1) * a.clone()
-            + prep(2) * b
-            + prep(3) * c
-            + prep(4);
-        let mut lookups = Vec::new();
-        for col in 0..self.width {
-            lookups.push(Lookup::push(
-                constant(F::ONE),
-                vec![
-                    constant(self.namespace),
-                    constant(F::ZERO),
-                    prep(5 + col),
-                    main(col),
-                ],
-            ));
-            lookups.push(Lookup::pull(
-                constant(F::ONE),
-                vec![
-                    constant(self.namespace),
-                    constant(F::ZERO),
-                    prep(5 + self.width + col),
-                    main(col),
-                ],
-            ));
-        }
-        let public_enable = 5 + 2 * self.width;
-        lookups.push(Lookup::pull(
-            prep(public_enable),
-            vec![
-                constant(self.namespace),
-                constant(F::ONE),
-                prep(public_enable + 1),
-                a,
-            ],
-        ));
-        let mut table_args = vec![
-            constant(self.namespace),
-            constant(F::TWO),
-            prep(public_enable + 3),
-        ];
-        table_args.extend((0..self.width).map(main));
-        lookups.push(Lookup::pull(prep(public_enable + 2), table_args));
-        if !self.hash_definitions.is_empty() {
-            lookups.push(Lookup::push(
-                prep(public_enable + 4),
-                vec![
-                    constant(self.namespace),
-                    constant(F::from_u8(4)),
-                    constant(F::from_u8(4)),
-                    prep(public_enable + 3),
-                    prep(public_enable + 1),
-                    main(0),
-                ],
-            ));
-        }
+        let (relation, lookups) = computation_relations(
+            self.namespace,
+            self.width,
+            !self.hash_definitions.is_empty(),
+        );
         let mut inputs = Vec::new();
         for index in 0..self.main_heights.len() {
             if selected.is_some_and(|i| i != index) {
@@ -657,12 +707,10 @@ impl<F: Field> MultiStarkCircuit<F> {
                 while rows.len() < height * width {
                     rows.extend_from_within(..width);
                 }
-                let mut args = vec![constant(self.namespace), constant(F::TWO)];
-                args.extend((0..width).map(prep));
                 inputs.push(CircuitInputs {
                     main_width: 1,
                     preprocessed: Some(RowMajorMatrix::new(rows, width)),
-                    lookups: vec![Lookup::push(main(0), args)],
+                    lookups: vec![merged_table_lookup(self.namespace, width)],
                     ..Default::default()
                 });
             }
@@ -721,49 +769,69 @@ impl<F: Field> MultiStarkCircuit<F> {
         Ok(traces)
     }
 
-    /// Check the assignment once, then generate shards on demand for batch
-    /// proving with `Retention::Regenerate`. The circuit, fixed data and logical
-    /// assignment remain resident; this only bounds generated witness traces.
+    /// Bind an immutable, validated assignment to this circuit, then generate
+    /// shards on demand for batch proving with `Retention::Regenerate`. The
+    /// circuit, fixed data, assignment and compact hash preparation remain
+    /// resident; this only bounds expanded witness traces.
     pub fn trace_shards<'a>(
         &'a self,
         assignment: &'a Assignment<F>,
     ) -> Result<TraceShards<'a, F>, WitnessError> {
-        if assignment.owner != self.circuit.owner {
+        if assignment.owner() != self.circuit.owner {
             return Err(WitnessError::ForeignAssignment);
         }
-        self.circuit.check_values(&assignment.values)?;
         Ok(TraceShards {
             compiled: self,
             assignment,
         })
     }
 
-    fn layout_row(&self, row: usize, wires: &mut [Value], fixed: &mut [F]) {
-        wires.fill(self.circuit.zero);
-        fixed.fill(F::ZERO);
+    fn layout_wires(&self, row: usize, wires: &mut [Value]) {
+        self.layout_row::<false>(row, wires, &mut []);
+    }
+
+    fn layout_fixed(&self, row: usize, fixed: &mut [F]) {
+        self.layout_row::<true>(row, &mut [], fixed);
+    }
+
+    fn layout_row<const FIXED: bool>(&self, row: usize, wires: &mut [Value], fixed: &mut [F]) {
+        if FIXED {
+            fixed.fill(F::ZERO);
+        } else {
+            wires.fill(self.circuit.zero);
+        }
         let c = &self.circuit;
         let public_enable = 5 + 2 * self.width;
         let public_index = public_enable + 1;
         let table_enable = public_enable + 2;
         let table_index = public_enable + 3;
         if let Some(gate) = c.gates.get(row) {
-            wires[..3].copy_from_slice(&gate.wires);
-            fixed[..5].copy_from_slice(&gate.coefficients);
+            if FIXED {
+                fixed[..5].copy_from_slice(&gate.coefficients);
+            } else {
+                wires[..3].copy_from_slice(&gate.wires);
+            }
         } else if row < c.gates.len() + 1 + c.publics.len() {
             let index = row - c.gates.len();
-            wires[0] = if index == 0 {
-                c.zero
+            if FIXED {
+                fixed[public_enable] = F::ONE;
+                fixed[public_index] = F::from_usize(index);
             } else {
-                c.publics[index - 1]
-            };
-            fixed[public_enable] = F::ONE;
-            fixed[public_index] = F::from_usize(index);
+                wires[0] = if index == 0 {
+                    c.zero
+                } else {
+                    c.publics[index - 1]
+                };
+            }
         } else {
             let index = row - c.gates.len() - 1 - c.publics.len();
             if let Some(lookup) = c.lookups.get(index) {
-                wires[..lookup.values.len()].copy_from_slice(&lookup.values);
-                fixed[table_enable] = F::ONE;
-                fixed[table_index] = F::from_usize(lookup.table.index);
+                if FIXED {
+                    fixed[table_enable] = F::ONE;
+                    fixed[table_index] = F::from_usize(lookup.table.index);
+                } else {
+                    wires[..lookup.values.len()].copy_from_slice(&lookup.values);
+                }
             } else {
                 let index = index - c.lookups.len();
                 let call_index = self.hash_row_ends.partition_point(|&end| end <= index);
@@ -772,18 +840,21 @@ impl<F: Field> MultiStarkCircuit<F> {
                         - call_index
                             .checked_sub(1)
                             .map_or(0, |i| self.hash_row_ends[i]);
-                    wires[0] = if offset < call.input.len() {
-                        call.input[offset]
+                    if FIXED {
+                        fixed[table_index] = F::from_usize(call_index);
+                        fixed[public_index] = F::from_usize(offset);
+                        fixed[table_index + 1] = if offset < call.input.len() {
+                            F::ONE
+                        } else {
+                            F::NEG_ONE
+                        };
                     } else {
-                        call.output[offset - call.input.len()]
-                    };
-                    fixed[table_index] = F::from_usize(call_index);
-                    fixed[public_index] = F::from_usize(offset);
-                    fixed[table_index + 1] = if offset < call.input.len() {
-                        F::ONE
-                    } else {
-                        F::NEG_ONE
-                    };
+                        wires[0] = if offset < call.input.len() {
+                            call.input[offset]
+                        } else {
+                            call.output[offset - call.input.len()]
+                        };
+                    }
                 }
             }
         }
@@ -799,15 +870,14 @@ impl<F: Field> MultiStarkCircuit<F> {
                 width,
             );
         };
-        let mut values = vec![F::ZERO; height * width];
+        let mut values = F::zero_vec(height * width);
         values
             .par_chunks_mut(width * (1 << 12))
             .enumerate()
             .for_each(|(tile, output)| {
-                let mut wires = vec![self.circuit.zero; self.width];
                 for (offset, fixed) in output.chunks_exact_mut(width).enumerate() {
                     let row = start + tile * (1 << 12) + offset;
-                    self.layout_row(row, &mut wires, fixed);
+                    self.layout_fixed(row, fixed);
                     for col in 0..self.width {
                         let cell = row * self.width + col;
                         fixed[5 + col] = F::from_usize(cell);
@@ -825,18 +895,17 @@ impl<F: Field> MultiStarkCircuit<F> {
         let start = self.main_heights[..index].iter().sum::<usize>() * self.width;
         let end = start + self.main_heights[index] * self.width;
         if self.successors.is_some() {
-            let mut values = vec![F::ZERO; end - start];
+            let mut values = F::zero_vec(end - start);
             values
                 .par_chunks_mut(self.width * (1 << 12))
                 .enumerate()
                 .for_each(|(tile, output)| {
                     let mut wires = vec![self.circuit.zero; self.width];
-                    let mut fixed = vec![F::ZERO; self.fixed.width()];
                     for (offset, row_values) in output.chunks_exact_mut(self.width).enumerate() {
                         let row = start / self.width + tile * (1 << 12) + offset;
-                        self.layout_row(row, &mut wires, &mut fixed);
+                        self.layout_wires(row, &mut wires);
                         for (output, wire) in row_values.iter_mut().zip(&wires) {
-                            *output = assignment.values[wire.index];
+                            *output = assignment.values()[wire.index];
                         }
                     }
                 });
@@ -845,7 +914,7 @@ impl<F: Field> MultiStarkCircuit<F> {
         RowMajorMatrix::new(
             self.wires[start..end]
                 .par_iter()
-                .map(|v| assignment.values[v.index])
+                .map(|v| assignment.values()[v.index])
                 .collect(),
             self.width,
         )
@@ -866,33 +935,17 @@ impl<F: Field> MultiStarkCircuit<F> {
     ) -> Result<Vec<RowMajorMatrix<F>>, WitnessError> {
         let mut traces = self.table_traces(assignment);
         if !self.hash_definitions.is_empty() {
-            traces.extend(
-                self.circuit
-                    .hashes
-                    .as_ref()
-                    .unwrap()
-                    .traces(&assignment.values, &self.hash_definitions)?,
-            );
+            traces.extend(self.circuit.hashes.as_ref().unwrap().traces(
+                assignment.prepared_hash(&self.circuit)?,
+                &self.hash_definitions,
+            ));
         }
         Ok(traces)
     }
 
     fn table_traces(&self, assignment: &Assignment<F>) -> Vec<RowMajorMatrix<F>> {
         let mut traces = Vec::new();
-        let mut multiplicities: Vec<Vec<F>> = self
-            .circuit
-            .tables
-            .iter()
-            .map(|table| vec![F::ZERO; table.rows.len().max(2).next_power_of_two()])
-            .collect();
-        let mut args = Vec::new();
-        for lookup in &self.circuit.lookups {
-            let table = &self.circuit.tables[lookup.table.index];
-            args.clear();
-            args.extend(lookup.values.iter().map(|v| assignment.values[v.index]));
-            let row = table.indices[&args];
-            multiplicities[lookup.table.index][row] += F::ONE;
-        }
+        let multiplicities = multiplicities::table_counts(&self.circuit, assignment.values());
         if let Some(height) = self.merged_table_height {
             let mut merged = Vec::with_capacity(height);
             for (counts, table) in multiplicities.into_iter().zip(&self.circuit.tables) {
@@ -959,6 +1012,9 @@ fn partition_heights(used_rows: usize, cap: Option<usize>) -> Result<Vec<usize>,
         ])
     }
 }
+
+#[cfg(test)]
+mod row_selection_tests;
 
 #[cfg(test)]
 mod partition_tests {
@@ -1083,6 +1139,9 @@ mod partition_tests {
         for i in 0..dense.num_circuits() {
             let a = dense.circuit_input(i).unwrap();
             let b = lazy.circuit_input(i).unwrap();
+            let dimensions = Some((a.preprocessed.as_ref().unwrap().height(), a.main_width));
+            assert_eq!(dense.trace_dimensions(i), dimensions);
+            assert_eq!(lazy.trace_dimensions(i), dimensions);
             assert_eq!(a.preprocessed, b.preprocessed);
             assert_eq!(
                 format!("{:?}", a.constraints),
@@ -1091,6 +1150,7 @@ mod partition_tests {
             assert_eq!(format!("{:?}", a.lookups), format!("{:?}", b.lookups));
         }
         assert!(lazy.circuit_input(lazy.num_circuits()).is_none());
+        assert!(lazy.trace_dimensions(lazy.num_circuits()).is_none());
         let a = dense.witness().generate().unwrap();
         let b = lazy.witness().generate().unwrap();
         let expected = dense.traces(&a).unwrap();

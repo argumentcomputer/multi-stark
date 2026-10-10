@@ -227,7 +227,7 @@ fn conditional_retry_circuit_proves_multiple_paths_under_one_outer_key() {
             buffer.remaining[16].value(),
             buffer.remaining[24].value(),
         ] {
-            let mut forged = assignment.values.clone();
+            let mut forged = assignment.values().to_vec();
             forged[wire.index()] += Goldilocks::ONE;
             assert!(compiled.circuit().check_values(&forged).is_err());
         }

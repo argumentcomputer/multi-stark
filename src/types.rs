@@ -1157,6 +1157,15 @@ impl CudaPcsDft<Val> for CudaDft {
     ) -> crate::cuda::CudaLde {
         self.coset_lde_batch_resident(matrix, added_bits, shift)
     }
+
+    fn try_coset_lde_batch_host(
+        &self,
+        matrix: &RowMajorMatrix<Val>,
+        added_bits: usize,
+        shift: Val,
+    ) -> Option<RowMajorMatrix<Val>> {
+        self.try_auxiliary_coset_lde(matrix, added_bits, shift)
+    }
 }
 
 type Dft = Radix2DitParallel<Val>;

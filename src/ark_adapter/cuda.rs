@@ -8,6 +8,15 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
+#[cfg(test)]
+mod diagnostic;
+mod distributed;
+#[cfg(test)]
+mod idle_tests;
+pub(super) mod lookup;
+pub(super) mod quotient;
+pub(super) mod srs_cache;
+
 #[repr(C)]
 struct FftJob {
     input: *const [u64; 4],
@@ -17,7 +26,21 @@ struct FftJob {
     resident_output: *mut *mut c_void,
 }
 
+#[repr(C)]
+#[derive(Default)]
+struct NativeIdleMemory {
+    driver_free_bytes: u64,
+    total_bytes: u64,
+    current_pool_reserved_bytes: u64,
+    current_pool_used_bytes: u64,
+    default_pool_reserved_bytes: u64,
+    default_pool_used_bytes: u64,
+    current_pool_is_default: u64,
+}
+
 unsafe extern "C" {
+    fn multi_stark_kzg_range_push(name: *const std::ffi::c_char);
+    fn multi_stark_kzg_range_pop();
     fn multi_stark_kzg_fft_batch(
         device: i32,
         jobs: *const FftJob,
@@ -38,10 +61,12 @@ unsafe extern "C" {
     fn multi_stark_kzg_devices(count: *mut i32) -> i32;
     fn multi_stark_kzg_device_ordinal(index: i32, ordinal: *mut i32) -> i32;
     fn multi_stark_kzg_memory(device: i32, free: *mut usize, total: *mut usize) -> i32;
+    fn multi_stark_kzg_idle_memory(device: i32, trim: bool, report: *mut NativeIdleMemory) -> i32;
+    fn multi_stark_kzg_peer_access(accessor: i32, owner: i32, supported: *mut i32) -> i32;
     fn multi_stark_kzg_msm_create(
         device: i32,
         out: *mut *mut c_void,
-        points: *const [[u64; 6]; 2],
+        points: *const c_void,
         count: usize,
     ) -> i32;
     fn multi_stark_kzg_msm_invoke(
@@ -89,10 +114,42 @@ unsafe extern "C" {
     ) -> i32;
     fn multi_stark_kzg_divide(
         device: i32,
-        values: *mut [u64; 4],
+        input: *const [u64; 4],
+        output: *mut [u64; 4],
         count: usize,
         z: *const [u64; 4],
     ) -> i32;
+    fn multi_stark_kzg_divide_resident(
+        device: i32,
+        input: *const [u64; 4],
+        count: usize,
+        z: *const [u64; 4],
+        output: *mut *mut c_void,
+    ) -> i32;
+    fn multi_stark_kzg_polynomial_sample(
+        device: i32,
+        polynomial: *const c_void,
+        offset: usize,
+        count: usize,
+        samples: *mut [u64; 4],
+    ) -> i32;
+
+}
+
+pub(super) struct ProfileRange(std::marker::PhantomData<std::rc::Rc<()>>);
+
+impl ProfileRange {
+    pub(super) fn new(name: &std::ffi::CStr) -> Self {
+        // NVTX copies the label and pairs ranges on the calling host thread.
+        unsafe { multi_stark_kzg_range_push(name.as_ptr()) };
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl Drop for ProfileRange {
+    fn drop(&mut self) {
+        unsafe { multi_stark_kzg_range_pop() };
+    }
 }
 
 // The FFI names explicit limb arrays. These checks reject an arkworks layout
@@ -102,6 +159,13 @@ const _: () = {
     assert!(align_of::<Fr>() == align_of::<[u64; 4]>());
     assert!(std::mem::offset_of!(Fr, 0) == 0);
     assert!(std::mem::offset_of!(BigInt<4>, 0) == 0);
+    assert!(size_of::<G1Affine>() == 104);
+    assert!(std::mem::offset_of!(G1Affine, x) == 0);
+    assert!(std::mem::offset_of!(G1Affine, y) == 48);
+    assert!(std::mem::offset_of!(G1Affine, infinity) == 96);
+    assert!(size_of::<Fq>() == size_of::<[u64; 6]>());
+    assert!(std::mem::offset_of!(Fq, 0) == 0);
+    assert!(std::mem::offset_of!(BigInt<6>, 0) == 0);
 };
 
 fn check(code: i32, operation: &str) {
@@ -128,9 +192,20 @@ struct Devices {
     resident_limits: Vec<usize>,
 }
 
+static DEVICES: OnceLock<Devices> = OnceLock::new();
+
 impl Devices {
+    fn potential_budget(&self, index: usize) -> usize {
+        let (mut free, mut total) = (0, 0);
+        check(
+            unsafe { multi_stark_kzg_memory(self.ids[index], &mut free, &mut total) },
+            "memory query",
+        );
+        free.saturating_add(srs_cache::reclaimable(index))
+            .saturating_sub(total / 4)
+    }
+
     fn get() -> &'static Self {
-        static DEVICES: OnceLock<Devices> = OnceLock::new();
         DEVICES.get_or_init(|| {
             let mut count = 0;
             // The FFI writes one integer and initializes sppark's device registry.
@@ -195,6 +270,29 @@ impl Devices {
         }
     }
 
+    fn acquire_group(&self, indices: &[usize]) -> Vec<Device<'_>> {
+        assert!(
+            indices
+                .iter()
+                .enumerate()
+                .all(|(i, &index)| { index < self.ids.len() && !indices[..i].contains(&index) })
+        );
+        let mut busy = self.busy.lock().unwrap();
+        while indices.iter().any(|&index| busy[index]) {
+            busy = self.available.wait(busy).unwrap();
+        }
+        for &index in indices {
+            busy[index] = true;
+        }
+        indices
+            .iter()
+            .map(|&index| Device {
+                devices: self,
+                index,
+            })
+            .collect()
+    }
+
     fn reserve(&self, bytes: usize) -> Option<Reservation> {
         let mut retained = self.resident_bytes.lock().unwrap();
         let index = (0..self.ids.len())
@@ -211,6 +309,10 @@ struct Device<'a> {
 }
 
 impl Device<'_> {
+    fn prepare_budget(&self, required: usize) -> bool {
+        srs_cache::prepare_budget(self, required)
+    }
+
     fn id(&self) -> i32 {
         self.devices.ids[self.index]
     }
@@ -224,6 +326,55 @@ impl Device<'_> {
         );
         free.saturating_sub(total / 4)
     }
+
+    fn idle_memory(&self, trim: bool) -> super::pcs::KzgDeviceMemorySnapshot {
+        let mut memory = NativeIdleMemory::default();
+        check(
+            unsafe { multi_stark_kzg_idle_memory(self.id(), trim, &mut memory) },
+            "idle memory release",
+        );
+        let (srs_point_bytes, msm_workspace_bytes) = srs_cache::resident_bytes(self.index);
+        super::pcs::KzgDeviceMemorySnapshot {
+            driver_free_bytes: memory.driver_free_bytes,
+            total_bytes: memory.total_bytes,
+            current_pool_reserved_bytes: memory.current_pool_reserved_bytes,
+            current_pool_used_bytes: memory.current_pool_used_bytes,
+            default_pool_reserved_bytes: memory.default_pool_reserved_bytes,
+            default_pool_used_bytes: memory.default_pool_used_bytes,
+            current_pool_is_default: memory.current_pool_is_default != 0,
+            resident_coefficient_bytes: self.devices.resident_bytes.lock().unwrap()[self.index],
+            srs_point_bytes,
+            msm_workspace_bytes,
+        }
+    }
+}
+
+pub(super) fn release_idle_device_memory() -> super::pcs::KzgIdleMemoryRelease {
+    let mut report = super::pcs::KzgIdleMemoryRelease {
+        cuda_enabled: true,
+        ..Default::default()
+    };
+    let Some(devices) = DEVICES.get() else {
+        return report;
+    };
+    let indices: Vec<_> = (0..devices.ids.len()).collect();
+    let leases = devices.acquire_group(&indices);
+    report.initialized = true;
+    for device in &leases {
+        let before = device.idle_memory(false);
+        let (released_srs_point_bytes, released_msm_workspace_bytes) =
+            srs_cache::release_all(device);
+        let after = device.idle_memory(true);
+        report.devices.push(super::pcs::KzgDeviceMemoryRelease {
+            device: device.id(),
+            before,
+            after,
+            released_srs_point_bytes,
+            released_msm_workspace_bytes,
+        });
+    }
+    report.quiesced = true;
+    report
 }
 
 impl Drop for Device<'_> {
@@ -270,7 +421,7 @@ pub(super) fn retain(coefficients: &[Fr]) -> Option<Arc<ResidentPolynomial>> {
     let devices = Devices::get();
     let reservation = devices.reserve(coefficients.len().checked_mul(32).unwrap())?;
     let device = devices.acquire_at(reservation.index);
-    if reservation.bytes + (1 << 30) > device.budget() {
+    if !device.prepare_budget(reservation.bytes + (1 << 30)) {
         return None;
     }
     let mut context = std::ptr::null_mut();
@@ -332,6 +483,7 @@ pub(super) fn fft_columns(
             let started = std::time::Instant::now();
             let device = devices.acquire_at(index);
             let wait_seconds = started.elapsed().as_secs_f64();
+            device.prepare_budget(count * 32 * group.len().min(2) + (1 << 30));
             let workspace = device.budget().saturating_sub(1 << 30);
             let slots = (workspace / (count * 32)).min(2).min(group.len());
             assert!(slots > 0, "insufficient free VRAM for KZG FFT queue");
@@ -429,6 +581,7 @@ pub(super) fn interpolate_columns(
             // All retained outputs survive the queue. Count them in addition
             // to the two transient slots, even though their lifetimes overlap.
             let retained = group.iter().filter(|(_, _, r)| r.is_some()).count() * bytes;
+            device.prepare_budget(retained + bytes * group.len().min(2) + (1 << 30));
             let budget = device.budget().saturating_sub(1 << 30);
             if retained + bytes > budget {
                 for (_, _, reservation) in &mut group {
@@ -549,6 +702,7 @@ pub(super) fn msm_columns_resident(
         .filter(|(_, g)| !g.is_empty())
         .map(|(index, group)| {
             let device = devices.acquire_at(index);
+            device.prepare_budget(devices.chunk_points.min(points.len()) * 384 + (1 << 30));
             let chunk = devices
                 .chunk_points
                 .min(device.budget().saturating_sub(1 << 30) / 384);
@@ -612,18 +766,17 @@ fn upload_msm_points<'lease, 'devices>(
     device: &'lease Device<'devices>,
     points: &[G1Affine],
 ) -> ResidentMsm<'lease, 'devices> {
-    let limbs = super::buffer::generate(points.len(), |i| {
-        let p = points[i];
-        if p.infinity {
-            [[0; 6]; 2]
-        } else {
-            [p.x.0.0, p.y.0.0]
-        }
-    });
     let mut context = std::ptr::null_mut();
+    // The layout-checked arkworks storage stays borrowed through the upload.
+    // Native conversion preserves infinity without a polynomial-sized host copy.
     check(
         unsafe {
-            multi_stark_kzg_msm_create(device.id(), &mut context, limbs.as_ptr(), points.len())
+            multi_stark_kzg_msm_create(
+                device.id(),
+                &mut context,
+                points.as_ptr().cast(),
+                points.len(),
+            )
         },
         "MSM point upload",
     );
@@ -647,9 +800,14 @@ fn msm_normalization(scalars: &[Fr]) -> Option<(Fr, Fr)> {
     if scalars.len() < 4096 {
         return None;
     }
+    sample_normalization(
+        (0usize..128).map(|i| scalars[i.wrapping_mul(0x9e37_79b9_7f4a_7c15) % scalars.len()]),
+    )
+}
+
+fn sample_normalization(samples: impl Iterator<Item = Fr>) -> Option<(Fr, Fr)> {
     let mut counts = HashMap::new();
-    for i in 0usize..128 {
-        let value = scalars[i.wrapping_mul(0x9e37_79b9_7f4a_7c15) % scalars.len()];
+    for value in samples {
         if !value.is_zero() {
             *counts.entry(value.min(-value)).or_insert(0usize) += 1;
         }
@@ -687,6 +845,7 @@ fn msm_columns_chunked(
         .enumerate()
         .map(|(chunk_index, points)| {
             let device = devices.acquire();
+            device.prepare_budget(points.len() * 384 + (1 << 30));
             // The largest window uses < 1 GiB of buckets. Resident affine points,
             // scalars, signed digits and sorting scratch fit in 384 B/point.
             let admitted = device.budget().saturating_sub(1 << 30) / 384;
@@ -758,7 +917,7 @@ pub(super) fn fft(values: &mut [Fr], inverse: bool, shift: Fr) {
     let device = Devices::get().acquire();
     let wait_seconds = started.elapsed().as_secs_f64();
     assert!(
-        values.len().checked_mul(32).unwrap() + (1 << 30) <= device.budget(),
+        device.prepare_budget(values.len().checked_mul(32).unwrap() + (1 << 30)),
         "insufficient free VRAM for KZG FFT"
     );
     let shift = if inverse {
@@ -802,7 +961,7 @@ pub(super) fn fft_from(coefficients: &[Fr], lg: usize, shift: Fr) -> Vec<Fr> {
     let device = Devices::get().acquire();
     let wait_seconds = started.elapsed().as_secs_f64();
     assert!(
-        count * 32 + (1 << 30) <= device.budget(),
+        device.prepare_budget(count * 32 + (1 << 30)),
         "insufficient free VRAM for KZG FFT"
     );
     let mut values = Vec::<Fr>::with_capacity(count);
@@ -868,7 +1027,7 @@ pub(super) fn evaluate_resident(
         .and_then(|bytes| bytes.checked_add(1 << 30))
         .expect("KZG evaluation size overflow");
     assert!(
-        bytes <= device.budget(),
+        device.prepare_budget(bytes),
         "insufficient free VRAM for KZG evaluation"
     );
     let mut results = Vec::<Fr>::with_capacity(points.len());
@@ -898,24 +1057,155 @@ pub(super) fn divide(coefficients: &[Fr], z: Fr) -> Vec<Fr> {
     }
     let device = Devices::get().acquire();
     assert!(
-        coefficients.len().checked_mul(32).unwrap() + (1 << 30) <= device.budget(),
+        device.prepare_budget(coefficients.len().checked_mul(32).unwrap() + (1 << 30)),
         "insufficient free VRAM for KZG division"
     );
-    let mut values = super::buffer::generate(coefficients.len(), |i| coefficients[i]);
+    // Parallel first-touch keeps page faults out of the pinned-ring download.
+    let mut values = super::buffer::generate(coefficients.len() - 1, |_| Fr::ZERO);
     // The call synchronizes its copies and kernels before releasing either buffer.
     check(
         unsafe {
             multi_stark_kzg_divide(
                 device.id(),
+                coefficients.as_ptr().cast(),
                 values.as_mut_ptr().cast(),
-                values.len(),
+                coefficients.len(),
                 &z.0.0,
             )
         },
         "polynomial division",
     );
-    values.pop();
     values
+}
+
+pub(super) fn single_device_opening(
+    points: &[G1Affine],
+    coefficients: &[Fr],
+    z: Fr,
+) -> Option<G1Projective> {
+    // A quotient on one card loses the multi-device MSM partitioning benefit.
+    if Devices::get().ids.len() != 1 {
+        return None;
+    }
+    divide_and_msm(points, coefficients, z)
+}
+
+/// Divide and commit without a polynomial-sized download or scalar re-upload.
+/// The quotient and its MSM scratch must fit together under one device lease.
+fn divide_and_msm(points: &[G1Affine], coefficients: &[Fr], z: Fr) -> Option<G1Projective> {
+    divide_and_msm_chunked(points, coefficients, z, Devices::get().chunk_points)
+}
+
+fn divide_and_msm_chunked(
+    points: &[G1Affine],
+    coefficients: &[Fr],
+    z: Fr,
+    chunk_limit: usize,
+) -> Option<G1Projective> {
+    assert_eq!(points.len(), coefficients.len().saturating_sub(1));
+    if points.is_empty() {
+        return Some(G1Projective::zero());
+    }
+    let devices = Devices::get();
+    let device = devices.acquire();
+    device.prepare_budget(
+        coefficients
+            .len()
+            .checked_mul(32)?
+            .checked_add(1 << 30)?
+            .checked_add(chunk_limit.min(points.len()).checked_mul(384)?)?,
+    );
+    let chunk = opening_chunk(coefficients.len(), chunk_limit, device.budget())?;
+    let mut context = std::ptr::null_mut();
+    check(
+        unsafe {
+            multi_stark_kzg_divide_resident(
+                device.id(),
+                coefficients.as_ptr().cast(),
+                coefficients.len(),
+                &z.0.0,
+                &mut context,
+            )
+        },
+        "resident polynomial division",
+    );
+    let quotient = LeasedPolynomial {
+        device: &device,
+        context,
+    };
+    Some(commit_leased_quotient(&quotient, points, chunk))
+}
+
+fn opening_chunk(count: usize, chunk_limit: usize, budget: usize) -> Option<usize> {
+    let fixed = count.checked_mul(32)?.checked_add(1 << 30)?;
+    let chunk = chunk_limit.min(budget.checked_sub(fixed)? / 384);
+    (chunk > 0).then_some(chunk)
+}
+
+fn commit_leased_quotient(
+    quotient: &LeasedPolynomial<'_, '_>,
+    points: &[G1Affine],
+    chunk: usize,
+) -> G1Projective {
+    let device = quotient.device;
+    let mut result = G1Projective::zero();
+    for (part, points) in points.chunks(chunk).enumerate() {
+        let offset = part * chunk;
+        let mut samples = [Fr::ZERO; 128];
+        let normalization = if points.len() >= 4096 {
+            check(
+                unsafe {
+                    multi_stark_kzg_polynomial_sample(
+                        device.id(),
+                        quotient.context,
+                        offset,
+                        points.len(),
+                        samples.as_mut_ptr().cast(),
+                    )
+                },
+                "resident scalar sample",
+            );
+            sample_normalization(samples.into_iter())
+        } else {
+            None
+        };
+        let resident_points = upload_msm_points(device, points);
+        let mut out = [[0; 6]; 3];
+        check(
+            unsafe {
+                multi_stark_kzg_msm_invoke_resident(
+                    device.id(),
+                    resident_points.context,
+                    &mut out,
+                    quotient.context,
+                    offset,
+                    points.len(),
+                    normalization
+                        .as_ref()
+                        .map_or(std::ptr::null(), |(_, inverse)| &inverse.0.0),
+                )
+            },
+            "opening witness MSM",
+        );
+        let point = projective(out);
+        result += normalization.map_or(point, |(scale, _)| point * scale);
+    }
+    result
+}
+
+struct LeasedPolynomial<'lease, 'devices> {
+    device: &'lease Device<'devices>,
+    context: *mut c_void,
+}
+
+impl Drop for LeasedPolynomial<'_, '_> {
+    fn drop(&mut self) {
+        // The existing lease covers destruction; reacquiring it would deadlock.
+        let code = unsafe { multi_stark_kzg_polynomial_destroy(self.device.id(), self.context) };
+        if code != 0 {
+            tracing::error!(code, "KZG temporary polynomial destruction failed");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -948,6 +1238,7 @@ mod tests {
         points[0] = G1Affine::zero();
         points[1] = G1Affine::generator();
         points[2] = -points[1];
+        points[4].infinity = true;
         scalars[1] = Fr::ONE;
         scalars[2] = Fr::ONE;
         scalars[3] = Fr::ZERO;
@@ -1234,6 +1525,123 @@ mod tests {
                     "n={n}, points={count}"
                 );
             }
+        }
+    }
+
+    fn division_reference(coefficients: &[Fr], z: Fr) -> Vec<Fr> {
+        let mut quotient = vec![Fr::ZERO; coefficients.len().saturating_sub(1)];
+        let mut carry = Fr::ZERO;
+        for i in (1..coefficients.len()).rev() {
+            carry = coefficients[i] + z * carry;
+            quotient[i - 1] = carry;
+        }
+        quotient
+    }
+
+    fn opening_points(count: usize) -> Vec<G1Affine> {
+        let mut point = G1Projective::zero();
+        let basis: Vec<_> = (0..256)
+            .map(|_| {
+                let output = point;
+                point += G1Affine::generator();
+                output
+            })
+            .collect();
+        let basis = G1Projective::normalize_batch(&basis);
+        super::super::buffer::generate(count, |i| basis[i % basis.len()])
+    }
+
+    #[test]
+    fn cuda_resident_division_msm_matches_arkworks() {
+        for n in [0usize, 1, 2, 33, 4097, 65537] {
+            let points = opening_points(n.saturating_sub(1));
+            for (coefficients, z) in [
+                (scalars(n), Fr::from(918273)),
+                (vec![Fr::from(19).inverse().unwrap(); n], Fr::ZERO),
+                (vec![Fr::ZERO; n], Fr::ONE),
+            ] {
+                let expected =
+                    G1Projective::msm(&points, &division_reference(&coefficients, z)).unwrap();
+                assert_eq!(
+                    divide_and_msm_chunked(&points, &coefficients, z, 16385),
+                    Some(expected),
+                    "n={n}, z={z}"
+                );
+            }
+        }
+        assert!(divide_and_msm_chunked(&opening_points(1), &[Fr::ONE; 2], Fr::ZERO, 0).is_none());
+        assert_eq!(
+            divide_and_msm(&opening_points(1), &[Fr::ONE; 2], Fr::ZERO),
+            Some(G1Projective::zero())
+        );
+    }
+
+    #[test]
+    fn opening_memory_admission_keeps_scratch_reserve() {
+        let fixed = (1 << 30) + 32 * 1024;
+        assert_eq!(opening_chunk(1024, 16, fixed - 1), None);
+        assert_eq!(opening_chunk(1024, 16, fixed + 383), None);
+        assert_eq!(opening_chunk(1024, 16, fixed + 384), Some(1));
+        assert_eq!(opening_chunk(1024, 16, fixed + 384 * 32), Some(16));
+        assert_eq!(opening_chunk(usize::MAX, 16, usize::MAX), None);
+        assert_eq!(opening_chunk(1024, 0, usize::MAX), None);
+    }
+
+    #[test]
+    #[ignore = "compares quotient download/re-upload with a resident quotient MSM"]
+    fn cuda_opening_benchmark() {
+        let lg: usize =
+            std::env::var("MULTI_STARK_KZG_BENCH_LOG_N").map_or(24, |value| value.parse().unwrap());
+        assert!((16..=28).contains(&lg));
+        let factor = scalars(1)[0];
+        let coefficients =
+            super::super::buffer::generate(1 << lg, |i| Fr::from(i as u64 + 1).pow([5]) * factor);
+        let points = opening_points(coefficients.len() - 1);
+        let z = Fr::from(918273);
+        let _ = divide_and_msm(&points[..1023], &coefficients[..1024], z).unwrap();
+        for iteration in 0..3 {
+            let measure = |resident| {
+                let started = std::time::Instant::now();
+                let commitment = if resident {
+                    divide_and_msm(&points, &coefficients, z).unwrap()
+                } else {
+                    msm(&points, &divide(&coefficients, z))
+                };
+                (commitment, started.elapsed().as_secs_f64())
+            };
+            let (first, second) = (measure(iteration % 2 == 0), measure(iteration % 2 != 0));
+            assert_eq!(first.0, second.0);
+            let (resident, host) = if iteration % 2 == 0 {
+                (first.1, second.1)
+            } else {
+                (second.1, first.1)
+            };
+            eprintln!(
+                "opening lg={lg} iteration={iteration} host_seconds={host:.6} resident_seconds={resident:.6}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "measures one polynomial division without generating a proof or SRS"]
+    fn cuda_division_benchmark() {
+        let lg: usize =
+            std::env::var("MULTI_STARK_KZG_BENCH_LOG_N").map_or(24, |value| value.parse().unwrap());
+        assert!((16..=28).contains(&lg));
+        let factor = scalars(1)[0];
+        let coefficients =
+            super::super::buffer::generate(1 << lg, |i| Fr::from(i as u64 + 1).pow([5]) * factor);
+        let z = Fr::from(918273);
+        let _ = divide(&coefficients[..1024], z);
+        for iteration in 0..3 {
+            let started = std::time::Instant::now();
+            let quotient = divide(&coefficients, z);
+            let seconds = started.elapsed().as_secs_f64();
+            assert_eq!(quotient.len(), coefficients.len() - 1);
+            assert!(quotient.par_iter().enumerate().all(|(i, &q)| {
+                q - z * quotient.get(i + 1).copied().unwrap_or(Fr::ZERO) == coefficients[i + 1]
+            }));
+            eprintln!("division lg={lg} iteration={iteration} seconds={seconds:.6}");
         }
     }
 

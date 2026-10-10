@@ -219,6 +219,11 @@ macro_rules! impl_field_via_p3 {
             fn from_usize(x: usize) -> Self {
                 p3_field::PrimeCharacteristicRing::from_usize(x)
             }
+
+            #[inline]
+            fn zero_vec(len: usize) -> Vec<Self> {
+                p3_field::PrimeCharacteristicRing::zero_vec(len)
+            }
         }
     };
 }

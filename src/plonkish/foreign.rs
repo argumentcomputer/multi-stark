@@ -17,6 +17,9 @@ use p3_matrix::Matrix;
 
 const P: u64 = <Val as PrimeField64>::ORDER_U64;
 
+mod interval;
+mod quotient;
+
 impl MultiStarkCircuit<Scalar> {
     /// Minimize KZG commitment/evaluation bytes by choosing lookup groups per
     /// trace, within the supplied quotient budget. Include the actual SRS length
@@ -28,7 +31,7 @@ impl MultiStarkCircuit<Scalar> {
     ) -> Result<Vec<CircuitInputs<Scalar>>, LoweringError> {
         let mut inputs = self.circuit_inputs();
         for input in &mut inputs {
-            tune_kzg_input(input, srs_len, quotient_budget)?;
+            tune_kzg_input(input, srs_len, quotient_budget, true)?;
         }
         Ok(inputs)
     }
@@ -40,10 +43,27 @@ impl MultiStarkCircuit<Scalar> {
         srs_len: usize,
         quotient_budget: usize,
     ) -> Result<Option<CircuitInputs<Scalar>>, LoweringError> {
+        self.kzg_circuit_input_with_degree_policy(index, srs_len, quotient_budget, true)
+    }
+
+    /// Tune one trace using the selected degree policy. A public-degree setup
+    /// has no shifted commitments, including for traces below `max_trace_len`.
+    pub fn kzg_circuit_input_with_degree_policy(
+        &self,
+        index: usize,
+        max_trace_len: usize,
+        quotient_budget: usize,
+        shifted_degree_bounds: bool,
+    ) -> Result<Option<CircuitInputs<Scalar>>, LoweringError> {
         let Some(mut input) = self.circuit_input(index) else {
             return Ok(None);
         };
-        tune_kzg_input(&mut input, srs_len, quotient_budget)?;
+        tune_kzg_input(
+            &mut input,
+            max_trace_len,
+            quotient_budget,
+            shifted_degree_bounds,
+        )?;
         Ok(Some(input))
     }
 }
@@ -52,11 +72,12 @@ fn tune_kzg_input(
     input: &mut CircuitInputs<Scalar>,
     srs_len: usize,
     quotient_budget: usize,
+    shifted_degree_bounds: bool,
 ) -> Result<(), LoweringError> {
     use crate::{
         expr::CircuitSpec,
         graph::{ExtensionParams, compile},
-        lookup::{MAX_LOOKUP_GROUP, logup_max_degree, stage2_width},
+        lookup::stage2_width,
     };
     let fixed = input
         .preprocessed
@@ -82,24 +103,52 @@ fn tune_kzg_input(
         },
     )
     .expect("valid lowering");
-    let commitment_bytes = if fixed.height() == srs_len { 48 } else { 96 };
+    input.lookup_group_size = kzg_lookup_group(
+        &graph,
+        input.lookups.len(),
+        fixed.height(),
+        srs_len,
+        quotient_budget,
+        shifted_degree_bounds,
+    )?;
+    Ok(())
+}
+
+/// Choose a lookup group using the compact commitment/opening cost and quotient
+/// budget. The graph and lookup count must describe the same compiled circuit.
+pub fn kzg_lookup_group(
+    graph: &crate::graph::ConstraintGraph<Scalar>,
+    num_lookups: usize,
+    height: usize,
+    max_trace_len: usize,
+    quotient_budget: usize,
+    shifted_degree_bounds: bool,
+) -> Result<usize, LoweringError> {
+    use crate::lookup::{MAX_LOOKUP_GROUP, logup_max_degree, stage2_width};
+    if height > max_trace_len {
+        return Err(LoweringError::InvalidTraceHeight);
+    }
+    let commitment_bytes = if shifted_degree_bounds && height < max_trace_len {
+        96
+    } else {
+        48
+    };
     let best = (1..=MAX_LOOKUP_GROUP)
         .filter_map(|group| {
             let degree = graph
                 .max_constraint_degree
-                .max(logup_max_degree(&graph, group)) as usize;
+                .max(logup_max_degree(graph, group)) as usize;
             let quotient = (degree.max(2) - 1).next_power_of_two();
             if quotient > quotient_budget {
                 return None;
             }
-            let width = stage2_width(input.lookups.len(), group, 1);
+            let width = stage2_width(num_lookups, group, 1);
             let bytes = width * (commitment_bytes + 64) + quotient * (commitment_bytes + 32);
             Some(((bytes, quotient, group), group))
         })
         .min_by_key(|(cost, _)| *cost)
         .ok_or(LoweringError::QuotientBudgetTooSmall)?;
-    input.lookup_group_size = best.1;
-    Ok(())
+    Ok(best.1)
 }
 /// A fixed translation. Public values retain their original order and canonical encoding.
 pub struct GoldilocksCircuit {
@@ -142,6 +191,7 @@ fn integer(value: Scalar) -> BigInt {
     BigInt::from_biguint(Sign::Plus, BigUint::from_bytes_le(&bytes))
 }
 
+#[cfg(test)]
 fn interval(coefficients: [i128; 5], bounds: [u64; 3]) -> (BigInt, BigInt) {
     let [a, b, c] = bounds.map(BigInt::from);
     let maxima = [&a * &b, a, b, c];
@@ -311,15 +361,31 @@ fn range(b: &mut CircuitBuilder<Scalar>, table: Table, value: Value, bits: usize
         b.assert_bool(value);
         return;
     }
-    let count = bits.div_ceil(16);
-    let mut terms = Vec::with_capacity(count);
+    match bits.div_ceil(16) {
+        1 => range_limbs::<1>(b, table, value),
+        2 => range_limbs::<2>(b, table, value),
+        3 => range_limbs::<3>(b, table, value),
+        4 => range_limbs::<4>(b, table, value),
+        5 => range_limbs::<5>(b, table, value),
+        6 => range_limbs::<6>(b, table, value),
+        7 => range_limbs::<7>(b, table, value),
+        8 => range_limbs::<8>(b, table, value),
+        9 => range_limbs::<9>(b, table, value),
+        _ => panic!("Goldilocks range exceeds quotient bound"),
+    }
+}
+
+fn range_limbs<const N: usize>(b: &mut CircuitBuilder<Scalar>, table: Table, value: Value) {
+    let limbs = b.hint_many::<N>("integer limbs", &[value], |v| {
+        let words = v[0].canonical_limbs_le();
+        Ok(std::array::from_fn(|i| {
+            Scalar::from_u64((words[i / 4] >> (16 * (i % 4))) & 0xffff)
+        }))
+    });
+    let mut terms = Vec::with_capacity(N);
     let radix = Scalar::from_u32(1 << 16);
     let mut coefficient = Scalar::ONE;
-    for i in 0..count {
-        let limb = b.hint("integer limb", &[value], move |v| {
-            let limbs = v[0].canonical_limbs_le();
-            Ok(Scalar::from_u64((limbs[i / 4] >> (16 * (i % 4))) & 0xffff))
-        });
+    for limb in limbs {
         b.lookup(table, &[limb]);
         terms.push((coefficient, limb));
         coefficient *= radix;
@@ -412,6 +478,50 @@ impl GoldilocksCircuit {
         b: &mut CircuitBuilder<Scalar>,
         expand_hashes: bool,
     ) -> GoldilocksInputs {
+        Self::translate_with_chunk_size(source, b, expand_hashes, 1 << 16)
+    }
+
+    pub(super) fn translate_with_chunk_size(
+        source: &Circuit<Val>,
+        b: &mut CircuitBuilder<Scalar>,
+        expand_hashes: bool,
+        chunk_size: usize,
+    ) -> GoldilocksInputs {
+        Self::translate_inner(source, b, expand_hashes, chunk_size, |b, index| {
+            b.input_indexed("goldilocks", index)
+        })
+    }
+
+    #[cfg(test)]
+    fn translate_with_inputs(
+        source: &Circuit<Val>,
+        b: &mut CircuitBuilder<Scalar>,
+        expand_hashes: bool,
+        input: impl FnMut(&mut CircuitBuilder<Scalar>, usize) -> Value,
+    ) -> GoldilocksInputs {
+        Self::translate_inner(source, b, expand_hashes, 0, input)
+    }
+
+    fn translate_inner(
+        source: &Circuit<Val>,
+        b: &mut CircuitBuilder<Scalar>,
+        expand_hashes: bool,
+        chunk_size: usize,
+        mut input: impl FnMut(&mut CircuitBuilder<Scalar>, usize) -> Value,
+    ) -> GoldilocksInputs {
+        let mut chunks = (cfg!(feature = "parallel")
+            && chunk_size > 0
+            && !expand_hashes
+            && b.fresh_witness_plan())
+        .then(Vec::new);
+        let record_chunk = |b: &CircuitBuilder<Scalar>, chunks: &mut Option<Vec<usize>>| {
+            if let Some(ends) = chunks {
+                let end = b.stats().values;
+                if end - ends.last().copied().unwrap_or(0) >= chunk_size {
+                    ends.push(end);
+                }
+            }
+        };
         let range_table = b.fixed_table(
             "u16",
             (0..=u16::MAX).map(|v| vec![Scalar::from_u16(v)]).collect(),
@@ -486,13 +596,14 @@ impl GoldilocksCircuit {
                         integer_gates[gate_index] = true;
                     }
                 }
-                let value = b.input(format!("goldilocks[{i}]"));
+                let value = input(b, i);
                 if !checked[i] {
                     canonical(b, range_table, value);
                 }
                 wires.push(value);
                 inputs.push(true);
             }
+            record_chunk(b, &mut chunks);
         }
         let tables: Vec<_> = source
             .tables
@@ -549,9 +660,24 @@ impl GoldilocksCircuit {
         }
         for (gate, integer) in source.gates.iter().zip(integer_gates) {
             constrain_gate(b, range_table, gate, &wires, &bounds, integer);
+            record_chunk(b, &mut chunks);
         }
         for value in &source.publics {
             b.expose_public(wires[value.index]);
+        }
+        if let Some(mut ends) = chunks {
+            if ends.last() != Some(&b.stats().values) {
+                ends.push(b.stats().values);
+            }
+            let chunk_count = ends.len();
+            let started = std::time::Instant::now();
+            let certified = b.certify_witness_chunks(ends);
+            tracing::info!(
+                chunks = chunk_count,
+                certified,
+                certificate_seconds = started.elapsed().as_secs_f64(),
+                "Goldilocks witness schedule checked"
+            );
         }
         GoldilocksInputs {
             source_owner: source.owner,
@@ -575,14 +701,14 @@ impl GoldilocksInputs {
         source: &Assignment<Val>,
         witness: &mut Witness<'_, Scalar>,
     ) -> Result<(), WitnessError> {
-        if source.owner != self.source_owner {
+        if source.owner() != self.source_owner {
             return Err(WitnessError::ForeignAssignment);
         }
         for (i, &input) in self.is_input.iter().enumerate() {
             if input {
                 witness.set(
                     self.wires[i],
-                    Scalar::from_u64(source.values[i].as_canonical_u64()),
+                    Scalar::from_u64(source.values()[i].as_canonical_u64()),
                 )?;
             }
         }
@@ -608,33 +734,16 @@ fn constrain_gate(
         b.constrain_gate(values, coefficients.map(signed_scalar));
         return;
     }
-    let (low, high) = interval(coefficients, gate.wires.map(|v| bounds[v.index]));
-    let p = BigInt::from(P);
-    if low > -&p && high < p {
-        b.constrain_gate(values, coefficients.map(|c| scalar(&BigInt::from(c))));
+    let interval::GatePlan::Quotient { offset, bits } =
+        interval::GatePlan::new(coefficients, gate.wires.map(|v| bounds[v.index]))
+    else {
+        b.constrain_gate(values, coefficients.map(signed_scalar));
         return;
-    }
-    let shift = if low < BigInt::from(0) {
-        (-low + &p - 1) / &p
-    } else {
-        BigInt::from(0)
     };
-    let offset = &shift * &p;
-    let max_q = (high + &offset) / &p;
-    let bits = usize::try_from(max_q.bits()).expect("quotient fits usize");
-    assert!(bits <= 130, "Goldilocks gate quotient bound");
-    let hint_offset = offset.clone();
-    let quotient = b.hint("Goldilocks quotient", &values, move |v| {
-        let [a, c, d] = [integer(v[0]), integer(v[1]), integer(v[2])];
-        let [qm, qa, qb, qc, k] = coefficients;
-        let sum = qm * &a * &c + qa * a + qb * c + qc * d + k + &hint_offset;
-        if &sum % P != BigInt::from(0) {
-            return Err("invalid Goldilocks gate".into());
-        }
-        Ok(scalar(&(sum / P)))
-    });
+    let hint = quotient::QuotientHint::from_limbs(coefficients, offset);
+    let quotient = b.hint("Goldilocks quotient", &values, move |v| hint.evaluate(v));
     range(b, table, quotient, bits);
-    let [qm, qa, qb, qc, k] = coefficients.map(|c| scalar(&BigInt::from(c)));
+    let [qm, qa, qb, qc, k] = coefficients.map(signed_scalar);
     let product = b.mul(values[0], values[1]);
     let residual = b.linear_combination(
         &[
@@ -644,11 +753,27 @@ fn constrain_gate(
             (qc, values[2]),
             (-Scalar::from_u64(P), quotient),
         ],
-        k + scalar(&offset),
+        k + Scalar::from_limbs_le(offset.0),
     );
     let zero = b.constant(Scalar::ZERO);
     b.assert_equal(residual, zero);
 }
+
+#[cfg(test)]
+#[path = "tests/range_hints.rs"]
+mod range_tests;
+
+#[cfg(test)]
+#[path = "tests/quotient_hints.rs"]
+mod quotient_tests;
+
+#[cfg(test)]
+#[path = "tests/translation_intervals.rs"]
+mod interval_tests;
+
+#[cfg(test)]
+#[path = "tests/indexed_names.rs"]
+mod indexed_names_tests;
 
 #[cfg(test)]
 mod tests {
@@ -742,7 +867,7 @@ mod tests {
                     // residue. Scalar constraints must still reject it.
                     for (i, &is_input) in mapped.inputs.is_input.iter().enumerate() {
                         if is_input {
-                            let mut forged = assignment.values.clone();
+                            let mut forged = assignment.values().to_vec();
                             forged[mapped.inputs.wires[i].index] += Scalar::from_u64(P);
                             assert!(mapped.circuit.check_values(&forged).is_err());
                         }
@@ -855,7 +980,7 @@ mod tests {
                     assignment.public_values()[0].as_canonical_u64()
                 )]
             );
-            let mut forged = output.values;
+            let mut forged = output.values().to_vec();
             let quotient = mapped
                 .circuit
                 .hints
@@ -908,7 +1033,7 @@ mod tests {
         mapped.assign(&assignment, &mut witness).unwrap();
         let output = witness.generate().unwrap();
         assert_eq!(output.public_values(), &[Scalar::from_u8(195)]);
-        let mut forged = output.values;
+        let mut forged = output.values().to_vec();
         forged[mapped.inputs.wires[product.index].index] += Scalar::ONE;
         assert!(mapped.circuit.check_values(&forged).is_err());
     }

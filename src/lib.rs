@@ -27,6 +27,26 @@ pub use p3_field;
 pub use p3_goldilocks;
 pub use p3_matrix;
 
+/// Compiled library features, independent of runtime backend selection or device availability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuildCapabilities {
+    pub kzg: bool,
+    pub kzg_cuda: bool,
+    pub goldilocks_cuda: bool,
+    pub parallel: bool,
+}
+
+impl BuildCapabilities {
+    pub const fn compiled() -> Self {
+        Self {
+            kzg: cfg!(feature = "kzg"),
+            kzg_cuda: cfg!(feature = "kzg-cuda"),
+            goldilocks_cuda: cfg!(feature = "cuda"),
+            parallel: cfg!(feature = "parallel"),
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! ensure {
     ($condition:expr, $err:expr) => {
