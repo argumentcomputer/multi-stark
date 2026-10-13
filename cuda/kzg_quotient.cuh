@@ -72,6 +72,34 @@ __device__ __forceinline__ void evaluate_constraint_nodes(
         }
 }
 
+__device__ __forceinline__ fr_t quotient_lookup_group(
+    fr_t* values, const fr_t* evaluations, const QuotientColumn* columns,
+    const QuotientLookup* lookups, size_t lookup_count, const uint32_t* args,
+    const fr_t* publics, QuotientParameters parameters, size_t groups, size_t group,
+    size_t n, size_t row, size_t next, fr_t last
+) {
+    const fr_t target = group + 1 == groups
+        ? quotient_column(evaluations, columns, n, parameters.stage2_start, next) + last * parameters.delta
+        : quotient_column(evaluations, columns, n, parameters.stage2_start + uint32_t(group + 1), row);
+    fr_t constraint = target - quotient_column(evaluations, columns, n, parameters.stage2_start + uint32_t(group), row);
+    fr_t messages[8], prefix[9], suffix[9];
+    prefix[0] = suffix[lookup_count] = fr_t::one();
+    for (size_t i = 0; i < lookup_count; ++i) {
+        const auto& lookup = lookups[i];
+        fr_t fingerprint;
+        fingerprint.zero();
+        for (size_t j = lookup.arg_count; j > 0; --j)
+            fingerprint = fingerprint * publics[1] + values[size_t(args[lookup.arg_start + j - 1]) * blockDim.x];
+        messages[i] = fingerprint + publics[0];
+        prefix[i + 1] = prefix[i] * messages[i];
+    }
+    for (size_t i = lookup_count; i > 0; --i) suffix[i - 1] = messages[i - 1] * suffix[i];
+    constraint *= prefix[lookup_count];
+    for (size_t i = 0; i < lookup_count; ++i)
+        constraint -= prefix[i] * suffix[i + 1] * values[size_t(lookups[i].multiplicity) * blockDim.x];
+    return constraint;
+}
+
 __device__ __forceinline__ fr_t quotient_row(
     fr_t* values, const fr_t* evaluations, const QuotientColumn* columns,
     const QuotientInstruction* nodes, size_t node_count, const uint32_t* roots,
@@ -86,36 +114,14 @@ __device__ __forceinline__ fr_t quotient_row(
     accumulator.zero();
     for (size_t i = 0; i < root_count; ++i)
         accumulator = accumulator * parameters.alpha + values[size_t(roots[i]) * blockDim.x];
-    const fr_t injection = last * parameters.delta;
     const size_t groups = lookup_count ? (lookup_count + parameters.group_size - 1) / parameters.group_size : 1;
     for (size_t group = 0; group < groups; ++group) {
-        fr_t target = group + 1 == groups
-            ? quotient_column(evaluations, columns, n, parameters.stage2_start, next) + injection
-            : quotient_column(evaluations, columns, n, parameters.stage2_start + uint32_t(group + 1), row);
-        fr_t constraint = target - quotient_column(evaluations, columns, n, parameters.stage2_start + uint32_t(group), row);
-        if (lookup_count) {
-            const size_t start = group * parameters.group_size;
-            const size_t remaining = lookup_count - start;
-            const size_t count = remaining < parameters.group_size ? remaining : parameters.group_size;
-            fr_t messages[8], prefix[9], suffix[9];
-            prefix[0] = suffix[count] = fr_t::one();
-            for (size_t i = 0; i < count; ++i) {
-                const auto& lookup = lookups[start + i];
-                fr_t fingerprint;
-                fingerprint.zero();
-                for (size_t j = lookup.arg_count; j > 0; --j)
-                    fingerprint = fingerprint * publics[1]
-                        + values[size_t(arguments[lookup.arg_start + j - 1]) * blockDim.x];
-                messages[i] = fingerprint + publics[0];
-                prefix[i + 1] = prefix[i] * messages[i];
-            }
-            for (size_t i = count; i > 0; --i)
-                suffix[i - 1] = messages[i - 1] * suffix[i];
-            constraint *= prefix[count];
-            for (size_t i = 0; i < count; ++i)
-                constraint -= prefix[i] * suffix[i + 1]
-                    * values[size_t(lookups[start + i].multiplicity) * blockDim.x];
-        }
+        const size_t start = group * parameters.group_size;
+        const size_t remaining = lookup_count - start;
+        const size_t count = remaining < parameters.group_size ? remaining : parameters.group_size;
+        const fr_t constraint = quotient_lookup_group(values, evaluations, columns,
+            count ? lookups + start : nullptr, count, arguments, publics, parameters,
+            groups, group, n, row, next, last);
         accumulator = accumulator * parameters.alpha + constraint;
     }
     return accumulator;

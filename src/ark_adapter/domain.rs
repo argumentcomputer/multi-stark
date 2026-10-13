@@ -95,9 +95,21 @@ impl EvaluationDomain for Radix2Coset {
     }
 
     fn selectors_on_coset(&self, coset: Self) -> LagrangeSelectors<Vec<Scalar>> {
+        self.selectors_on_coset_range(coset, 0..coset.size())
+    }
+}
+
+impl Radix2Coset {
+    /// Compute selectors for a contiguous interval without allocating the full coset.
+    pub(super) fn selectors_on_coset_range(
+        &self,
+        coset: Self,
+        rows: core::ops::Range<usize>,
+    ) -> LagrangeSelectors<Vec<Scalar>> {
         assert_eq!(self.shift, ONE, "selectors_on_coset needs the group itself");
         assert_ne!(coset.shift, ONE, "coset must be disjoint from the group");
         assert!(coset.log_size >= self.log_size);
+        assert!(rows.start <= rows.end && rows.end <= coset.size());
         let rate_bits = coset.log_size - self.log_size;
 
         // Z_H(X) = X^n − 1 is periodic over the coset with period
@@ -113,10 +125,10 @@ impl EvaluationDomain for Radix2Coset {
         let subgroup_last = self.generator().inverse();
         let generator = coset.generator();
         let inverses = batch_inverse(&vanishing);
-        let mut first = vec![ONE; coset.size()];
-        let mut last = vec![ONE; coset.size()];
-        let mut transition = vec![ONE; coset.size()];
-        let mut inv_vanishing = vec![ONE; coset.size()];
+        let mut first = vec![ONE; rows.len()];
+        let mut last = vec![ONE; rows.len()];
+        let mut transition = vec![ONE; rows.len()];
+        let mut inv_vanishing = vec![ONE; rows.len()];
         first
             .par_chunks_mut(1 << 14)
             .zip(last.par_chunks_mut(1 << 14))
@@ -124,7 +136,7 @@ impl EvaluationDomain for Radix2Coset {
             .zip(inv_vanishing.par_chunks_mut(1 << 14))
             .enumerate()
             .for_each(|(tile, (((first, last), transition), inv_vanishing))| {
-                let start = tile * (1 << 14);
+                let start = rows.start + tile * (1 << 14);
                 let mut point = coset.shift * generator.exp_u64(start as u64);
                 for row in 0..first.len() {
                     first[row] = point - ONE;
@@ -153,6 +165,29 @@ impl EvaluationDomain for Radix2Coset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selector_ranges_preserve_absolute_coset_indices() {
+        let trace = Radix2Coset {
+            log_size: 14,
+            shift: ONE,
+        };
+        for extra in [0, 1, 2] {
+            let coset = trace.create_disjoint_domain(1 << (14 + extra));
+            for rows in [0..0, 3..19, 1023..1031, 16380..coset.size()] {
+                let actual = trace.selectors_on_coset_range(coset, rows.clone());
+                assert_eq!(actual.is_first_row.len(), rows.len());
+                for (offset, index) in rows.enumerate() {
+                    let point = coset.shift * coset.generator().exp_u64(index as u64);
+                    let expected = trace.selectors_at_point(point);
+                    assert_eq!(actual.is_first_row[offset], expected.is_first_row);
+                    assert_eq!(actual.is_last_row[offset], expected.is_last_row);
+                    assert_eq!(actual.is_transition[offset], expected.is_transition);
+                    assert_eq!(actual.inv_vanishing[offset], expected.inv_vanishing);
+                }
+            }
+        }
+    }
 
     #[test]
     fn selectors_and_points_agree_across_parallel_tiles() {

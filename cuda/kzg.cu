@@ -316,6 +316,7 @@ void transform(const gpu_t& gpu, stream_t& stream, fr_t* data,
 #include "kzg_distributed.cuh"
 #include "kzg_quotient_distributed.cuh"
 #include "kzg_lookup.cuh"
+#include "kzg_passes.cuh"
 #include "kzg_lookup_distributed.cuh"
 
 extern "C" int multi_stark_kzg_polynomial_upload(int device, const fr_t* input,

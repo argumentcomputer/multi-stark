@@ -44,18 +44,18 @@ pub(super) struct Column {
 }
 
 #[repr(C, align(32))]
-struct Parameters {
-    alpha: [u64; 4],
-    generator: [u64; 4],
-    generator_inverse: [u64; 4],
-    delta: [u64; 4],
-    quotient_shift_inverse: [u64; 4],
-    trace_log: u32,
-    quotient_log: u32,
-    slots: u32,
-    stage2_start: u32,
-    group_size: u32,
-    blocks: u32,
+pub(super) struct Parameters {
+    pub(super) alpha: [u64; 4],
+    pub(super) generator: [u64; 4],
+    pub(super) generator_inverse: [u64; 4],
+    pub(super) delta: [u64; 4],
+    pub(super) quotient_shift_inverse: [u64; 4],
+    pub(super) trace_log: u32,
+    pub(super) quotient_log: u32,
+    pub(super) slots: u32,
+    pub(super) stage2_start: u32,
+    pub(super) group_size: u32,
+    pub(super) blocks: u32,
 }
 
 unsafe extern "C" {
@@ -102,14 +102,21 @@ pub(super) struct Program {
 }
 
 fn encode(graph: &ConstraintGraph<Scalar>, widths: [usize; 3], publics: usize) -> Option<Program> {
-    encode_range(graph, widths, publics, graph.nodes.len(), &graph.zeros)
+    encode_range(
+        graph,
+        widths,
+        publics,
+        graph.nodes.len(),
+        &graph.zeros,
+        None,
+    )
 }
 
 pub(super) fn encode_lookup(
     graph: &ConstraintGraph<Scalar>,
     widths: [usize; 3],
 ) -> Option<Program> {
-    encode_range(graph, widths, 0, graph.lookup_prefix_len, &[])
+    encode_range(graph, widths, 0, graph.lookup_prefix_len, &[], None)
 }
 
 fn encode_range(
@@ -118,10 +125,51 @@ fn encode_range(
     publics: usize,
     n: usize,
     roots: &[crate::graph::NodeId],
+    selection: Option<core::ops::Range<usize>>,
 ) -> Option<Program> {
+    let selected = graph
+        .lookups
+        .get(selection.clone().unwrap_or(0..graph.lookups.len()))?;
+    let mut live = vec![selection.is_none(); n];
+    if selection.is_some() {
+        let mut pending: Vec<_> = roots
+            .iter()
+            .chain(
+                selected
+                    .iter()
+                    .flat_map(|l| core::iter::once(&l.multiplicity).chain(l.args.iter())),
+            )
+            .copied()
+            .collect();
+        while let Some(id) = pending.pop() {
+            let used = live.get_mut(id.index())?;
+            if *used {
+                continue;
+            }
+            *used = true;
+            match *graph.nodes.get(id.index())? {
+                Node::Add(a, b) | Node::Sub(a, b) | Node::Mul(a, b) => {
+                    if a.index() >= id.index() || b.index() >= id.index() {
+                        return None;
+                    }
+                    pending.extend([a, b]);
+                }
+                Node::Neg(a) => {
+                    if a.index() >= id.index() {
+                        return None;
+                    }
+                    pending.push(a);
+                }
+                _ => {}
+            }
+        }
+    }
     let node_range = graph.nodes.get(..n)?;
     let mut last: Vec<_> = (0..n).collect();
     for (i, node) in node_range.iter().enumerate() {
+        if !live[i] {
+            continue;
+        }
         let mut consume = |id: crate::graph::NodeId| {
             if id.index() >= i {
                 return None;
@@ -139,8 +187,7 @@ fn encode_range(
         }
     }
     for id in roots.iter().chain(
-        graph
-            .lookups
+        selected
             .iter()
             .flat_map(|lookup| core::iter::once(&lookup.multiplicity).chain(lookup.args.iter())),
     ) {
@@ -153,6 +200,9 @@ fn encode_range(
     let mut nodes = Vec::with_capacity(n);
     for (i, node) in node_range.iter().enumerate() {
         free.append(&mut retire[i]);
+        if !live[i] {
+            continue;
+        }
         let out = free.pop().unwrap_or_else(|| {
             let slot = slots;
             slots += 1;
@@ -210,9 +260,9 @@ fn encode_range(
         nodes.push(encoded);
     }
     let roots = roots.iter().map(|id| mapping[id.index()]).collect();
-    let mut lookups = Vec::with_capacity(graph.lookups.len());
+    let mut lookups = Vec::with_capacity(selected.len());
     let mut args = Vec::new();
-    for lookup in &graph.lookups {
+    for lookup in selected {
         lookups.push(Lookup {
             multiplicity: mapping[lookup.multiplicity.index()],
             arg_start: u32::try_from(args.len()).ok()?,
@@ -227,6 +277,51 @@ fn encode_range(
         args,
         slots: slots as usize,
     })
+}
+
+pub(super) fn encode_pass(
+    graph: &ConstraintGraph<Scalar>,
+    widths: [usize; 3],
+    publics: usize,
+    roots: &[crate::graph::NodeId],
+    lookups: core::ops::Range<usize>,
+) -> Option<Program> {
+    encode_range(
+        graph,
+        widths,
+        publics,
+        graph.nodes.len(),
+        roots,
+        Some(lookups),
+    )
+}
+
+pub(super) fn pass_columns(
+    all: &[PolynomialView<'_>],
+    program: &Program,
+    extra: &[usize],
+) -> Option<(Vec<Column>, usize)> {
+    let mut used = vec![false; all.len()];
+    for node in &program.nodes {
+        if node.op == 1 {
+            *used.get_mut(node.a as usize)? = true;
+        }
+    }
+    for &column in extra {
+        *used.get_mut(column)? = true;
+    }
+    let mut columns = resident_column_descriptors(all);
+    let mut count = 0;
+    for ((descriptor, (_, _, constant)), needed) in columns.iter_mut().zip(all).zip(used) {
+        descriptor.slot = if needed && !constant {
+            let slot = u32::try_from(count).ok()?;
+            count += 1;
+            slot
+        } else {
+            u32::MAX
+        };
+    }
+    Some((columns, count))
 }
 
 pub(super) fn matrix<'a>(
@@ -397,6 +492,18 @@ fn coefficients_impl(
             &inverse_vanishing,
             options,
         );
+    }
+    if passes::enabled(eligible.is_empty()) {
+        if let Some(output) = passes::quotient_coefficients(
+            input,
+            &parameters,
+            &all_columns,
+            widths,
+            &shifts,
+            &inverse_vanishing,
+        ) {
+            return Some(output);
+        }
     }
     if distributed::enabled(eligible.is_empty()) {
         if let Some(output) = distributed::coefficients(

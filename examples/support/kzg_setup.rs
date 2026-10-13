@@ -204,11 +204,11 @@ impl SetupSource {
                 )?
             }
         };
-        Ok(KzgConfig::with_max_trace_len(
-            Arc::new(srs),
-            height,
-            quotient,
-        ))
+        let mut config = KzgConfig::with_max_trace_len(Arc::new(srs), height, quotient);
+        if let Some(directory) = std::env::var_os("MULTI_STARK_KZG_QUOTIENT_SCRATCH") {
+            config = config.with_quotient_scratch_directory(directory.into());
+        }
+        Ok(config)
     }
 
     pub(crate) fn security_description(&self) -> &'static str {

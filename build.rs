@@ -194,6 +194,7 @@ fn build_kzg_cuda() {
     println!("cargo:rerun-if-changed=cuda/kzg_distributed.cuh");
     println!("cargo:rerun-if-changed=cuda/kzg_srs.cuh");
     println!("cargo:rerun-if-changed=cuda/kzg_lookup.cuh");
+    println!("cargo:rerun-if-changed=cuda/kzg_passes.cuh");
     println!("cargo:rerun-if-changed=cuda/kzg_lookup_distributed.cuh");
     println!("cargo:rerun-if-changed=cuda/kzg_transfer.cuh");
     println!("cargo:rerun-if-changed=cuda/kzg_profile.cuh");

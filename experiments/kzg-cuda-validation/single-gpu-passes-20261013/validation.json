@@ -1,0 +1,36 @@
+{
+  "planner_tests_passed": 3,
+  "forced_gpu_parity_tests_passed": 4,
+  "dense_gpu_regression_tests_passed": 2,
+  "cuda_memcheck_cases": 2,
+  "cuda_memcheck_errors": 0,
+  "python_harness_tests_passed": 26,
+  "recursive_census": {
+    "rows": 134217728,
+    "widths": [
+      15,
+      3,
+      4
+    ],
+    "lookup_columns_per_pass": [
+      3,
+      3,
+      3,
+      7
+    ],
+    "quotient_columns_per_pass": [
+      8,
+      5,
+      5,
+      5,
+      9
+    ],
+    "lookup_scratch_bytes": 61213776384,
+    "quotient_scratch_bytes": 52623841920,
+    "all_columns_assumed_nonconstant": true
+  },
+  "gpu_memory_checker_output": "========= COMPUTE-SANITIZER\n\nrunning 1 test\ntest ark_adapter::cuda::lookup::tests::resident_lookup_matches_cpu_coefficients ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 268 filtered out; finished in 1.49s\n\n========= ERROR SUMMARY: 0 errors\n========= COMPUTE-SANITIZER\n\nrunning 1 test\ntest ark_adapter::cuda::quotient::tests::resident_quotient_matches_cpu_coefficients ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 268 filtered out; finished in 1.99s\n\n========= ERROR SUMMARY: 0 errors\n",
+  "timed_trial_count": 4,
+  "excluded_warmup_count": 1,
+  "all_proof_bytes_identical_to_previous_verified_single_gpu_baseline": true
+}

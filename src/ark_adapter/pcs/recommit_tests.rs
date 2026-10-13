@@ -250,3 +250,29 @@ fn recommit_rejects_trace_cap_and_loaded_prefix_independently() {
         Err(KzgError::ShapeMismatch)
     ));
 }
+
+#[test]
+fn bounded_evaluation_batches_match_polynomial_evaluation() {
+    let pcs = KzgPcs::new(public_srs(16, b"bounded-evaluations"), 4);
+    let (_, data) = pcs.commit(fixture());
+    for (index, matrix) in data.matrices.iter().enumerate() {
+        for extra in [0, 1, 2] {
+            let domain = Radix2Coset {
+                log_size: matrix.domain.log_size + extra,
+                shift: Scalar::from_u64(7),
+            };
+            for limit in [0, domain.size() * size_of::<Fr>() * 2, usize::MAX] {
+                let actual = pcs.evaluations_with_scratch_limit(&data, index, domain, limit);
+                for (row, point) in domain.points().into_iter().enumerate() {
+                    for (column, coefficients) in matrix.columns.iter().enumerate() {
+                        let expected = coefficients
+                            .iter()
+                            .rev()
+                            .fold(Fr::ZERO, |acc, c| acc * point.0 + c);
+                        assert_eq!(actual.values[row * actual.width + column], Scalar(expected));
+                    }
+                }
+            }
+        }
+    }
+}

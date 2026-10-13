@@ -39,10 +39,10 @@ def validate_worker_options(*, retained, root_artifacts, seed_fri, seed_claims):
         raise ValueError("worker seed options require --retained-workers")
 
 
-def validate_development_public_degree_options(*, enabled, setup, retained, acceptance):
-    if enabled and (setup != "development" or not retained or acceptance):
+def validate_development_public_degree_options(*, enabled, setup, retained, acceptance, sequential=False):
+    if enabled and (setup != "development" or not (retained or sequential) or acceptance):
         raise ValueError("--development-public-degree requires --setup development and "
-                         "--retained-workers; it cannot establish Filecoin --acceptance")
+                         "--retained-workers or --sequential-workers; it cannot establish Filecoin --acceptance")
 
 
 def validate_development_public_degree_reports(reports):
@@ -274,7 +274,8 @@ def summarize_host_operations(path):
             operation = operations.setdefault(label, {"calls": 0})
             operation["calls"] += 1
             for key in keys:
-                operation[key] = operation.get(key, 0) + float(fields[key])
+                if key in fields:
+                    operation[key] = operation.get(key, 0) + float(fields[key])
     return operations
 
 
@@ -838,6 +839,29 @@ class WorkerClient:
             self.log.close()
 
 
+def run_sequential_worker(binary, role, directory, env, devices, *, development_public_degree,
+                          source, destination, claims, log_path):
+    started = time.monotonic()
+    worker = WorkerClient(binary, role, directory, env, devices,
+                          development_public_degree=development_public_degree)
+    succeeded = False
+    try:
+        worker.request(f"fresh-{role}", source, destination, claims, log_path, reused=False)
+        succeeded = True
+    finally:
+        worker.close(graceful=succeeded)
+    measured = dict(worker.last_request)
+    measured["request_wall_seconds"] = measured["wall_seconds"]
+    measured["wall_seconds"] = time.monotonic() - started
+    measured["started_at_utc"] = worker.started_at
+    measured["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+    measured["completion_kind"] = "worker_process_exit"
+    measured["exit_code"] = worker.process.returncode
+    measured["worker_startup"] = worker.startup
+    measured["worker_shutdown"] = worker.shutdown
+    return measured
+
+
 def interrupt(signum, _frame):
     raise InterruptedError(f"Received {signal.Signals(signum).name}")
 
@@ -864,8 +888,11 @@ def main():
     parser.add_argument("--srs-cache", type=Path, help="Trusted local development SRS cache")
     parser.add_argument("--fused-staging", action="store_true",
                         help="Generate both KZG stages' witness traces directly into commitment")
-    parser.add_argument("--retained-workers", action="store_true",
+    workers = parser.add_mutually_exclusive_group()
+    workers.add_argument("--retained-workers", action="store_true",
                         help="Warm two retained workers, then time a fresh root-to-packet request separately")
+    workers.add_argument("--sequential-workers", action="store_true",
+                         help="Prove once per worker and exit before the next stage; includes preparation and shutdown")
     parser.add_argument("--development-public-degree", action="store_true",
                         help="Explicit known-trapdoor v4 worker diagnostic; cannot establish Filecoin acceptance")
     parser.add_argument("--worker-seed-fri", type=Path,
@@ -883,9 +910,11 @@ def main():
     try:
         validate_development_public_degree_options(
             enabled=args.development_public_degree, setup=args.setup,
-            retained=args.retained_workers, acceptance=args.acceptance)
+            retained=args.retained_workers, acceptance=args.acceptance, sequential=args.sequential_workers)
         validate_worker_options(retained=args.retained_workers, root_artifacts=args.root_artifacts,
                                 seed_fri=args.worker_seed_fri, seed_claims=args.worker_seed_claims)
+        if args.sequential_workers and args.root_artifacts is None:
+            raise ValueError("--sequential-workers requires --root-artifacts and its independent expected claims")
         if args.retained_workers:
             args.worker_seed_fri = args.worker_seed_fri.resolve()
             args.worker_seed_claims = args.worker_seed_claims.resolve()
@@ -921,6 +950,9 @@ def main():
                         else env.get("MULTI_STARK_KZG_CUDA_DEVICES"))
     try:
         devices = parse_kzg_devices(device_selection) if device_selection is not None else None
+        if args.sequential_workers and devices is None:
+            raise ValueError("--sequential-workers requires explicit --kzg-devices or "
+                             "MULTI_STARK_KZG_CUDA_DEVICES for its recursive memory policy")
         validate_acceptance_options(acceptance=args.acceptance, setup=args.setup,
                                     root_artifacts=args.root_artifacts, devices=devices)
     except ValueError as error:
@@ -929,8 +961,11 @@ def main():
         env["MULTI_STARK_KZG_CUDA_DEVICES"] = ",".join(map(str, devices))
     if args.acceptance:
         env["MULTI_STARK_KZG_CUDA_PROFILE"] = "1"
-    if args.retained_workers:
+    if args.retained_workers or args.sequential_workers:
         env["MULTI_STARK_KZG_CUDA_PROFILE"] = "1"
+    if args.sequential_workers:
+        env["MULTI_STARK_KZG_PREFETCH_GIB"] = "0"
+        env["MULTI_STARK_KZG_QUOTIENT_SCRATCH"] = str(args.output.resolve() / "quotient-scratch")
     if args.fixed_cache:
         env["MULTI_STARK_KZG_FIXED_CACHE"] = str(args.fixed_cache.resolve())
     if args.srs_cache:
@@ -976,7 +1011,8 @@ def main():
         "development_srs": args.setup == "development",
         "setup": args.setup,
         "development_public_degree": args.development_public_degree,
-        "fused_staging": args.fused_staging or args.retained_workers,
+        "fused_staging": args.fused_staging or args.retained_workers or args.sequential_workers,
+        "sequential_workers": args.sequential_workers,
         "retained_workers": args.retained_workers,
         "latency_boundary": "retained_worker_fresh_request" if args.retained_workers else "cold_process_pipeline",
         "distributed_wrapper": args.distributed_wrapper,
@@ -1066,6 +1102,19 @@ def main():
             raise RuntimeError(f"{name} exited {process.returncode}; see {log_path}")
         print(f"Finished {name}: {measured['wall_seconds']:.1f}s, "
               f"{measured['peak_rss_bytes'] / 2**30:.1f} GiB RSS", flush=True)
+
+    def sequential_worker(role, name, binary, source, destination):
+        print(f"Starting {name}: one fresh worker including preparation and shutdown", flush=True)
+        phase_env = phase_environment(env, recursive=role == "wrapper",
+                                      distributed_wrapper=args.distributed_wrapper)
+        if role == "wrapper" and len(devices or []) == 1:
+            phase_env["MULTI_STARK_KZG_CUDA_RESIDENT_GIB"] = "8"
+        report["phases"][name] = run_sequential_worker(
+            binary, role, output / f"{role}-worker", phase_env, devices,
+            development_public_degree=args.development_public_degree,
+            source=source, destination=destination, claims=root_snapshot / "root-claims.bin",
+            log_path=output / f"{name}.log")
+        save()
 
     def compare(name, actual, expected):
         files = proof_hashes(actual)
@@ -1172,6 +1221,8 @@ def main():
         if args.retained_workers:
             worker_request("first_stage", "fri_stage_and_prove", "fresh-first_stage", input_fri,
                            fri, root_snapshot / "root-claims.bin")
+        elif args.sequential_workers:
+            sequential_worker("first_stage", "fri_stage_and_prove", first, input_fri, fri)
         elif args.fused_staging:
             run("fri_stage_and_prove", [first, "stage-and-prove", input_fri, fri])
         else:
@@ -1190,6 +1241,8 @@ def main():
         if args.retained_workers:
             worker_request("wrapper", "recursive_stage_and_prove", "fresh-wrapper", intermediate,
                            recursive, root_snapshot / "root-claims.bin")
+        elif args.sequential_workers:
+            sequential_worker("wrapper", "recursive_stage_and_prove", outer, intermediate, recursive)
         elif args.fused_staging:
             run("recursive_stage_and_prove", [outer, "stage-and-prove", intermediate, recursive], recursive=True)
         else:
@@ -1219,7 +1272,7 @@ def main():
         report["recursive_cpu_verification"] = read_verification_report(recursive / "kzg", "verify")
         if args.development_public_degree:
             validate_development_public_degree_reports([
-                *report["worker_startup"]["verification"].values(),
+                *report.get("worker_startup", {}).get("verification", {}).values(),
                 report["first_stage_verification"], report["recursive_verification"],
                 report["first_stage_cpu_verification"], report["recursive_cpu_verification"],
             ])

@@ -11,13 +11,13 @@ mod distributed;
 mod tests;
 
 #[repr(C, align(32))]
-struct Parameters {
-    beta: [u64; 4],
-    gamma: [u64; 4],
-    trace_log: u32,
-    slots: u32,
-    group_size: u32,
-    blocks: u32,
+pub(super) struct Parameters {
+    pub(super) beta: [u64; 4],
+    pub(super) gamma: [u64; 4],
+    pub(super) trace_log: u32,
+    pub(super) slots: u32,
+    pub(super) group_size: u32,
+    pub(super) blocks: u32,
 }
 
 unsafe extern "C" {
@@ -145,6 +145,12 @@ fn coefficients_impl(
     };
     if let Some(options) = distributed_options {
         return distributed::coefficients(&parameters, &program, &all_columns, groups, options);
+    }
+    if passes::enabled(eligible.is_empty()) {
+        if let Some(output) = passes::lookup_coefficients(input, &parameters, &all_columns, widths)
+        {
+            return Some(output);
+        }
     }
     if distributed::enabled(eligible.is_empty()) {
         if let Some(result) = distributed::coefficients(

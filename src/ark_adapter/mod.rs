@@ -41,3 +41,5 @@ pub use srs::{PublicSetup, Srs};
 pub use transcript::Blake3Transcript;
 mod buffer;
 mod pipeline;
+
+mod quotient_scratch;

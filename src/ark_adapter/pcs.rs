@@ -464,6 +464,93 @@ impl KzgPcs {
         }
     }
 
+    fn evaluations_with_scratch_limit(
+        &self,
+        data: &KzgProverData,
+        idx: usize,
+        domain: Radix2Coset,
+        scratch_bytes: usize,
+    ) -> RowMajorMatrix<Scalar> {
+        #[cfg(feature = "kzg-cuda")]
+        let _profile = super::cuda::ProfileRange::new(c"kzg/evaluation-reconstruction");
+        let matrix = &data.matrices[idx];
+        assert!(
+            domain.size() <= matrix.domain.size() * self.max_quotient_degree,
+            "requested domain ({}) exceeds the coset-FFT budget ({}x trace); \
+             raise max_quotient_degree if this cost is intended",
+            domain.size(),
+            self.max_quotient_degree
+        );
+        let started = std::time::Instant::now();
+        use p3_maybe_rayon::prelude::*;
+        let constants = matrix.constant_columns();
+        let width = matrix.columns.len();
+        let height = domain.size();
+        let mut values = super::buffer::generate(width * height, |index| {
+            if constants[index % width] {
+                Scalar(matrix.columns[index % width][0])
+            } else {
+                Scalar(Fr::ZERO)
+            }
+        });
+        let active: Vec<_> = (0..width).filter(|&i| !constants[i]).collect();
+        // The destination already holds a full matrix. Bound simultaneous FFT
+        // outputs to the scratch budget, or one column when it exceeds that budget.
+        let batch_columns = (scratch_bytes / (height * size_of::<Fr>())).max(1);
+        let mut transform_seconds = 0.0;
+        let mut transpose_seconds = 0.0;
+        for batch in active.chunks(batch_columns) {
+            let transform_started = std::time::Instant::now();
+            let transform_columns = || {
+                #[cfg(feature = "kzg-cuda")]
+                if super::cuda::enabled() && domain.size() >= 1 << 10 {
+                    let residents = matrix.resident_columns();
+                    let inputs: Vec<_> = batch
+                        .iter()
+                        .map(|&i| (matrix.columns[i].as_slice(), residents[i].as_deref()))
+                        .collect();
+                    return super::cuda::fft_columns(
+                        &inputs,
+                        domain.log_size,
+                        false,
+                        domain.shift.0,
+                    );
+                }
+                map_columns(batch.to_vec(), |i| {
+                    let c = &matrix.columns[i];
+                    let mut column = super::buffer::generate(c.len(), |i| c[i]);
+                    Self::transform(&mut column, domain, false);
+                    column
+                })
+            };
+            let transformed = transform_columns();
+            transform_seconds += transform_started.elapsed().as_secs_f64();
+            let transpose_started = std::time::Instant::now();
+            values
+                .par_chunks_mut(width * (1 << 12))
+                .enumerate()
+                .for_each(|(tile, rows)| {
+                    for (offset, row) in rows.chunks_mut(width).enumerate() {
+                        let index = tile * (1 << 12) + offset;
+                        for (&column, evaluations) in batch.iter().zip(&transformed) {
+                            row[column] = Scalar(evaluations[index]);
+                        }
+                    }
+                });
+            transpose_seconds += transpose_started.elapsed().as_secs_f64();
+        }
+        tracing::info!(
+            width,
+            height,
+            batch_columns,
+            transform_seconds,
+            transpose_seconds,
+            seconds = started.elapsed().as_secs_f64(),
+            "KZG evaluation reconstruction"
+        );
+        RowMajorMatrix::new(values, width)
+    }
+
     pub fn srs(&self) -> &Srs {
         &self.srs
     }
@@ -845,69 +932,7 @@ impl Pcs for KzgPcs {
         idx: usize,
         domain: Radix2Coset,
     ) -> RowMajorMatrix<Scalar> {
-        #[cfg(feature = "kzg-cuda")]
-        let _profile = super::cuda::ProfileRange::new(c"kzg/evaluation-reconstruction");
-        let matrix = &data.matrices[idx];
-        assert!(
-            domain.size() <= matrix.domain.size() * self.max_quotient_degree,
-            "requested domain ({}) exceeds the coset-FFT budget ({}x trace); \
-             raise max_quotient_degree if this cost is intended",
-            domain.size(),
-            self.max_quotient_degree
-        );
-        let started = std::time::Instant::now();
-        enum Column {
-            Constant(Fr),
-            Values(Vec<Fr>),
-        }
-        let constants = matrix.constant_columns();
-        let mut column_evals: Vec<_> = matrix
-            .columns
-            .iter()
-            .map(|c| Column::Constant(c.first().copied().unwrap_or(Fr::ZERO)))
-            .collect();
-        let active: Vec<_> = (0..matrix.columns.len())
-            .filter(|&i| !constants[i])
-            .collect();
-        let transform_columns = || {
-            #[cfg(feature = "kzg-cuda")]
-            if super::cuda::enabled() && domain.size() >= 1 << 10 {
-                let residents = matrix.resident_columns();
-                let inputs: Vec<_> = active
-                    .iter()
-                    .map(|&i| (matrix.columns[i].as_slice(), residents[i].as_deref()))
-                    .collect();
-                return super::cuda::fft_columns(&inputs, domain.log_size, false, domain.shift.0);
-            }
-            map_columns(active.clone(), |i| {
-                let c = &matrix.columns[i];
-                let mut values = super::buffer::generate(c.len(), |i| c[i]);
-                Self::transform(&mut values, domain, false);
-                values
-            })
-        };
-        let transformed = transform_columns();
-        for (i, values) in active.into_iter().zip(transformed) {
-            column_evals[i] = Column::Values(values);
-        }
-        let transform_seconds = started.elapsed().as_secs_f64();
-        let width = column_evals.len();
-        let height = domain.size();
-        let started = std::time::Instant::now();
-        let values = super::buffer::generate(width * height, |index| {
-            Scalar(match &column_evals[index % width] {
-                Column::Constant(value) => *value,
-                Column::Values(column) => column[index / width],
-            })
-        });
-        tracing::debug!(
-            width,
-            height,
-            transform_seconds,
-            transpose_seconds = started.elapsed().as_secs_f64(),
-            "KZG evaluation reconstruction"
-        );
-        RowMajorMatrix::new(values, width)
+        self.evaluations_with_scratch_limit(data, idx, domain, 1 << 30)
     }
 
     fn open(

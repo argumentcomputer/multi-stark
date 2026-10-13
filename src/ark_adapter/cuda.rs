@@ -14,6 +14,7 @@ mod distributed;
 #[cfg(test)]
 mod idle_tests;
 pub(super) mod lookup;
+mod passes;
 pub(super) mod quotient;
 pub(super) mod srs_cache;
 

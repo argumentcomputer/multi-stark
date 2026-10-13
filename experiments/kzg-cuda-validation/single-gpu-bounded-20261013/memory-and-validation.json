@@ -1,0 +1,49 @@
+{
+  "pipeline_wall_seconds": 521.0939587539997,
+  "total_wall_seconds": 522.1509165759999,
+  "cache_state": "cached development SRS; cold fixed preprocessing and fresh worker frontends",
+  "profile": "known-trapdoor development public-degree v4; not Filecoin acceptance",
+  "host_limit_gib": 230,
+  "scope": {
+    "returncode": 0,
+    "elapsed_seconds": 522.3825296129999,
+    "timed_out": false,
+    "memory_peak_bytes": "246960619520",
+    "memory_events": "low 0\nhigh 0\nmax 23357\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+    "memory_pressure": "some avg10=0.00 avg60=0.03 avg300=0.03 total=486560\nfull avg10=0.00 avg60=0.03 avg300=0.03 total=486291"
+  },
+  "phase_peak_rss_gib": {
+    "fri_compress": 204.5361557006836,
+    "fri_stage_and_prove": 217.44214248657227,
+    "recursive_stage_and_prove": 226.1047019958496,
+    "fri_cpu_verify": 0.009185791015625,
+    "recursive_cpu_verify": 0.0077972412109375
+  },
+  "phase_wall_seconds": {
+    "fri_compress": 60.26431680600035,
+    "fri_stage_and_prove": 204.66386342600072,
+    "recursive_stage_and_prove": 256.16069254100057,
+    "fri_cpu_verify": 0.3164359379998132,
+    "recursive_cpu_verify": 0.11397969800054852
+  },
+  "recursive_lookup_seconds": 42.48162958,
+  "recursive_quotient_seconds": 78.260335899,
+  "scratch_files_after_completion": [],
+  "initial_attempt": {
+    "directory": "/opt/dlami/nvme/kzg-single-gpu-full-20261013",
+    "scope_result": "oom-kill",
+    "phase": "recursive quotient input reconstruction",
+    "quotient_coset_spilling": false
+  },
+  "validation": [
+    "25 Python harness tests passed",
+    "5 selector/domain tests passed",
+    "bounded evaluation batches matched direct polynomial evaluation",
+    "scalar quotient matched portable evaluator with next rows",
+    "streamed lookup and partition pipeline proof-byte parity passed",
+    "GPU public-degree fixture passed",
+    "CPU lookup/quotient fallback with GPU FFT/MSM proof-byte parity passed",
+    "NVMe coset spill proof-byte parity and cleanup passed",
+    "both saved KZG proofs passed independent CPU verification and negative checks"
+  ]
+}

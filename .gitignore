@@ -21,3 +21,7 @@ result*
 !/experiments/kzg-cuda-validation/*/*.py
 !/experiments/kzg-cuda-validation/*/*.sh
 !/experiments/kzg-cuda-validation/*/*.md
+!/experiments/kzg-cuda-validation/single-gpu-bounded-20261013/report.json
+!/experiments/kzg-cuda-validation/single-gpu-bounded-20261013/memory-and-validation.json
+!/experiments/kzg-cuda-validation/single-gpu-bounded-20261013/scope-metadata.json
+!/experiments/kzg-cuda-validation/single-gpu-passes-20261013/*.json

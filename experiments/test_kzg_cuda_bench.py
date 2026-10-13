@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import copy
 import json
 import os
@@ -102,6 +103,27 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         bench.validate_capabilities(caps, "wrapper")
         with self.assertRaisesRegex(ValueError, "parallel"):
             bench.validate_capabilities(caps, "wrapper", acceptance=True)
+
+    def test_sequential_worker_device_selection_is_required_before_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            arguments = ["bench", "--sequential-workers", "--development-public-degree",
+                         "--setup", "development", "--root-artifacts", directory,
+                         "--first-stage-binary", str(Path(directory) / "missing-binary")]
+            for extra, environment, expected in (
+                    ([], {}, "requires explicit --kzg-devices"),
+                    (["--kzg-devices", "0"], {}, "Build or select the CUDA-capable executable"),
+                    ([], {"MULTI_STARK_KZG_CUDA_DEVICES": "0"}, "Build or select the CUDA-capable executable")):
+                with self.subTest(extra=extra, environment=environment), \
+                        mock.patch.object(sys, "argv", arguments + extra), \
+                        mock.patch.dict(os.environ, environment, clear=True), \
+                        mock.patch.object(bench.signal, "signal"), \
+                        mock.patch.object(bench, "read_capabilities") as capabilities, \
+                        mock.patch("sys.stderr", new_callable=io.StringIO) as error:
+                    with self.assertRaises(SystemExit) as stopped:
+                        bench.main()
+                    self.assertEqual(stopped.exception.code, 2)
+                    self.assertIn(expected, error.getvalue())
+                    capabilities.assert_not_called()
 
     def test_acceptance_requires_full_filecoin_boundary_and_explicit_four_devices(self):
         self.assertEqual(bench.parse_kzg_devices("3, 1,2,0"), [3, 1, 2, 0])
@@ -580,9 +602,32 @@ for index, line in enumerate(sys.stdin):
             with self.assertRaises(ValueError):
                 bench.expected_statement_bytes(self.claims)
 
+    def test_sequential_worker_closes_before_returning_and_on_failure(self):
+        for fails in (False, True):
+            worker = mock.Mock()
+            worker.last_request = {"wall_seconds": 1.0}
+            worker.started_at = "2026-10-13T00:00:00+00:00"
+            worker.process.returncode = 0
+            if fails:
+                worker.request.side_effect = RuntimeError("proof failed")
+            with mock.patch.object(bench, "WorkerClient", return_value=worker):
+                args = dict(development_public_degree=True, source=Path("/source"),
+                            destination=Path("/destination"), claims=Path("/claims"), log_path=Path("/log"))
+                if fails:
+                    with self.assertRaisesRegex(RuntimeError, "proof failed"):
+                        bench.run_sequential_worker(Path("/binary"), "wrapper", Path("/worker"), {}, [0], **args)
+                else:
+                    result = bench.run_sequential_worker(Path("/binary"), "wrapper", Path("/worker"), {}, [0], **args)
+                    self.assertEqual(result["completion_kind"], "worker_process_exit")
+                    self.assertEqual(result["exit_code"], 0)
+                worker.request.assert_called_once()
+                self.assertFalse(worker.request.call_args.kwargs["reused"])
+                worker.close.assert_called_once_with(graceful=not fails)
+
     def test_development_public_degree_requires_explicit_diagnostic_selection(self):
         options = dict(enabled=True, setup="development", retained=True, acceptance=False)
         bench.validate_development_public_degree_options(**options)
+        bench.validate_development_public_degree_options(**dict(options, retained=False, sequential=True))
         for mutation in ({"setup": "filecoin"}, {"retained": False}, {"acceptance": True}):
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 bench.validate_development_public_degree_options(**dict(options, **mutation))

@@ -140,6 +140,8 @@ Keep targeted measurements separate from integrated request measurements. Standa
 MSM/FFT tuning and additional stream concurrency follow evidence that they
 limit the remaining critical path.
 
+- [Single-GPU constraint-pass comparison](#single-gpu-constraint-pass-comparison)
+- [Single-GPU execution with bounded host memory](#single-gpu-execution-with-bounded-host-memory)
 - [Goal, priorities, and first experiments](#goal-and-priorities)
 - [Measured results](#measured-results)
 - [Cache contents and setup cost](#cache-contents-and-setup-cost)
@@ -155,6 +157,167 @@ limit the remaining critical path.
 - [Implementation review, 2026-10-10](#implementation-review-2026-10-10)
 - [Targeted validation](#targeted-validation)
 - [Recovery and run commands](#recovery-and-run-commands)
+
+## Single-GPU constraint-pass comparison
+
+See the [single-GPU handoff](kzg-single-gpu-handoff.md) for implementation
+entry points, reproduction details, correctness invariants and remaining work.
+
+The [2026-10-13 paired comparison](../experiments/kzg-cuda-validation/single-gpu-passes-20261013/report.json)
+measures the same Init root-to-packet workload on one RTX PRO 6000 Blackwell,
+32 logical CPUs and a 230 GiB host-memory cap. The input is the saved Ix
+aggregation-root fixture; every trial regenerates its FRI compression proof,
+first KZG proof and recursive KZG proof. Generating the original root proof is
+outside this timing boundary.
+
+One candidate warmup populates the fixed cache and is excluded. Four measured
+trials run in baseline/candidate/candidate/baseline order, using identical
+executable, source and input hashes. Both variants use cached development SRS
+and fixed preprocessing, fresh witnesses, and cold worker processes. The
+baseline sets `MULTI_STARK_KZG_CUDA_PASSES=0`; the candidate sets it to `1`.
+Both use SRS caching, GPU FFTs/MSMs, sequential workers and zero prefetch.
+
+| Complete pipeline | First measured run | Second measured run | Median |
+| --- | ---: | ---: | ---: |
+| Existing fallback | 431.719 s | 431.499 s | **431.609 s** |
+| GPU constraint passes | 336.923 s | 336.046 s | **336.485 s** |
+
+The reduction is **95.124 seconds per proof (22.04%)**. The phase medians are:
+
+| Phase, including process lifetime | Existing fallback | GPU passes |
+| --- | ---: | ---: |
+| FRI compression | 60.565 s | 60.590 s |
+| First KZG stage | 163.445 s | 164.166 s |
+| Recursive KZG stage | 207.593 s | **111.723 s** |
+
+These are two samples per variant, not a broad workload distribution. The
+complete pipeline includes frontend preparation, cache loading, fresh traces,
+commitments, proving, in-process verification and worker shutdown. Separate
+CPU verification adds approximately 0.4 seconds. Both variants produce the
+same 1,909-byte final proof and 2,181-byte packet, and match the preceding
+verified single-GPU baseline exactly. This is the development public-degree
+v4 profile, not Filecoin ceremony acceptance.
+
+Recursive peak process RSS is approximately **226.083 GiB** in both baseline
+runs and **144.63 GiB** with GPU passes. The first KZG stage still peaks near
+217.4 GiB, so total pipeline capacity must include that stage. Recursive GPU
+memory peaks at approximately **69.3 GiB**, sampled every two seconds; FRI
+continues to dominate the whole-pipeline VRAM peak. All five runs have zero
+OOM events and pass independent CPU verification and negative checks.
+
+The implementation prunes each pass to its transitive graph dependencies.
+Lookup groups reuse denominator and product-scan scratch, then reconstruct
+the original row/group prefix order. Quotient passes retain the exact Horner
+weights and accumulate into the original interleaved coset layout. Their
+maximum input-column sets are seven and nine columns, versus eighteen and
+twenty-two for the dense recursive consumers. Conservative operation bounds
+are **57.010 GiB** for lookup and **49.010 GiB** for quotient, including one GiB
+of headroom. Admission accounts for existing resident allocations and can
+evict the SRS cache; the quarter-VRAM reserve remains in effect.
+
+`MULTI_STARK_KZG_CUDA_PASSES=1` is the default. With one selected device, it
+tries the pass layout when the existing dense consumer fails admission.
+`0` preserves the previous fallback behavior; `force` exercises the pass path
+on admitted small fixtures. Unsupported shapes or insufficient admission
+retain the fallback, while native execution errors remain errors. Dense
+coefficients and host-backed openings remain; this implements bounded GPU
+consumers, not the complete-residency proposal.
+
+The [validation record](../experiments/kzg-cuda-validation/single-gpu-passes-20261013/validation.json)
+includes dependency and allocation checks, CPU/GPU coefficient parity,
+proof-byte parity, and zero CUDA memcheck errors. It covers constants, zero
+lookup messages, partial groups, current/next rows and quotient slices.
+Sequential worker mode now requires an explicit device list through
+`--kzg-devices` or `MULTI_STARK_KZG_CUDA_DEVICES`. This prevents omitted device
+selection from bypassing the single-card recursive residency cap. CLI
+regressions reject omission before execution and accept both explicit forms.
+The guard was added after the comparison; every measured run selected GPU 0.
+
+The [comparison driver](../experiments/kzg-cuda-validation/single-gpu-passes-20261013/run.py)
+pins its executables, performs the excluded warmup, validates proof parity,
+records memory and runs both pairs. It uses the measured host's repository
+and SRS-cache paths. For a single proof, use the sequential command below;
+the current executable's measured fixed cache is
+`/opt/dlami/nvme/kzg-gpu-passes-20261013/fixed-cache`.
+
+## Single-GPU execution with bounded host memory
+
+This capacity baseline predates the GPU-pass comparison above.
+
+The [2026-10-13 single-GPU report](../experiments/kzg-cuda-validation/single-gpu-bounded-20261013/report.json)
+records a complete root-to-packet development-v4 proof on one RTX PRO 6000
+Blackwell, 32 logical CPUs and 249 GiB host RAM. Workers execute once and exit
+before the next stage starts. The pipeline takes **521.094 seconds (8m41s)**;
+the driver including independent CPU verification takes **522.151 seconds**.
+Development SRS files were cached; fixed preprocessing and worker frontends
+were cold. Fresh FRI and both KZG proofs are included. This is one capacity
+validation run, not a repeated performance comparison or Filecoin acceptance.
+
+| Phase, including its process lifetime | Seconds | Peak process RSS |
+| --- | ---: | ---: |
+| FRI compression | 60.264 | 204.536 GiB |
+| First KZG stage | 204.664 | 217.442 GiB |
+| Recursive KZG stage | 256.161 | 226.105 GiB |
+
+The [memory and validation record](../experiments/kzg-cuda-validation/single-gpu-bounded-20261013/memory-and-validation.json)
+reports a **230 GiB cgroup limit**, zero swap and zero OOM events on the
+successful run. File cache reached the limit and was reclaimed. GPU memory,
+sampled every two seconds, peaked at 96,603 MiB during FRI, 70,479 MiB during
+the first KZG stage and 29,485 MiB during recursion. Sampling can miss shorter
+peaks. Both independent CPU verifiers passed native and negative checks;
+recursion also passed its external pairing checks. The final proof is
+**1,909 bytes**, with a **2,181-byte packet**.
+
+The sequential mode disables partition prefetch and limits recursive
+coefficient residency to 8 GiB when one device is selected. Admitted consumers,
+FFTs and MSMs use CUDA. Oversized recursive lookup and quotient work uses the
+existing CPU fallback. Evaluation reconstruction holds at most one GiB of
+temporary transformed columns, or one column if larger; a `2^27` column is
+4 GiB. Quotient selectors are generated per tile. Completed quotient cosets
+spill to NVMe until the evaluation matrices have been released, then are
+interleaved and committed. Successful completion removes the scratch files.
+CPU parallelism stays at its default.
+
+The initial attempt without coset spilling hit the same 230 GiB cap during
+recursive quotient reconstruction. Bounding FFT output batches and selector
+arrays alone did not suffice. With spilling, recursive lookup generation and
+commitment takes **42.482 seconds**, and quotient generation and commitment
+takes **78.260 seconds**. These are measured targets for a GPU-resident
+replacement; its compact-storage peak and extra FFT cost remain unmeasured.
+
+Build the three targets from the repository root on this Blackwell host:
+
+```sh
+MULTI_STARK_CUDA_ARCHS=120 cargo build --release --locked --features parallel,cuda,kzg-cuda --example ix_root --example init_fri_kzg_prove
+MULTI_STARK_CUDA_ARCHS=120 cargo build --release --locked --manifest-path experiments/kzg-wrap/Cargo.toml --features kzg-cuda
+```
+
+Use a new output directory and trusted existing caches on NVMe. The paths
+below reuse the measured machine's caches; a different machine must generate
+them. Fixed caches bind the executable digest, so rebuilding can invalidate
+them. The memory scope requires a working user systemd manager.
+
+```sh
+kzg_run_root=/opt/dlami/nvme/kzg-single-gpu-next
+systemd-run --user --scope -p MemoryMax=230G -p MemorySwapMax=0 -p OOMPolicy=continue \
+  env CUDA_VISIBLE_DEVICES=0 MULTI_STARK_CUDA_DEVICE=0 MULTI_STARK_CUDA_AUX_DEVICES= \
+  MULTI_STARK_KZG_CUDA_SRS_CACHE=1 \
+  MULTI_STARK_KZG_CUDA_DISTRIBUTED_LOOKUP=0 MULTI_STARK_KZG_CUDA_DISTRIBUTED_QUOTIENT=0 \
+  python3 experiments/kzg-cuda-bench.py \
+  --output "$kzg_run_root" \
+  --root-artifacts experiments/kzg-cuda-validation/resume-20261009/root-artifacts \
+  --setup development --development-public-degree --sequential-workers --kzg-devices 0 \
+  --srs-cache /opt/dlami/nvme/kzg-single-gpu-pilot-20261013/srs-cache \
+  --fixed-cache /opt/dlami/nvme/kzg-gpu-passes-20261013/fixed-cache
+```
+
+`--sequential-workers` is mutually exclusive with `--retained-workers`,
+requires explicit KZG device selection, root artifacts and independently
+supplied root claims, and includes
+preparation and shutdown in pipeline timing. Its quotient scratch directory
+is under the output directory; use disk storage rather than a RAM-backed
+temporary filesystem. The hard memory cap terminates a workload that exceeds
+the budget; it does not make arbitrary circuit shapes fit automatically.
 
 ## Goal and priorities
 

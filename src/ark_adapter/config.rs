@@ -25,6 +25,7 @@ pub struct KzgConfig {
     stream_lookups: bool,
     stream_quotient: bool,
     partition_prefetch_bytes: usize,
+    quotient_scratch: Option<std::path::PathBuf>,
 }
 
 impl KzgConfig {
@@ -96,6 +97,7 @@ impl KzgConfig {
             stream_lookups: false,
             stream_quotient: false,
             partition_prefetch_bytes: 0,
+            quotient_scratch: None,
         }
     }
 
@@ -120,6 +122,14 @@ impl KzgConfig {
 
     /// Evaluate each quotient on trace-sized cosets, bounding temporary matrices.
     pub fn with_streaming_quotient(mut self) -> Self {
+        self.stream_quotient = true;
+        self
+    }
+
+    /// Spill completed quotient cosets until all constraint evaluations finish.
+    /// Temporary files are removed after use; proof bytes and transcript stay unchanged.
+    pub fn with_quotient_scratch_directory(mut self, directory: std::path::PathBuf) -> Self {
+        self.quotient_scratch = Some(directory);
         self.stream_quotient = true;
         self
     }
@@ -235,9 +245,6 @@ fn scalar_quotient_values(
     assert!(fixed.is_none_or(|m| m.height() == size));
     assert_eq!(constraint_count, circuit.constraint_count());
     let started = std::time::Instant::now();
-    let selectors = trace_domain.selectors_on_coset(quotient_domain);
-    let selector_seconds = started.elapsed().as_secs_f64();
-    let started = std::time::Instant::now();
     let normalizer = (Scalar::from_usize(trace_domain.size()) * trace_domain.generator()).inverse();
     let delta = [(publics[3] - publics[2]) * normalizer];
     let mut weights: Vec<_> = alpha.powers().take(constraint_count).collect();
@@ -255,6 +262,9 @@ fn scalar_quotient_values(
             // values for every point of the quotient domain.
             let mut nodes = Vec::with_capacity(circuit.graph.nodes.len());
             let mut constraints = Vec::with_capacity(constraint_count);
+            let start = tile * (1 << 10);
+            let selectors =
+                trace_domain.selectors_on_coset_range(quotient_domain, start..start + output.len());
             for (offset, output) in output.iter_mut().enumerate() {
                 let i = tile * (1 << 10) + offset;
                 let next = (i + step) % size;
@@ -269,9 +279,9 @@ fn scalar_quotient_values(
                         &stage2.values[row(stage2, next)],
                     ],
                     publics,
-                    is_first_row: selectors.is_first_row[i],
-                    is_last_row: selectors.is_last_row[i],
-                    is_transition: selectors.is_transition[i],
+                    is_first_row: selectors.is_first_row[offset],
+                    is_last_row: selectors.is_last_row[offset],
+                    is_transition: selectors.is_transition[offset],
                 };
                 circuit.graph.sweep(&view, &mut nodes);
                 constraints.clear();
@@ -290,12 +300,12 @@ fn scalar_quotient_values(
                     &mut constraints,
                 );
                 *output = Scalar::batched_linear_combination(&constraints, &weights)
-                    * selectors.inv_vanishing[i];
+                    * selectors.inv_vanishing[offset];
             }
         });
     tracing::info!(
         rows = size,
-        selector_seconds,
+        selectors_included = true,
         constraint_seconds = started.elapsed().as_secs_f64(),
         "KZG quotient constraints evaluated"
     );
@@ -386,7 +396,7 @@ impl KzgConfig {
             let ratio = input.quotient_domain.size() / n;
             let generator = Scalar::two_adic_generator(input.quotient_domain.log_size);
             let mut shift = input.quotient_domain.shift;
-            let mut values = vec![Scalar::ZERO; input.quotient_domain.size()];
+            let mut cosets = Vec::with_capacity(ratio);
             for coset in 0..ratio {
                 let lde_started = std::time::Instant::now();
                 let domain = super::domain::Radix2Coset {
@@ -414,9 +424,11 @@ impl KzgConfig {
                     alpha,
                     input.constraint_count,
                 );
-                for (row, value) in chunk.into_iter().enumerate() {
-                    values[row * ratio + coset] = value;
-                }
+                drop((fixed, main, stage2));
+                cosets.push(
+                    super::quotient_scratch::Coset::store(chunk, self.quotient_scratch.as_deref())
+                        .expect("KZG quotient scratch write failed"),
+                );
                 shift *= generator;
                 tracing::info!(
                     circuit = i,
@@ -425,6 +437,13 @@ impl KzgConfig {
                     seconds = start.elapsed().as_secs_f64(),
                     "KZG quotient coset evaluated"
                 );
+            }
+            let mut values = vec![Scalar::ZERO; input.quotient_domain.size()];
+            for (coset, stored) in cosets.into_iter().enumerate() {
+                let chunk = stored.load(n).expect("KZG quotient scratch read failed");
+                for (row, value) in chunk.into_iter().enumerate() {
+                    values[row * ratio + coset] = value;
+                }
             }
             let (_, data) = self.pcs.commit_quotient(vec![(
                 input.quotient_domain,
@@ -1137,6 +1156,27 @@ mod tests {
         );
         assert_eq!(actual.to_bytes().unwrap(), expected.to_bytes().unwrap());
         serial.verify_multiple_claims(&[], &actual).unwrap();
+    }
+
+    #[test]
+    fn spilled_cosets_preserve_proof_bytes_and_remove_temporary_files() {
+        let directory =
+            std::env::temp_dir().join(format!("kzg-coset-parity-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let config = KzgConfig::new(Arc::new(Srs::unsafe_dev_setup(16, b"coset-spill")), 8)
+            .with_streaming_lookups()
+            .with_streaming_quotient();
+        let (ordinary, ordinary_key) = System::new(config.clone(), [mul_circuit()]);
+        let expected = ordinary.prove_multiple_claims(&ordinary_key, &[], witness(&ordinary));
+        let (spilled, spilled_key) = System::new(
+            config.with_quotient_scratch_directory(directory.clone()),
+            [mul_circuit()],
+        );
+        let actual = spilled.prove_multiple_claims(&spilled_key, &[], witness(&spilled));
+        assert_eq!(actual.to_bytes().unwrap(), expected.to_bytes().unwrap());
+        spilled.verify_multiple_claims(&[], &actual).unwrap();
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        std::fs::remove_dir(directory).unwrap();
     }
 
     fn witness(system: &System<KzgConfig>) -> SystemWitness<Scalar> {
