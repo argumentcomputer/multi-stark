@@ -1,5 +1,10 @@
 # KZG performance: roadmap to under five minutes
 
+Current priority, 2026-10-14: complete the
+[correctness and simplicity audit checklist](kzg-correctness-and-simplicity-audit.md).
+Further performance work is deferred at the
+[single-GPU checkpoint](kzg-single-gpu-handoff.md).
+
 Updated 2026-10-10. This document combines the performance roadmap, measured
 CUDA handoff, trace/witness design, and recursive circuit-size proposals.
 The latest [complete prepared-worker development-v4 request](#integrated-development-v4-worker-pipeline)

@@ -136,12 +136,16 @@ retry through the host fallback after partial execution.
 
 ## Remaining work
 
+The current priority is the
+[correctness and simplicity audit checklist](kzg-correctness-and-simplicity-audit.md).
+Further prover optimization is deferred at this checkpoint.
+
 The compact fixed-input representation, sole-copy device storage, GPU opening
 folds and complete-residency design are unimplemented. The new pass layout is
 limited to one GPU; existing multi-GPU paths remain separate. No production
 SRS acceptance or original root-generation benchmark is included here.
 
-Start further optimization by attributing the first KZG stage's approximately
+If optimization resumes, start by attributing the first KZG stage's approximately
 164 s and 217.4 GiB, then remaining recursive host preparation. Treat the
 first-stage RAM peak and FRI VRAM peak as independent capacity constraints.
 Require a complete-proof comparison with matched caches, binaries, inputs,
