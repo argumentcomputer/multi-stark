@@ -208,6 +208,13 @@ unsafe extern "C" {
     #[cfg(test)]
     fn multi_stark_sppark_borrowed_round_trip(device: c_int, values: *mut u64, lg: u32) -> c_int;
     #[cfg(test)]
+    fn multi_stark_sppark_parallel_memcpy(
+        device: c_int,
+        destination: *mut core::ffi::c_void,
+        source: *const core::ffi::c_void,
+        bytes: usize,
+    ) -> c_int;
+    #[cfg(test)]
     fn multi_stark_sppark_ntt_host(
         device: c_int,
         inout: *mut u64,
@@ -393,6 +400,90 @@ mod tests {
         let status = try_ntt_host(1 << 20, &mut values, Order::NN, Direction::Forward, false);
         assert_eq!(status, Err(101));
         assert_eq!(values, input);
+    }
+
+    #[test]
+    fn host_copy_workers_complete_concurrent_copies_and_preserve_guards() {
+        std::thread::scope(|scope| {
+            for worker in 0u8..4 {
+                scope.spawn(move || {
+                    const GRAIN: usize = 4 << 20;
+                    for bytes in [0, 1, GRAIN - 1, GRAIN, GRAIN + 19, (16 << 20) + 137] {
+                        let input: Vec<_> = (0..bytes)
+                            .map(|index| index.to_le_bytes()[0].wrapping_add(worker))
+                            .collect();
+                        let mut output = vec![0xa5; bytes + 40];
+                        check_cuda(
+                            unsafe {
+                                multi_stark_sppark_parallel_memcpy(
+                                    0,
+                                    output[17..].as_mut_ptr().cast(),
+                                    input.as_ptr().cast(),
+                                    bytes,
+                                )
+                            },
+                            "parallel host copy",
+                        );
+                        assert_eq!(&output[17..17 + bytes], input);
+                        assert!(output[..17].iter().all(|&value| value == 0xa5));
+                        assert!(output[17 + bytes..].iter().all(|&value| value == 0xa5));
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn host_ffi_rejects_invalid_buffers_and_shapes() {
+        let mut values = [7u64; 8];
+        let original = values;
+        unsafe {
+            for lg in [0, u32::MAX] {
+                assert_eq!(
+                    multi_stark_sppark_ntt_host(0, values.as_mut_ptr(), lg, 0, 0, 0),
+                    1,
+                );
+                assert_eq!(
+                    multi_stark_sppark_borrowed_round_trip(0, values.as_mut_ptr(), lg),
+                    1,
+                );
+            }
+            for (batch, stride) in [(0, 8), (65536, 8), (1, 7), (1, usize::MAX)] {
+                assert_eq!(
+                    multi_stark_sppark_ntt_batch_host(
+                        0,
+                        values.as_mut_ptr(),
+                        3,
+                        0,
+                        0,
+                        0,
+                        batch,
+                        stride,
+                    ),
+                    1,
+                );
+            }
+            assert_eq!(
+                multi_stark_sppark_parallel_memcpy(
+                    0,
+                    values.as_mut_ptr().cast(),
+                    core::ptr::null(),
+                    8,
+                ),
+                1,
+            );
+            assert_eq!(
+                multi_stark_sppark_parallel_memcpy(
+                    1 << 20,
+                    values.as_mut_ptr().cast(),
+                    original.as_ptr().cast(),
+                    8,
+                ),
+                101,
+            );
+            assert_eq!(multi_stark_sppark_l2_bytes(0, core::ptr::null_mut()), 1);
+        }
+        assert_eq!(values, original);
     }
 
     fn resident_matches_cpu(
