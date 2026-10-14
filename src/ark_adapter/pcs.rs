@@ -118,7 +118,7 @@ serde_via_canonical!(KzgProof, Vec<G1Affine>);
 pub struct CommittedMatrix {
     pub(crate) domain: Radix2Coset,
     columns: Vec<Vec<Fr>>,
-    constants: std::sync::OnceLock<Vec<bool>>,
+    constants: Vec<bool>,
     #[cfg(feature = "kzg-cuda")]
     resident: std::sync::OnceLock<Vec<Option<Arc<super::cuda::ResidentPolynomial>>>>,
 }
@@ -155,37 +155,37 @@ impl CommittedMatrix {
     }
 
     fn new(domain: Radix2Coset, columns: Vec<Vec<Fr>>) -> Self {
+        let constants = map_columns(columns.iter().collect(), |column| {
+            column.iter().skip(1).all(Zero::is_zero)
+        });
         Self {
             domain,
             columns,
-            constants: Default::default(),
+            constants,
             #[cfg(feature = "kzg-cuda")]
             resident: Default::default(),
         }
     }
 
     fn constant_columns(&self) -> &[bool] {
-        self.constants.get_or_init(|| {
-            map_columns(self.columns.iter().collect(), |column| {
-                column.iter().skip(1).all(Zero::is_zero)
-            })
-        })
+        &self.constants
     }
 
     #[cfg(feature = "kzg-cuda")]
     pub(super) fn resident_columns(&self) -> &[Option<Arc<super::cuda::ResidentPolynomial>>] {
         self.resident.get_or_init(|| {
-            let constants = self.constant_columns();
-            map_columns(
-                self.columns.iter().enumerate().collect(),
-                |(index, column)| {
-                    if constants[index] {
+            // A OnceLock initializer must not run Rayon work that can reenter it.
+            self.columns
+                .iter()
+                .zip(&self.constants)
+                .map(|(column, &constant)| {
+                    if constant {
                         None
                     } else {
                         super::cuda::retain(column)
                     }
-                },
-            )
+                })
+                .collect()
         })
     }
 }
@@ -763,7 +763,8 @@ impl KzgPcs {
                 inputs.push(col);
             }
         }
-        let result = CommittedMatrix::new(domain, vec![]);
+        #[cfg(feature = "kzg-cuda")]
+        let resident = std::sync::OnceLock::new();
         let columns = {
             #[cfg(feature = "kzg-cuda")]
             if super::cuda::enabled() && domain.size() >= 1 << 10 {
@@ -773,7 +774,7 @@ impl KzgPcs {
                 for (&i, resident) in active.iter().zip(residents) {
                     all_residents[i] = resident;
                 }
-                let _ = result.resident.set(all_residents);
+                let _ = resident.set(all_residents);
                 inputs = columns;
             } else {
                 inputs = map_columns(inputs, |mut column| {
@@ -799,8 +800,13 @@ impl KzgPcs {
             seconds = started.elapsed().as_secs_f64(),
             "KZG column interpolation"
         );
-        let _ = result.constants.set(constants);
-        CommittedMatrix { columns, ..result }
+        CommittedMatrix {
+            domain,
+            columns,
+            constants,
+            #[cfg(feature = "kzg-cuda")]
+            resident,
+        }
     }
 }
 

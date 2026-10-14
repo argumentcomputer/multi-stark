@@ -115,3 +115,45 @@ fn concurrent_uncached_msm_completes() {
         });
     });
 }
+
+#[cfg(feature = "parallel")]
+#[test]
+#[ignore = "requires one CUDA GPU; concurrent shared-key hydration with a completion deadline"]
+fn concurrent_shared_matrix_hydration_completes() {
+    use crate::ark_adapter::{Scalar, domain::Radix2Coset, pcs::KzgProverData};
+
+    with_timeout("concurrent_shared_matrix_hydration_completes", || {
+        assert_eq!(rayon::current_num_threads(), 2);
+        let n = 1 << 16;
+        let mut constant = vec![Fr::ZERO; n];
+        constant[0] = Fr::from(37);
+        let coefficients = vec![Fr::from(19); n];
+        let data = KzgProverData::coefficient_fixture(
+            Radix2Coset {
+                log_size: 16,
+                shift: Scalar(Fr::ONE),
+            },
+            vec![constant, coefficients.clone(), coefficients.clone()],
+        );
+        let matrix = &data.matrices[0];
+        let columns: Vec<_> = (0..16)
+            .into_par_iter()
+            .map(|_| matrix.resident_columns())
+            .collect();
+        assert!(columns.iter().all(|view| std::ptr::eq(*view, columns[0])));
+        let resident = columns[0];
+        assert!(resident[0].is_none());
+        let z = Fr::from(7);
+        let expected = coefficients
+            .iter()
+            .rev()
+            .fold(Fr::ZERO, |sum, c| sum * z + c);
+        for column in &resident[1..] {
+            assert!(column.is_some(), "small resident fixture must fit");
+            assert_eq!(
+                evaluate_resident(&coefficients, column.as_deref(), &[z]),
+                [expected]
+            );
+        }
+    });
+}

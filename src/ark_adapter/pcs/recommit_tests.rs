@@ -138,10 +138,7 @@ fn check_migration(source: &KzgPcs, target: &KzgPcs) -> (KzgCommitment, KzgCommi
         assert_eq!(matrix.domain(), expected.domain);
         assert_eq!(matrix.width(), 4);
         assert_eq!(matrix.columns, expected.columns);
-        assert_eq!(
-            matrix.constants.get(),
-            Some(&vec![true, true, false, false])
-        );
+        assert_eq!(matrix.constant_columns(), [true, true, false, false]);
         assert_eq!(
             matrix.columns.iter().map(Vec::as_ptr).collect::<Vec<_>>(),
             pointers
