@@ -199,8 +199,15 @@ extern "C" int multi_stark_kzg_msm_create(int device, void** out,
       catch (const std::exception& e) { return failure(cudaErrorUnknown, e.what()); }
 }
 
+__global__ void scale_values(fr_t* output, const fr_t* input, size_t count, fr_t scale) {
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+         i < count; i += size_t(gridDim.x) * blockDim.x)
+        output[i] = input[i] * scale;
+}
+
 extern "C" int multi_stark_kzg_msm_invoke(int device, void* context, point_t* out,
-                                          const fr_t* scalars, size_t count) {
+                                          const fr_t* scalars, size_t count,
+                                          const fr_t* normalization) {
     ProfileRange range("kzg/msm-host-scalars");
     try {
         if (!context || !out || !scalars || count == 0)
@@ -218,6 +225,13 @@ extern "C" int multi_stark_kzg_msm_invoke(int device, void* context, point_t* ou
         MsmKernelTimings kernels;
         TransferStats compute;
         const auto started = std::chrono::steady_clock::now();
+        if (normalization) {
+            auto* timer = kzg_msm_profile_start(gpu);
+            scale_values<<<gpu.sm_count() * 4, 256, 0, gpu>>>(data, data, count, *normalization);
+            CUDA_OK(cudaGetLastError());
+            kzg_msm_profile_end(timer, gpu);
+            gpu.sync();
+        }
         const int code = msm_result(msm.msm.invoke(*out, msm.points, count, data, true));
         compute.call_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - started).count();
@@ -345,12 +359,6 @@ extern "C" int multi_stark_kzg_polynomial_destroy(int device, void* pointer) {
         return 0;
     } catch (const cuda_error& e) { return failure(e.code(), e.what()); }
       catch (const std::exception& e) { return failure(cudaErrorUnknown, e.what()); }
-}
-
-__global__ void scale_values(fr_t* output, const fr_t* input, size_t count, fr_t scale) {
-    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
-         i < count; i += size_t(gridDim.x) * blockDim.x)
-        output[i] = input[i] * scale;
 }
 
 extern "C" int multi_stark_kzg_msm_invoke_resident(int device, void* context,

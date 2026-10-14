@@ -76,6 +76,7 @@ unsafe extern "C" {
         out: *mut [[u64; 6]; 3],
         scalars: *const [u64; 4],
         count: usize,
+        normalization: *const [u64; 4],
     ) -> i32;
     fn multi_stark_kzg_msm_invoke_resident(
         device: i32,
@@ -859,20 +860,6 @@ fn msm_columns_chunked(
                 for (sum, column) in sums.iter_mut().zip(columns) {
                     let input = &column[start..start + count];
                     let normalization = msm_normalization(input);
-                    let normalized = normalization.map(|(scale, inverse)| {
-                        let negative = -scale;
-                        super::buffer::generate(input.len(), |i| {
-                            let value = input[i];
-                            if value == scale {
-                                Fr::ONE
-                            } else if value == negative {
-                                -Fr::ONE
-                            } else {
-                                value * inverse
-                            }
-                        })
-                    });
-                    let scalars = normalized.as_deref().unwrap_or(input);
                     let mut out = [[0; 6]; 3];
                     // The resident point chunk is immutable across all column invocations.
                     check(
@@ -881,8 +868,11 @@ fn msm_columns_chunked(
                                 device.id(),
                                 resident.context,
                                 &mut out,
-                                scalars.as_ptr().cast(),
+                                input.as_ptr().cast(),
                                 count,
+                                normalization
+                                    .as_ref()
+                                    .map_or(std::ptr::null(), |(_, inverse)| &inverse.0.0),
                             )
                         },
                         "MSM",
@@ -1056,13 +1046,13 @@ pub(super) fn divide(coefficients: &[Fr], z: Fr) -> Vec<Fr> {
     if coefficients.len() < 2 {
         return vec![];
     }
+    // Parallel first-touch keeps page faults out of the pinned-ring download.
+    let mut values = super::buffer::generate(coefficients.len() - 1, |_| Fr::ZERO);
     let device = Devices::get().acquire();
     assert!(
         device.prepare_budget(coefficients.len().checked_mul(32).unwrap() + (1 << 30)),
         "insufficient free VRAM for KZG division"
     );
-    // Parallel first-touch keeps page faults out of the pinned-ring download.
-    let mut values = super::buffer::generate(coefficients.len() - 1, |_| Fr::ZERO);
     // The call synchronizes its copies and kernels before releasing either buffer.
     check(
         unsafe {
