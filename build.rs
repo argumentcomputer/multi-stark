@@ -131,60 +131,6 @@ fn build_kzg_cuda() {
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let root = PathBuf::from(env::var_os("DEP_SPPARK_ROOT").expect("sppark include path"));
     let blst = PathBuf::from(env::var_os("DEP_BLST_C_SRC").expect("blst include path"));
-    let headers = out.join("kzg-sppark");
-    std::fs::create_dir_all(headers.join("util")).unwrap();
-    let runtime = std::fs::read_to_string(root.join("util/gpu_t.cuh")).unwrap();
-    let sync = "inline void sync() const\n    {\n        zero.sync();";
-    assert_eq!(
-        runtime.matches(sync).count(),
-        1,
-        "sppark gpu_t::sync changed"
-    );
-    // NTT parameter initialization synchronizes every GPU from one host thread.
-    // Each synchronization must select the context owning those streams.
-    std::fs::write(
-        headers.join("util/gpu_t.cuh"),
-        runtime.replace(
-            sync,
-            "inline void sync() const\n    {\n        select();\n        zero.sync();",
-        ),
-    )
-    .unwrap();
-    // GPU intervals exclude the host bucket reduction and result downloads.
-    // The scoped header copy keeps the dependency checkout immutable.
-    let mut msm = std::fs::read_to_string(root.join("msm/pippenger.cuh")).unwrap();
-    for (before, after) in [
-        ("#include \"sort.cuh\"", "#include <msm/sort.cuh>"),
-        (
-            "#include \"batch_addition.cuh\"",
-            "#include <msm/batch_addition.cuh>",
-        ),
-        (
-            "        breakdown<<<2*grid_size, 1024, sizeof(scalar_t)*1024, gpu[2]>>>(",
-            "        auto* kzg_digits_timer = kzg_msm_profile_start(gpu[2]);\n        breakdown<<<2*grid_size, 1024, sizeof(scalar_t)*1024, gpu[2]>>>(",
-        ),
-        (
-            "#endif\n    }\n\npublic:\n    RustError invoke",
-            "#endif\n        kzg_msm_profile_end(kzg_digits_timer, gpu[2]);\n    }\n\npublic:\n    RustError invoke",
-        ),
-        (
-            "                gpu[i&1].wait(ev);",
-            "                gpu[i&1].wait(ev);\n                auto* kzg_bucket_timer = kzg_msm_profile_start(gpu[i&1]);",
-        ),
-        (
-            "                if (i < batch-1) {",
-            "                kzg_msm_profile_end(kzg_bucket_timer, gpu[i&1]);\n                if (i < batch-1) {",
-        ),
-    ] {
-        assert_eq!(
-            msm.matches(before).count(),
-            1,
-            "sppark MSM profiling boundary changed"
-        );
-        msm = msm.replace(before, after);
-    }
-    std::fs::create_dir_all(headers.join("msm")).unwrap();
-    std::fs::write(headers.join("msm/pippenger.cuh"), msm).unwrap();
     for directory in ["ec", "ff", "msm", "ntt", "polynomial", "util"] {
         println!("cargo:rerun-if-changed={}", root.join(directory).display());
     }
@@ -215,7 +161,6 @@ fn build_kzg_cuda() {
             "-include",
             "cuda/kzg_sppark.cuh",
         ]);
-        command.arg(format!("-I{}", headers.display()));
         command.arg(format!("-I{}", root.display()));
         command.arg(format!("-I{}", root.join("util").display()));
         command.arg(format!("-I{}", blst.display()));

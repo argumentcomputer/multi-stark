@@ -52,3 +52,7 @@ void kzg_msm_profile_end(TimedKernel* timer, cudaStream_t stream) {
 }
 
 } // namespace
+
+// sppark's Pippenger header brackets its digit and bucket passes with these.
+#define SPPARK_MSM_PROFILE_START(stream) kzg_msm_profile_start(stream)
+#define SPPARK_MSM_PROFILE_END(timer, stream) kzg_msm_profile_end(timer, stream)

@@ -48,7 +48,7 @@ blst = { version = "=0.3.16", features = ["portable"], optional = true }
 # streams and a runtime compatible with the Lean executable's C++ linkage.
 [dependencies.sppark]
 git = "https://github.com/argumentcomputer/sppark"
-rev = "e10e107673aa22861f0f8b9758fc62169ab919ae"
+rev = "114feb69ebfe029e2caa5e6c2d372c695e5d4da8"
 optional = true
 features = ["cuda"]
 

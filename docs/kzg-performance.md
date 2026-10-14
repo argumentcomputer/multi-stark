@@ -4582,7 +4582,10 @@ source files changed after the last compiled executables.
 7. **`build.rs` edits sppark by string substitution.** The MSM profiling
    timers are injected into a copy of `msm/pippenger.cuh` with six exact-match
    replacements. The pinned dependency is already a maintained fork; the hooks
-   belong there, where the compiler checks them.
+   belong there, where the compiler checks them. Resolved: fork commits
+   `9207455` and `114feb6` carry the `gpu_t::sync` fix and the
+   `SPPARK_MSM_PROFILE_START`/`END` hooks, and `build.rs` no longer copies
+   or rewrites headers.
 8. **Repository hygiene.** The working tree holds 56 modified and about 60
    untracked paths with 7,755 uncommitted insertions. About 1.1 GiB of
    measured executables sit under `experiments/kzg-cuda-validation`, neither
