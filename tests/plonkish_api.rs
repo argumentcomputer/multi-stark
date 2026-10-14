@@ -90,6 +90,28 @@ fn sizing_cannot_be_used_as_a_circuit() {
 }
 
 #[test]
+fn indexed_inputs_preserve_diagnostics_and_assignment_identity() {
+    let mut builder = CircuitBuilder::<Val>::new();
+    let input = builder.input_indexed("input", 42);
+    let circuit = builder.finish();
+    assert!(matches!(
+        circuit.witness().generate(),
+        Err(WitnessError::MissingInput { name }) if name == "input[42]"
+    ));
+    let mut witness = circuit.witness();
+    witness.set(input, Val::from_u8(7)).unwrap();
+    let assignment = witness.generate().unwrap();
+    assert_eq!(
+        assignment.values(circuit.id()).unwrap()[input.index()],
+        Val::from_u8(7)
+    );
+    assert!(matches!(
+        assignment.values(CircuitBuilder::<Val>::new().finish().id()),
+        Err(WitnessError::ForeignAssignment)
+    ));
+}
+
+#[test]
 fn backend_graph_inspection_matches_setup() {
     let mut b = CircuitBuilder::<Val>::new();
     let x = b.input("x");

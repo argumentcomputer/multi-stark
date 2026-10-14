@@ -99,7 +99,7 @@ impl ByteGadgets {
         value: Value,
     ) -> [Value; N] {
         assert!(N <= 16);
-        let nibbles = b.hint_many("nibbles", &[value], |v| {
+        let nibbles = b.hint_many_pure("nibbles", &[value], |v| {
             let value = integer(v[0])?;
             Ok(std::array::from_fn(|i| {
                 F::from_u64((value >> (i * 4)) & 15)

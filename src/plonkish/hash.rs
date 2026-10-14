@@ -22,6 +22,7 @@ use crate::traits::Field;
 use crate::{expr::Expr, lookup::Lookup, system::CircuitInputs};
 use p3_blake3::Blake3;
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
+use p3_maybe_rayon::prelude::*;
 use p3_symmetric::CryptographicHasher;
 use std::collections::HashMap;
 const IV: [u32; 8] = [
@@ -73,6 +74,12 @@ enum Recipe {
     Rotate(usize, usize, u32),
     Xor(usize, usize),
 }
+
+pub(super) struct Prepared {
+    words: Vec<u32>,
+    multiplicities: [Vec<usize>; 3],
+}
+
 enum Boundary {
     Constant(u32),
     Bridge {
@@ -286,30 +293,44 @@ impl Compact {
         }
         (0..6).map(|t| vec![namespace, f(4), f(3), f(t)]).collect()
     }
-    pub(super) fn definitions<F: Field>(&self, namespace: F) -> Vec<CircuitInputs<F>> {
+    fn copy_fixed<F: Field>(&self) -> Vec<Vec<F>> {
         let mut fixed: Vec<_> = (0..6)
-            .map(|t| vec![F::ZERO; self.rows[t].len().max(2).next_power_of_two() * fw(t)])
+            .map(|t| F::zero_vec(self.rows[t].len().max(2).next_power_of_two() * fw(t)))
             .collect();
-        let mut occurrences = vec![vec![]; self.recipes.len()];
+        // The first label and the last successor cell close each word's
+        // cycle without retaining its intermediate occurrences.
+        let mut endpoints = vec![(usize::MAX, 0, 0); self.recipes.len()];
         let mut label = 0usize;
         for t in 0..6 {
             fixed[t][1] = F::ONE; // mandatory activation marker
             for (r, row) in self.rows[t].iter().enumerate() {
                 fixed[t][r * fw(t)] = F::ONE;
                 for (slot, &word) in row.iter().enumerate() {
-                    fixed[t][r * fw(t) + 2 + slot] = f(label);
-                    occurrences[word].push((t, r, slot, label));
+                    let value = f(label);
+                    fixed[t][r * fw(t) + 2 + slot] = value;
+                    let (first, last_trace, last_cell) = &mut endpoints[word];
+                    if *first == usize::MAX {
+                        *first = label;
+                    } else {
+                        fixed[*last_trace][*last_cell] = value;
+                    }
+                    *last_trace = t;
+                    *last_cell = r * fw(t) + 2 + slots(t) + slot;
                     label += 1;
                 }
             }
         }
         assert!(F::prime_order_exceeds(label));
-        for uses in occurrences {
-            for (i, &(t, r, slot, _)) in uses.iter().enumerate() {
-                fixed[t][r * fw(t) + 2 + slots(t) + slot] = f(uses[(i + 1) % uses.len()].3);
+        for (first, last_trace, last_cell) in endpoints {
+            if first != usize::MAX {
+                fixed[last_trace][last_cell] = f(first);
             }
         }
+        fixed
+    }
 
+    pub(super) fn definitions<F: Field>(&self, namespace: F) -> Vec<CircuitInputs<F>> {
+        let mut fixed = self.copy_fixed();
         for (r, boundary) in self.boundaries.iter().enumerate() {
             let row = &mut fixed[5][r * fw(5)..(r + 1) * fw(5)];
             match *boundary {
@@ -443,31 +464,7 @@ impl Compact {
         }
         defs
     }
-    pub(super) fn traces<F: Field>(
-        &self,
-        values: &[F],
-        defs: &[CircuitInputs<F>],
-    ) -> Result<Vec<RowMajorMatrix<F>>, WitnessError> {
-        self.selected_traces(values, defs, None)
-    }
-
-    pub(super) fn trace<F: Field>(
-        &self,
-        values: &[F],
-        defs: &[CircuitInputs<F>],
-        index: usize,
-    ) -> Result<RowMajorMatrix<F>, WitnessError> {
-        Ok(self
-            .selected_traces(values, defs, Some(index))?
-            .remove(index))
-    }
-
-    fn selected_traces<F: Field>(
-        &self,
-        values: &[F],
-        defs: &[CircuitInputs<F>],
-        selected: Option<usize>,
-    ) -> Result<Vec<RowMajorMatrix<F>>, WitnessError> {
+    pub(super) fn prepare<F: Field>(&self, values: &[F]) -> Result<Prepared, WitnessError> {
         let messages = self.messages(values)?;
         let mut words: Vec<u32> = Vec::with_capacity(self.recipes.len());
         for recipe in &self.recipes {
@@ -484,31 +481,87 @@ impl Compact {
             };
             words.push(value);
         }
-        let mut traces: Vec<_> = defs
-            .iter()
-            .enumerate()
-            .map(|(i, d)| {
-                let height = if selected.is_none_or(|s| s == i) {
-                    d.preprocessed.as_ref().unwrap().height()
+        // Canonical byte-indexed table rows allow all three histograms to share
+        // a word pass without retaining any expanded field matrices.
+        let mut multiplicities = [vec![0; 65536], vec![0; 512], vec![0; 256]];
+        for (t, rows) in self.rows.iter().enumerate() {
+            for slots in rows {
+                if t == 5 {
+                    for byte in words[slots[0]].to_le_bytes() {
+                        multiplicities[2][usize::from(byte)] += 1;
+                    }
+                    continue;
+                }
+                let (a, b) = if t < 4 {
+                    (slots[3], slots[4])
                 } else {
-                    0
+                    (slots[0], slots[1])
                 };
-                RowMajorMatrix::new(vec![F::ZERO; height * d.main_width], d.main_width)
-            })
-            .collect();
-        for t in 0..6 {
-            if selected.is_some_and(|s| s < 6 && s != t) {
-                continue;
+                for (a, b) in words[a]
+                    .to_le_bytes()
+                    .into_iter()
+                    .zip(words[b].to_le_bytes())
+                {
+                    multiplicities[0][usize::from(a) * 256 + usize::from(b)] += 1;
+                    if t == 1 || t == 3 {
+                        let offset = if t == 1 { 0 } else { 256 };
+                        multiplicities[1][offset + usize::from(a ^ b)] += 1;
+                    }
+                }
             }
-            for (r, slots) in self.rows[t].iter().enumerate() {
-                if selected.is_none_or(|s| s == t) {
-                    let row = &mut traces[t].values[r * mw(t)..(r + 1) * mw(t)];
+        }
+        Ok(Prepared {
+            words,
+            multiplicities,
+        })
+    }
+
+    pub(super) fn traces<F: Field>(
+        &self,
+        prepared: &Prepared,
+        defs: &[CircuitInputs<F>],
+    ) -> Vec<RowMajorMatrix<F>> {
+        (0..defs.len())
+            .map(|index| self.trace(prepared, defs, index))
+            .collect()
+    }
+
+    pub(super) fn trace<F: Field>(
+        &self,
+        prepared: &Prepared,
+        defs: &[CircuitInputs<F>],
+        index: usize,
+    ) -> RowMajorMatrix<F> {
+        let d = &defs[index];
+        if index >= 6 {
+            return RowMajorMatrix::new(
+                prepared.multiplicities[index - 6]
+                    .iter()
+                    .map(|&n| F::from_usize(n))
+                    .collect(),
+                d.main_width,
+            );
+        }
+        let words = &prepared.words;
+        // Scalar-field embeddings require Montgomery conversion; each byte
+        // value can reuse one conversion throughout the expanded matrix.
+        let bytes: [F; 256] = std::array::from_fn(F::from_usize);
+        let mut trace = RowMajorMatrix::new(
+            F::zero_vec(d.preprocessed.as_ref().unwrap().height() * d.main_width),
+            d.main_width,
+        );
+        let width = mw(index);
+        trace.values[..self.rows[index].len() * width]
+            .par_chunks_mut(width * (1 << 12))
+            .zip(self.rows[index].par_chunks(1 << 12))
+            .for_each(|(output, rows)| {
+                for (row, slots) in output.chunks_exact_mut(width).zip(rows) {
                     for (slot, &word) in slots.iter().enumerate() {
                         for (i, b) in words[word].to_le_bytes().into_iter().enumerate() {
-                            row[slot * 4 + i] = F::from_u8(b);
+                            row[slot * 4 + i] = bytes[usize::from(b)];
                         }
                     }
-                    if t < 4 {
+                    if index < 4 {
                         let mut carry = 0u16;
                         for i in 0..4 {
                             let sum = u16::from(words[slots[0]].to_le_bytes()[i])
@@ -516,41 +569,22 @@ impl Compact {
                                 + u16::from(words[slots[2]].to_le_bytes()[i])
                                 + carry;
                             carry = sum >> 8;
-                            row[24 + i] = F::from_u16(carry);
+                            row[24 + i] = bytes[usize::from(carry)];
                             let x =
                                 words[slots[3]].to_le_bytes()[i] ^ words[slots[4]].to_le_bytes()[i];
-                            row[28 + i] = F::from_u8(x);
-                            let bits = ROT[t] % 8;
+                            row[28 + i] = bytes[usize::from(x)];
+                            let bits = ROT[index] % 8;
                             if bits != 0 {
-                                row[32 + i] = F::from_u8(x & ((1 << bits) - 1));
-                                row[36 + i] = F::from_u8(x >> bits);
+                                row[32 + i] = bytes[usize::from(x & ((1 << bits) - 1))];
+                                row[36 + i] = bytes[usize::from(x >> bits)];
                             }
                         }
                     }
                 }
-                // The three fixed tables use canonical byte-indexed row order.
-                // Count directly from word recipes without materializing other traces.
-                for i in 0..4 {
-                    if t < 5 {
-                        let (a, b) = if t < 4 {
-                            (slots[3], slots[4])
-                        } else {
-                            (slots[0], slots[1])
-                        };
-                        let (a, b) = (words[a].to_le_bytes()[i], words[b].to_le_bytes()[i]);
-                        if selected.is_none_or(|s| s == 6) {
-                            traces[6].values[usize::from(a) * 256 + usize::from(b)] += F::ONE;
-                        }
-                        if (t == 1 || t == 3) && selected.is_none_or(|s| s == 7) {
-                            let offset = if t == 1 { 0 } else { 256 };
-                            traces[7].values[offset + usize::from(a ^ b)] += F::ONE;
-                        }
-                    } else if selected.is_none_or(|s| s == 8) {
-                        traces[8].values[usize::from(words[slots[0]].to_le_bytes()[i])] += F::ONE;
-                    }
-                }
-            }
-        }
-        Ok(traces)
+            });
+        trace
     }
 }
+
+#[cfg(test)]
+mod tests;
