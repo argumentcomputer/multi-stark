@@ -4,10 +4,13 @@ use ark_bls12_381::{Fq, Fr, G1Affine, G1Projective};
 use ark_ff::{AdditiveGroup, BigInt, Field, Zero};
 use blst as _;
 use rayon::prelude::*;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
+#[cfg(test)]
+mod concurrency_tests;
 #[cfg(test)]
 mod diagnostic;
 mod distributed;
@@ -196,6 +199,10 @@ struct Devices {
 
 static DEVICES: OnceLock<Devices> = OnceLock::new();
 
+thread_local! {
+    static DEVICE_LEASES: Cell<usize> = const { Cell::new(0) };
+}
+
 impl Devices {
     fn potential_budget(&self, index: usize) -> usize {
         let (mut free, mut total) = (0, 0);
@@ -248,31 +255,28 @@ impl Devices {
     }
 
     fn acquire(&self) -> Device<'_> {
+        Device::assert_unleased();
         let mut busy = self.busy.lock().unwrap();
         loop {
             if let Some(index) = busy.iter().position(|&v| !v) {
                 busy[index] = true;
-                return Device {
-                    devices: self,
-                    index,
-                };
+                return Device::new(self, index);
             }
             busy = self.available.wait(busy).unwrap();
         }
     }
     fn acquire_at(&self, index: usize) -> Device<'_> {
+        Device::assert_unleased();
         let mut busy = self.busy.lock().unwrap();
         while busy[index] {
             busy = self.available.wait(busy).unwrap();
         }
         busy[index] = true;
-        Device {
-            devices: self,
-            index,
-        }
+        Device::new(self, index)
     }
 
     fn acquire_group(&self, indices: &[usize]) -> Vec<Device<'_>> {
+        Device::assert_unleased();
         assert!(
             indices
                 .iter()
@@ -288,10 +292,7 @@ impl Devices {
         }
         indices
             .iter()
-            .map(|&index| Device {
-                devices: self,
-                index,
-            })
+            .map(|&index| Device::new(self, index))
             .collect()
     }
 
@@ -308,9 +309,25 @@ impl Devices {
 struct Device<'a> {
     devices: &'a Devices,
     index: usize,
+    // Thread-local accounting requires release on the acquiring thread.
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
-impl Device<'_> {
+impl<'a> Device<'a> {
+    fn new(devices: &'a Devices, index: usize) -> Self {
+        DEVICE_LEASES.set(DEVICE_LEASES.get() + 1);
+        Self {
+            devices,
+            index,
+            _thread: std::marker::PhantomData,
+        }
+    }
+
+    fn assert_unleased() {
+        // Nested Rayon work can steal a job that waits for its own thread's lease.
+        assert_eq!(DEVICE_LEASES.get(), 0, "reentrant KZG device lease");
+    }
+
     fn prepare_budget(&self, required: usize) -> bool {
         srs_cache::prepare_budget(self, required)
     }
@@ -382,6 +399,7 @@ pub(super) fn release_idle_device_memory() -> super::pcs::KzgIdleMemoryRelease {
 impl Drop for Device<'_> {
     fn drop(&mut self) {
         self.devices.busy.lock().unwrap()[self.index] = false;
+        DEVICE_LEASES.set(DEVICE_LEASES.get() - 1);
         self.devices.available.notify_all();
     }
 }

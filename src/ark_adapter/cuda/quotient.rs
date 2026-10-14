@@ -629,6 +629,7 @@ pub(super) fn acquire_columns(
     all_columns: &[PolynomialView<'_>],
     bytes: usize,
 ) -> Option<Device<'static>> {
+    Device::assert_unleased();
     if eligible.is_empty() {
         return None;
     }
@@ -638,7 +639,7 @@ pub(super) fn acquire_columns(
         loop {
             if let Some(&(index, _)) = eligible.iter().find(|&&(index, _)| !busy[index]) {
                 busy[index] = true;
-                break Device { devices, index };
+                break Device::new(devices, index);
             }
             busy = devices.available.wait(busy).unwrap();
         }
