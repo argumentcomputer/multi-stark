@@ -481,49 +481,6 @@ bool upload_staging_in_use[MAX_CUDA_DEVICES][UPLOAD_STAGING_SLOTS] = {{false}};
 pthread_mutex_t upload_staging_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t upload_staging_cond = PTHREAD_COND_INITIALIZER;
 
-// One thread copies into pinned memory at a fraction of the PCIe rate, so a
-// serial copy, not the DMA, would bound a staged upload; large chunks are
-// copied by a few threads.
-struct MemcpyPart {
-    unsigned char* destination;
-    const unsigned char* source;
-    size_t bytes;
-};
-
-void* memcpy_part(void* argument) {
-    const auto* part = static_cast<const MemcpyPart*>(argument);
-    memcpy(part->destination, part->source, part->bytes);
-    return nullptr;
-}
-
-// pthreads rather than std::thread: the executable is linked by the Lean
-// toolchain without the C++ runtime library.
-void parallel_memcpy(void* destination, const void* source, size_t bytes) {
-    constexpr size_t THREADS = 4;
-    constexpr size_t MIN_PARALLEL = size_t(8) << 20;
-    if (bytes < MIN_PARALLEL) {
-        memcpy(destination, source, bytes);
-        return;
-    }
-    const size_t part = (bytes + THREADS - 1) / THREADS;
-    auto* dst = static_cast<unsigned char*>(destination);
-    const auto* src = static_cast<const unsigned char*>(source);
-    MemcpyPart parts[THREADS];
-    pthread_t workers[THREADS];
-    bool started[THREADS] = {false};
-    for (size_t t = 1; t < THREADS; ++t) {
-        const size_t offset = t * part;
-        if (offset >= bytes) break;
-        parts[t] = {dst + offset, src + offset, std::min(part, bytes - offset)};
-        started[t] = pthread_create(&workers[t], nullptr, memcpy_part, &parts[t]) == 0;
-        if (!started[t]) memcpy_part(&parts[t]);
-    }
-    memcpy(dst, src, std::min(part, bytes));
-    for (size_t t = 1; t < THREADS; ++t) {
-        if (started[t]) pthread_join(workers[t], nullptr);
-    }
-}
-
 // Both directions share the per-device ring. Every event and host copy has
 // completed before the slot is released to a caller on another thread.
 cudaError_t staged_transfer(void* destination, const void* source, size_t bytes,
@@ -588,14 +545,17 @@ cudaError_t staged_transfer(void* destination, const void* source, size_t bytes,
             if (!upload || index >= UPLOAD_STAGING_RING) status = cudaEventSynchronize(events[ring]);
             const size_t chunk = std::min(UPLOAD_STAGING_CHUNK, bytes - offset);
             if (status == cudaSuccess && upload) {
-                parallel_memcpy(buffer, input + offset, chunk);
-                status = cudaMemcpyAsync(output + offset, buffer, chunk,
-                                         cudaMemcpyHostToDevice, cudaStreamPerThread);
+                status = static_cast<cudaError_t>(multi_stark_sppark_parallel_memcpy(
+                    device_index, buffer, input + offset, chunk));
+                if (status == cudaSuccess)
+                    status = cudaMemcpyAsync(output + offset, buffer, chunk,
+                                             cudaMemcpyHostToDevice, cudaStreamPerThread);
                 if (status == cudaSuccess) status = cudaEventRecord(events[ring], cudaStreamPerThread);
             } else if (status == cudaSuccess) {
-                parallel_memcpy(output + offset, buffer, chunk);
+                status = static_cast<cudaError_t>(multi_stark_sppark_parallel_memcpy(
+                    device_index, output + offset, buffer, chunk));
                 const size_t next = offset + UPLOAD_STAGING_BYTES;
-                if (next < bytes) {
+                if (status == cudaSuccess && next < bytes) {
                     const size_t following = std::min(UPLOAD_STAGING_CHUNK, bytes - next);
                     status = cudaMemcpyAsync(buffer, input + next, following,
                                              cudaMemcpyDeviceToHost, cudaStreamPerThread);

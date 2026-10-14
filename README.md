@@ -112,7 +112,7 @@ correctness harness, platform limitations, and benchmark commands.
 ### sppark transforms
 
 Every CUDA build uses [sppark](https://github.com/argumentcomputer/sppark)'s
-Goldilocks NTT, pinned to the fork's `dev` branch. Its borrowed streams keep
+Goldilocks NTT, pinned to a revision of the fork. Its borrowed streams keep
 panel allocation, transforms and freeing on the caller's stream. Tiny generic
 host matrices retain the CPU DFT. CPU builds do not depend on sppark or CUDA.
 
@@ -124,8 +124,15 @@ one column within the panel budget; invalid shapes fail before allocation.
 `MULTI_STARK_SPPARK_PANEL_BYTES` caps the transform scratch, 4 GiB by default;
 a budget smaller than one column is a configuration error. Columns are
 transformed in launch groups sized to the device's L2 cache. Both are captured
-when the device DFT is constructed. The fork's `SPPARK_NO_CXX_RUNTIME` mode
-aborts on CUDA errors with diagnostics.
+when the device DFT is constructed. Staging copies reuse sppark's per-device
+CPU workers. `MULTI_STARK_CUDA_AUX_DEVICES` names further CUDA ordinals,
+comma separated, that take the coset LDEs the primary device leaves to the
+host. The C adapter catches native exceptions, synchronizes outstanding
+device work on failure, and returns CUDA error codes to Rust.
+
+CUDA Rust binaries link libstdc++ normally. Foreign static-library consumers
+must keep its C++ ABI separate from other runtimes; ix's Lake build isolates
+the native CUDA objects and their GNU C++ runtime from Lean's libc++abi.
 
 ```sh
 cargo test --release --features parallel,cuda --lib cuda::sppark::tests::
