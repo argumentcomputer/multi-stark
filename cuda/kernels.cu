@@ -1146,7 +1146,7 @@ cudaError_t generate_coset_selectors(
     return status;
 }
 
-extern "C" int multi_stark_cuda_generate_coset_selectors(
+extern "C" __attribute__((visibility("default"))) int multi_stark_cuda_generate_coset_selectors(
     int device_id, uint64_t* output, size_t quotient_size, size_t next_step,
     uint64_t coset_shift, uint64_t coset_generator, uint64_t trace_last,
     uint64_t vanishing_start, uint64_t vanishing_step) {
@@ -2871,7 +2871,7 @@ extern "C" int multi_stark_cuda_fri_workspace_create(int device_id,void** handle
     if(status!=cudaSuccess){delete w;return static_cast<int>(status);}*handle=w;return static_cast<int>(cudaSuccess);
 }
 
-extern "C" int multi_stark_cuda_fri_interpolate_batch(int device_id,void* handle,uint64_t* output,
+extern "C" __attribute__((visibility("default"))) int multi_stark_cuda_fri_interpolate_batch(int device_id,void* handle,uint64_t* output,
     size_t output_count,const InterpolationTask* tasks,size_t task_count,uint64_t ext_w){
     if(!handle||!output||!output_count||!tasks||!task_count)return static_cast<int>(cudaErrorInvalidValue);
     cudaError_t status=cudaSetDevice(device_id);auto* w=static_cast<ResidentFriWorkspace*>(handle);
@@ -2926,7 +2926,7 @@ extern "C" int multi_stark_cuda_fri_interpolate_batch(int device_id,void* handle
     if(status==cudaSuccess)status=cudaMemcpy(output,w->output,output_count*sizeof(Ext2),cudaMemcpyDeviceToHost);return static_cast<int>(status);
 }
 
-extern "C" int multi_stark_cuda_fri_reduce_batch(int device_id,void* handle,
+extern "C" __attribute__((visibility("default"))) int multi_stark_cuda_fri_reduce_batch(int device_id,void* handle,
     const ReductionTask* tasks,size_t task_count,const uint64_t* alpha,size_t alpha_count,uint64_t ext_w){
     if(!handle||!tasks||!task_count||!alpha||!alpha_count)return static_cast<int>(cudaErrorInvalidValue);
     cudaError_t status=cudaSetDevice(device_id);auto* w=static_cast<ResidentFriWorkspace*>(handle);
@@ -4159,6 +4159,19 @@ extern "C" int multi_stark_cuda_mixed_merkle_create_from_host_matrices(
     }
     delete[] lde_handles;
     return static_cast<int>(status);
+}
+
+extern "C" int multi_stark_cuda_get_device(int* device) {
+    if (device == nullptr) return static_cast<int>(cudaErrorInvalidValue);
+    return static_cast<int>(cudaGetDevice(device));
+}
+
+extern "C" int multi_stark_cuda_set_device(int device) {
+    return static_cast<int>(cudaSetDevice(device));
+}
+
+extern "C" int multi_stark_cuda_synchronize() {
+    return static_cast<int>(cudaDeviceSynchronize());
 }
 
 extern "C" const char* multi_stark_cuda_error_string(int status) {
