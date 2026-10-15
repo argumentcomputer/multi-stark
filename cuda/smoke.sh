@@ -9,11 +9,7 @@ cargo --version
 nvcc --version
 nvidia-smi --query-gpu=index,name,uuid,memory.total,driver_version,compute_cap --format=csv
 
-if [[ -z "${MULTI_STARK_CUDA_ARCHS:-}" ]]; then
-  MULTI_STARK_CUDA_ARCHS="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | sed -n '1p' | tr -d '.[:space:]')"
-  export MULTI_STARK_CUDA_ARCHS
-fi
-echo "MULTI_STARK_CUDA_ARCHS=${MULTI_STARK_CUDA_ARCHS}"
+echo "MULTI_STARK_CUDA_ARCHS=${MULTI_STARK_CUDA_ARCHS-automatic detection}"
 
 cargo clippy --release --locked --all-targets --features parallel,cuda -- -D warnings
 cargo test --release --locked --features parallel,cuda \

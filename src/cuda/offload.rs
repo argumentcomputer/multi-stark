@@ -171,7 +171,10 @@ fn try_worker(
     // Pool frees run on the calling thread's stream. Complete them before a
     // different thread can reuse this device's serialized worker and budget.
     // SAFETY: all allocations and launches above select the worker's device.
-    check_cuda(unsafe { cudaDeviceSynchronize() }, "auxiliary LDE release");
+    check_cuda(
+        unsafe { multi_stark_cuda_synchronize() },
+        "auxiliary LDE release",
+    );
     if memory_diagnostics_enabled() {
         eprintln!(
             "[multi-stark/cuda] host LDE offload: device={} height={} width={} added_bits={added_bits} input_bytes={input_bytes} output_bytes={output_bytes} admitted_bytes={required_bytes} upload_compute_s={compute_seconds:.6} download_s={download_seconds:.6} total_s={:.6}",
@@ -190,7 +193,7 @@ impl RestoreDevice {
     fn capture() -> Self {
         let mut device = 0;
         check_cuda(
-            unsafe { cudaGetDevice(&mut device) },
+            unsafe { multi_stark_cuda_get_device(&mut device) },
             "auxiliary LDE caller device",
         );
         Self(device)
@@ -200,14 +203,14 @@ impl RestoreDevice {
 impl Drop for RestoreDevice {
     fn drop(&mut self) {
         // CUDA device selection is thread-local; no handle changes ownership.
-        let _ = unsafe { cudaSetDevice(self.0) };
+        let _ = unsafe { multi_stark_cuda_set_device(self.0) };
     }
 }
 
 unsafe extern "C" {
-    fn cudaGetDevice(device: *mut i32) -> i32;
-    fn cudaSetDevice(device: i32) -> i32;
-    fn cudaDeviceSynchronize() -> i32;
+    fn multi_stark_cuda_get_device(device: *mut i32) -> i32;
+    fn multi_stark_cuda_set_device(device: i32) -> i32;
+    fn multi_stark_cuda_synchronize() -> i32;
 }
 
 #[cfg(test)]
@@ -242,7 +245,10 @@ mod tests {
         let result = first.try_coset_lde(&matrix, 2, Goldilocks::ONE).unwrap();
         assert!(result.values.iter().all(|&value| value == Goldilocks::ONE));
         let mut current = -1;
-        check_cuda(unsafe { cudaGetDevice(&mut current) }, "test caller device");
+        check_cuda(
+            unsafe { multi_stark_cuda_get_device(&mut current) },
+            "test caller device",
+        );
         assert_eq!(current, 0);
     }
 }
