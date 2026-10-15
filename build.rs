@@ -1,271 +1,183 @@
-//! CUDA build isolation.
-//!
-//! This build script is deliberately a no-op unless Cargo enables the
-//! `cuda` feature. Normal CPU builds therefore need neither nvcc nor CUDA
-//! headers/libraries.
+//! CUDA compilation is opt-in; CPU builds need no CUDA toolchain.
 
 use std::env;
-use std::path::{Path, PathBuf};
+use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 use std::process::Command;
 
-fn main() {
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=cuda/kernels.cu");
-    println!("cargo:rerun-if-changed=cuda/goldilocks.cuh");
-    println!("cargo:rerun-if-changed=cuda/sppark_ntt.cu");
-    println!("cargo:rerun-if-changed=cuda/ntt.cuh");
-    if let Some(root) = env::var_os("DEP_SPPARK_ROOT") {
-        let root = PathBuf::from(root);
-        println!("cargo:rerun-if-changed={}", root.join("ntt").display());
-        println!("cargo:rerun-if-changed={}", root.join("util").display());
-    }
-    println!("cargo:rerun-if-env-changed=NVCC");
-    println!("cargo:rerun-if-env-changed=CUDA_HOME");
-    println!("cargo:rerun-if-env-changed=CUDA_PATH");
-    println!("cargo:rerun-if-env-changed=MULTI_STARK_CUDA_ARCHS");
+const CUDA_EXPORTS: &str = r"{
+    global: multi_stark_*; cuda_available; drop_gpu_ptr_t; clone_gpu_ptr_t;
+            drop_error_message; sppark_cuda_fail;
+    local: *;
+};";
 
+fn main() {
+    for path in ["build.rs", "cuda"] {
+        println!("cargo:rerun-if-changed={path}");
+    }
+    for variable in [
+        "NVCC",
+        "NVCC_CCBIN",
+        "NVCC_PREPEND_FLAGS",
+        "NVCC_APPEND_FLAGS",
+        "CUDA_HOME",
+        "CUDA_PATH",
+        "MULTI_STARK_CUDA_ARCHS",
+    ] {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
     if env::var_os("CARGO_FEATURE_CUDA").is_none() {
         return;
     }
-
+    assert!(
+        env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
+            && env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64"),
+        "the CUDA backend requires Linux x86_64"
+    );
     let include = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("cuda");
     println!("cargo:include={}", include.display());
-
-    assert_eq!(
-        env::var("CARGO_CFG_TARGET_OS").as_deref(),
-        Ok("linux"),
-        "the first-party CUDA backend currently supports Linux targets only"
-    );
-    assert_eq!(
-        env::var("CARGO_CFG_TARGET_ARCH").as_deref(),
-        Ok("x86_64"),
-        "the first-party CUDA backend currently supports x86_64 targets only"
-    );
-
-    let nvcc = nvcc_path();
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo did not set OUT_DIR"));
-    let library = out_dir.join("libmulti_stark_cuda.a");
-    let architectures = cuda_architectures(&nvcc);
-
-    // sppark's units are compiled first, on their own, without the
-    // `_GNU_SOURCE` undefinition below: its runtime includes libstdc++'s
-    // `<mutex>`, whose GNU-only pthread functions that flag would hide. Their
-    // objects then join the archive.
-    let mut sppark_objects = Vec::new();
-    {
-        let root = PathBuf::from(
-            env::var_os("DEP_SPPARK_ROOT").expect("sppark's build script exports DEP_SPPARK_ROOT"),
-        );
-        for (source, object) in [
-            (PathBuf::from("cuda/sppark_ntt.cu"), "sppark_ntt.o"),
-            (root.join("util/all_gpus.cpp"), "sppark_all_gpus.o"),
-        ] {
-            let object = out_dir.join(object);
-            let mut compile = Command::new(&nvcc);
-            compile
-                .arg("-c")
-                .arg("--std=c++17")
-                .arg("--cudart=static")
-                .arg("--default-stream=per-thread")
-                .arg("-O3")
-                .arg("-lineinfo")
-                .arg("--compiler-options=-fPIC")
-                .arg(format!("-I{}", root.display()))
-                .arg("-Icuda")
-                .arg("-DFEATURE_GOLDILOCKS")
-                .arg("-o")
-                .arg(&object)
-                .arg(&source);
-            for architecture in &architectures {
-                compile.arg(format!(
-                    "-gencode=arch=compute_{architecture},code=sm_{architecture}"
-                ));
-            }
-            let status = compile
-                .status()
-                .unwrap_or_else(|error| panic!("failed to execute {:?}: {error}", nvcc));
-            assert!(
-                status.success(),
-                "nvcc failed on {} with status {status}",
-                source.display()
-            );
-            sppark_objects.push(object);
-        }
+    let root = PathBuf::from(env::var_os("DEP_SPPARK_ROOT").expect("sppark source directory"));
+    for directory in ["ff", "ntt", "util"] {
+        println!("cargo:rerun-if-changed={}", root.join(directory).display());
     }
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo did not set OUT_DIR"));
+    let library = out.join("libmulti_stark_cuda.so");
+    let exports = out.join("exports.map");
+    std::fs::write(&exports, CUDA_EXPORTS).expect("write CUDA export map");
+    let nvcc = nvcc_path();
+    let architectures = cuda_architectures(&nvcc);
+    let compiler = || cuda_command(&nvcc, &architectures);
 
-    let mut command = Command::new(&nvcc);
-    command
-        .arg("--lib")
-        .arg("--std=c++17")
-        .arg("--cudart=static")
-        .arg("--default-stream=per-thread")
-        .arg("-O3")
-        .arg("-lineinfo")
-        .arg("--compiler-options=-fPIC")
-        // Host code is linked by whatever toolchain links the final binary,
-        // and Lean's bundled clang links against a sysroot older than
-        // glibc 2.38. g++ predefines _GNU_SOURCE, under which glibc 2.38+
-        // renames strtol and friends to their C23 variants (__isoc23_*),
-        // which that sysroot lacks. The POSIX and default feature sets keep
-        // everything the kernels' host code uses (clock_gettime, pthreads)
-        // under the plain names.
-        .arg("--compiler-options=-U_GNU_SOURCE,-D_DEFAULT_SOURCE,-D_POSIX_C_SOURCE=200809L")
+    let objects = [
+        (PathBuf::from("cuda/sppark_ntt.cu"), "sppark_ntt.o"),
+        (root.join("util/all_gpus.cpp"), "sppark_all_gpus.o"),
+    ]
+    .map(|(source, name)| {
+        let object = out.join(name);
+        run(compiler()
+            .arg("-c")
+            .arg(format!("-I{}", root.display()))
+            .args(["-Icuda", "-DFEATURE_GOLDILOCKS"])
+            .arg("-o")
+            .arg(&object)
+            .arg(source));
+        object
+    });
+
+    // C23 conversion redirects require newer libc symbols. sppark's units
+    // retain _GNU_SOURCE because libstdc++'s <mutex> needs GNU pthread APIs.
+    // The private C++ runtime and unwinder prevent interposition by Lean.
+    run(compiler()
+        .args([
+            "--shared",
+            "--compiler-options=-U_GNU_SOURCE,-D_DEFAULT_SOURCE,-D_POSIX_C_SOURCE=200809L",
+            "--compiler-options=-static-libstdc++,-static-libgcc",
+        ])
+        .arg(format!(
+            "-Xlinker=-z,defs,-soname,libmulti_stark_cuda.so,--version-script,{}",
+            exports.display()
+        ))
         .arg("-o")
         .arg(&library)
-        .arg("cuda/kernels.cu");
-    command.args(&sppark_objects);
+        .arg("cuda/kernels.cu")
+        .args(objects));
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=dylib=multi_stark_cuda");
+    println!("cargo:library={}", library.display());
+}
 
-    for architecture in &architectures {
+fn cuda_command(nvcc: &OsStr, architectures: &[String]) -> Command {
+    let mut command = Command::new(nvcc);
+    command.args([
+        "--std=c++17",
+        "--cudart=static",
+        "--default-stream=per-thread",
+        "-O3",
+        "-lineinfo",
+        "--compiler-options=-fPIC",
+    ]);
+    // Native cubins avoid PTX newer than the installed driver's JIT.
+    for architecture in architectures {
         command.arg(format!(
             "-gencode=arch=compute_{architecture},code=sm_{architecture}"
         ));
     }
-    // Emit native cubins only. A toolkit can produce PTX newer than the
-    // installed driver understands even when both support the GPU's native
-    // ISA (for example nvcc 13.3 with a CUDA-13.2-capable production
-    // driver). In that case the runtime may select the incompatible PTX and
-    // reject an otherwise usable exact-architecture cubin with error 222.
-
-    let status = command.status().unwrap_or_else(|error| {
-        panic!(
-            "failed to execute {:?}: {error}; install the CUDA toolkit or set NVCC",
-            nvcc
-        )
-    });
-    assert!(status.success(), "nvcc failed with status {status}");
-
-    println!("cargo:rustc-link-search=native={}", out_dir.display());
-    println!("cargo:rustc-link-lib=static=multi_stark_cuda");
-    // Bundle the CUDA runtime into Rust staticlib consumers as well as normal
-    // Cargo binaries. Dynamic native dependencies are not propagated through
-    // a Rust staticlib to a foreign final linker (for example, Lean/Lake),
-    // which otherwise leaves the CUDA registration and runtime symbols
-    // unresolved. This remains entirely behind the `cuda` feature.
-    println!("cargo:rustc-link-lib=static=cudart_static");
-    println!("cargo:rustc-link-lib=dylib=dl");
-    println!("cargo:rustc-link-lib=dylib=rt");
-    println!("cargo:rustc-link-lib=dylib=pthread");
-    println!("cargo:rustc-link-lib=dylib=stdc++");
-
-    for directory in cuda_library_directories(&nvcc) {
-        if directory.is_dir() {
-            println!("cargo:rustc-link-search=native={}", directory.display());
-        }
-    }
+    command
 }
 
-fn nvcc_path() -> std::ffi::OsString {
-    if let Some(nvcc) = env::var_os("NVCC") {
-        return nvcc;
-    }
-    if let Some(root) = env::var_os("CUDA_HOME").or_else(|| env::var_os("CUDA_PATH")) {
-        let candidate = PathBuf::from(root).join("bin/nvcc");
-        if candidate.is_file() {
-            return candidate.into_os_string();
-        }
-    }
-    "nvcc".into()
+fn run(command: &mut Command) {
+    let status = command
+        .status()
+        .unwrap_or_else(|error| panic!("{command:?}: {error}"));
+    assert!(status.success(), "{command:?} failed with {status}");
 }
 
-fn cuda_architectures(nvcc: &std::ffi::OsStr) -> Vec<String> {
-    let supported = supported_architectures(nvcc);
-    let configured = env::var("MULTI_STARK_CUDA_ARCHS").ok().map_or_else(
-        || {
-            let preferred = ["80", "86", "89", "90", "100", "120"];
-            let selected = preferred
-                .into_iter()
-                .filter(|architecture| supported.iter().any(|item| item == architecture))
-                .collect::<Vec<_>>();
-            let defaults = if selected.is_empty() {
-                detect_nvidia_architectures().unwrap_or_else(|| "80".to_owned())
-            } else {
-                selected.join(",")
-            };
-            (defaults, false)
-        },
-        |value| (value, true),
-    );
-    let (configured, explicitly_configured) = configured;
-    let architectures: Vec<_> = configured
+fn nvcc_path() -> OsString {
+    env::var_os("NVCC")
+        .or_else(|| {
+            let root = env::var_os("CUDA_HOME").or_else(|| env::var_os("CUDA_PATH"))?;
+            let path = PathBuf::from(root).join("bin/nvcc");
+            path.is_file().then(|| path.into_os_string())
+        })
+        .unwrap_or_else(|| "nvcc".into())
+}
+
+fn cuda_architectures(nvcc: &OsStr) -> Vec<String> {
+    let output = command_output(nvcc, &["--list-gpu-code"]).unwrap_or_default();
+    let supported = String::from_utf8_lossy(&output);
+    let supported: Vec<_> = supported
+        .split_whitespace()
+        .filter_map(|code| code.strip_prefix("sm_"))
+        .filter(|code| code.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    let selected = env::var("MULTI_STARK_CUDA_ARCHS")
+        .ok()
+        .or_else(detect_nvidia_architectures)
+        .expect("no NVIDIA GPU detected; set MULTI_STARK_CUDA_ARCHS for the target GPU");
+    let architectures: Vec<_> = selected
         .split(',')
         .map(str::trim)
-        .filter(|architecture| !architecture.is_empty())
-        .map(|architecture| {
-            assert!(
-                (2..=3).contains(&architecture.len())
-                    && architecture.chars().all(|character| character.is_ascii_digit()),
-                "invalid CUDA architecture {architecture:?}; expected comma-separated numbers such as 80,90"
-            );
-            assert!(
-                !explicitly_configured
-                    || supported.is_empty()
-                    || supported.iter().any(|item| item == architecture),
-                "nvcc does not support CUDA architecture sm_{architecture}"
-            );
-            architecture.to_owned()
-        })
+        .filter(|arch| !arch.is_empty())
+        .map(str::to_owned)
         .collect();
     assert!(
         !architectures.is_empty(),
-        "MULTI_STARK_CUDA_ARCHS must contain at least one architecture"
+        "MULTI_STARK_CUDA_ARCHS must not be empty"
     );
+    for arch in &architectures {
+        assert!(
+            (2..=3).contains(&arch.len()) && arch.chars().all(|c| c.is_ascii_digit()),
+            "invalid CUDA architecture {arch:?}; expected numbers such as 80,90"
+        );
+        assert!(
+            supported.is_empty() || supported.contains(&arch.as_str()),
+            "nvcc does not support CUDA architecture sm_{arch}"
+        );
+    }
     architectures
 }
 
-fn supported_architectures(nvcc: &std::ffi::OsStr) -> Vec<String> {
-    let Ok(output) = Command::new(nvcc).arg("--list-gpu-code").output() else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .filter_map(|code| code.strip_prefix("sm_"))
-        .filter(|code| code.chars().all(|character| character.is_ascii_digit()))
-        .map(str::to_owned)
-        .collect()
+fn command_output(program: impl AsRef<OsStr>, args: &[&str]) -> Option<Vec<u8>> {
+    let output = Command::new(program).args(args).output().ok()?;
+    output.status.success().then_some(output.stdout)
 }
 
-/// Detect the architecture of the installed GPU when building on the target
-/// machine. This avoids requiring users to translate `nvidia-smi`'s `12.0`
-/// compute capability into nvcc's `sm_120` spelling. Cross builds and hosts
-/// without a visible GPU retain the portable sm_80 default and can still set
-/// `MULTI_STARK_CUDA_ARCHS` explicitly.
 fn detect_nvidia_architectures() -> Option<String> {
-    let output = Command::new("nvidia-smi")
-        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let capabilities = String::from_utf8(output.stdout).ok()?;
-    let mut architectures = capabilities
+    let output = command_output(
+        "nvidia-smi",
+        &["--query-gpu=compute_cap", "--format=csv,noheader"],
+    )?;
+    let capabilities = String::from_utf8(output).ok()?;
+    let mut architectures: Vec<_> = capabilities
         .lines()
-        .map(|capability| {
-            capability
-                .chars()
-                .filter(|character| character.is_ascii_digit())
+        .map(|line| {
+            line.chars()
+                .filter(|c| c.is_ascii_digit())
                 .collect::<String>()
         })
-        .filter(|architecture| !architecture.is_empty())
-        .collect::<Vec<_>>();
+        .filter(|arch| !arch.is_empty())
+        .collect();
     architectures.sort_unstable();
     architectures.dedup();
     (!architectures.is_empty()).then(|| architectures.join(","))
-}
-
-fn cuda_library_directories(nvcc: &std::ffi::OsStr) -> Vec<PathBuf> {
-    let root = env::var_os("CUDA_HOME")
-        .or_else(|| env::var_os("CUDA_PATH"))
-        .map(PathBuf::from)
-        .or_else(|| {
-            let nvcc = Path::new(nvcc);
-            nvcc.is_absolute()
-                .then(|| nvcc.parent()?.parent().map(Path::to_path_buf))
-                .flatten()
-        })
-        .unwrap_or_else(|| PathBuf::from("/usr/local/cuda"));
-    vec![root.join("lib64"), root.join("targets/x86_64-linux/lib")]
 }
