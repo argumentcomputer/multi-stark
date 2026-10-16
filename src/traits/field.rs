@@ -7,6 +7,7 @@ use core::iter::Iterator;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use p3_matrix::Matrix;
+use p3_maybe_rayon::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -200,30 +201,60 @@ pub fn flatten_to_base<F: Field, EF: ExtensionOf<F>>(
 }
 
 /// Batch inversion by Montgomery's trick: 3 multiplications per element
-/// and a single field inversion. Zero entries are passed through as zero
-/// (matching the reference semantics the lookup witness relies on).
+/// and one field inversion per chunk, chunks inverted in parallel.
+///
+/// # Panics
+///
+/// Panics if any input is zero.
 pub fn batch_inverse<F: Field>(values: &[F]) -> Vec<F> {
-    let mut prefix = Vec::with_capacity(values.len());
-    let mut acc = F::ONE;
-    for &v in values {
-        prefix.push(acc);
-        if !v.is_zero() {
-            acc *= v;
-        }
-    }
-    let mut inv = acc.inverse();
-    let mut out = vec![F::ZERO; values.len()];
-    for i in (0..values.len()).rev() {
-        if !values[i].is_zero() {
-            out[i] = prefix[i] * inv;
-            inv *= values[i];
-        }
-    }
+    const CHUNK: usize = 1 << 12;
+    let mut out = F::zero_vec(values.len());
+    out.par_chunks_mut(CHUNK)
+        .zip(values.par_chunks(CHUNK))
+        .for_each(|(out, values)| batch_inverse_chunk(values, out));
     out
+}
+
+fn batch_inverse_chunk<F: Field>(values: &[F], out: &mut [F]) {
+    let mut acc = F::ONE;
+    for (slot, &v) in out.iter_mut().zip(values) {
+        *slot = acc;
+        acc *= v;
+    }
+    assert!(!acc.is_zero(), "batch_inverse: zero input");
+    let mut inv = acc.inverse();
+    for i in (0..values.len()).rev() {
+        out[i] *= inv;
+        inv *= values[i];
+    }
 }
 
 /// Canonical integer access for byte gadgets.
 pub trait PrimeField: Field {
     fn canonical_u64(self) -> Option<u64>;
     fn modulus_u64() -> Option<u64>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p3_goldilocks::Goldilocks;
+
+    #[test]
+    fn batch_inverse_matches_elementwise_inversion_across_chunks() {
+        let values: Vec<Goldilocks> = (1..=10_000u64)
+            .map(|i| p3_field::PrimeCharacteristicRing::from_u64(i * 7919 + 3))
+            .collect();
+        let inverses = batch_inverse(&values);
+        for (v, inv) in values.iter().zip(&inverses) {
+            assert_eq!(*v * *inv, Goldilocks::ONE);
+        }
+        assert!(batch_inverse::<Goldilocks>(&[]).is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "zero input")]
+    fn batch_inverse_rejects_a_zero_input() {
+        batch_inverse(&[Goldilocks::ONE, Goldilocks::ZERO, Goldilocks::TWO]);
+    }
 }
