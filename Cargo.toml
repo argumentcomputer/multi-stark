@@ -42,6 +42,7 @@ optional = true
 features = ["cuda"]
 
 [dev-dependencies]
+blake3 = "1"
 criterion = "0.5"
 p3-baby-bear = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
 rand = "0.10"

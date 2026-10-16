@@ -15,13 +15,13 @@
 //! ```
 
 use bincode::{config::standard, serde::encode_to_vec};
-use multi_stark::config::StarkGenericConfig;
+use multi_stark::config::ProofConfig;
+use multi_stark::traits::{OpenedValues, Pcs as PcsTrait};
 use multi_stark::types::{
     Challenger, Commitment, CommitmentParameters, Domain, ExtVal, FriParameters,
-    GoldilocksBlake3Config, Pcs, PcsProof, ProverData, Val,
+    GoldilocksBlake3Config, PcsProof, ProverData, Val,
 };
 use p3_challenger::{CanObserve, FieldChallenger};
-use p3_commit::{OpenedValues, Pcs as PcsTrait};
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::dense::RowMajorMatrix;
 
@@ -52,8 +52,7 @@ fn main() {
     let degree = 1usize << log_degree;
     let num_polys: usize = 1;
 
-    let domain: Domain =
-        <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(pcs, degree);
+    let domain: Domain = PcsTrait::natural_domain_for_degree(pcs, degree);
 
     // Simple non-trivial evaluations: entry (i, j) = i * num_polys + j.
     let n = u32::try_from(degree * num_polys).unwrap();
@@ -63,7 +62,7 @@ fn main() {
     // The PCS computes a coset LDE (blowup × domain size evaluations), then
     // builds a Merkle tree over the extended rows. The root is the commitment.
     let (commitment, prover_data): (Commitment, ProverData) =
-        <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, [(domain, matrix)]);
+        PcsTrait::commit(pcs, vec![(domain, matrix)]);
     println!(
         "Committed {} polynomials over domain of size {} (degree ≤ {})",
         num_polys,
@@ -82,12 +81,11 @@ fn main() {
     // Open all polynomials at ζ and produce a FRI opening proof.
     // Input: for each committed batch, a list of opening-point vectors (one per matrix).
     // Output: claimed evaluations + proof.
-    let (opened_values, pcs_proof): (OpenedValues<_>, PcsProof) =
-        <Pcs as PcsTrait<ExtVal, Challenger>>::open(
-            pcs,
-            vec![(&prover_data, vec![vec![zeta; num_open]])],
-            &mut prover_challenger,
-        );
+    let (opened_values, pcs_proof): (OpenedValues<_>, PcsProof) = PcsTrait::open(
+        pcs,
+        vec![(&prover_data, vec![vec![zeta; num_open]])],
+        &mut prover_challenger,
+    );
     // opened_values[round][matrix_idx][point_idx] = Vec<ExtVal> (one per column)
     let evals_at_zeta = opened_values[0][0][0].clone();
     println!("Opened at ζ: {} polynomial values", evals_at_zeta.len());
@@ -107,7 +105,7 @@ fn main() {
     let verifier_zeta: ExtVal = verifier_challenger.sample_algebra_element();
     assert_eq!(verifier_zeta, zeta, "Fiat-Shamir transcript mismatch");
 
-    <Pcs as PcsTrait<ExtVal, Challenger>>::verify(
+    PcsTrait::verify(
         pcs,
         vec![(
             commitment,

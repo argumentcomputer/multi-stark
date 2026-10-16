@@ -10,7 +10,7 @@ use p3_symmetric::MerkleCap;
 use super::mmcs::CudaMmcsData;
 use super::{CudaLde, CudaMixedMerkleTree, device_memory_info};
 use crate::config::{Com, Domain, PcsData};
-use crate::types::{GoldilocksBlake3Config as Config, Pcs as CudaPcs, Val};
+use crate::types::{GoldilocksBlake3Config as Config, InnerPcs as CudaPcs, Val};
 use crate::witness::TraceSource;
 
 pub(crate) fn record_lde_spill(device: i32, bytes: usize) {

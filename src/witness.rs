@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use p3_field::Field;
+use crate::traits::Field;
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 /// A frozen source which reproduces the same canonical cells on every call.
