@@ -365,7 +365,9 @@ impl<SC: StarkGenericConfig> System<SC> {
             header.active == proof.active
                 && header.stage_1_trace == proof.commitments.stage_1_trace
                 && header.log_degrees == proof.log_degrees,
-            VerificationError::BatchShapeMismatch
+            VerificationError::BatchShapeMismatch;
+            shard,
+            "batch header does not match shard proof"
         );
         challenger.observe_field(Val::<SC>::from_usize(shard));
         let acc = checked_claims_accumulator::<SC>(
@@ -402,7 +404,10 @@ impl<SC: StarkGenericConfig> System<SC> {
         let BatchProof { preamble, proofs } = batch;
         ensure!(
             !preamble.headers.is_empty() && preamble.headers.len() == proofs.len(),
-            VerificationError::BatchShapeMismatch
+            VerificationError::BatchShapeMismatch;
+            header_count = preamble.headers.len(),
+            proof_count = proofs.len(),
+            "invalid batch header/proof counts"
         );
         let (challenger, lookup_argument_challenge, fingerprint_challenge) =
             self.batch_challenger(preamble);
