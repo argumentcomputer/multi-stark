@@ -37,10 +37,16 @@ host-matrix users and transfer-inclusive microbenchmarks.
 
 ## Build configuration
 
-By default, the build emits native cubins for the common architectures among
-`sm_80`, `sm_86`, `sm_89`, `sm_90`, `sm_100`, and `sm_120` that the installed
-`nvcc` reports as supported. Override the comma-separated list for smaller
-deployment artifacts:
+The `cuda` feature builds `libmulti_stark_cuda.so`. It exposes a C ABI and
+privately links the CUDA runtime, GNU C++ runtime, and exception unwinder.
+Cargo supplies its location when running tests or examples. Applications
+installed outside Cargo must package the library and set an appropriate
+runtime search path. A direct dependent's build script receives its path as
+`DEP_MULTI_STARK_CUDA_LIBRARY`.
+
+By default, the build detects installed GPUs with `nvidia-smi` and emits
+native cubins only for their distinct architectures. Set the comma-separated
+architecture list explicitly when cross-compiling or building without a GPU:
 
 ```sh
 MULTI_STARK_CUDA_ARCHS=80,90 \

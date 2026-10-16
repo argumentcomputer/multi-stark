@@ -71,7 +71,7 @@ fn goldilocks_quadratic_inverse_denominators(
         .collect()
 }
 
-pub trait CudaPcsDft<T: TwoAdicField>: TwoAdicSubgroupDft<T> {
+pub trait CudaPcsDft<T: TwoAdicField>: TwoAdicSubgroupDft<T> + Send + Sync + 'static {
     fn coset_lde_workspace_bytes(
         &self,
         height: usize,
@@ -88,6 +88,16 @@ pub trait CudaPcsDft<T: TwoAdicField>: TwoAdicSubgroupDft<T> {
         added_bits: usize,
         shift: T,
     ) -> CudaLde;
+
+    /// Computes canonical, bit-reversed host storage on an auxiliary device.
+    /// Returns `None` when no reserved device admits the complete transform;
+    /// failures after device admission propagate instead of retrying on CPU.
+    fn try_coset_lde_batch_host(
+        &self,
+        matrix: &RowMajorMatrix<T>,
+        added_bits: usize,
+        shift: T,
+    ) -> Option<RowMajorMatrix<T>>;
 }
 
 use p3_fri::{
@@ -170,18 +180,23 @@ fn select_gpu_items(
 
 type CosetLdeJob<F> = (usize, (TwoAdicMultiplicativeCoset<F>, RowMajorMatrix<F>));
 
-fn cpu_coset_lde_jobs<F>(
+fn host_coset_lde_jobs<F, Dft>(
+    dft: &Dft,
     jobs: Vec<CosetLdeJob<F>>,
     log_blowup: usize,
 ) -> Vec<(usize, RowMajorMatrix<F>)>
 where
     F: TwoAdicField + PrimeField64,
+    Dft: CudaPcsDft<F>,
     Radix2DitParallel<F>: TwoAdicSubgroupDft<F>,
 {
     let cpu = Radix2DitParallel::<F>::default();
     jobs.into_par_iter()
         .map(|(index, (domain, evaluations))| {
             let shift = F::GENERATOR / domain.shift();
+            if let Some(lde) = dft.try_coset_lde_batch_host(&evaluations, log_blowup, shift) {
+                return (index, lde);
+            }
             let mut lde = cpu
                 .coset_lde_batch(evaluations, log_blowup, shift)
                 .bit_reverse_rows()
@@ -862,7 +877,8 @@ where
                 let (aux_results, transient_results) = std::thread::scope(|scope| {
                     let aux_pool = std::sync::Arc::clone(&stage1_pool);
                     let cpu_task = scope.spawn(move || {
-                        aux_pool.install(|| cpu_coset_lde_jobs(transient_aux_jobs, log_blowup))
+                        aux_pool
+                            .install(|| host_coset_lde_jobs(dft, transient_aux_jobs, log_blowup))
                     });
                     let transient_started = std::time::Instant::now();
                     let transient_results = transient_jobs
@@ -894,12 +910,17 @@ where
                         height: evaluations.height() << log_blowup,
                     };
                     let pool = std::sync::Arc::clone(&stage1_pool);
+                    let deferred_dft = (*dft).clone();
                     let worker = std::thread::spawn(move || {
                         pool.install(|| {
-                            cpu_coset_lde_jobs(vec![(index, (domain, evaluations))], log_blowup)
-                                .pop()
-                                .expect("deferred LDE worker returned no matrix")
-                                .1
+                            host_coset_lde_jobs(
+                                &deferred_dft,
+                                vec![(index, (domain, evaluations))],
+                                log_blowup,
+                            )
+                            .pop()
+                            .expect("deferred LDE worker returned no matrix")
+                            .1
                         })
                     });
                     transient_ldes[index] = Some(lde);
@@ -911,7 +932,7 @@ where
                         .filter(|matrix| matrix.is_some())
                         .count();
                     eprintln!(
-                        "[multi-stark/cuda] stage1 deferred CPU LDE workers: {deferred_count} matrices on {stage1_threads} threads"
+                        "[multi-stark/cuda] stage1 deferred host LDE workers: {deferred_count} matrices on {stage1_threads} threads"
                     );
                 }
                 let mut host_digest_groups = Vec::new();
@@ -921,7 +942,7 @@ where
                     let remaining_pool = std::sync::Arc::clone(&stage1_pool);
                     let cpu_task = scope.spawn(move || {
                         remaining_pool
-                            .install(|| cpu_coset_lde_jobs(remaining_cpu_jobs, log_blowup))
+                            .install(|| host_coset_lde_jobs(dft, remaining_cpu_jobs, log_blowup))
                     });
                     if let Some(height) = transient_height {
                         let indices = &height_indices[&height];
@@ -976,7 +997,7 @@ where
                 }
                 if crate::cuda::memory_diagnostics_enabled() {
                     eprintln!(
-                        "[multi-stark/cuda] stage1 CPU LDE: {:.3}s",
+                        "[multi-stark/cuda] stage1 host LDE: {:.3}s",
                         cpu_started.elapsed().as_secs_f64()
                     );
                 }
@@ -1020,22 +1041,15 @@ where
                 }
                 return committed;
             }
-            let cpu = Radix2DitParallel::<Val>::default();
-            let ldes = tracing::info_span!("cuda/cpu_lde_fallback").in_scope(|| {
-                evaluations
-                    .into_par_iter()
-                    .map(|(domain, evals)| {
-                        let shift = Val::GENERATOR / domain.shift();
-                        let mut lde = cpu
-                            .coset_lde_batch(evals, log_blowup, shift)
-                            .bit_reverse_rows()
-                            .to_row_major_matrix();
-                        lde.values.par_iter_mut().for_each(|value| {
-                            *value = Val::from_u64(value.as_canonical_u64());
-                        });
-                        lde
-                    })
-                    .collect()
+            let ldes = tracing::info_span!("cuda/host_lde_fallback").in_scope(|| {
+                host_coset_lde_jobs(
+                    dft,
+                    evaluations.into_iter().enumerate().collect(),
+                    log_blowup,
+                )
+                .into_iter()
+                .map(|(_, lde)| lde)
+                .collect()
             });
             return tracing::info_span!("cuda/cpu_mmcs_fallback")
                 .in_scope(|| self.mmcs.commit_cpu_storage(ldes));
@@ -2323,6 +2337,59 @@ mod tests {
     use super::*;
     use crate::types::ExtVal;
     use p3_field::Field;
+
+    #[test]
+    #[ignore = "requires two CUDA devices"]
+    fn auxiliary_host_ldes_preserve_matrix_order_cosets_and_canonical_words() {
+        let cpu_dft = crate::cuda::CudaDft::new(0).with_auxiliary_devices(&[]);
+        let gpu_dft = cpu_dft.clone().with_auxiliary_devices(&[1]);
+        let representatives = [
+            0,
+            1,
+            Goldilocks::ORDER_U64 - 1,
+            Goldilocks::ORDER_U64,
+            u64::MAX,
+        ];
+        let jobs = [
+            (7, 10, 33, 5),
+            (2, 11, 17, 1),
+            (19, 7, 3, 11),
+            (5, 12, 9, 7),
+            (11, 15, 129, 13),
+        ]
+        .map(|(index, log_height, width, shift)| {
+            let domain =
+                TwoAdicMultiplicativeCoset::new(Goldilocks::from_u64(shift), log_height).unwrap();
+            let values = (0..(1 << log_height) * width)
+                .map(|i| Goldilocks::new(representatives[(i + index) % representatives.len()]))
+                .collect();
+            (index, (domain, RowMajorMatrix::new(values, width)))
+        })
+        .to_vec();
+        for added_bits in [0, 1, 2] {
+            let expected = host_coset_lde_jobs(&cpu_dft, jobs.clone(), added_bits);
+            let actual = host_coset_lde_jobs(&gpu_dft, jobs.clone(), added_bits);
+            assert_eq!(
+                actual.iter().map(|(index, _)| *index).collect_vec(),
+                vec![7, 2, 19, 5, 11]
+            );
+            assert_eq!(actual, expected);
+            for (_, matrix) in actual {
+                assert!(matrix.values.iter().all(|&value| {
+                    // SAFETY: Goldilocks is transparent over a u64; inspect
+                    // physical storage without a canonicalizing accessor.
+                    let raw = unsafe { core::mem::transmute::<Goldilocks, u64>(value) };
+                    raw < Goldilocks::ORDER_U64
+                }));
+            }
+        }
+        let (_, (domain, matrix)) = &jobs[0];
+        assert!(
+            gpu_dft
+                .try_coset_lde_batch_host(matrix, 2, Goldilocks::GENERATOR / domain.shift())
+                .is_some()
+        );
+    }
 
     #[test]
     fn quadratic_norm_inverses_match_extension_inverses() {
