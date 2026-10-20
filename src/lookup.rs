@@ -908,6 +908,22 @@ pub struct LookupRowMut<'a, F> {
 }
 
 impl<F: Field> LookupRowMut<'_, F> {
+    /// Returns mutable views of a slot's multiplicity and full argument buffer.
+    ///
+    /// This allows a witness generator to populate arguments directly, without
+    /// first collecting them into a temporary slice. Fresh builder storage is
+    /// zeroed; revisiting a slot preserves its existing contents. A negative
+    /// multiplicity has "pull" semantics, as in [`Self::pull`].
+    ///
+    /// # Panics
+    /// Panics if `slot` is outside this row's lookup slots.
+    #[inline]
+    pub fn slot_mut(&mut self, slot: usize) -> (&mut F, &mut [F]) {
+        let start = self.arg_offsets[slot];
+        let end = self.arg_offsets[slot + 1];
+        (&mut self.multiplicities[slot], &mut self.args[start..end])
+    }
+
     /// Writes lookup slot `slot` with "push" semantics (adds a claim).
     /// Fewer arguments than the slot's width leave zero padding.
     ///
@@ -1307,6 +1323,43 @@ mod tests {
         assert_eq!(a.arg_offsets, b.arg_offsets);
         assert_eq!(a.multiplicities, b.multiplicities);
         assert_eq!(a.args, b.args);
+    }
+
+    #[test]
+    fn direct_slots_match_from_rows() {
+        let f = Val::from_u32;
+        let expected = LookupValues::from_rows(vec![
+            vec![
+                Lookup::push(f(2), vec![]),
+                Lookup::pull(f(3), vec![f(4), f(5)]),
+            ],
+            vec![Lookup::empty(), Lookup::push(f(6), vec![f(7)])],
+        ]);
+        let mut builder = LookupValues::builder(2, &[0, 2]);
+        {
+            let mut rows = builder.rows_mut();
+            let (count, args) = rows[0].slot_mut(0);
+            assert_eq!(*count, Val::ZERO);
+            assert!(args.is_empty());
+            *count = f(2);
+            let (count, args) = rows[0].slot_mut(1);
+            *count = -f(3);
+            args.copy_from_slice(&[f(4), f(5)]);
+            // A second view exposes the existing buffer, without resetting it.
+            let (count, args) = rows[0].slot_mut(1);
+            assert_eq!(*count, -f(3));
+            assert_eq!(args, &[f(4), f(5)]);
+            let (count, args) = rows[1].slot_mut(1);
+            *count = f(6);
+            args[0] = f(7);
+            assert_eq!(args[1], Val::ZERO);
+        }
+        let actual = builder.finish();
+        assert_eq!(expected.height, actual.height);
+        assert_eq!(expected.num_lookups, actual.num_lookups);
+        assert_eq!(expected.arg_offsets, actual.arg_offsets);
+        assert_eq!(expected.multiplicities, actual.multiplicities);
+        assert_eq!(expected.args, actual.args);
     }
 
     #[test]
