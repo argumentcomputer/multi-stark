@@ -13,16 +13,21 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # All runner families share this AVX-512 baseline. Explicit flags keep
+  # cached build scripts and proc macros compatible across Intel and AMD.
+  RUSTFLAGS: "-Ctarget-cpu=x86-64-v4 -Ctarget-feature=+avx512vbmi2,+gfni"
+
 jobs:
   linux-test:
-    runs-on: ubuntu-latest
+    runs-on: runs-on=${{ github.run_id }}-linux-test-${{ github.run_attempt }}/cpu=8/family=r7i+r8i+r7a+r8a/image=ubuntu26-full-x64/volume=100gb/extras=s3-cache
     steps:
+      - uses: runs-on/action@dfae4d98c5537a0dc7bbb7e6b9211f30ba240f6d # v2.4.0
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The action denies warnings through cargo's build.warnings, which
-      # covers clippy too, and leaves RUSTFLAGS unset so codegen comes from
-      # .cargo/config.toml.
+      # Deny warnings through cargo's build.warnings while preserving the
+      # shared AVX-512 baseline for both host and target code.
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
@@ -32,8 +37,9 @@ jobs:
           cargo nextest run --profile ci --cargo-profile dev-ci --workspace --features parallel
 
   lints:
-    runs-on: ubuntu-latest
+    runs-on: runs-on=${{ github.run_id }}-lints-${{ github.run_attempt }}/cpu=8/family=r7i+r8i+r7a+r8a/image=ubuntu26-full-x64/volume=100gb/extras=s3-cache
     steps:
+      - uses: runs-on/action@dfae4d98c5537a0dc7bbb7e6b9211f30ba240f6d # v2.4.0
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -80,9 +86,8 @@ jobs:
         run: |
           apt-get update
           apt-get install --yes --no-install-recommends curl
-      # Codegen comes from .cargo/config.toml, as in the other jobs. The action
-      # sets build.warnings=deny, which makes cargo fail on clippy warnings
-      # too, so the clippy command below does not repeat -D warnings.
+      # Use the same AVX-512 host baseline as the other jobs. The action
+      # sets build.warnings=deny, including clippy warnings.
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
       - name: Compile and lint CUDA targets
         run: cargo clippy --release --locked --all-targets --features parallel,cuda

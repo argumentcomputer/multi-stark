@@ -461,6 +461,7 @@ name = "multi-stark"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "blake3",
  "criterion",
  "itertools 0.14.0",
  "p3-air",

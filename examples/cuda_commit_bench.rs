@@ -9,10 +9,8 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use multi_stark::config::StarkGenericConfig;
-use multi_stark::types::{
-    Challenger, CommitmentParameters, ExtVal, FriParameters, GoldilocksBlake3Config, Pcs, Val,
-};
-use p3_commit::Pcs as PcsTrait;
+use multi_stark::traits::Pcs as PcsTrait;
+use multi_stark::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Pcs, Val};
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::dense::RowMajorMatrix;
 
@@ -63,14 +61,12 @@ fn main() {
                             Val::from_u64(value)
                         })
                         .collect();
-                    let domain = <Pcs as PcsTrait<ExtVal, Challenger>>::natural_domain_for_degree(
-                        pcs, height,
-                    );
+                    let domain = <Pcs as PcsTrait>::natural_domain_for_degree(pcs, height);
                     (domain, RowMajorMatrix::new(values, width))
                 })
                 .collect::<Vec<_>>();
             let started = Instant::now();
-            let (commitment, data) = <Pcs as PcsTrait<ExtVal, Challenger>>::commit(pcs, inputs);
+            let (commitment, data) = <Pcs as PcsTrait>::commit(pcs, inputs);
             let seconds = started.elapsed().as_secs_f64();
             if let Some(expected) = &expected {
                 assert_eq!(&commitment, expected);

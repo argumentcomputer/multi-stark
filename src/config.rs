@@ -1,70 +1,40 @@
-//! Generic STARK configuration.
-//!
-//! [`StarkGenericConfig`] bundles the three choices that instantiate the
-//! protocol: the polynomial commitment scheme, the challenge (extension)
-//! field, and the Fiat-Shamir challenger. The base field is determined
-//! transitively by the PCS ([`Val`]). The prover, verifier and system are
-//! generic over an implementation of this trait; see
-//! [`crate::types::GoldilocksBlake3Config`] for the reference instantiation.
+//! Proof-system configuration, parameter limits and backend acceleration hooks.
+//! Associated types use the interfaces in [`crate::traits`].
 
-use p3_challenger::{CanObserve, CanSample, FieldChallenger};
-use p3_commit::{Pcs, PolynomialSpace};
-use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{ExtensionField, Field, TwoAdicField};
+use crate::traits::{ExtensionOf, Field, Pcs, Transcript};
 
-/// The base field of a configuration, as determined by its PCS domain.
-pub type Val<SC> = <<<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Domain as PolynomialSpace>::Val;
+/// The base (trace) field of a configuration's PCS.
+pub type Val<SC> = <<SC as ProofConfig>::Pcs as Pcs>::F;
 
 /// The evaluation domain type of a configuration's PCS.
-pub type Domain<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Domain;
+pub type Domain<SC> = <<SC as ProofConfig>::Pcs as Pcs>::Domain;
 
 /// The commitment type of a configuration's PCS.
-pub type Com<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Commitment;
+pub type Com<SC> = <<SC as ProofConfig>::Pcs as Pcs>::Commitment;
 
 /// The opening proof type of a configuration's PCS.
-pub type PcsProof<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Proof;
+pub type PcsProof<SC> = <<SC as ProofConfig>::Pcs as Pcs>::Proof;
 
 /// The error type of a configuration's PCS.
-pub type PcsError<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::Error;
+pub type PcsError<SC> = <<SC as ProofConfig>::Pcs as Pcs>::Error;
 
 /// The prover data type of a configuration's PCS.
-pub type PcsData<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::ProverData;
+pub type PcsData<SC> = <<SC as ProofConfig>::Pcs as Pcs>::ProverData;
 
 /// Result produced by an accelerated lookup-trace constructor.
 pub type AcceleratedLookupTraces<SC> = (
-    Vec<p3_matrix::dense::RowMajorMatrix<<SC as StarkGenericConfig>::Challenge>>,
-    Vec<<SC as StarkGenericConfig>::Challenge>,
+    Vec<p3_matrix::dense::RowMajorMatrix<<SC as ProofConfig>::Challenge>>,
+    Vec<<SC as ProofConfig>::Challenge>,
 );
 
 /// Result produced by an accelerated lookup commitment.
-pub type AcceleratedLookupCommitment<SC> = (
-    Com<SC>,
-    PcsData<SC>,
-    Vec<<SC as StarkGenericConfig>::Challenge>,
-);
+pub type AcceleratedLookupCommitment<SC> =
+    (Com<SC>, PcsData<SC>, Vec<<SC as ProofConfig>::Challenge>);
 
 /// One circuit's inputs to an optional fused quotient commitment backend.
 /// Keeping this protocol-level description free of CUDA types lets the
 /// generic CPU prover remain entirely independent of accelerator support.
-pub struct QuotientCommitInput<'a, SC: StarkGenericConfig> {
+pub struct QuotientCommitInput<'a, SC: ProofConfig> {
     pub circuit: &'a crate::system::Circuit<Val<SC>>,
     pub lookup_publics: Vec<Val<SC>>,
     pub trace_domain: Domain<SC>,
@@ -78,58 +48,37 @@ pub struct QuotientCommitInput<'a, SC: StarkGenericConfig> {
 /// One circuit's inputs to an optional fused lookup construction and
 /// commitment backend. The committed stage-1 data lets an accelerator reuse
 /// the witness already uploaded for the main-trace commitment.
-pub struct LookupCommitInput<'a, SC: StarkGenericConfig> {
+pub struct LookupCommitInput<'a, SC: ProofConfig> {
     pub circuit: &'a crate::system::Circuit<Val<SC>>,
     pub lookup_values: &'a crate::lookup::LookupValues<Val<SC>>,
     pub preprocessed: Option<(&'a PcsData<SC>, usize)>,
     pub stage_1: (&'a PcsData<SC>, usize),
 }
 
-/// Evaluations of committed polynomials over a domain.
-pub type EvaluationsOnDomain<'a, SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
-    <SC as StarkGenericConfig>::Challenge,
-    <SC as StarkGenericConfig>::Challenger,
->>::EvaluationsOnDomain<'a>;
+/// The borrowed evaluations view of a configuration's PCS.
+pub type EvaluationsOnDomain<'a, SC> = <<SC as ProofConfig>::Pcs as Pcs>::Evaluations<'a>;
 
-/// Packed base-field values of a configuration.
+/// Packed (SIMD) representation of the base field.
 pub type PackedVal<SC> = <Val<SC> as Field>::Packing;
 
-/// Packed challenge-field values of a configuration.
-pub type PackedChallenge<SC> =
-    <<SC as StarkGenericConfig>::Challenge as ExtensionField<Val<SC>>>::ExtensionPacking;
+/// Packed (SIMD) representation of the challenge field.
+pub type PackedChallenge<SC> = <<SC as ProofConfig>::Challenge as ExtensionOf<Val<SC>>>::ExtPacking;
 
-/// Configuration of a STARK system.
-pub trait StarkGenericConfig {
+pub trait ProofConfig {
     /// The PCS used to commit to trace polynomials.
-    type Pcs: Pcs<Self::Challenge, Self::Challenger>;
-
-    /// The two-adic transform implementation used by prover-side polynomial
-    /// operations outside the PCS.
-    ///
-    /// Configurations should use the same implementation here and inside
-    /// their PCS. Keeping this transform explicit lets an accelerated backend
-    /// serve both paths without coupling the generic prover to a concrete CPU
-    /// DFT or changing the proof protocol.
-    type Dft: Clone + Default;
+    type Pcs: Pcs<F: Field, Challenge = Self::Challenge, Challenger = Self::Challenger>;
 
     /// The field from which random challenges are drawn. Its size bounds the
     /// Schwartz-Zippel terms of the soundness error, so it must be large
     /// enough for the target security level (see the soundness argument in
     /// the verifier module docs).
-    type Challenge: ExtensionField<Val<Self>>;
+    type Challenge: ExtensionOf<Val<Self>>;
 
     /// The Fiat-Shamir challenger.
-    type Challenger: FieldChallenger<Val<Self>> + CanObserve<Com<Self>> + CanSample<Self::Challenge>;
+    type Challenger: Transcript<F = Val<Self>, Challenge = Self::Challenge, Commitment = Com<Self>>;
 
     /// Returns a reference to the PCS.
     fn pcs(&self) -> &Self::Pcs;
-
-    /// Returns the transform implementation used by quotient polynomial
-    /// slicing and low-degree extension.
-    fn dft(&self) -> &Self::Dft
-    where
-        Val<Self>: TwoAdicField,
-        Self::Dft: TwoAdicSubgroupDft<Val<Self>>;
 
     /// Returns a fresh challenger.
     ///
@@ -141,12 +90,26 @@ pub trait StarkGenericConfig {
     /// `System::observe_shape`.
     fn initialise_challenger(&self) -> Self::Challenger;
 
-    /// The largest log2 polynomial degree the PCS can commit to and open.
-    ///
-    /// The verifier rejects proofs whose claimed trace degree, multiplied by
-    /// the quotient degree, exceeds this bound. For a FRI-based PCS this is
-    /// the field's two-adicity minus the log blowup.
+    /// Largest log2 length of a committed polynomial.
     fn max_log_degree(&self) -> usize;
+
+    /// Omit next-row openings of main/fixed matrices when no graph node reads
+    /// them. Configurations enabling this must bind it in their transcript tag.
+    fn omit_unused_next_row_openings(&self) -> bool {
+        false
+    }
+
+    /// Permit empty opening lists for inactive fixed matrices. The PCS must
+    /// authenticate matrix boundaries without opening their values. Bind this
+    /// choice in the transcript; row-batched Merkle commitments cannot use it.
+    fn omit_inactive_preprocessed_openings(&self) -> bool {
+        false
+    }
+
+    /// Largest log2 domain for computing the unsliced quotient.
+    fn max_log_quotient_domain(&self) -> usize {
+        self.max_log_degree()
+    }
 
     /// The largest quotient degree — as a multiple of the trace degree —
     /// that the PCS can serve trace evaluations for.
@@ -186,7 +149,8 @@ pub trait StarkGenericConfig {
         self.pcs().commit(
             evaluations
                 .into_iter()
-                .map(|(domain, trace)| (domain, trace.materialize())),
+                .map(|(domain, trace)| (domain, trace.materialize()))
+                .collect(),
         )
     }
 
@@ -271,3 +235,6 @@ pub trait StarkGenericConfig {
         None
     }
 }
+
+// Compatibility name for existing configurations.
+pub use ProofConfig as StarkGenericConfig;
