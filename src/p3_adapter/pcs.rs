@@ -288,10 +288,7 @@ fn lde_from_shifted_coefficients<F: TwoAdicField + Ord>(
         .to_row_major_matrix()
 }
 
-/// Reference form of `lde_from_shifted_coefficients` taking PLAIN
-/// coefficients: folds the `GENERATOR` shift in explicitly. Only the
-/// pinning tests need it; the prover gets the shift for free inside
-/// `shifted_quotient_slices`.
+/// The wrapped Plonky3 PCS, for the operations this type does not override.
 impl<F, EF, Challenger, Dft, ValMmcs, ChallengeMmcs, Inner> core::ops::Deref
     for FriPcs<F, EF, Challenger, Dft, ValMmcs, ChallengeMmcs, Inner>
 {
@@ -301,6 +298,10 @@ impl<F, EF, Challenger, Dft, ValMmcs, ChallengeMmcs, Inner> core::ops::Deref
     }
 }
 
+/// Reference form of `lde_from_shifted_coefficients` taking PLAIN
+/// coefficients: folds the `GENERATOR` shift in explicitly. Only the
+/// pinning tests need it; the prover gets the shift for free inside
+/// `shifted_quotient_slices`.
 #[cfg(test)]
 fn lde_from_coefficients<F: TwoAdicField + Ord>(
     dft: &impl TwoAdicSubgroupDft<F>,

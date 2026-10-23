@@ -463,6 +463,9 @@ impl ProofConfig for GoldilocksBlake3Config {
         alpha: ExtVal,
         constraint_count: usize,
     ) -> Option<Vec<ExtVal>> {
+        if !crate::cuda::quotient_graph_supported(&circuit.graph) {
+            return None;
+        }
         let main = stage_1.0.resident(stage_1.1)?;
         let s2 = stage_2.0.resident(stage_2.1)?;
         let prep = match preprocessed {
@@ -527,6 +530,15 @@ impl ProofConfig for GoldilocksBlake3Config {
     ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
         use crate::cuda::mmcs::CudaCommitMmcs;
 
+        // The fused path commits every circuit's quotient from one device
+        // batch, so one circuit without a device evaluation sends the whole
+        // batch through the per-circuit path.
+        if inputs
+            .iter()
+            .any(|input| !crate::cuda::quotient_graph_supported(&input.circuit.graph))
+        {
+            return None;
+        }
         let (_, total_device_bytes) =
             crate::cuda::device_memory_info(self.pcs.mmcs.cuda_device_id());
         let matrix_width = |data: &crate::config::PcsData<Self>, index: usize| {
@@ -1156,6 +1168,15 @@ impl CudaPcsDft<Val> for CudaDft {
         shift: Val,
     ) -> crate::cuda::CudaLde {
         self.coset_lde_batch_resident(matrix, added_bits, shift)
+    }
+
+    fn try_coset_lde_batch_host(
+        &self,
+        matrix: &RowMajorMatrix<Val>,
+        added_bits: usize,
+        shift: Val,
+    ) -> Option<RowMajorMatrix<Val>> {
+        self.try_auxiliary_coset_lde(matrix, added_bits, shift)
     }
 }
 

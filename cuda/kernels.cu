@@ -463,11 +463,11 @@ struct ResidentMixedMerkleTree {
     }
 };
 
-// Large pageable traces are uploaded through a few persistent pinned staging
-// buffers rather than pinned in place: registering a multi-gigabyte host
+// Large pageable matrices use a few persistent pinned staging buffers
+// rather than being pinned in place: registering a multi-gigabyte host
 // buffer walks every page and unregistering walks it again, while a staged
 // copy costs one host memcpy per chunk. Slots are leased under a mutex and
-// callers wait for a free one, which bounds concurrent uploads to the slot
+// callers wait for a free one, which bounds concurrent transfers to the slot
 // count (the PCIe link is shared anyway).
 // A slot is a ring of chunks, each with the event of its last transfer, so
 // the host copy of one chunk overlaps the DMA of the chunks before it.
@@ -481,52 +481,10 @@ bool upload_staging_in_use[MAX_CUDA_DEVICES][UPLOAD_STAGING_SLOTS] = {{false}};
 pthread_mutex_t upload_staging_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t upload_staging_cond = PTHREAD_COND_INITIALIZER;
 
-// One thread copies into pinned memory at a fraction of the PCIe rate, so a
-// serial copy, not the DMA, would bound a staged upload; large chunks are
-// copied by a few threads.
-struct MemcpyPart {
-    unsigned char* destination;
-    const unsigned char* source;
-    size_t bytes;
-};
-
-void* memcpy_part(void* argument) {
-    const auto* part = static_cast<const MemcpyPart*>(argument);
-    memcpy(part->destination, part->source, part->bytes);
-    return nullptr;
-}
-
-// pthreads rather than std::thread: the executable is linked by the Lean
-// toolchain without the C++ runtime library.
-void parallel_memcpy(void* destination, const void* source, size_t bytes) {
-    constexpr size_t THREADS = 4;
-    constexpr size_t MIN_PARALLEL = size_t(8) << 20;
-    if (bytes < MIN_PARALLEL) {
-        memcpy(destination, source, bytes);
-        return;
-    }
-    const size_t part = (bytes + THREADS - 1) / THREADS;
-    auto* dst = static_cast<unsigned char*>(destination);
-    const auto* src = static_cast<const unsigned char*>(source);
-    MemcpyPart parts[THREADS];
-    pthread_t workers[THREADS];
-    bool started[THREADS] = {false};
-    for (size_t t = 1; t < THREADS; ++t) {
-        const size_t offset = t * part;
-        if (offset >= bytes) break;
-        parts[t] = {dst + offset, src + offset, std::min(part, bytes - offset)};
-        started[t] = pthread_create(&workers[t], nullptr, memcpy_part, &parts[t]) == 0;
-        if (!started[t]) memcpy_part(&parts[t]);
-    }
-    memcpy(dst, src, std::min(part, bytes));
-    for (size_t t = 1; t < THREADS; ++t) {
-        if (started[t]) pthread_join(workers[t], nullptr);
-    }
-}
-
-// Copies `bytes` of pageable host memory to the device on the per-thread
-// stream through a leased staging slot; returns with the copy complete.
-cudaError_t staged_upload(void* device, const void* host, size_t bytes) {
+// Both directions share the per-device ring. Every event and host copy has
+// completed before the slot is released to a caller on another thread.
+cudaError_t staged_transfer(void* destination, const void* source, size_t bytes,
+                            bool upload) {
     const int device_index = current_device_index();
     cudaError_t status = cudaSuccess;
     uint64_t** slots = upload_staging[device_index];
@@ -553,26 +511,57 @@ cudaError_t staged_upload(void* device, const void* host, size_t bytes) {
         for (size_t i = 0; status == cudaSuccess && i < UPLOAD_STAGING_RING; ++i) {
             status = cudaEventCreateWithFlags(&events[i], cudaEventDisableTiming);
         }
+        if (status != cudaSuccess) {
+            for (size_t i = 0; i < UPLOAD_STAGING_RING; ++i) {
+                if (events[i]) cudaEventDestroy(events[i]);
+                events[i] = nullptr;
+            }
+            if (slots[slot]) cudaFreeHost(slots[slot]);
+            slots[slot] = nullptr;
+        }
     }
     pthread_mutex_unlock(&upload_staging_mutex);
     auto* staging = reinterpret_cast<unsigned char*>(slots[slot]);
     if (status == cudaSuccess) {
-        const auto* source = static_cast<const unsigned char*>(host);
-        auto* target = static_cast<unsigned char*>(device);
+        const auto* input = static_cast<const unsigned char*>(source);
+        auto* output = static_cast<unsigned char*>(destination);
+        if (!upload) {
+            // Prime the DMA queue; later chunks refill a buffer only after
+            // its previous contents have reached the caller's host matrix.
+            for (size_t ring = 0; ring < UPLOAD_STAGING_RING && status == cudaSuccess; ++ring) {
+                const size_t offset = ring * UPLOAD_STAGING_CHUNK;
+                if (offset >= bytes) break;
+                const size_t chunk = std::min(UPLOAD_STAGING_CHUNK, bytes - offset);
+                status = cudaMemcpyAsync(staging + offset, input + offset, chunk,
+                                         cudaMemcpyDeviceToHost, cudaStreamPerThread);
+                if (status == cudaSuccess) status = cudaEventRecord(events[ring], cudaStreamPerThread);
+            }
+        }
         size_t index = 0;
         for (size_t offset = 0; offset < bytes && status == cudaSuccess;
              offset += UPLOAD_STAGING_CHUNK, ++index) {
             const size_t ring = index % UPLOAD_STAGING_RING;
             unsigned char* buffer = staging + ring * UPLOAD_STAGING_CHUNK;
-            // The buffer is free once its previous transfer has landed.
-            if (index >= UPLOAD_STAGING_RING) status = cudaEventSynchronize(events[ring]);
+            if (!upload || index >= UPLOAD_STAGING_RING) status = cudaEventSynchronize(events[ring]);
             const size_t chunk = std::min(UPLOAD_STAGING_CHUNK, bytes - offset);
-            if (status == cudaSuccess) {
-                parallel_memcpy(buffer, source + offset, chunk);
-                status = cudaMemcpyAsync(target + offset, buffer, chunk,
-                                         cudaMemcpyHostToDevice, cudaStreamPerThread);
+            if (status == cudaSuccess && upload) {
+                status = static_cast<cudaError_t>(multi_stark_sppark_parallel_memcpy(
+                    device_index, buffer, input + offset, chunk));
+                if (status == cudaSuccess)
+                    status = cudaMemcpyAsync(output + offset, buffer, chunk,
+                                             cudaMemcpyHostToDevice, cudaStreamPerThread);
+                if (status == cudaSuccess) status = cudaEventRecord(events[ring], cudaStreamPerThread);
+            } else if (status == cudaSuccess) {
+                status = static_cast<cudaError_t>(multi_stark_sppark_parallel_memcpy(
+                    device_index, output + offset, buffer, chunk));
+                const size_t next = offset + UPLOAD_STAGING_BYTES;
+                if (status == cudaSuccess && next < bytes) {
+                    const size_t following = std::min(UPLOAD_STAGING_CHUNK, bytes - next);
+                    status = cudaMemcpyAsync(buffer, input + next, following,
+                                             cudaMemcpyDeviceToHost, cudaStreamPerThread);
+                    if (status == cudaSuccess) status = cudaEventRecord(events[ring], cudaStreamPerThread);
+                }
             }
-            if (status == cudaSuccess) status = cudaEventRecord(events[ring], cudaStreamPerThread);
         }
         // The slot is handed to the next caller on release.
         const cudaError_t synced = cudaStreamSynchronize(cudaStreamPerThread);
@@ -583,6 +572,14 @@ cudaError_t staged_upload(void* device, const void* host, size_t bytes) {
     pthread_cond_broadcast(&upload_staging_cond);
     pthread_mutex_unlock(&upload_staging_mutex);
     return status;
+}
+
+cudaError_t staged_upload(void* device, const void* host, size_t bytes) {
+    return staged_transfer(device, host, bytes, true);
+}
+
+cudaError_t staged_download(void* host, const void* device, size_t bytes) {
+    return staged_transfer(host, device, bytes, false);
 }
 
 using TraceWriter = int (*)(void*, int, uint64_t*, size_t, size_t);
@@ -1149,7 +1146,7 @@ cudaError_t generate_coset_selectors(
     return status;
 }
 
-extern "C" int multi_stark_cuda_generate_coset_selectors(
+extern "C" __attribute__((visibility("default"))) int multi_stark_cuda_generate_coset_selectors(
     int device_id, uint64_t* output, size_t quotient_size, size_t next_step,
     uint64_t coset_shift, uint64_t coset_generator, uint64_t trace_last,
     uint64_t vanishing_start, uint64_t vanishing_step) {
@@ -2224,10 +2221,14 @@ extern "C" int multi_stark_cuda_lde_copy_to_host(int device_id,
         return static_cast<int>(status);
     }
     const ResidentLde* lde = static_cast<const ResidentLde*>(handle);
+    const size_t bytes = lde->height * lde->width * sizeof(uint64_t);
+    if (bytes >= (size_t(8) << 20)) {
+        return static_cast<int>(staged_download(output, lde->values, bytes));
+    }
     HostRegistration registered_output(
-        output, lde->height * lde->width * sizeof(uint64_t));
+        output, bytes);
     status = cudaMemcpy(output, lde->values,
-                        lde->height * lde->width * sizeof(uint64_t),
+                        bytes,
                         cudaMemcpyDeviceToHost);
     return static_cast<int>(status);
 }
@@ -2736,6 +2737,14 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed(
     if(status==cudaSuccess&&dynamic_shared>48*1024)
         status=configure_quotient_shared_memory(device_id,dynamic_shared);
 
+    // The chunk streams are nonblocking and do not inherit the per-thread
+    // stream's metadata uploads, async allocation, or selector generation.
+    cudaEvent_t inputs_ready=nullptr;
+    if(status==cudaSuccess)status=cudaEventCreateWithFlags(&inputs_ready,cudaEventDisableTiming);
+    if(status==cudaSuccess)status=cudaEventRecord(inputs_ready,cudaStreamPerThread);
+    for(size_t i=0;i<2&&status==cudaSuccess;++i)
+        status=cudaStreamWaitEvent(streams[i],inputs_ready,0);
+
     const unsigned int log_size=static_cast<unsigned int>(__builtin_ctzll(quotient_size));
     const auto pack=[&](uint64_t* destination,size_t storage_start,size_t count){
         const long online=sysconf(_SC_NPROCESSORS_ONLN);
@@ -2788,7 +2797,12 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed(
             storage_start,count,true);
         status=cudaGetLastError();stream_busy[buffer]=status==cudaSuccess;
     }
-    for(size_t i=0;i<2;++i)if(status==cudaSuccess&&stream_busy[i])status=cudaStreamSynchronize(streams[i]);
+    // Drain both consumers even when one launch failed before recycling the
+    // shared metadata and their staging buffers on the producer stream.
+    for(size_t i=0;i<2;++i)if(streams[i]){
+        const cudaError_t synced=cudaStreamSynchronize(streams[i]);
+        if(status==cudaSuccess)status=synced;
+    }
 
     if(status==cudaSuccess)status=forward_in_place(device_id, quotient,quotient_size,2,quotient_plan);
     ResidentLde* lde=nullptr;
@@ -2808,6 +2822,7 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed(
         if(device_staging[i])persistent_free(device_staging[i]);
         if(scratch[i])persistent_free(scratch[i]);
     }
+    if(inputs_ready)cudaEventDestroy(inputs_ready);
     cudaFree(allocation);
     return static_cast<int>(status);
 }
@@ -2856,7 +2871,7 @@ extern "C" int multi_stark_cuda_fri_workspace_create(int device_id,void** handle
     if(status!=cudaSuccess){delete w;return static_cast<int>(status);}*handle=w;return static_cast<int>(cudaSuccess);
 }
 
-extern "C" int multi_stark_cuda_fri_interpolate_batch(int device_id,void* handle,uint64_t* output,
+extern "C" __attribute__((visibility("default"))) int multi_stark_cuda_fri_interpolate_batch(int device_id,void* handle,uint64_t* output,
     size_t output_count,const InterpolationTask* tasks,size_t task_count,uint64_t ext_w){
     if(!handle||!output||!output_count||!tasks||!task_count)return static_cast<int>(cudaErrorInvalidValue);
     cudaError_t status=cudaSetDevice(device_id);auto* w=static_cast<ResidentFriWorkspace*>(handle);
@@ -2911,7 +2926,7 @@ extern "C" int multi_stark_cuda_fri_interpolate_batch(int device_id,void* handle
     if(status==cudaSuccess)status=cudaMemcpy(output,w->output,output_count*sizeof(Ext2),cudaMemcpyDeviceToHost);return static_cast<int>(status);
 }
 
-extern "C" int multi_stark_cuda_fri_reduce_batch(int device_id,void* handle,
+extern "C" __attribute__((visibility("default"))) int multi_stark_cuda_fri_reduce_batch(int device_id,void* handle,
     const ReductionTask* tasks,size_t task_count,const uint64_t* alpha,size_t alpha_count,uint64_t ext_w){
     if(!handle||!tasks||!task_count||!alpha||!alpha_count)return static_cast<int>(cudaErrorInvalidValue);
     cudaError_t status=cudaSetDevice(device_id);auto* w=static_cast<ResidentFriWorkspace*>(handle);
@@ -3361,24 +3376,37 @@ extern "C" int multi_stark_cuda_lde_release_values(int device_id, void* handle) 
     if (!handle) return static_cast<int>(cudaSuccess);
     cudaError_t status = cudaSetDevice(device_id);
     auto* lde = static_cast<ResidentLde*>(handle);
+    bool release_queued = false;
     if (status == cudaSuccess && lde->values) {
-        // This is an admission-control eviction, not a short-lived scratch
-        // release. Make the memory globally available before returning: the
-        // LDE may have been created on a Rayon worker's per-thread stream and
-        // its replacement upload may run on a different stream. An async free
-        // would make the Rust-side free-byte projection optimistic and can
-        // still produce cudaErrorMemoryAllocation on that upload.
-        status = persistent_free(lde->values);
-        lde->values = nullptr;
+        // Async allocations must return through cudaFreeAsync: legacy
+        // cudaFree can leave the pool's used-byte counter charged even after
+        // device synchronization, preventing admission from seeing capacity.
+        status = stream_free(lde->values);
+        if (status == cudaSuccess) {
+            lde->values = nullptr;
+            release_queued = true;
+        }
     }
     if (status == cudaSuccess && lde->interpolation_scratch) {
-        status = persistent_free(lde->interpolation_scratch);
-        lde->interpolation_scratch = nullptr;
-        lde->interpolation_scratch_bytes = 0;
+        status = stream_free(lde->interpolation_scratch);
+        if (status == cudaSuccess) {
+            lde->interpolation_scratch = nullptr;
+            lde->interpolation_scratch_bytes = 0;
+            release_queued = true;
+        }
     }
     if (status == cudaSuccess && lde->trace_values) {
-        status = persistent_free(lde->trace_values);
-        lde->trace_values = nullptr;
+        status = stream_free(lde->trace_values);
+        if (status == cudaSuccess) {
+            lde->trace_values = nullptr;
+            release_queued = true;
+        }
+    }
+    if (release_queued) {
+        // Admission and replacement uploads can run on another Rayon stream.
+        // Observe every queued release before exposing its bytes as reusable.
+        const cudaError_t synced = cudaStreamSynchronize(cudaStreamPerThread);
+        if (status == cudaSuccess) status = synced;
     }
     if (status == cudaSuccess && lde->host_trace_registered) {
         status = cudaHostUnregister(const_cast<uint64_t*>(lde->host_trace_values));
@@ -4133,6 +4161,19 @@ extern "C" int multi_stark_cuda_mixed_merkle_create_from_host_matrices(
     return static_cast<int>(status);
 }
 
+extern "C" int multi_stark_cuda_get_device(int* device) {
+    if (device == nullptr) return static_cast<int>(cudaErrorInvalidValue);
+    return static_cast<int>(cudaGetDevice(device));
+}
+
+extern "C" int multi_stark_cuda_set_device(int device) {
+    return static_cast<int>(cudaSetDevice(device));
+}
+
+extern "C" int multi_stark_cuda_synchronize() {
+    return static_cast<int>(cudaDeviceSynchronize());
+}
+
 extern "C" const char* multi_stark_cuda_error_string(int status) {
     return cudaGetErrorString(static_cast<cudaError_t>(status));
 }
@@ -4183,4 +4224,3 @@ extern "C" int multi_stark_cuda_memory_info(int device_id, size_t* free_bytes,
     }
     return static_cast<int>(status);
 }
-

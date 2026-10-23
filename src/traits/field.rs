@@ -192,11 +192,10 @@ pub fn flatten_to_base<F: Field, EF: ExtensionOf<F>>(
     m: p3_matrix::dense::RowMajorMatrix<EF>,
 ) -> p3_matrix::dense::RowMajorMatrix<F> {
     let width = m.width * EF::D;
-    let values = m
-        .values
-        .into_iter()
-        .flat_map(|e| e.as_basis_coefficients_slice().to_vec())
-        .collect();
+    let mut values = Vec::with_capacity(m.values.len() * EF::D);
+    for value in m.values {
+        values.extend_from_slice(value.as_basis_coefficients_slice());
+    }
     p3_matrix::dense::RowMajorMatrix::new(values, width)
 }
 
@@ -238,7 +237,34 @@ pub trait PrimeField: Field {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p3_field::extension::BinomialExtensionField;
     use p3_goldilocks::Goldilocks;
+    use p3_matrix::dense::RowMajorMatrix;
+
+    type Ext = BinomialExtensionField<Goldilocks, 2>;
+
+    #[test]
+    fn flatten_to_base_lays_out_basis_coefficients_in_row_order() {
+        let values: Vec<Ext> = (0..6u64)
+            .map(|i| {
+                Ext::from_basis_coefficients_fn(|k| {
+                    p3_field::PrimeCharacteristicRing::from_u64(2 * i + k as u64)
+                })
+            })
+            .collect();
+        let flat = flatten_to_base::<Goldilocks, Ext>(RowMajorMatrix::new(values.clone(), 3));
+        assert_eq!(flat.width, 6);
+        assert_eq!(flat.values.len(), 12);
+        for (i, value) in values.iter().enumerate() {
+            assert_eq!(
+                &flat.values[2 * i..2 * i + 2],
+                value.as_basis_coefficients_slice()
+            );
+        }
+        let empty = flatten_to_base::<Goldilocks, Ext>(RowMajorMatrix::new(vec![], 3));
+        assert_eq!(empty.width, 6);
+        assert!(empty.values.is_empty());
+    }
 
     #[test]
     fn batch_inverse_matches_elementwise_inversion_across_chunks() {

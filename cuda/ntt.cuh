@@ -17,7 +17,9 @@ struct MultiStarkNttPlan {
 };
 
 extern "C" int multi_stark_sppark_forward(int device, uint64_t* values,
-                                          const MultiStarkNttPlan* plan);
+                                          const MultiStarkNttPlan* plan) noexcept;
 extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace,
                                             uint64_t* values, const MultiStarkNttPlan* plan,
-                                            const uint64_t* device_shift_powers);
+                                            const uint64_t* device_shift_powers) noexcept;
+extern "C" int multi_stark_sppark_parallel_memcpy(int device, void* destination,
+                                                 const void* source, size_t bytes) noexcept;

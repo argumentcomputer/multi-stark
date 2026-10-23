@@ -37,7 +37,7 @@ p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c837
 # streams and a runtime compatible with the Lean executable's C++ linkage.
 [dependencies.sppark]
 git = "https://github.com/argumentcomputer/sppark"
-rev = "e10e107673aa22861f0f8b9758fc62169ab919ae"
+rev = "114feb69ebfe029e2caa5e6c2d372c695e5d4da8"
 optional = true
 features = ["cuda"]
 

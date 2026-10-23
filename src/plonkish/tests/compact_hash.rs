@@ -56,7 +56,36 @@ fn compact_hash_all_block_and_tree_boundaries_match_native() {
         }
         let a = w.generate().unwrap();
         assert_eq!(a.public_values(), expected);
+        let shards = compiled.trace_shards(&a).unwrap();
+        let streamed = std::thread::scope(|scope| {
+            let pending: Vec<_> = (0..compiled.num_circuits())
+                .rev()
+                .map(|index| {
+                    let shards = &shards;
+                    scope.spawn(move || (index, shards.trace(index).unwrap()))
+                })
+                .collect();
+            pending
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
         let traces = compiled.traces(&a).unwrap();
+        for (index, trace) in traces.iter().enumerate() {
+            assert_eq!(
+                compiled.trace_dimensions(index),
+                Some((trace.height(), trace.width()))
+            );
+        }
+        for (index, trace) in streamed {
+            assert_eq!(trace, traces[index]);
+        }
+        let regenerated = compiled.trace_shards(&a).unwrap();
+        let auxiliary = regenerated.traces(regenerated.len() - 1).unwrap();
+        for index in compiled.num_circuits() - 9..compiled.num_circuits() {
+            assert_eq!(regenerated.trace(index).unwrap(), traces[index]);
+            assert_eq!(auxiliary[index], traces[index]);
+        }
         let claims = compiled.claims(&expected).unwrap();
         assert!(relations_hold(&defs, &traces, &claims));
         assert_eq!(

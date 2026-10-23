@@ -165,7 +165,8 @@
 use crate::config::{PcsError, ProofConfig, Val};
 use crate::ensure_eq;
 use crate::eval::VarValues;
-use crate::prover::{Proof, claims_accumulator, observe_claims, sample_lookup_challenges};
+use crate::lookup::fingerprint;
+use crate::prover::{Proof, observe_claims, sample_lookup_challenges};
 use crate::system::System;
 use crate::traits::{Algebra, EvaluationDomain, ExtensionOf, Field, Pcs, Transcript, TwoAdicField};
 
@@ -179,6 +180,8 @@ pub enum VerificationError<PcsErr> {
     /// Note: this variant is not currently returned by any verification path.
     /// It is reserved for future claim validation checks.
     InvalidClaim,
+    /// A transcript challenge makes an evaluation or lookup denominator invalid.
+    InvalidChallenge,
     /// The PCS opening proof failed to verify.
     InvalidOpeningArgument(PcsErr),
     /// The proof has an unexpected shape (wrong number of opened values, etc.).
@@ -196,6 +199,21 @@ pub enum VerificationError<PcsErr> {
     /// The shards' lookup residuals and the batch's public messages did not
     /// sum to zero.
     UnbalancedBatch,
+}
+
+pub(crate) fn checked_claims_accumulator<SC: ProofConfig>(
+    beta: SC::Challenge,
+    gamma: &SC::Challenge,
+    claims: &[&[Val<SC>]],
+) -> Result<SC::Challenge, VerificationError<PcsError<SC>>> {
+    let mut accumulator = <SC::Challenge as Algebra<SC::Challenge>>::ZERO;
+    for claim in claims {
+        let message = beta + fingerprint(gamma, claim.iter().copied());
+        accumulator += message
+            .try_inverse()
+            .ok_or(VerificationError::InvalidChallenge)?;
+    }
+    Ok(accumulator)
 }
 
 impl<SC: ProofConfig> System<SC> {
@@ -278,8 +296,11 @@ impl<SC: ProofConfig> System<SC> {
             sample_lookup_challenges::<SC>(&mut challenger);
 
         // construct the accumulator from the claims
-        let acc =
-            claims_accumulator::<SC>(lookup_argument_challenge, &fingerprint_challenge, claims);
+        let acc = checked_claims_accumulator::<SC>(
+            lookup_argument_challenge,
+            &fingerprint_challenge,
+            claims,
+        )?;
 
         self.verify_after_challenges(
             proof,
@@ -352,6 +373,9 @@ impl<SC: ProofConfig> System<SC> {
         // Soundness: OOD evaluation. ζ is sampled after all commitments are fixed.
         // A nonzero polynomial of degree ≤ D vanishes at ζ with probability ≤ D/|F_ext|.
         let zeta: SC::Challenge = challenger.sample_challenge();
+        // Zero merges rotated opening points, while roots of a trace domain
+        // make the selector and quotient denominators undefined.
+        crate::ensure!(!zeta.is_zero(), VerificationError::InvalidChallenge);
 
         // Reconstruct the PCS opening rounds (identical to the prover).
         let mut stage_1_trace_evaluations = vec![];
@@ -360,6 +384,12 @@ impl<SC: ProofConfig> System<SC> {
         for pos in 0..active_indices.len() {
             let log_degree = log_degrees[pos];
             let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
+            let unshifted = zeta * SC::Challenge::from(trace_domain.first_point().inverse());
+            crate::ensure!(
+                unshifted.exp_power_of_2(usize::from(log_degree))
+                    != <SC::Challenge as Algebra<SC::Challenge>>::ONE,
+                VerificationError::InvalidChallenge
+            );
             let zeta_next = trace_domain.next_point(zeta);
             stage_1_trace_evaluations.push((
                 trace_domain,
@@ -565,7 +595,12 @@ impl<SC: ProofConfig> System<SC> {
             ensure_eq!(
                 composition * sels.inv_vanishing,
                 quotient,
-                VerificationError::OodEvaluationMismatch
+                VerificationError::OodEvaluationMismatch;
+                circuit = ci,
+                active_position = pos,
+                degree,
+                quotient_degree,
+                "out-of-domain constraint evaluation mismatch"
             );
             // the accumulator must become the next accumulator for the next iteration
             acc = next_acc;
@@ -590,11 +625,19 @@ impl<SC: ProofConfig> System<SC> {
             ..
         } = proof;
         let num_circuits = self.circuits.len();
-        crate::ensure!(num_circuits > 0, VerificationError::InvalidSystem);
+        crate::ensure!(
+            num_circuits > 0,
+            VerificationError::InvalidSystem;
+            num_circuits,
+            "system has no circuits"
+        );
         ensure_eq!(
             active.len(),
             num_circuits,
-            VerificationError::InvalidProofShape
+            VerificationError::InvalidProofShape;
+            actual = active.len(),
+            expected = num_circuits,
+            "unexpected number of activation flags"
         );
         let active_indices: Vec<usize> = active
             .iter()
@@ -602,11 +645,20 @@ impl<SC: ProofConfig> System<SC> {
             .filter_map(|(i, &a)| a.then_some(i))
             .collect();
         let num_active = active_indices.len();
-        crate::ensure!(num_active > 0, VerificationError::InvalidProofShape);
+        crate::ensure!(
+            num_active > 0,
+            VerificationError::InvalidProofShape;
+            num_active,
+            num_circuits,
+            "proof has no active circuits"
+        );
         ensure_eq!(
             log_degrees.len(),
             num_active,
-            VerificationError::InvalidProofShape
+            VerificationError::InvalidProofShape;
+            actual = log_degrees.len(),
+            expected = num_active,
+            "unexpected number of trace heights"
         );
         let num_preprocessed = self
             .preprocessed_indices
@@ -616,7 +668,10 @@ impl<SC: ProofConfig> System<SC> {
         ensure_eq!(
             self.preprocessed_commit.is_none(),
             num_preprocessed == 0,
-            VerificationError::InvalidSystem
+            VerificationError::InvalidSystem;
+            commitment_present = self.preprocessed_commit.is_some(),
+            num_preprocessed,
+            "preprocessed commitment does not match configured circuits"
         );
         // Stage 0 round: the preprocessed commitment is built once over ALL
         // preprocessed traces at system construction, so its round carries one
@@ -627,7 +682,10 @@ impl<SC: ProofConfig> System<SC> {
                 .as_ref()
                 .map_or(0, |values| values.len()),
             num_preprocessed,
-            VerificationError::InvalidProofShape
+            VerificationError::InvalidProofShape;
+            actual = preprocessed_opened_values.as_ref().map_or(0, |values| values.len()),
+            expected = num_preprocessed,
+            "unexpected number of preprocessed matrices"
         );
         for (ci, (&prep_index, &is_active)) in
             self.preprocessed_indices.iter().zip(active).enumerate()
@@ -637,12 +695,27 @@ impl<SC: ProofConfig> System<SC> {
             {
                 let opened = &preprocessed_opened_values.as_ref().unwrap()[slot];
                 let count = usize::from(!self.config.omit_inactive_preprocessed_openings());
-                ensure_eq!(opened.len(), count, VerificationError::InvalidProofShape);
-                for row in opened {
+                ensure_eq!(
+                    opened.len(),
+                    count,
+                    VerificationError::InvalidProofShape;
+                    circuit = ci,
+                    preprocessed_slot = slot,
+                    actual = opened.len(),
+                    expected = count,
+                    "unexpected number of inactive preprocessed openings"
+                );
+                for (opening_position, row) in opened.iter().enumerate() {
                     ensure_eq!(
                         row.len(),
                         self.circuits[ci].preprocessed_width,
-                        VerificationError::InvalidProofShape
+                        VerificationError::InvalidProofShape;
+                        circuit = ci,
+                        preprocessed_slot = slot,
+                        opening_position,
+                        actual = row.len(),
+                        expected = self.circuits[ci].preprocessed_width,
+                        "unexpected inactive preprocessed opening width"
                     );
                 }
             }
@@ -650,12 +723,18 @@ impl<SC: ProofConfig> System<SC> {
         ensure_eq!(
             stage_1_opened_values.len(),
             num_active,
-            VerificationError::InvalidProofShape
+            VerificationError::InvalidProofShape;
+            actual = stage_1_opened_values.len(),
+            expected = num_active,
+            "unexpected number of main matrices"
         );
         ensure_eq!(
             stage_2_opened_values.len(),
             num_active,
-            VerificationError::InvalidProofShape
+            VerificationError::InvalidProofShape;
+            actual = stage_2_opened_values.len(),
+            expected = num_active,
+            "unexpected number of stage-2 matrices"
         );
         for (pos, &ci) in active_indices.iter().enumerate() {
             let circuit = &self.circuits[ci];
@@ -665,48 +744,86 @@ impl<SC: ProofConfig> System<SC> {
             ensure_eq!(
                 stage_1_opened_values[pos].len(),
                 1 + usize::from(self.opens_next_row(ci, crate::expr::Source::Main)),
-                VerificationError::InvalidProofShape
+                VerificationError::InvalidProofShape;
+                circuit = ci,
+                active_position = pos,
+                actual = stage_1_opened_values[pos].len(),
+                expected = 1 + usize::from(self.opens_next_row(ci, crate::expr::Source::Main)),
+                "unexpected number of main openings"
             );
             ensure_eq!(
                 stage_2_opened_values[pos].len(),
                 num_openings,
-                VerificationError::InvalidProofShape
+                VerificationError::InvalidProofShape;
+                circuit = ci,
+                active_position = pos,
+                actual = stage_2_opened_values[pos].len(),
+                expected = num_openings,
+                "unexpected number of stage-2 openings"
             );
             if let Some(slot) = preprocessed_i {
                 ensure_eq!(
                     preprocessed_opened_values.as_ref().unwrap()[slot].len(),
                     1 + usize::from(self.opens_next_row(ci, crate::expr::Source::Preprocessed)),
-                    VerificationError::InvalidProofShape
+                    VerificationError::InvalidProofShape;
+                    circuit = ci,
+                    active_position = pos,
+                    preprocessed_slot = slot,
+                    actual = preprocessed_opened_values.as_ref().unwrap()[slot].len(),
+                    expected = 1 + usize::from(self.opens_next_row(ci, crate::expr::Source::Preprocessed)),
+                    "unexpected number of preprocessed openings"
                 );
             }
             if let Some(slot) = preprocessed_i {
-                for row in &preprocessed_opened_values.as_ref().unwrap()[slot] {
+                for (opening_position, row) in preprocessed_opened_values.as_ref().unwrap()[slot]
+                    .iter()
+                    .enumerate()
+                {
                     ensure_eq!(
                         row.len(),
                         circuit.preprocessed_width,
-                        VerificationError::InvalidProofShape
+                        VerificationError::InvalidProofShape;
+                        circuit = ci,
+                        active_position = pos,
+                        preprocessed_slot = slot,
+                        opening_position,
+                        actual = row.len(),
+                        expected = circuit.preprocessed_width,
+                        "unexpected preprocessed opening width"
                     );
                 }
             }
-            for row in &stage_1_opened_values[pos] {
+            for (opening_position, row) in stage_1_opened_values[pos].iter().enumerate() {
                 ensure_eq!(
                     row.len(),
                     circuit.main_width,
-                    VerificationError::InvalidProofShape
+                    VerificationError::InvalidProofShape;
+                    circuit = ci,
+                    active_position = pos,
+                    opening_position,
+                    actual = row.len(),
+                    expected = circuit.main_width,
+                    "unexpected main opening width"
                 );
             }
-            for row in &stage_2_opened_values[pos] {
+            for (opening_position, row) in stage_2_opened_values[pos].iter().enumerate() {
                 // Stage-2 is committed as flattened base columns, so the
                 // opened width is already the flattened width.
                 ensure_eq!(
                     row.len(),
                     circuit.stage_2_width,
-                    VerificationError::InvalidProofShape
+                    VerificationError::InvalidProofShape;
+                    circuit = ci,
+                    active_position = pos,
+                    opening_position,
+                    actual = row.len(),
+                    expected = circuit.stage_2_width,
+                    "unexpected stage-2 opening width"
                 );
             }
         }
         let mut quotient_degrees = vec![];
-        for (&ci, log_degree) in active_indices.iter().zip(log_degrees) {
+        for (pos, (&ci, log_degree)) in active_indices.iter().zip(log_degrees).enumerate() {
             let circuit = &self.circuits[ci];
             // Fixed columns describe rows on the setup-time trace domain.
             // Pin that domain here as well as in witness construction: a
@@ -716,7 +833,12 @@ impl<SC: ProofConfig> System<SC> {
                 ensure_eq!(
                     1usize.checked_shl(u32::from(*log_degree)),
                     Some(circuit.preprocessed_height),
-                    VerificationError::InvalidProofShape
+                    VerificationError::InvalidProofShape;
+                    circuit = ci,
+                    active_position = pos,
+                    log_degree = *log_degree,
+                    expected_height = circuit.preprocessed_height,
+                    "trace height does not match preprocessed height"
                 );
             }
             let quotient_degree = circuit.quotient_degree();
@@ -729,7 +851,14 @@ impl<SC: ProofConfig> System<SC> {
                     && usize::from(*log_degree) < usize::BITS as usize
                     && usize::from(*log_degree) + log2_strict_usize(quotient_degree)
                         <= self.config.max_log_quotient_domain(),
-                VerificationError::InvalidProofShape
+                VerificationError::InvalidProofShape;
+                circuit = ci,
+                active_position = pos,
+                log_degree = *log_degree,
+                quotient_degree,
+                max_log_degree = self.config.max_log_degree(),
+                max_log_quotient_domain = self.config.max_log_quotient_domain(),
+                "trace or quotient domain exceeds supported size"
             );
             quotient_degrees.push(quotient_degree);
         }
@@ -738,29 +867,53 @@ impl<SC: ProofConfig> System<SC> {
         ensure_eq!(
             quotient_opened_values.len(),
             num_active,
-            VerificationError::InvalidProofShape
+            VerificationError::InvalidProofShape;
+            actual = quotient_opened_values.len(),
+            expected = num_active,
+            "unexpected number of quotient matrices"
         );
         let extension_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
         for (pos, quotient_degree) in quotient_degrees.iter().enumerate() {
             ensure_eq!(
                 quotient_opened_values[pos].len(),
                 1,
-                VerificationError::InvalidProofShape
+                VerificationError::InvalidProofShape;
+                circuit = active_indices[pos],
+                active_position = pos,
+                actual = quotient_opened_values[pos].len(),
+                expected = 1,
+                quotient_degree = *quotient_degree,
+                extension_degree = extension_d,
+                "unexpected number of quotient openings"
             );
             ensure_eq!(
                 quotient_opened_values[pos][0].len(),
                 quotient_degree * extension_d,
-                VerificationError::InvalidProofShape
+                VerificationError::InvalidProofShape;
+                circuit = active_indices[pos],
+                active_position = pos,
+                actual = quotient_opened_values[pos][0].len(),
+                expected = quotient_degree * extension_d,
+                quotient_degree = *quotient_degree,
+                extension_degree = extension_d,
+                "unexpected quotient opening width"
             );
         }
         ensure_eq!(
             intermediate_accumulators.len(),
             num_active,
-            VerificationError::InvalidProofShape
+            VerificationError::InvalidProofShape;
+            actual = intermediate_accumulators.len(),
+            expected = num_active,
+            "unexpected number of intermediate accumulators"
         );
         Ok(quotient_degrees)
     }
 }
+
+#[cfg(test)]
+#[path = "verifier/challenge_tests.rs"]
+mod challenge_tests;
 
 /// Reassembles an extension element from its base coordinates.
 fn from_ext_basis<F: Field, EF: ExtensionOf<F>>(coeffs: &[EF]) -> EF {
