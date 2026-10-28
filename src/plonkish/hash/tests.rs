@@ -34,7 +34,6 @@ fn serial_trace<F: Field>(
     prepared: &Prepared,
     defs: &[CircuitInputs<F>],
     index: usize,
-    field_allocation: bool,
 ) -> RowMajorMatrix<F> {
     let definition = &defs[index];
     if index >= 6 {
@@ -49,14 +48,7 @@ fn serial_trace<F: Field>(
     let words = &prepared.words;
     let bytes: [F; 256] = std::array::from_fn(F::from_usize);
     let len = definition.preprocessed.as_ref().unwrap().height() * definition.main_width;
-    let mut trace = RowMajorMatrix::new(
-        if field_allocation {
-            F::zero_vec(len)
-        } else {
-            vec![F::ZERO; len]
-        },
-        definition.main_width,
-    );
+    let mut trace = RowMajorMatrix::new(vec![F::ZERO; len], definition.main_width);
     for (r, slots) in hashes.rows[index].iter().enumerate() {
         let row = &mut trace.values[r * mw(index)..(r + 1) * mw(index)];
         for (slot, &word) in slots.iter().enumerate() {
@@ -138,7 +130,7 @@ fn check_trace_packing<F: Field>() {
         let (hashes, prepared) = packing_fixture(rows, &[0, 1, 2, 3, 4, 5]);
         let definitions = packing_definitions::<F>(&hashes);
         for kind in 0..9 {
-            let expected = serial_trace(&hashes, &prepared, &definitions, kind, false);
+            let expected = serial_trace(&hashes, &prepared, &definitions, kind);
             let actual = hashes.trace(&prepared, &definitions, kind);
             assert_eq!(actual, expected, "rows={rows}, kind={kind}");
         }
@@ -251,7 +243,6 @@ fn copy_and_trace_construction_preserve_fresh_proof_bytes() {
             assignment.prepared_hash(compiled.circuit()).unwrap(),
             &actual_definitions[hash_start..],
             index,
-            false,
         )
     }));
     assert_eq!(traces, reference_traces);
@@ -290,100 +281,4 @@ fn copy_and_trace_construction_preserve_fresh_proof_bytes() {
         actual_proof.to_bytes().unwrap(),
         reference_proof.to_bytes().unwrap()
     );
-}
-
-#[test]
-#[ignore = "isolated CPU compact-hash copy-cycle construction comparison"]
-fn copy_endpoints_benchmark() {
-    use std::{hint::black_box, time::Instant};
-    let value = Value { owner: 1, index: 0 };
-    let mut hashes = Compact::default();
-    for _ in 0..1024 {
-        hashes.add_call(HashCall {
-            input: vec![value; 128],
-            output: [value; 32],
-        });
-    }
-    let occurrences: usize = hashes.rows.iter().flatten().map(Vec::len).sum();
-    let mut used = vec![false; hashes.recipes.len()];
-    for &word in hashes.rows.iter().flatten().flatten() {
-        used[word] = true;
-    }
-    let nonempty_words = used.into_iter().filter(|used| *used).count();
-    let expected = occurrence_fixed::<Val>(&hashes);
-    let actual = hashes.copy_fixed::<Val>();
-    assert!(actual == expected, "compact hash fixed cells differ");
-    drop(expected);
-    drop(actual);
-    for iteration in 0..5 {
-        let mut seconds = [0.0; 2];
-        for endpoints in if iteration % 2 == 0 {
-            [false, true]
-        } else {
-            [true, false]
-        } {
-            let started = Instant::now();
-            let fixed = if endpoints {
-                black_box(&hashes).copy_fixed::<Val>()
-            } else {
-                occurrence_fixed::<Val>(black_box(&hashes))
-            };
-            seconds[usize::from(endpoints)] = started.elapsed().as_secs_f64();
-            black_box(fixed);
-        }
-        println!(
-            "COPY_ENDPOINTS_BENCH iteration={iteration} compressions={} words={} occurrences={occurrences} removed_small_allocations={nonempty_words} occurrence_seconds={:.9} endpoint_seconds={:.9}",
-            hashes.compressions,
-            hashes.recipes.len(),
-            seconds[0],
-            seconds[1],
-        );
-    }
-}
-
-fn trace_packing_benchmark_for<F: Field>(field: &str, log_height: usize) {
-    use std::{hint::black_box, time::Instant};
-    let height = 1 << log_height;
-    let kind = 1;
-    let (hashes, prepared) = packing_fixture(height - 3, &[kind]);
-    let definitions = packing_definitions::<F>(&hashes);
-    let expected = serial_trace(&hashes, &prepared, &definitions, kind, false);
-    assert_eq!(
-        expected,
-        serial_trace(&hashes, &prepared, &definitions, kind, true)
-    );
-    assert_eq!(expected, hashes.trace(&prepared, &definitions, kind));
-    drop(expected);
-    for (iteration, order) in [[0, 1, 2], [2, 1, 0], [1, 2, 0], [0, 2, 1], [1, 0, 2]]
-        .into_iter()
-        .enumerate()
-    {
-        let mut seconds = [0.0; 3];
-        for variant in order {
-            let started = Instant::now();
-            let trace = match variant {
-                0 => serial_trace(black_box(&hashes), &prepared, &definitions, kind, false),
-                1 => serial_trace(black_box(&hashes), &prepared, &definitions, kind, true),
-                _ => black_box(&hashes).trace(&prepared, &definitions, kind),
-            };
-            seconds[variant] = started.elapsed().as_secs_f64();
-            black_box(trace);
-        }
-        println!(
-            "HASH_TRACE_PACKING_BENCH field={field} iteration={iteration} kind={kind} used_rows={} height={height} width={} output_bytes={} serial_generic_seconds={:.9} serial_field_seconds={:.9} parallel_field_seconds={:.9}",
-            height - 3,
-            mw(kind),
-            height * mw(kind) * size_of::<F>(),
-            seconds[0],
-            seconds[1],
-            seconds[2],
-        );
-    }
-}
-
-#[test]
-#[ignore = "isolated CPU hash advice allocation and indexed row-packing comparison"]
-fn trace_packing_benchmark() {
-    trace_packing_benchmark_for::<Val>("goldilocks", 18);
-    trace_packing_benchmark_for::<p3_baby_bear::BabyBear>("baby_bear", 16);
 }

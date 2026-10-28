@@ -183,7 +183,7 @@ use crate::config::{
     Val,
 };
 use crate::eval::VarValues;
-use crate::lookup::{LookupValues, fingerprint};
+use crate::lookup::{LookupValues, try_claims_accumulator};
 use crate::system::{ProverKey, System, SystemWitness};
 use crate::traits::{
     Algebra, EvaluationDomain, ExtensionOf, Field, LagrangeSelectors, OpenedValuesForRound, Packed,
@@ -300,22 +300,6 @@ pub fn sample_lookup_challenges<SC: ProofConfig>(
     (lookup_argument_challenge, fingerprint_challenge)
 }
 
-/// The accumulator contributed by public claims: each claim is one message
-/// pushed with multiplicity one, `Σ (β + fingerprint(γ, claim))⁻¹`.
-pub(crate) fn claims_accumulator<SC: ProofConfig>(
-    lookup_argument_challenge: SC::Challenge,
-    fingerprint_challenge: &SC::Challenge,
-    claims: &[&[Val<SC>]],
-) -> SC::Challenge {
-    let mut acc = <SC::Challenge as Algebra<SC::Challenge>>::ZERO;
-    for claim in claims {
-        let message =
-            lookup_argument_challenge + fingerprint(fingerprint_challenge, claim.iter().cloned());
-        acc += message.inverse();
-    }
-    acc
-}
-
 impl<SC: ProofConfig> Proof<SC> {
     pub(crate) fn serde_config() -> Configuration<LittleEndian, Fixint> {
         standard().with_little_endian().with_fixed_int_encoding()
@@ -366,7 +350,8 @@ where
     /// [`Proof::active`].
     ///
     /// # Panics
-    /// Panics if every circuit's trace is empty (nothing to prove).
+    /// Panics if every circuit's trace is empty (nothing to prove), or if the
+    /// sampled lookup challenge makes a public claim denominator zero.
     #[tracing::instrument(level = "info", skip_all, name = "stark/prove")]
     pub fn prove_multiple_claims(
         &self,
@@ -379,6 +364,9 @@ where
     }
 
     /// Continue an ordinary proof from independently prepared stage-one data.
+    ///
+    /// # Panics
+    /// Panics if the sampled lookup challenge makes a public claim denominator zero.
     pub fn prove_committed(
         &self,
         key: &ProverKey<SC>,
@@ -417,8 +405,8 @@ where
 
         let (lookup_argument_challenge, fingerprint_challenge) =
             sample_lookup_challenges::<SC>(&mut challenger);
-        let acc =
-            claims_accumulator::<SC>(lookup_argument_challenge, &fingerprint_challenge, claims);
+        let acc = try_claims_accumulator(lookup_argument_challenge, &fingerprint_challenge, claims)
+            .expect("lookup challenge makes a claim denominator zero");
 
         self.prove_after_challenges(
             key,

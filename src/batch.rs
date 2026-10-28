@@ -62,10 +62,10 @@
 //! the admissible message set from data the verifier trusts or checks.
 
 use crate::config::{Com, PcsError, StarkGenericConfig, Val};
-use crate::lookup::fingerprint;
-use crate::prover::{Proof, Stage1, claims_accumulator, observe_claims, sample_lookup_challenges};
+use crate::lookup::{try_claims_accumulator, try_messages_accumulator};
+use crate::prover::{Proof, Stage1, observe_claims, sample_lookup_challenges};
 use crate::system::{ProverKey, System, SystemWitness};
-use crate::verifier::{VerificationError, checked_claims_accumulator};
+use crate::verifier::VerificationError;
 use crate::{ensure, ensure_eq};
 
 use crate::traits::{Algebra, Field, Transcript, TwoAdicField};
@@ -303,18 +303,22 @@ impl<SC: StarkGenericConfig> System<SC> {
 
     /// The accumulator contributed by the batch's messages:
     /// `Σ multiplicity · (β + fingerprint(γ, args))⁻¹`.
+    ///
+    /// # Panics
+    /// Panics if any message denominator is zero, even when its multiplicity is zero.
     pub fn messages_accumulator(
         lookup_argument_challenge: SC::Challenge,
         fingerprint_challenge: &SC::Challenge,
         messages: &[BatchMessage<SC>],
     ) -> SC::Challenge {
-        let mut acc = <SC::Challenge as Algebra<SC::Challenge>>::ZERO;
-        for message in messages {
-            let m = lookup_argument_challenge
-                + fingerprint(fingerprint_challenge, message.args.iter().cloned());
-            acc += m.inverse() * SC::Challenge::from(message.multiplicity);
-        }
-        acc
+        try_messages_accumulator(
+            lookup_argument_challenge,
+            fingerprint_challenge,
+            messages
+                .iter()
+                .map(|message| (message.args.as_slice(), message.multiplicity)),
+        )
+        .expect("lookup challenge makes a batch message denominator zero")
     }
 
     /// Verifies shard `shard` of a batch and returns its residual (final
@@ -370,11 +374,12 @@ impl<SC: StarkGenericConfig> System<SC> {
             "batch header does not match shard proof"
         );
         challenger.observe_field(Val::<SC>::from_usize(shard));
-        let acc = checked_claims_accumulator::<SC>(
+        let acc = try_claims_accumulator(
             lookup_argument_challenge,
             &fingerprint_challenge,
             &claim_slices::<SC>(&header.claims),
-        )?;
+        )
+        .ok_or(VerificationError::InvalidChallenge)?;
         self.verify_after_challenges(
             proof,
             &quotient_degrees,
@@ -411,15 +416,15 @@ impl<SC: StarkGenericConfig> System<SC> {
         );
         let (challenger, lookup_argument_challenge, fingerprint_challenge) =
             self.batch_challenger(preamble);
-        let mut total = <SC::Challenge as Algebra<SC::Challenge>>::ZERO;
-        for message in &preamble.messages {
-            let denominator = lookup_argument_challenge
-                + fingerprint(&fingerprint_challenge, message.args.iter().copied());
-            let inverse = denominator
-                .try_inverse()
-                .ok_or(VerificationError::InvalidChallenge)?;
-            total += inverse * SC::Challenge::from(message.multiplicity);
-        }
+        let mut total = try_messages_accumulator(
+            lookup_argument_challenge,
+            &fingerprint_challenge,
+            preamble
+                .messages
+                .iter()
+                .map(|message| (message.args.as_slice(), message.multiplicity)),
+        )
+        .ok_or(VerificationError::InvalidChallenge)?;
         for (shard, proof) in proofs.iter().enumerate() {
             total += self.verify_batch_shard_from(
                 preamble,
@@ -447,6 +452,9 @@ where
     /// Round two for one shard: forks the batch transcript at the shard
     /// index and proves from the committed stage 1. `claims` must be the
     /// claims recorded in the shard's header.
+    ///
+    /// # Panics
+    /// Panics if the shared lookup challenge makes a public claim denominator zero.
     #[tracing::instrument(level = "info", skip_all, name = "stark/prove_batch_shard")]
     pub fn prove_batch_shard(
         &self,
@@ -459,8 +467,8 @@ where
         let (mut challenger, lookup_argument_challenge, fingerprint_challenge) =
             self.batch_challenger(preamble);
         challenger.observe_field(Val::<SC>::from_usize(shard));
-        let acc =
-            claims_accumulator::<SC>(lookup_argument_challenge, &fingerprint_challenge, claims);
+        let acc = try_claims_accumulator(lookup_argument_challenge, &fingerprint_challenge, claims)
+            .expect("lookup challenge makes a claim denominator zero");
         self.prove_after_challenges(
             key,
             stage_1,

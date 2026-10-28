@@ -3,8 +3,6 @@ use crate::plonkish::{CircuitBuilder, gadgets::ByteGadgets, gadgets::blake3};
 use crate::traits::PrimeField;
 use crate::types::Val;
 
-// Keep both outputs behind a call boundary, as in the shared row implementation.
-#[inline(never)]
 fn both_outputs<F: Field>(
     compiled: &MultiStarkCircuit<F>,
     row: usize,
@@ -311,75 +309,4 @@ fn selected_rows_preserve_fresh_proof_bytes() {
         actual_proof.to_bytes().unwrap(),
         reference_proof.to_bytes().unwrap()
     );
-}
-
-fn measure<T: PartialEq>(name: &str, mut before: impl FnMut() -> T, mut after: impl FnMut() -> T) {
-    use std::{hint::black_box, time::Instant};
-    assert!(
-        black_box(before()) == black_box(after()),
-        "{name} warmup differs"
-    );
-    let mut old = Vec::new();
-    let mut new = Vec::new();
-    for sample in 0..5 {
-        let mut timed = |selected| {
-            let start = Instant::now();
-            let value = black_box(if selected { after() } else { before() });
-            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-            if selected {
-                new.push(elapsed)
-            } else {
-                old.push(elapsed)
-            }
-            value
-        };
-        let first = timed(sample % 2 != 0);
-        let second = timed(sample % 2 == 0);
-        assert!(first == second, "{name} sample {sample} differs");
-    }
-    println!("row_selection_result name={name} before_ms={old:?} after_ms={new:?}");
-}
-
-fn benchmark<F: PrimeField>(name: &str) {
-    let (circuit, seed) = mixed_circuit::<F>(1 << 15, 1 << 17);
-    let layout = circuit.multi_stark_layout().unwrap();
-    let compiled = circuit
-        .lower_to_multi_stark_sharded(F::from_u8(143), 1 << 18)
-        .unwrap();
-    let assignment = assigned(&compiled, seed);
-    assert_eq!(compiled.main_heights, [1 << 18]);
-    println!(
-        "row_selection_shape field={name} used_rows={} padded_rows={} gates={} publics={} lookups={} hash_calls={} main_width={} fixed_width={} main_bytes={} fixed_bytes={}",
-        layout.used_rows,
-        compiled.main_height(),
-        compiled.circuit.gates.len(),
-        compiled.circuit.publics.len(),
-        compiled.circuit.lookups.len(),
-        compiled.circuit.hashes.as_ref().unwrap().calls.len(),
-        compiled.width,
-        compiled.fixed.width(),
-        compiled.main_height() * compiled.width * size_of::<F>(),
-        compiled.main_height() * compiled.fixed.width() * size_of::<F>()
-    );
-    measure(
-        &format!("{name}/copy_links"),
-        || copy_links::<_, false>(&compiled),
-        || copy_links::<_, true>(&compiled),
-    );
-    measure(
-        &format!("{name}/main_trace"),
-        || both_output_main(&compiled, &assignment, 0),
-        || compiled.main_trace(&assignment, 0),
-    );
-    measure(
-        &format!("{name}/fixed_partition"),
-        || both_output_fixed(&compiled, 0),
-        || compiled.fixed_partition(0),
-    );
-}
-
-#[test]
-#[ignore = "isolated allocation-inclusive row selection comparison"]
-fn selected_rows_benchmark() {
-    benchmark::<Val>("goldilocks");
 }

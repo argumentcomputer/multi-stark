@@ -1,11 +1,5 @@
 //! CPU versus auxiliary-GPU host-backed LDEs, including upload and download.
 
-#[cfg(not(feature = "cuda"))]
-fn main() {
-    eprintln!("enable --features parallel,cuda");
-}
-
-#[cfg(feature = "cuda")]
 fn main() {
     use multi_stark::cuda::{CudaDft, pcs::CudaPcsDft};
     use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};

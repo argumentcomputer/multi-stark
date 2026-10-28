@@ -88,15 +88,31 @@ compares the complete serialized files. Together with the pinned BLAKE3/Merkle
 vectors and small-proof digest, this demonstrates production-path protocol
 compatibility rather than only transform round trips.
 
-After correctness passes, run the transfer-inclusive microbenchmark:
+After correctness passes, run the full proving benchmark or the
+transfer-inclusive DFT/LDE and BLAKE3 comparisons:
 
 ```sh
+cargo bench --locked --features parallel,cuda --bench multi_stark
 cargo run --release --locked --features parallel,cuda --example cuda_dft_bench
+cargo run --release --locked --features parallel,cuda --example cuda_blake3_bench
 ```
 
-It emits CSV to stdout. Shape/iteration controls are documented at the top of
-`examples/cuda_dft_bench.rs`. The full proving Criterion benchmark and dated
-Ix measurements are documented in [`docs/cuda-benchmarks.md`](../docs/cuda-benchmarks.md).
+The DFT benchmark emits CSV to stdout, labels CPU fallbacks, and checks each
+output against the CPU reference outside the timing window. Shape/iteration
+controls are documented at the top of `examples/cuda_dft_bench.rs`.
+
+The host-backed LDE benchmark compares CPU transforms with auxiliary GPU
+offload, including upload and download. Reserve at least one auxiliary GPU
+distinct from the primary device (device 0 by default):
+
+```sh
+MULTI_STARK_CUDA_AUX_DEVICES=1 \
+  cargo bench --locked --features parallel,cuda --bench cuda_host_lde_bench
+```
+
+`MULTI_STARK_CUDA_BENCH_SHAPES` accepts semicolon-separated
+`log_height,width,added_bits` triples (default `20,533,2`).
+`MULTI_STARK_CUDA_BENCH_COPIES` controls concurrent transforms (default `1`).
 
 ## Safety and protocol invariants
 

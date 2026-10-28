@@ -140,35 +140,3 @@ fn parallel_validation_preserves_errors_goldilocks() {
 fn parallel_validation_preserves_errors_baby_bear() {
     malformed_assignments::<p3_baby_bear::BabyBear>();
 }
-#[test]
-#[ignore = "isolated CPU scalar gate and lookup validation comparison"]
-fn witness_validation_benchmark() {
-    use std::{hint::black_box, time::Instant};
-    let (circuit, values, _) = fixture::<p3_baby_bear::BabyBear>(1 << 17);
-    serial_check(&circuit, &values).unwrap();
-    circuit.check_values(&values).unwrap();
-    for iteration in 0..5 {
-        let mut seconds = [0.0; 2];
-        for parallel in if iteration % 2 == 0 {
-            [false, true]
-        } else {
-            [true, false]
-        } {
-            let started = Instant::now();
-            let result = if parallel {
-                black_box(&circuit).check_values(black_box(&values))
-            } else {
-                serial_check(black_box(&circuit), black_box(&values))
-            };
-            result.unwrap();
-            seconds[usize::from(parallel)] = started.elapsed().as_secs_f64();
-        }
-        println!(
-            "WITNESS_VALIDATION_BENCH iteration={iteration} gates={} lookups={} serial_seconds={:.6} parallel_seconds={:.6}",
-            circuit.gates.len(),
-            circuit.lookups.len(),
-            seconds[0],
-            seconds[1]
-        );
-    }
-}

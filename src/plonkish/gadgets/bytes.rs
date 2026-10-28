@@ -370,9 +370,11 @@ impl ByteGadgets {
         b: &mut CircuitBuilder<F>,
         bytes: [ByteValue; 8],
     ) -> Value {
-        let pairs = bytes.map(|byte| self.nibbles(b, byte));
-        let nibbles: [Value; 16] = std::array::from_fn(|i| pairs[i / 2][i % 2]);
-        self.pack(b, &nibbles)
+        let mut packed = bytes[7].value;
+        for byte in bytes[..7].iter().rev() {
+            packed = affine(b, packed, F::from_u16(256), byte.value);
+        }
+        packed
     }
 
     /// Canonical encoding for a prime field whose modulus fits in u64.

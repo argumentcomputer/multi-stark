@@ -53,6 +53,11 @@ tracing-texray = { git = "https://github.com/argumentcomputer/tracing-texray", r
 name = "multi_stark"
 harness = false
 
+[[bench]]
+name = "cuda_host_lde_bench"
+harness = false
+required-features = ["parallel", "cuda"]
+
 [features]
 parallel = ["p3-maybe-rayon/parallel"]
 # CUDA requires the toolkit at build time and an NVIDIA GPU at runtime.

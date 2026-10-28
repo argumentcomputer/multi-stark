@@ -231,10 +231,26 @@ fn zero_batch_claim_and_message_denominators_are_rejected() {
         args: vec![-beta],
         multiplicity: Val::ONE,
     });
-    assert!(matches!(
-        system.verify_batch(&batch),
-        Err(VerificationError::InvalidChallenge)
-    ));
+    for multiplicity in [Val::ZERO, Val::ONE, Val::NEG_ONE] {
+        batch.preamble.messages[0].multiplicity = multiplicity;
+        assert!(matches!(
+            system.verify_batch(&batch),
+            Err(VerificationError::InvalidChallenge)
+        ));
+        assert!(
+            std::panic::catch_unwind(|| {
+                System::<ScriptedConfig>::messages_accumulator(
+                    ExtVal::from(beta),
+                    &ExtVal::from(Val::from_u8(3)),
+                    &batch.preamble.messages,
+                )
+            })
+            .is_err()
+        );
+    }
+    batch.preamble.messages[0].args = vec![Val::ZERO];
+    batch.preamble.messages[0].multiplicity = Val::ZERO;
+    system.verify_batch(&batch).unwrap();
     batch.preamble.messages.clear();
     system.verify_batch(&batch).unwrap();
 }

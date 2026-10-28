@@ -165,7 +165,7 @@
 use crate::config::{PcsError, ProofConfig, Val};
 use crate::ensure_eq;
 use crate::eval::VarValues;
-use crate::lookup::fingerprint;
+use crate::lookup::try_claims_accumulator;
 use crate::prover::{Proof, observe_claims, sample_lookup_challenges};
 use crate::system::System;
 use crate::traits::{Algebra, EvaluationDomain, ExtensionOf, Field, Pcs, Transcript, TwoAdicField};
@@ -199,21 +199,6 @@ pub enum VerificationError<PcsErr> {
     /// The shards' lookup residuals and the batch's public messages did not
     /// sum to zero.
     UnbalancedBatch,
-}
-
-pub(crate) fn checked_claims_accumulator<SC: ProofConfig>(
-    beta: SC::Challenge,
-    gamma: &SC::Challenge,
-    claims: &[&[Val<SC>]],
-) -> Result<SC::Challenge, VerificationError<PcsError<SC>>> {
-    let mut accumulator = <SC::Challenge as Algebra<SC::Challenge>>::ZERO;
-    for claim in claims {
-        let message = beta + fingerprint(gamma, claim.iter().copied());
-        accumulator += message
-            .try_inverse()
-            .ok_or(VerificationError::InvalidChallenge)?;
-    }
-    Ok(accumulator)
 }
 
 impl<SC: ProofConfig> System<SC> {
@@ -296,11 +281,8 @@ impl<SC: ProofConfig> System<SC> {
             sample_lookup_challenges::<SC>(&mut challenger);
 
         // construct the accumulator from the claims
-        let acc = checked_claims_accumulator::<SC>(
-            lookup_argument_challenge,
-            &fingerprint_challenge,
-            claims,
-        )?;
+        let acc = try_claims_accumulator(lookup_argument_challenge, &fingerprint_challenge, claims)
+            .ok_or(VerificationError::InvalidChallenge)?;
 
         self.verify_after_challenges(
             proof,

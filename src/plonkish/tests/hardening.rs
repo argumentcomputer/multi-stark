@@ -7,6 +7,70 @@ use std::sync::{
 use super::*;
 
 #[test]
+fn byte_packing_uses_seven_gates_without_decomposition() {
+    use crate::plonkish::gadgets::ByteGadgets;
+    use p3_field::PrimeField64;
+
+    let mut b = CircuitBuilder::<Val>::new();
+    let bytes = ByteGadgets::new(&mut b);
+    let input: [_; 8] = std::array::from_fn(|_| bytes.input(&mut b, "byte"));
+    let selector = b.input("select");
+    let bit = b.assert_bool(selector);
+    let fallback = 0x0123_4567_89ab_cdef_u64;
+    let selected = std::array::from_fn(|i| {
+        let other = bytes.constant(&mut b, fallback.to_le_bytes()[i]);
+        bytes.select(&mut b, bit, input[i], other)
+    });
+    let (eager_packed, eager_cost) = b.measure(|b| bytes.pack_u64(b, input));
+    let canonical = bytes.is_at_most_u64(&mut b, selected, Val::ORDER_U64 - 1);
+    let (lazy_packed, lazy_cost) = b.measure(|b| bytes.pack_u64(b, selected));
+    let expected_cost = CircuitStats {
+        gates: 7,
+        values: 7,
+        ..Default::default()
+    };
+    assert_eq!(eager_cost, expected_cost);
+    assert_eq!(lazy_cost, expected_cost);
+
+    let circuit = b.finish();
+    for integer in [
+        0,
+        1,
+        255,
+        256,
+        fallback,
+        Val::ORDER_U64 - 1,
+        Val::ORDER_U64,
+        u64::MAX,
+    ] {
+        for select in [false, true] {
+            let mut witness = circuit.witness();
+            witness.set(selector, Val::from_bool(select)).unwrap();
+            for (wire, byte) in input.iter().zip(integer.to_le_bytes()) {
+                witness.set(wire.value(), Val::from_u8(byte)).unwrap();
+            }
+            let assignment = witness.generate().unwrap();
+            let selected = if select { integer } else { fallback };
+            assert_eq!(
+                assignment.value(eager_packed).unwrap(),
+                Val::from_u64(integer)
+            );
+            assert_eq!(
+                assignment.value(lazy_packed).unwrap(),
+                Val::from_u64(selected)
+            );
+            assert_eq!(
+                assignment.value(canonical.value()).unwrap(),
+                Val::from_bool(selected < Val::ORDER_U64)
+            );
+            let mut forged = assignment.values(circuit.id()).unwrap().to_vec();
+            forged[lazy_packed.index()] += Val::ONE;
+            assert!(circuit.check_values(&forged).is_err());
+        }
+    }
+}
+
+#[test]
 fn goldilocks_byte_boundary_rejects_forged_zero_tests_and_aliases() {
     use crate::plonkish::builder::Recipe;
     use crate::plonkish::gadgets::ByteGadgets;

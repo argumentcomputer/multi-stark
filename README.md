@@ -102,9 +102,7 @@ cargo run --release --locked --features parallel,cuda --example cuda_dft_bench
 
 The CUDA build requires an NVIDIA GPU and CUDA toolkit. It keeps trace LDEs,
 mixed-height BLAKE3 Merkle commitments, lookup construction, quotient
-evaluation, batched openings, and FRI folding resident on the device. Dated
-hardware and downstream Ix measurements live in
-[docs/cuda-benchmarks.md](docs/cuda-benchmarks.md).
+evaluation, batched openings, and FRI folding resident on the device.
 
 See [cuda/README.md](cuda/README.md) for architecture, build settings, the NVIDIA
 correctness harness, platform limitations, and benchmark commands.
