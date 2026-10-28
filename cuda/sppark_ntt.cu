@@ -4,19 +4,112 @@
 #include "goldilocks.cuh"
 #include "ntt.cuh"
 
+#include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <new>
 
 namespace {
+
+int caught_cuda_status(int device) noexcept {
+    int status = static_cast<int>(cudaErrorUnknown);
+    try {
+        throw;
+    } catch (const cuda_error& error) {
+        status = error.code() < 0 ? -error.code() : error.code();
+    } catch (const std::bad_alloc&) {
+        status = static_cast<int>(cudaErrorMemoryAllocation);
+    } catch (...) {
+    }
+    // Rust can release host buffers as soon as the C entry point returns.
+    // A failed launch may leave earlier transfers queued on another stream.
+    if (cudaSetDevice(device) == cudaSuccess) (void)cudaDeviceSynchronize();
+    return status;
+}
 
 bool valid_arguments(const void* d_inout, uint32_t lg, int order, int direction, int coset) {
     return d_inout && lg > 0 && lg <= MAX_LG_DOMAIN_SIZE && order >= 0 && order <= 3 &&
            direction >= 0 && direction <= 1 && coset >= 0 && coset <= 1;
 }
 
+const gpu_t& device_gpu(int device) {
+    // sppark's logical indices exclude unsupported CUDA devices.
+    const gpu_t* found = nullptr;
+    for (const gpu_t* candidate : all_gpus())
+        if (candidate->cid() == device) found = candidate;
+    if (!found) CUDA_OK(cudaErrorInvalidDevice);
+    return select_gpu(found->id());
+}
+
+constexpr size_t HOST_COPY_GRAIN = size_t(4) << 20;
+
+struct HostCopyState {
+    unsigned char* destination;
+    const unsigned char* source;
+    size_t bytes, pending;
+    std::mutex mutex;
+    std::condition_variable completed;
+
+    HostCopyState(void* output, const void* input, size_t count, size_t parts)
+        : destination(static_cast<unsigned char*>(output)),
+          source(static_cast<const unsigned char*>(input)), bytes(count), pending(parts) {}
+
+    void finish(size_t count) {
+        std::lock_guard<std::mutex> lock(mutex);
+        pending -= count;
+        if (pending == 0) completed.notify_all();
+    }
+
+    void wait() {
+        std::unique_lock<std::mutex> lock(mutex);
+        completed.wait(lock, [&] { return pending == 0; });
+    }
+};
+
 }  // namespace
 
-extern "C" int multi_stark_sppark_max_lg_domain() { return MAX_LG_DOMAIN_SIZE; }
+extern "C" int multi_stark_sppark_max_lg_domain() noexcept { return MAX_LG_DOMAIN_SIZE; }
+
+extern "C" int multi_stark_sppark_parallel_memcpy(int device, void* destination,
+                                                 const void* source, size_t bytes) noexcept try {
+    if (bytes == 0) return static_cast<int>(cudaSuccess);
+    if (!destination || !source) return static_cast<int>(cudaErrorInvalidValue);
+    const cudaError_t status = cudaSetDevice(device);
+    if (status != cudaSuccess) return static_cast<int>(status);
+    const gpu_t& gpu = device_gpu(device);
+    // A serial copy into pinned memory can bottleneck the staging ring.
+    // Reuse the device's workers across chunks and concurrent transfers.
+    if (bytes <= HOST_COPY_GRAIN || gpu.ncpus() == 0) {
+        std::memcpy(destination, source, bytes);
+    } else {
+        const size_t parts = 1 + (bytes - 1) / HOST_COPY_GRAIN;
+        auto state = std::make_shared<HostCopyState>(destination, source, bytes, parts);
+        size_t submitted = 0;
+        try {
+            for (; submitted < parts; ++submitted) {
+                gpu.spawn([state, part = submitted] {
+                    const size_t offset = part * HOST_COPY_GRAIN;
+                    std::memcpy(state->destination + offset, state->source + offset,
+                                std::min(HOST_COPY_GRAIN, state->bytes - offset));
+                    state->finish(1);
+                });
+            }
+        } catch (...) {
+            // A failed enqueue must drain submitted jobs before Rust can
+            // release either buffer. Jobs retain the state through notify.
+            state->finish(parts - submitted);
+            state->wait();
+            throw;
+        }
+        state->wait();
+    }
+    return static_cast<int>(cudaSuccess);
+} catch (...) {
+    return caught_cuda_status(device);
+}
 
 // `batch` in-place transforms of 2^lg field elements each, `stride`
 // elements apart from `d_inout` on `device`, in one launch sequence.
@@ -25,26 +118,24 @@ extern "C" int multi_stark_sppark_max_lg_domain() { return MAX_LG_DOMAIN_SIZE; }
 // generator. Inverse transforms are normalized by 1/2^lg upstream.
 static int ntt_batch_on_stream(int device, uint64_t* d_inout, uint32_t lg,
                                                     int order, int direction, int coset,
-                                                    uint32_t batch, size_t stride, cudaStream_t caller) {
+                                                    uint32_t batch, size_t stride, cudaStream_t caller) noexcept try {
     // Upstream indexes with index_t, 32 bits at this domain limit.
     if (!valid_arguments(d_inout, lg, order, direction, coset) || batch == 0 || batch > 65535 ||
         (batch > 1 && stride < (size_t(1) << lg)) || stride > size_t(std::numeric_limits<index_t>::max()))
         return static_cast<int>(cudaErrorInvalidValue);
     cudaError_t status = cudaSetDevice(device);
     if (status != cudaSuccess) return static_cast<int>(status);
-    // Upstream keeps only the devices it supports, so its logical index can
-    // differ from the CUDA ordinal; find the entry by ordinal.
-    const gpu_t* found = nullptr;
-    for (const gpu_t* candidate : all_gpus())
-        if (candidate->cid() == device) found = candidate;
-    if (!found) return static_cast<int>(cudaErrorInvalidDevice);
-    const gpu_t& gpu = select_gpu(found->id());
+    const gpu_t& gpu = device_gpu(device);
     stream_t stream(gpu.id(), caller);
     NTT::Base_dev_ptr_batch(stream, reinterpret_cast<fr_t*>(d_inout), lg,
                             static_cast<NTT::InputOutputOrder>(order),
                             static_cast<NTT::Direction>(direction),
                             static_cast<NTT::Type>(coset), batch, stride);
     return static_cast<int>(cudaSuccess);
+} catch (...) {
+    // Allocation owners can still release their buffers and streams after
+    // an NTT failure because exceptions stop at this launch boundary.
+    return caught_cuda_status(device);
 }
 
 static int ntt_batch_device(int device, uint64_t* data, uint32_t lg, int order, int direction,
@@ -54,7 +145,8 @@ static int ntt_batch_device(int device, uint64_t* data, uint32_t lg, int order, 
 
 // A fresh caller-owned stream carrying producer, transforms and consumer.
 // Reusing it after each borrowed wrapper is dropped checks its ownership.
-extern "C" int multi_stark_sppark_borrowed_round_trip(int device, uint64_t* values, uint32_t lg) {
+extern "C" int multi_stark_sppark_borrowed_round_trip(int device, uint64_t* values, uint32_t lg) noexcept try {
+    if (!valid_arguments(values, lg, 1, 0, 0)) return static_cast<int>(cudaErrorInvalidValue);
     cudaError_t status = cudaSetDevice(device);
     if (status != cudaSuccess) return static_cast<int>(status);
     cudaStream_t caller = nullptr;
@@ -73,6 +165,8 @@ extern "C" int multi_stark_sppark_borrowed_round_trip(int device, uint64_t* valu
     if (result == 0) result = static_cast<int>(synced);
     cudaStreamDestroy(caller);
     return result;
+} catch (...) {
+    return caught_cuda_status(device);
 }
 
 // The batched transform on host memory: `batch * stride` words uploaded,
@@ -80,8 +174,9 @@ extern "C" int multi_stark_sppark_borrowed_round_trip(int device, uint64_t* valu
 // inputs, not the prover.
 extern "C" int multi_stark_sppark_ntt_batch_host(int device, uint64_t* inout, uint32_t lg, int order,
                                                   int direction, int coset, uint32_t batch,
-                                                  size_t stride) {
-    if (!valid_arguments(inout, lg, order, direction, coset) || batch == 0 || stride < (size_t(1) << lg))
+                                                  size_t stride) noexcept try {
+    if (!valid_arguments(inout, lg, order, direction, coset) || batch == 0 || batch > 65535 ||
+        stride < (size_t(1) << lg) || stride > size_t(std::numeric_limits<index_t>::max()))
         return static_cast<int>(cudaErrorInvalidValue);
     const size_t bytes = batch * stride * sizeof(uint64_t);
     cudaError_t status = cudaSetDevice(device);
@@ -100,12 +195,17 @@ extern "C" int multi_stark_sppark_ntt_batch_host(int device, uint64_t* inout, ui
     if (result == 0) result = static_cast<int>(synced);
     cudaFree(d_inout);
     return result;
+} catch (...) {
+    return caught_cuda_status(device);
 }
 
 // One transform on host memory: the batch entry with a single vector.
 extern "C" int multi_stark_sppark_ntt_host(int device, uint64_t* inout, uint32_t lg, int order,
-                                            int direction, int coset) {
+                                            int direction, int coset) noexcept try {
+    if (!valid_arguments(inout, lg, order, direction, coset)) return static_cast<int>(cudaErrorInvalidValue);
     return multi_stark_sppark_ntt_batch_host(device, inout, lg, order, direction, coset, 1, size_t(1) << lg);
+} catch (...) {
+    return caught_cuda_status(device);
 }
 
 // Row-major matrices are gathered into contiguous column panels for the
@@ -264,16 +364,19 @@ int transform_columns(int device, uint64_t* panel, uint32_t lg, int order, int d
 
 }  // namespace
 
-extern "C" int multi_stark_sppark_l2_bytes(int device, size_t* bytes) {
+extern "C" int multi_stark_sppark_l2_bytes(int device, size_t* bytes) noexcept try {
+    if (!bytes) return static_cast<int>(cudaErrorInvalidValue);
     int l2 = 0;
     const cudaError_t status = cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, device);
     if (status == cudaSuccess) *bytes = l2 > 0 ? size_t(l2) : size_t(64) << 20;
     return static_cast<int>(status);
+} catch (...) {
+    return caught_cuda_status(device);
 }
 
 extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, uint64_t* values,
                                             const MultiStarkNttPlan* plan,
-                                            const uint64_t* shift_powers) {
+                                            const uint64_t* shift_powers) noexcept try {
     const size_t height = plan->height, width = plan->width;
     const size_t extended_height = plan->extended_height, columns = plan->columns;
     const unsigned log_height = log2_exact(height), log_extended = log2_exact(extended_height);
@@ -304,9 +407,11 @@ extern "C" int multi_stark_sppark_coset_lde(int device, const uint64_t* trace, u
     const cudaError_t freed = cudaFreeAsync(scratch, cudaStreamPerThread);
     if (result == 0) result = static_cast<int>(freed);
     return result;
+} catch (...) {
+    return caught_cuda_status(device);
 }
 
-extern "C" int multi_stark_sppark_forward(int device, uint64_t* values, const MultiStarkNttPlan* plan) {
+extern "C" int multi_stark_sppark_forward(int device, uint64_t* values, const MultiStarkNttPlan* plan) noexcept try {
     const size_t height = plan->height, width = plan->width, columns = plan->columns;
     const unsigned log_height = log2_exact(height);
     cudaError_t status = cudaSetDevice(device);
@@ -325,4 +430,6 @@ extern "C" int multi_stark_sppark_forward(int device, uint64_t* values, const Mu
     const cudaError_t freed = cudaFreeAsync(panel, cudaStreamPerThread);
     if (result == 0) result = static_cast<int>(freed);
     return result;
+} catch (...) {
+    return caught_cuda_status(device);
 }

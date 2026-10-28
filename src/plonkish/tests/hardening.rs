@@ -7,6 +7,70 @@ use std::sync::{
 use super::*;
 
 #[test]
+fn byte_packing_uses_seven_gates_without_decomposition() {
+    use crate::plonkish::gadgets::ByteGadgets;
+    use p3_field::PrimeField64;
+
+    let mut b = CircuitBuilder::<Val>::new();
+    let bytes = ByteGadgets::new(&mut b);
+    let input: [_; 8] = std::array::from_fn(|_| bytes.input(&mut b, "byte"));
+    let selector = b.input("select");
+    let bit = b.assert_bool(selector);
+    let fallback = 0x0123_4567_89ab_cdef_u64;
+    let selected = std::array::from_fn(|i| {
+        let other = bytes.constant(&mut b, fallback.to_le_bytes()[i]);
+        bytes.select(&mut b, bit, input[i], other)
+    });
+    let (eager_packed, eager_cost) = b.measure(|b| bytes.pack_u64(b, input));
+    let canonical = bytes.is_at_most_u64(&mut b, selected, Val::ORDER_U64 - 1);
+    let (lazy_packed, lazy_cost) = b.measure(|b| bytes.pack_u64(b, selected));
+    let expected_cost = CircuitStats {
+        gates: 7,
+        values: 7,
+        ..Default::default()
+    };
+    assert_eq!(eager_cost, expected_cost);
+    assert_eq!(lazy_cost, expected_cost);
+
+    let circuit = b.finish();
+    for integer in [
+        0,
+        1,
+        255,
+        256,
+        fallback,
+        Val::ORDER_U64 - 1,
+        Val::ORDER_U64,
+        u64::MAX,
+    ] {
+        for select in [false, true] {
+            let mut witness = circuit.witness();
+            witness.set(selector, Val::from_bool(select)).unwrap();
+            for (wire, byte) in input.iter().zip(integer.to_le_bytes()) {
+                witness.set(wire.value(), Val::from_u8(byte)).unwrap();
+            }
+            let assignment = witness.generate().unwrap();
+            let selected = if select { integer } else { fallback };
+            assert_eq!(
+                assignment.value(eager_packed).unwrap(),
+                Val::from_u64(integer)
+            );
+            assert_eq!(
+                assignment.value(lazy_packed).unwrap(),
+                Val::from_u64(selected)
+            );
+            assert_eq!(
+                assignment.value(canonical.value()).unwrap(),
+                Val::from_bool(selected < Val::ORDER_U64)
+            );
+            let mut forged = assignment.values(circuit.id()).unwrap().to_vec();
+            forged[lazy_packed.index()] += Val::ONE;
+            assert!(circuit.check_values(&forged).is_err());
+        }
+    }
+}
+
+#[test]
 fn goldilocks_byte_boundary_rejects_forged_zero_tests_and_aliases() {
     use crate::plonkish::builder::Recipe;
     use crate::plonkish::gadgets::ByteGadgets;
@@ -29,13 +93,13 @@ fn goldilocks_byte_boundary_rejects_forged_zero_tests_and_aliases() {
                 assignment.value(valid.value()).unwrap(),
                 Val::from_bool(integer < Val::ORDER_U64)
             );
-            let mut forged = assignment.values.clone();
+            let mut forged = assignment.values(circuit.id()).unwrap().to_vec();
             forged[valid.value().index()] = Val::ONE - forged[valid.value().index()];
             assert!(circuit.check_values(&forged).is_err());
             if integer >= Val::ORDER_U64 {
                 // Forge all inverse hints, then recompute the arithmetic so
                 // the false acceptance bit has consistent dependent advice.
-                let mut forged = assignment.values;
+                let mut forged = assignment.values(circuit.id()).unwrap().to_vec();
                 for (index, recipe) in circuit.recipes.iter().enumerate() {
                     match recipe {
                         Recipe::Hint(h) if circuit.hints[*h].name == "zero-test inverse" => {
@@ -66,7 +130,7 @@ fn goldilocks_byte_boundary_rejects_forged_zero_tests_and_aliases() {
     for original in [0u64, 1] {
         let mut w = circuit.witness();
         w.set(input, Val::from_u64(original)).unwrap();
-        let mut forged = w.generate().unwrap().values;
+        let mut forged = w.generate().unwrap().values(circuit.id()).unwrap().to_vec();
         let mut index = 0;
         while index < forged.len() {
             match &circuit.recipes[index] {
@@ -333,7 +397,7 @@ fn batched_hints_execute_once_and_preserve_input_and_output_roles() {
         system.verify_multiple_claims(&refs, &proof).unwrap();
         // Bypass every recipe and corrupt individual logical values.
         for output in [plus, square, sum] {
-            let mut values = assignment.values.clone();
+            let mut values = assignment.values(compiled.circuit().id()).unwrap().to_vec();
             values[output.index()] += Val::ONE;
             assert!(compiled.circuit().check_values(&values).is_err());
         }
@@ -357,7 +421,7 @@ fn hint_batches_are_not_implicit_constraints() {
     let [a, c] = b.hint_many("unconstrained", &[], |_| Ok([Val::ONE, Val::TWO]));
     let circuit = b.finish();
     let assignment = circuit.witness().generate().unwrap();
-    let mut changed = assignment.values;
+    let mut changed = assignment.values(circuit.id()).unwrap().to_vec();
     changed[a.index()] = Val::from_u32(99);
     changed[c.index()] = Val::from_u32(123);
     assert!(

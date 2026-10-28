@@ -399,4 +399,8 @@ fn plonkish_public_count_and_foreign_assignment_are_checked() {
         a.traces(&assignment),
         Err(WitnessError::ForeignAssignment)
     ));
+    assert!(matches!(
+        a.trace_shards(&assignment),
+        Err(WitnessError::ForeignAssignment)
+    ));
 }

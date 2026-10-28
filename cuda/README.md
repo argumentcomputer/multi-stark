@@ -37,10 +37,16 @@ host-matrix users and transfer-inclusive microbenchmarks.
 
 ## Build configuration
 
-By default, the build emits native cubins for the common architectures among
-`sm_80`, `sm_86`, `sm_89`, `sm_90`, `sm_100`, and `sm_120` that the installed
-`nvcc` reports as supported. Override the comma-separated list for smaller
-deployment artifacts:
+The `cuda` feature builds `libmulti_stark_cuda.so`. It exposes a C ABI and
+privately links the CUDA runtime, GNU C++ runtime, and exception unwinder.
+Cargo supplies its location when running tests or examples. Applications
+installed outside Cargo must package the library and set an appropriate
+runtime search path. A direct dependent's build script receives its path as
+`DEP_MULTI_STARK_CUDA_LIBRARY`.
+
+By default, the build detects installed GPUs with `nvidia-smi` and emits
+native cubins only for their distinct architectures. Set the comma-separated
+architecture list explicitly when cross-compiling or building without a GPU:
 
 ```sh
 MULTI_STARK_CUDA_ARCHS=80,90 \
@@ -82,15 +88,31 @@ compares the complete serialized files. Together with the pinned BLAKE3/Merkle
 vectors and small-proof digest, this demonstrates production-path protocol
 compatibility rather than only transform round trips.
 
-After correctness passes, run the transfer-inclusive microbenchmark:
+After correctness passes, run the full proving benchmark or the
+transfer-inclusive DFT/LDE and BLAKE3 comparisons:
 
 ```sh
+cargo bench --locked --features parallel,cuda --bench multi_stark
 cargo run --release --locked --features parallel,cuda --example cuda_dft_bench
+cargo run --release --locked --features parallel,cuda --example cuda_blake3_bench
 ```
 
-It emits CSV to stdout. Shape/iteration controls are documented at the top of
-`examples/cuda_dft_bench.rs`. The full proving Criterion benchmark and dated
-Ix measurements are documented in [`docs/cuda-benchmarks.md`](../docs/cuda-benchmarks.md).
+The DFT benchmark emits CSV to stdout, labels CPU fallbacks, and checks each
+output against the CPU reference outside the timing window. Shape/iteration
+controls are documented at the top of `examples/cuda_dft_bench.rs`.
+
+The host-backed LDE benchmark compares CPU transforms with auxiliary GPU
+offload, including upload and download. Reserve at least one auxiliary GPU
+distinct from the primary device (device 0 by default):
+
+```sh
+MULTI_STARK_CUDA_AUX_DEVICES=1 \
+  cargo bench --locked --features parallel,cuda --bench cuda_host_lde_bench
+```
+
+`MULTI_STARK_CUDA_BENCH_SHAPES` accepts semicolon-separated
+`log_height,width,added_bits` triples (default `20,533,2`).
+`MULTI_STARK_CUDA_BENCH_COPIES` controls concurrent transforms (default `1`).
 
 ## Safety and protocol invariants
 

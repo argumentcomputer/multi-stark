@@ -562,12 +562,36 @@ where
         .fold(F::ZERO, |acc, coeff| acc * *r + coeff.into())
 }
 
+pub(crate) fn try_claims_accumulator<F: Field, EF: Field + Algebra<F>>(
+    beta: EF,
+    gamma: &EF,
+    claims: &[&[F]],
+) -> Option<EF> {
+    try_messages_accumulator(beta, gamma, claims.iter().map(|&claim| (claim, F::ONE)))
+}
+
+/// Returns `None` for any zero denominator, including zero-multiplicity messages.
+/// Lookup denominators must be nonzero even when the field defines `inverse(0)`.
+pub(crate) fn try_messages_accumulator<'a, F: Field, EF: Field + Algebra<F>>(
+    beta: EF,
+    gamma: &EF,
+    messages: impl IntoIterator<Item = (&'a [F], F)>,
+) -> Option<EF> {
+    let mut accumulator = <EF as Algebra<EF>>::ZERO;
+    for (args, multiplicity) in messages {
+        let denominator = beta + fingerprint(gamma, args.iter().copied());
+        accumulator += denominator.try_inverse()? * EF::from(multiplicity);
+    }
+    Some(accumulator)
+}
+
 /// Concrete lookup values of one circuit, stored flat.
 ///
 /// Every row of a circuit has the same lookups (each with a fixed number of
 /// arguments), so all multiplicities and argument values are kept in two
 /// row-major vectors instead of nested per-row, per-lookup allocations.
 #[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub struct LookupValues<F> {
     /// Number of trace rows.
     height: usize,
@@ -917,6 +941,29 @@ impl<F: Field> LookupValuesBuilder<F> {
             .collect()
     }
 
+    pub(crate) fn par_rows_mut(
+        &mut self,
+    ) -> impl IndexedParallelIterator<Item = LookupRowMut<'_, F>> {
+        assert!(self.num_lookups > 0, "builder has no lookup slots");
+        let Self {
+            num_lookups,
+            arg_offsets,
+            row_stride,
+            multiplicities,
+            args,
+            ..
+        } = self;
+        let arg_offsets = arg_offsets.as_slice();
+        multiplicities
+            .par_chunks_exact_mut(*num_lookups)
+            .zip(args.par_chunks_exact_mut(*row_stride))
+            .map(|(multiplicities, args)| LookupRowMut {
+                multiplicities,
+                args,
+                arg_offsets,
+            })
+    }
+
     /// Finalizes into [`LookupValues`].
     pub fn finish(mut self) -> LookupValues<F> {
         if self.arg_offsets[self.num_lookups] == 0 {
@@ -979,6 +1026,57 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn message_accumulators_preserve_weights_and_claims() {
+        use crate::batch::BatchMessage;
+        use crate::types::ExtVal;
+
+        let beta = ExtVal::from_basis_coefficients_fn(|i| Val::from_usize(7 + i));
+        let gamma = ExtVal::from_basis_coefficients_fn(|i| Val::from_usize(3 + i));
+        let f = Val::from_u8;
+        let args = [
+            vec![],
+            vec![f(2)],
+            vec![f(3), f(5)],
+            vec![f(13), f(17), f(19)],
+        ];
+        let denominators = [
+            beta,
+            beta + ExtVal::from(f(2)),
+            beta + ExtVal::from(f(3)) + gamma * f(5),
+            beta + ExtVal::from(f(13)) + gamma * f(17) + gamma * gamma * f(19),
+        ];
+        let zero = <ExtVal as Algebra<ExtVal>>::ZERO;
+        let claims: Vec<_> = args.iter().map(Vec::as_slice).collect();
+        let expected_claims = denominators.iter().fold(zero, |acc, d| acc + d.inverse());
+        assert_eq!(
+            try_claims_accumulator(beta, &gamma, &claims),
+            Some(expected_claims)
+        );
+        let weights = [Val::ZERO, Val::NEG_ONE, f(2), f(7)];
+        let expected_messages = denominators
+            .iter()
+            .zip(weights)
+            .fold(zero, |acc, (d, weight)| acc + d.inverse() * weight);
+        let messages: Vec<BatchMessage<GoldilocksBlake3Config>> = args
+            .into_iter()
+            .zip(weights)
+            .map(|(args, multiplicity)| BatchMessage { args, multiplicity })
+            .collect();
+        assert_eq!(
+            System::<GoldilocksBlake3Config>::messages_accumulator(beta, &gamma, &messages),
+            expected_messages
+        );
+        assert_eq!(
+            try_claims_accumulator::<Val, _>(beta, &gamma, &[]),
+            Some(zero)
+        );
+        assert_eq!(
+            System::<GoldilocksBlake3Config>::messages_accumulator(beta, &gamma, &[]),
+            zero
+        );
+    }
 
     /// The selector `p3` provides is the UNNORMALIZED Lagrange numerator
     /// `is_last_row(x) = (x^n − 1)/(x − g^{−1})`; its value at the last row
