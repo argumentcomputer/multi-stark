@@ -4224,3 +4224,19 @@ extern "C" int multi_stark_cuda_memory_info(int device_id, size_t* free_bytes,
     }
     return static_cast<int>(status);
 }
+
+// Return what the default pool retains (see `retain_default_pool`) on every
+// visible device to the driver, once each device's queued work completes, so
+// another process or a later stage can allocate it. Live allocations stay.
+extern "C" int multi_stark_cuda_release_memory() {
+    int count = 0;
+    cudaError_t status = cudaGetDeviceCount(&count);
+    for (int device_id = 0; status == cudaSuccess && device_id < count; ++device_id) {
+        cudaMemPool_t pool = nullptr;
+        status = cudaSetDevice(device_id);
+        if (status == cudaSuccess) status = cudaDeviceSynchronize();
+        if (status == cudaSuccess) status = cudaDeviceGetDefaultMemPool(&pool, device_id);
+        if (status == cudaSuccess) status = cudaMemPoolTrimTo(pool, 0);
+    }
+    return static_cast<int>(status);
+}
