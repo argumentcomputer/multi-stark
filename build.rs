@@ -1,8 +1,13 @@
 //! CUDA compilation is opt-in; CPU builds need no CUDA toolchain.
+//!
+//! Through `links = "multi_stark_cuda"`, dependents' build scripts receive
+//! the toolchain this backend was compiled with as `DEP_MULTI_STARK_CUDA_*`:
+//! `NVCC`, `ARCHS` (comma-separated) and `LIB_DIRS` (a search path for the
+//! CUDA runtime), so their kernels target the same compiler and GPUs.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const CUDA_EXPORTS: &str = r"{
@@ -47,6 +52,11 @@ fn main() {
     let nvcc = nvcc_path();
     let architectures = cuda_architectures(&nvcc);
     let compiler = || cuda_command(&nvcc, &architectures);
+    println!("cargo:nvcc={}", Path::new(&nvcc).display());
+    println!("cargo:archs={}", architectures.join(","));
+    let lib_dirs = env::join_paths(cuda_library_directories(&nvcc))
+        .expect("CUDA library directories contain a path separator");
+    println!("cargo:lib_dirs={}", Path::new(&lib_dirs).display());
 
     let objects = [
         (PathBuf::from("cuda/sppark_ntt.cu"), "sppark_ntt.o"),
@@ -120,6 +130,23 @@ fn nvcc_path() -> OsString {
             path.is_file().then(|| path.into_os_string())
         })
         .unwrap_or_else(|| "nvcc".into())
+}
+
+/// The CUDA toolkit's library directories: under `CUDA_HOME` or
+/// `CUDA_PATH`, else the toolkit an absolute `nvcc` belongs to, else
+/// `/usr/local/cuda`.
+fn cuda_library_directories(nvcc: &OsStr) -> Vec<PathBuf> {
+    let root = env::var_os("CUDA_HOME")
+        .or_else(|| env::var_os("CUDA_PATH"))
+        .map(PathBuf::from)
+        .or_else(|| {
+            let nvcc = Path::new(nvcc);
+            nvcc.is_absolute()
+                .then(|| nvcc.parent()?.parent().map(Path::to_path_buf))
+                .flatten()
+        })
+        .unwrap_or_else(|| PathBuf::from("/usr/local/cuda"));
+    vec![root.join("lib64"), root.join("targets/x86_64-linux/lib")]
 }
 
 fn cuda_architectures(nvcc: &OsStr) -> Vec<String> {
