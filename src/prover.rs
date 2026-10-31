@@ -349,6 +349,56 @@ where
     Val<SC>: TwoAdicField,
     SC::Dft: TwoAdicSubgroupDft<Val<SC>>,
 {
+    /// A stage-one trace rebuilt from its commitment. The committed LDE holds
+    /// the trace polynomial's evaluations on a coset `gK`; those on `gH` give
+    /// its coefficients, which are evaluated back on the trace domain `H`.
+    /// Only prover paths that must read the lookup values a shape-only
+    /// witness omitted ([`LookupValues::shape_only`]) rebuild traces.
+    pub(crate) fn committed_trace(
+        &self,
+        data: &PcsData<SC>,
+        index: usize,
+        degree: usize,
+    ) -> RowMajorMatrix<Val<SC>> {
+        let pcs = self.config.pcs();
+        let coset = pcs
+            .natural_domain_for_degree(degree)
+            .create_disjoint_domain(degree);
+        let evaluations = pcs
+            .get_evaluations_on_domain(data, index, coset)
+            .to_row_major_matrix();
+        let dft = self.config.dft();
+        let coefficients = dft.coset_idft_batch(evaluations, coset.first_point());
+        dft.dft_batch(coefficients).to_row_major_matrix()
+    }
+
+    /// Fills every shape-only lookup witness of the active circuits from the
+    /// committed stage-one traces, for prover paths that read lookup values
+    /// on the host. Materialized witnesses pass through unchanged.
+    fn materialize_lookups(
+        &self,
+        data: &PcsData<SC>,
+        active_indices: &[usize],
+        log_degrees: &[usize],
+        lookups: Vec<LookupValues<Val<SC>>>,
+    ) -> Vec<LookupValues<Val<SC>>> {
+        lookups
+            .into_iter()
+            .enumerate()
+            .map(|(position, values)| {
+                if values.is_materialized() {
+                    return values;
+                }
+                let _g = tracing::info_span!("stark/materialize_lookups", position).entered();
+                let trace = self.committed_trace(data, position, 1 << log_degrees[position]);
+                crate::system::compute_lookup_values(
+                    &self.circuits[active_indices[position]],
+                    &trace,
+                )
+            })
+            .collect()
+    }
+
     /// Generates a STARK proof for the system with a single claim.
     ///
     /// This is a convenience wrapper around [`Self::prove_multiple_claims`].
@@ -564,6 +614,15 @@ where
                 drop(_g);
                 result
             } else {
+                // Host paths read every lookup value; derive any a shape-only
+                // witness omitted from the committed stage-one traces.
+                drop(lookup_inputs);
+                let active_lookups = self.materialize_lookups(
+                    &stage_1_trace_data,
+                    &active_indices,
+                    &log_degrees,
+                    active_lookups,
+                );
                 let (stage_2_traces, intermediate_accumulators) = self
                     .config
                     .accelerated_lookup_traces(

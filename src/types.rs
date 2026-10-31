@@ -899,10 +899,10 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
         // kernel from the same residency predicate; the kernel must not be
         // re-chosen here or it can run under the other path's budget.
         let evaluate = |input: &crate::config::LookupCommitInput<'_, Self>,
+                        values: &crate::lookup::LookupValues<Val>,
                         graph_path: bool,
                         cooperative: bool| {
-            let (height, num_lookups, multiplicities, args, arg_offsets) =
-                input.lookup_values.cuda_parts();
+            let (height, num_lookups, multiplicities, args, arg_offsets) = values.cuda_parts();
             let group_size = input.circuit.lookup_group_size.max(1);
             let main = graph_path.then(|| {
                 input
@@ -944,7 +944,7 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                     self.log_blowup,
                     move |rows| {
                         pool.install(|| {
-                            input.lookup_values.cuda_stage_2_deltas::<ExtVal>(
+                            values.cuda_stage_2_deltas::<ExtVal>(
                                 rows,
                                 group_size,
                                 lookup_challenge,
@@ -1049,7 +1049,19 @@ impl StarkGenericConfig for GoldilocksBlake3Config {
                 && output_bytes >= (8usize << 30)
                 && num_lookups >= 64
                 && arg_offsets.last().copied().unwrap_or(0) >= 256;
-            results[index] = Some(evaluate(&inputs[index], graph_path, cooperative)?);
+            // The direct paths read lookup values on the host. A shape-only
+            // witness gets them from the committed stage-one trace here.
+            let materialized = (!graph_path && !input.lookup_values.is_materialized()).then(|| {
+                let _g = tracing::info_span!("cuda/materialize_lookups", index).entered();
+                let trace = self.pcs.mmcs.committed_trace(
+                    input.stage_1.0,
+                    input.stage_1.1,
+                    self.log_blowup,
+                );
+                crate::system::compute_lookup_values(input.circuit, &trace)
+            });
+            let values = materialized.as_ref().unwrap_or(input.lookup_values);
+            results[index] = Some(evaluate(input, values, graph_path, cooperative)?);
             if crate::cuda::memory_diagnostics_enabled() {
                 eprintln!(
                     "[multi-stark/cuda] lookup job {index} complete: {:.3}s",

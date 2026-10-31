@@ -13,6 +13,7 @@ use p3_challenger::CanObserve;
 use p3_commit::{Pcs, PolynomialSpace};
 use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
+use p3_maybe_rayon::prelude::*;
 
 use crate::config::{Com, PcsData, StarkGenericConfig, Val};
 use crate::lookup::LookupValues;
@@ -299,7 +300,8 @@ impl<F: Field> SystemWitness<F> {
 
 /// Computes a circuit's concrete lookup values by sweeping the compiled
 /// lookup prefix over each row (with wrap-around for the next-row window).
-fn compute_lookup_values<F: Field>(
+/// Rows are independent, so they are swept in parallel.
+pub(crate) fn compute_lookup_values<F: Field>(
     circuit: &Circuit<F>,
     trace: &RowMajorMatrix<F>,
 ) -> LookupValues<F> {
@@ -316,40 +318,41 @@ fn compute_lookup_values<F: Field>(
     }
 
     let preprocessed = circuit.preprocessed.as_ref();
-    let empty: [F; 0] = [];
     let mut builder = LookupValues::builder(height, &slot_widths);
-    let mut buf = Vec::new();
-    let mut args = Vec::new();
     let mut writers = builder.rows_mut();
-    for (r, writer) in writers.iter_mut().enumerate() {
-        let r_next = (r + 1) % height;
-        let main_cur = trace.row_slice(r).unwrap();
-        let main_next = trace.row_slice(r_next).unwrap();
-        let preprocessed_rows =
-            preprocessed.map(|pp| (pp.row_slice(r).unwrap(), pp.row_slice(r_next).unwrap()));
-        let (pp_cur, pp_next): (&[F], &[F]) = match &preprocessed_rows {
-            Some((cur, next)) => (cur, next),
-            None => (&empty, &empty),
-        };
-        let view = VarValues {
-            preprocessed: [pp_cur, pp_next],
-            main: [&main_cur, &main_next],
-            stage2: [&empty, &empty],
-            publics: &empty,
-            is_first_row: if r == 0 { F::ONE } else { F::ZERO },
-            is_last_row: if r == height - 1 { F::ONE } else { F::ZERO },
-            is_transition: if r == height - 1 { F::ZERO } else { F::ONE },
-        };
-        circuit.graph.sweep_lookup_prefix(&view, &mut buf);
-        for (slot, lookup) in circuit.graph.lookups.iter().enumerate() {
-            let multiplicity = buf[lookup.multiplicity.index()];
-            args.clear();
-            args.extend(lookup.args.iter().map(|a| buf[a.index()]));
-            // The multiplicity expression already carries its sign, so store
-            // it as-is (push semantics).
-            writer.push(slot, multiplicity, &args);
-        }
-    }
+    writers.par_iter_mut().enumerate().for_each_init(
+        || (Vec::new(), Vec::new()),
+        |(buf, args), (r, writer)| {
+            let empty: [F; 0] = [];
+            let r_next = (r + 1) % height;
+            let main_cur = trace.row_slice(r).unwrap();
+            let main_next = trace.row_slice(r_next).unwrap();
+            let preprocessed_rows =
+                preprocessed.map(|pp| (pp.row_slice(r).unwrap(), pp.row_slice(r_next).unwrap()));
+            let (pp_cur, pp_next): (&[F], &[F]) = match &preprocessed_rows {
+                Some((cur, next)) => (cur, next),
+                None => (&empty, &empty),
+            };
+            let view = VarValues {
+                preprocessed: [pp_cur, pp_next],
+                main: [&main_cur, &main_next],
+                stage2: [&empty, &empty],
+                publics: &empty,
+                is_first_row: if r == 0 { F::ONE } else { F::ZERO },
+                is_last_row: if r == height - 1 { F::ONE } else { F::ZERO },
+                is_transition: if r == height - 1 { F::ZERO } else { F::ONE },
+            };
+            circuit.graph.sweep_lookup_prefix(&view, buf);
+            for (slot, lookup) in circuit.graph.lookups.iter().enumerate() {
+                let multiplicity = buf[lookup.multiplicity.index()];
+                args.clear();
+                args.extend(lookup.args.iter().map(|a| buf[a.index()]));
+                // The multiplicity expression already carries its sign, so
+                // store it as-is (push semantics).
+                writer.push(slot, multiplicity, args);
+            }
+        },
+    );
     drop(writers);
     builder.finish()
 }
