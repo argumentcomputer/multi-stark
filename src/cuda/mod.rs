@@ -2240,6 +2240,15 @@ pub(crate) fn device_memory_info(device_id: i32) -> (usize, usize) {
     (free_bytes, total_bytes)
 }
 
+/// Returns the device memory this backend's allocation pool retains between
+/// proofs to the driver, on every visible device, after queued work completes.
+/// Memory held by live buffers is unaffected. Call it once proving is done and
+/// before another process or a different backend needs the devices.
+pub fn release_device_memory() {
+    let status = unsafe { multi_stark_cuda_release_memory() };
+    check_cuda(status, "CUDA memory release");
+}
+
 /// Device bytes the prover keeps free for its later stages: a quarter of the
 /// device unless `MULTI_STARK_CUDA_MIN_FREE_BYTES` says otherwise.
 pub(crate) fn minimum_free_bytes(total_bytes: usize) -> usize {
@@ -2923,6 +2932,7 @@ impl Drop for CudaMixedMerkleTree {
 }
 
 unsafe extern "C" {
+    fn multi_stark_cuda_release_memory() -> i32;
     fn multi_stark_cuda_memory_info(
         device_id: i32,
         free_bytes: *mut usize,

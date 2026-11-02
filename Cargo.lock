@@ -1113,8 +1113,8 @@ dependencies = [
 
 [[package]]
 name = "sppark"
-version = "0.1.15"
-source = "git+https://github.com/argumentcomputer/sppark?rev=114feb69ebfe029e2caa5e6c2d372c695e5d4da8#114feb69ebfe029e2caa5e6c2d372c695e5d4da8"
+version = "0.1.16"
+source = "git+https://github.com/argumentcomputer/sppark?rev=9326ac014ec5415ebc4eab24c1246276714aee57#9326ac014ec5415ebc4eab24c1246276714aee57"
 dependencies = [
  "cc",
  "which",

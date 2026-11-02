@@ -190,9 +190,13 @@ where
     Dft: CudaPcsDft<F>,
     Radix2DitParallel<F>: TwoAdicSubgroupDft<F>,
 {
-    let cpu = Radix2DitParallel::<F>::default();
     jobs.into_par_iter()
         .map(|(index, (domain, evaluations))| {
+            // At the pinned Plonky3, twiddle initialization schedules Rayon work
+            // while holding a spin lock, so sharing one cache across concurrent
+            // jobs can deadlock. Plonky3 4148206d computes twiddles outside the
+            // lock; share one DFT again once the Plonky3 pin includes it.
+            let cpu = Radix2DitParallel::<F>::default();
             let shift = F::GENERATOR / domain.shift();
             if let Some(lde) = dft.try_coset_lde_batch_host(&evaluations, log_blowup, shift) {
                 return (index, lde);
@@ -2337,6 +2341,39 @@ mod tests {
     use super::*;
     use crate::types::ExtVal;
     use p3_field::Field;
+
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn concurrent_host_lde_jobs_match_serial_transforms() {
+        let dft = crate::cuda::CudaDft::new(0).with_auxiliary_devices(&[]);
+        let jobs = (0..32)
+            .map(|index| {
+                let log_height = 12 + index % 3;
+                let width = 1 + index % 4;
+                let domain = TwoAdicMultiplicativeCoset::new(
+                    Goldilocks::from_usize(1 + index % 5),
+                    log_height,
+                )
+                .unwrap();
+                let values = (0..(1 << log_height) * width)
+                    .map(|i| Goldilocks::from_usize(i + index))
+                    .collect();
+                (index, (domain, RowMajorMatrix::new(values, width)))
+            })
+            .collect_vec();
+        let expected = jobs
+            .iter()
+            .map(|(index, (domain, matrix))| {
+                let cpu = Radix2DitParallel::<Goldilocks>::default();
+                let output = cpu
+                    .coset_lde_batch(matrix.clone(), 2, Goldilocks::GENERATOR / domain.shift())
+                    .bit_reverse_rows()
+                    .to_row_major_matrix();
+                (*index, output)
+            })
+            .collect_vec();
+        assert_eq!(host_coset_lde_jobs(&dft, jobs, 2), expected);
+    }
 
     #[test]
     #[ignore = "requires two CUDA devices"]
