@@ -870,12 +870,21 @@ impl ProofConfig for GoldilocksBlake3Config {
                     .get(input.stage_1.1)
                     .expect("stage-1 matrix index out of bounds")
                     .width;
+                let preprocessed_width = input.preprocessed.map_or(0, |(data, matrix)| {
+                    self.pcs
+                        .mmcs
+                        .matrix_dimensions(data)
+                        .get(matrix)
+                        .expect("preprocessed matrix index out of bounds")
+                        .width
+                });
                 let graph_memory = (num_lookups != 0)
                     .then(|| {
                         crate::cuda::lookup_graph_lde_memory_upper_bound(
                             &input.circuit.graph,
                             height,
                             main_width,
+                            preprocessed_width,
                             group_size,
                             self.log_blowup,
                         )
@@ -962,8 +971,9 @@ impl ProofConfig for GoldilocksBlake3Config {
             });
             let result = if let Some(main) = main {
                 let preprocessed = input.preprocessed.map(|(data, index)| {
-                    data.resident(index)
-                        .expect("lookup graph admission requires a resident preprocessed LDE")
+                    data.resident_with_host_trace(index).expect(
+                        "lookup graph admission requires a trace-backed resident preprocessed LDE",
+                    )
                 });
                 crate::cuda::lookup_graph_lde_resident(
                     &self.pcs.dft,
@@ -1029,16 +1039,18 @@ impl ProofConfig for GoldilocksBlake3Config {
         for (index, output_bytes, direct_temporary_bytes, graph_temporary_bytes, _) in lookup_jobs {
             let job_started = std::time::Instant::now();
             let input = &inputs[index];
-            // The graph kernel reads the trace through `resident_with_trace`,
-            // which also serves spilled LDEs that regenerate from a generator
-            // or a retained host trace. Admit it under the same predicate so
-            // the budget matches the kernel that runs.
+            // The graph kernel reads the stage-1 trace through
+            // `resident_with_trace`, which also serves spilled LDEs that
+            // regenerate from a generator or a retained host trace, and the
+            // preprocessed trace through `resident_with_host_trace`. Admit it
+            // under the same predicates so the budget matches the kernel that
+            // runs.
             let admits_graph = || {
                 graph_temporary_bytes.is_some()
                     && input.stage_1.0.has_resident_with_trace(input.stage_1.1)
-                    && input
-                        .preprocessed
-                        .is_none_or(|(data, matrix)| data.resident(matrix).is_some())
+                    && input.preprocessed.is_none_or(|(data, matrix)| {
+                        data.resident_with_host_trace(matrix).is_some()
+                    })
             };
             let target_for = |graph_path: bool| {
                 let temporary_bytes = if graph_path {

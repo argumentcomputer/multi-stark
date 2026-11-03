@@ -986,14 +986,16 @@ __global__ void lookup_messages(Ext2* conjugates,uint64_t* norms,const uint64_t*
     }
 }
 // Evaluate the lookup-only prefix of a circuit DAG against the original
-// row-major witness retained by the stage-1 LDE. This avoids materializing
-// and uploading the much wider concrete LookupValues buffer.
+// row-major witnesses retained by the preprocessed and stage-1 LDEs. This
+// avoids materializing and uploading the much wider concrete LookupValues
+// buffer. A trace flagged as a chunk holds rows [row_start, row_start+row_count)
+// followed by the wrapped successor of its last row.
 __global__ void lookup_messages_graph(
     Ext2* conjugates,uint64_t* norms,uint64_t* multiplicities,
     const ConstraintNode* nodes,size_t node_count,size_t slot_count,
     const ConstraintLookup* lookups,size_t lookup_count,const uint32_t* lookup_args,
-    const ResidentLde* preprocessed,const uint64_t* main_trace,size_t main_width,
-    bool main_trace_is_chunk,
+    const uint64_t* prep_trace,size_t prep_width,bool prep_trace_is_chunk,
+    const uint64_t* main_trace,size_t main_width,bool main_trace_is_chunk,
     Ext2 beta,Ext2 gamma,uint64_t ext_w,size_t height,size_t row_start,
     size_t row_count,uint64_t* global_scratch){
     extern __shared__ uint64_t shared_values[];
@@ -1009,9 +1011,9 @@ __global__ void lookup_messages_graph(
             switch(n.op){
                 case 0:v=n.value;break;
                 case 1:{const bool prep_column=n.aux<2;
-                    const size_t r=prep_column?((n.aux&1U)?next:row):
-                        (main_trace_is_chunk?((n.aux&1U)?local_row+1:local_row):((n.aux&1U)?next:row));
-                    v=n.aux<2?preprocessed->trace_values[r*preprocessed->width+n.a]:main_trace[r*main_width+n.a];break;}
+                    const bool chunk=prep_column?prep_trace_is_chunk:main_trace_is_chunk;
+                    const size_t r=chunk?((n.aux&1U)?local_row+1:local_row):((n.aux&1U)?next:row);
+                    v=prep_column?prep_trace[r*prep_width+n.a]:main_trace[r*main_width+n.a];break;}
                 case 2:v=0;break;
                 case 3:v=static_cast<uint64_t>(row==0);break;
                 case 4:v=static_cast<uint64_t>(row+1==height);break;
@@ -2141,6 +2143,10 @@ extern "C" int multi_stark_cuda_coset_lde_generate(
     return status;
 }
 
+extern "C" bool multi_stark_cuda_lde_has_device_trace(const void* handle) {
+    return handle && static_cast<const ResidentLde*>(handle)->trace_values;
+}
+
 extern "C" bool multi_stark_cuda_lde_has_generator(const void* handle) {
     return handle && static_cast<const ResidentLde*>(handle)->trace_writer;
 }
@@ -3025,7 +3031,7 @@ extern "C" int multi_stark_cuda_lookup_trace(int device_id,uint64_t* output,uint
 extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_handle,uint64_t* total,
     const void* nodes,size_t node_count,size_t slot_count,const void* lookups,size_t lookup_count,
     const uint32_t* lookup_args,size_t lookup_arg_count,const void* preprocessed_handle,
-    const void* main_handle,size_t group_size,const uint64_t* beta,const uint64_t* gamma,
+    const uint64_t* preprocessed_host,const void* main_handle,size_t group_size,const uint64_t* beta,const uint64_t* gamma,
     uint64_t ext_w,size_t added_bits,const MultiStarkNttPlan* plan){
     auto* main=const_cast<ResidentLde*>(static_cast<const ResidentLde*>(main_handle));
     auto* prep=static_cast<const ResidentLde*>(preprocessed_handle);
@@ -3034,7 +3040,8 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
        (!main->trace_values&&!main->host_trace_values&&!main->trace_writer)||!main->trace_height||
        !group_size||!beta||!gamma||(!plan || !plan->shift_powers)||
        !is_power_of_two(main->trace_height)||added_bits>=sizeof(size_t)*8||
-       main->trace_height>(SIZE_MAX>>added_bits)||(prep&&!prep->trace_values)) {
+       main->trace_height>(SIZE_MAX>>added_bits)||
+       (prep&&!prep->trace_values&&!preprocessed_host)) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
     *output_handle=nullptr;const size_t height=main->trace_height;
@@ -3054,7 +3061,7 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
     auto cp=[&](size_t at,const void* src,size_t n){if(status==cudaSuccess)status=cudaMemcpy(metadata+at,src,n,cudaMemcpyHostToDevice);};
     cp(on,nodes,node_count*sizeof(ConstraintNode));cp(ol,lookups,lookup_count*sizeof(ConstraintLookup));cp(oa,lookup_args,lookup_arg_count*sizeof(uint32_t));
     auto* dn=reinterpret_cast<ConstraintNode*>(metadata+on);auto* dl=reinterpret_cast<ConstraintLookup*>(metadata+ol);auto* da=reinterpret_cast<uint32_t*>(metadata+oa);
-    Ext2 *conjugates=nullptr,*deltas=nullptr;uint64_t *norms=nullptr,*norm_inverses=nullptr,*multiplicities=nullptr,*scratch=nullptr,*trace_chunk=nullptr;ResidentLde* lde=nullptr;
+    Ext2 *conjugates=nullptr,*deltas=nullptr;uint64_t *norms=nullptr,*norm_inverses=nullptr,*multiplicities=nullptr,*scratch=nullptr,*trace_chunk=nullptr,*prep_chunk=nullptr;ResidentLde* lde=nullptr;
     if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&conjugates),message_count*sizeof(Ext2));
     if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&norms),message_count*sizeof(uint64_t));
     if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&norm_inverses),message_count*sizeof(uint64_t));
@@ -3069,6 +3076,15 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
     const bool generated = !main->trace_values && main->trace_writer;
     const bool tiled = main->host_trace_values || generated;
     if(status==cudaSuccess&&tiled)status=cudaMalloc(reinterpret_cast<void**>(&trace_chunk),(chunk_rows+1)*main->width*sizeof(uint64_t));
+    // Preprocessed data is shared across proofs, so a host copy is read in
+    // place instead of being attached to the LDE.
+    const bool prep_tiled=prep&&!prep->trace_values;
+    if(status==cudaSuccess&&prep_tiled)status=cudaMalloc(reinterpret_cast<void**>(&prep_chunk),(chunk_rows+1)*prep->width*sizeof(uint64_t));
+    auto upload_rows=[&](uint64_t* chunk,const uint64_t* host,size_t width,size_t row_start,size_t rows){
+        cudaError_t result=cudaMemcpy(chunk,host+row_start*width,rows*width*sizeof(uint64_t),cudaMemcpyHostToDevice);
+        const size_t next_row=(row_start+rows)&(height-1);
+        if(result==cudaSuccess)result=cudaMemcpy(chunk+rows*width,host+next_row*width,width*sizeof(uint64_t),cudaMemcpyHostToDevice);
+        return result;};
     for(size_t row_start=0;status==cudaSuccess&&row_start<height;row_start+=LOOKUP_ROWS_PER_CHUNK){
         const size_t rows=height-row_start<LOOKUP_ROWS_PER_CHUNK?height-row_start:LOOKUP_ROWS_PER_CHUNK;
         const size_t messages=rows*lookup_count;
@@ -3079,14 +3095,14 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
             status=static_cast<cudaError_t>(main->trace_writer(main->trace_context,device_id,trace_chunk,row_start,rows+1));
             active_trace=trace_chunk;
         } else if(main->host_trace_values){
-            status=cudaMemcpy(trace_chunk,main->host_trace_values+row_start*main->width,rows*main->width*sizeof(uint64_t),cudaMemcpyHostToDevice);
-            const size_t next_row=(row_start+rows)&(height-1);
-            if(status==cudaSuccess)status=cudaMemcpy(trace_chunk+rows*main->width,main->host_trace_values+next_row*main->width,main->width*sizeof(uint64_t),cudaMemcpyHostToDevice);
+            status=upload_rows(trace_chunk,main->host_trace_values,main->width,row_start,rows);
             active_trace=trace_chunk;
         }
+        if(status==cudaSuccess&&prep_tiled)status=upload_rows(prep_chunk,preprocessed_host,prep->width,row_start,rows);
         if(status==cudaSuccess){lookup_messages_graph<<<static_cast<unsigned int>(chunk_blocks),static_cast<unsigned int>(tile),global?0:slot_count*tile*sizeof(uint64_t)>>>(
-            conjugates,norms,multiplicities,dn,node_count,slot_count,dl,lookup_count,da,prep,active_trace,main->width,
-            tiled,{beta[0],beta[1]},{gamma[0],gamma[1]},ext_w,height,row_start,rows,scratch);status=cudaGetLastError();}
+            conjugates,norms,multiplicities,dn,node_count,slot_count,dl,lookup_count,da,
+            prep_tiled?prep_chunk:(prep?prep->trace_values:nullptr),prep?prep->width:0,prep_tiled,
+            active_trace,main->width,tiled,{beta[0],beta[1]},{gamma[0],gamma[1]},ext_w,height,row_start,rows,scratch);status=cudaGetLastError();}
         if(status==cudaSuccess)status=batch_inverse_norms(norm_inverses,norms,messages);
         if(status==cudaSuccess){lookup_group_deltas_batched<<<blocks_for(rows*groups),THREADS>>>(
             deltas+row_start*groups,multiplicities,conjugates,norm_inverses,rows,lookup_count,group_size,ext_w);status=cudaGetLastError();}
@@ -3097,7 +3113,7 @@ extern "C" int multi_stark_cuda_lookup_graph_lde(int device_id,void** output_han
     if(status==cudaSuccess)status=coset_lde(device_id,lde->values,lde->values,height,width,extended_height,plan);
     if(status==cudaSuccess)status=cudaStreamSynchronize(0);
     if(status==cudaSuccess)*output_handle=lde;else destroy_resident_lde(lde);
-    cudaFree(trace_chunk);cudaFree(scratch);cudaFree(deltas);cudaFree(multiplicities);cudaFree(norm_inverses);cudaFree(norms);cudaFree(conjugates);cudaFree(metadata);
+    cudaFree(prep_chunk);cudaFree(trace_chunk);cudaFree(scratch);cudaFree(deltas);cudaFree(multiplicities);cudaFree(norm_inverses);cudaFree(norms);cudaFree(conjugates);cudaFree(metadata);
     return static_cast<int>(status);
 }
 

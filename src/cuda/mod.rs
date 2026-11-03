@@ -357,6 +357,7 @@ unsafe extern "C" {
         writer: unsafe extern "C" fn(*mut c_void, i32, *mut u64, usize, usize) -> i32,
         destroy: unsafe extern "C" fn(*mut c_void),
     ) -> i32;
+    fn multi_stark_cuda_lde_has_device_trace(handle: *const c_void) -> bool;
     fn multi_stark_cuda_lde_has_generator(handle: *const c_void) -> bool;
     fn multi_stark_cuda_lde_generator_context(handle: *const c_void) -> *mut c_void;
 }
@@ -374,6 +375,11 @@ unsafe impl Send for CudaLde {}
 unsafe impl Sync for CudaLde {}
 
 impl CudaLde {
+    /// Whether the original trace is still resident on the device.
+    pub(crate) fn has_device_trace(&self) -> bool {
+        unsafe { multi_stark_cuda_lde_has_device_trace(self.raw_handle()) }
+    }
+
     pub(crate) fn has_generator(&self) -> bool {
         unsafe { multi_stark_cuda_lde_has_generator(self.raw_handle()) }
     }
@@ -947,6 +953,7 @@ pub(crate) fn lookup_graph_lde_memory_upper_bound(
     graph: &ConstraintGraph<Goldilocks>,
     height: usize,
     main_width: usize,
+    preprocessed_width: usize,
     group_size: usize,
     log_blowup: usize,
 ) -> Option<(usize, usize)> {
@@ -989,12 +996,13 @@ pub(crate) fn lookup_graph_lde_memory_upper_bound(
     } else {
         0
     };
-    // Some stage-1 policies retain the original trace in pinned host memory.
-    // Charge one bounded staging chunk even when this particular LDE still
-    // owns a device trace, keeping admission safe across both representations.
+    // Some commitment policies retain the original preprocessed and stage-1
+    // traces only in host memory. Charge one bounded staging chunk for each
+    // even when the LDE still owns a device trace, keeping admission safe
+    // across both representations.
     let trace_chunk_bytes = chunk_rows
         .saturating_add(1)
-        .saturating_mul(main_width)
+        .saturating_mul(main_width.saturating_add(preprocessed_width))
         .saturating_mul(size_of::<Goldilocks>());
     Some((
         output_bytes,
@@ -1999,7 +2007,7 @@ pub(crate) fn lookup_lde_resident_partitioned(
 pub(crate) fn lookup_graph_lde_resident(
     dft: &CudaDft,
     graph: &ConstraintGraph<Goldilocks>,
-    preprocessed: Option<&CudaLde>,
+    preprocessed: Option<(&CudaLde, Option<&RowMajorMatrix<Goldilocks>>)>,
     main: &CudaLde,
     height: usize,
     group_size: usize,
@@ -2019,6 +2027,10 @@ pub(crate) fn lookup_graph_lde_resident(
         added_bits = log_blowup
     )
     .entered();
+    if let Some((lde, Some(host))) = preprocessed {
+        assert_eq!(host.height(), height, "preprocessed host trace height");
+        assert_eq!(host.width(), lde.width, "preprocessed host trace width");
+    }
     let (nodes, slot_count, lookups, args) = encode_lookup_nodes(graph)?;
     let num_lookups = lookups.len();
     let groups = num_lookups.div_ceil(group_size.max(1));
@@ -2043,7 +2055,10 @@ pub(crate) fn lookup_graph_lde_resident(
             lookups.len(),
             args.as_ptr(),
             args.len(),
-            preprocessed.map_or(core::ptr::null(), CudaLde::raw_handle),
+            preprocessed.map_or(core::ptr::null(), |(lde, _)| lde.raw_handle()),
+            preprocessed
+                .and_then(|(_, host)| host)
+                .map_or(core::ptr::null(), |host| host.values.as_ptr().cast()),
             main.raw_handle(),
             group_size.max(1),
             beta.as_ptr().cast(),
@@ -3229,6 +3244,7 @@ unsafe extern "C" {
         lookup_args: *const u32,
         lookup_arg_count: usize,
         preprocessed_handle: *const c_void,
+        preprocessed_host: *const u64,
         main_handle: *const c_void,
         group_size: usize,
         beta: *const u64,
@@ -3463,6 +3479,7 @@ mod tests {
     use p3_symmetric::CryptographicHasher;
     use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
+    mod lookup_graph;
     mod quotient;
 
     #[test]

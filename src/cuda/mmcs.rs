@@ -230,6 +230,40 @@ impl CudaMmcsData<RowMajorMatrix<Goldilocks>> {
         }
     }
 
+    /// The resident LDE together with a retained host copy of its trace, if
+    /// any, for readers that take the original trace without attaching it to
+    /// the LDE. Unlike [`Self::resident_with_trace`] this never mutates the
+    /// LDE, so it is safe on data shared across concurrent proofs, such as a
+    /// preprocessed commitment. Returns `None` unless the trace is available
+    /// on the device or as that host copy.
+    pub(crate) fn resident_with_host_trace(
+        &self,
+        index: usize,
+    ) -> Option<(&CudaLde, Option<&RowMajorMatrix<Goldilocks>>)> {
+        let (lde, host) = match self {
+            Self::Cuda {
+                resident,
+                retained_traces,
+                ..
+            } => (
+                resident.get(index)?,
+                retained_traces
+                    .get()
+                    .and_then(|retained| retained.get(index)),
+            ),
+            Self::Hybrid {
+                resident,
+                retained_traces,
+                ..
+            } => (
+                resident.get(index)?.as_ref()?,
+                retained_traces.get(index)?.as_ref(),
+            ),
+            Self::Cpu(_) => return None,
+        };
+        (lde.has_device_trace() || host.is_some()).then_some((lde, host))
+    }
+
     pub(crate) fn resident_with_trace(&self, index: usize) -> Option<&CudaLde> {
         match self {
             Self::Cuda {
