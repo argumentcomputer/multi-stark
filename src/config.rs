@@ -138,6 +138,24 @@ pub trait ProofConfig {
     /// evaluations.
     fn log_blowup(&self) -> usize;
 
+    /// The stage-one trace at `index` of `data`, rebuilt on its trace domain
+    /// of size `degree` from the committed low-degree extension. Host prover
+    /// paths use it to derive the lookup values a shape-only witness
+    /// ([`crate::lookup::LookupValues::shape_only`]) omits. `None` means the
+    /// configuration cannot rebuild traces, so it cannot prove shape-only
+    /// witnesses on the host.
+    fn committed_trace(
+        &self,
+        _data: &PcsData<Self>,
+        _index: usize,
+        _degree: usize,
+    ) -> Option<p3_matrix::dense::RowMajorMatrix<Val<Self>>>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
     /// Commit deterministic main-trace sources.
     fn commit_main(
         &self,

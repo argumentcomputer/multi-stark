@@ -49,7 +49,9 @@ impl Default for CudaDft {
     }
 }
 
-pub(crate) fn configured_device() -> i32 {
+/// The device a prover uses when none is requested:
+/// `MULTI_STARK_CUDA_DEVICE`, otherwise zero.
+pub fn configured_device() -> i32 {
     std::env::var("MULTI_STARK_CUDA_DEVICE").map_or(0, |value| {
         value
             .parse()

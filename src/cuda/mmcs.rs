@@ -491,7 +491,86 @@ pub struct CudaMmcs {
     device_id: i32,
 }
 
+/// The trace a committed LDE extends: the bit-reversed LDE over `gK` starts
+/// with the bit-reversed evaluations on `gH`, which interpolate the trace
+/// polynomial back onto `H`. Computed on the host, so a device under memory
+/// pressure is not asked for transform workspace.
+fn trace_from_lde(
+    lde: &RowMajorMatrix<Goldilocks>,
+    log_blowup: usize,
+) -> RowMajorMatrix<Goldilocks> {
+    use p3_dft::TwoAdicSubgroupDft;
+    use p3_field::Field;
+    use p3_matrix::bitrev::BitReversibleMatrix;
+    let degree = lde.height() >> log_blowup;
+    let evaluations = lde
+        .split_rows(degree)
+        .0
+        .as_cow()
+        .bit_reverse_rows()
+        .to_row_major_matrix();
+    let dft = p3_dft::Radix2DitParallel::<Goldilocks>::default();
+    let coefficients = dft.coset_idft_batch(evaluations, Goldilocks::GENERATOR);
+    dft.dft_batch(coefficients).to_row_major_matrix()
+}
+
 impl CudaMmcs {
+    /// The stage-one trace of committed matrix `index`, for evaluating the
+    /// lookups a shape-only witness omitted: the retained host trace when
+    /// the commitment kept one, otherwise rebuilt from the committed LDE,
+    /// read back from the device if necessary. Only that matrix is read and
+    /// nothing is cached in `data`.
+    pub(crate) fn committed_trace(
+        &self,
+        data: &CudaMmcsData<RowMajorMatrix<Goldilocks>>,
+        index: usize,
+        log_blowup: usize,
+    ) -> RowMajorMatrix<Goldilocks> {
+        match data {
+            CudaMmcsData::Cpu(data) => {
+                trace_from_lde(self.cpu.get_matrices(data)[index], log_blowup)
+            }
+            CudaMmcsData::Hybrid {
+                resident,
+                resident_active,
+                committed_matrices,
+                deferred_matrices,
+                retained_traces,
+                ..
+            } => {
+                if let Some(trace) = &retained_traces[index] {
+                    return trace.clone();
+                }
+                if let Some(lde) = committed_matrices[index].get() {
+                    return trace_from_lde(lde, log_blowup);
+                }
+                if let Some(lde) = resident[index].as_ref()
+                    && resident_active[index].load(std::sync::atomic::Ordering::Acquire)
+                {
+                    return trace_from_lde(&lde.to_row_major_matrix(), log_blowup);
+                }
+                trace_from_lde(
+                    hybrid_matrix(committed_matrices, deferred_matrices, index),
+                    log_blowup,
+                )
+            }
+            CudaMmcsData::Cuda {
+                resident,
+                committed_matrices,
+                retained_traces,
+                ..
+            } => {
+                if let Some(trace) = retained_traces.get().and_then(|traces| traces.get(index)) {
+                    return trace.clone();
+                }
+                if let Some(ldes) = committed_matrices.get() {
+                    return trace_from_lde(&ldes[index], log_blowup);
+                }
+                trace_from_lde(&resident[index].to_row_major_matrix(), log_blowup)
+            }
+        }
+    }
+
     /// A commitment scheme resident on the given CUDA device. Every kernel
     /// it launches, allocation it makes and buffer it stages through belongs
     /// to that device, so several of these in one process can each own a

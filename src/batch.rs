@@ -803,6 +803,28 @@ mod tests {
     }
 
     #[test]
+    fn shape_only_shards_prove_the_same_batch() {
+        let (system, key) = byte_system(config());
+        let expected = system.prove_batch(&key, two_shards(&system), vec![]);
+        let claims: Vec<_> = two_shards(&system).into_iter().map(|s| s.claims).collect();
+        let shape = |shard: usize| {
+            let witness = two_shards(&system).swap_remove(shard).witness;
+            SystemWitness {
+                lookups: witness
+                    .lookups
+                    .iter()
+                    .map(crate::lookup::LookupValues::shape)
+                    .collect(),
+                traces: witness.traces,
+            }
+        };
+        for retention in [Retention::Retain, Retention::Regenerate] {
+            let actual = system.prove_batch_with(&key, &claims, vec![], retention, shape);
+            assert_eq!(actual.to_bytes().unwrap(), expected.to_bytes().unwrap());
+        }
+    }
+
+    #[test]
     fn positive_proof_of_work_batches_are_reproducible() {
         // With a grind in every shard's opening, the proof bytes must still
         // not depend on which policy built the batch or on the run.

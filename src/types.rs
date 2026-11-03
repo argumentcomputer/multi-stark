@@ -22,7 +22,6 @@ use p3_fri::FriParameters as InnerFriParameters;
 #[cfg(not(feature = "cuda"))]
 use p3_fri::TwoAdicFriPcs;
 use p3_goldilocks::Goldilocks;
-#[cfg(feature = "cuda")]
 use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
 use p3_merkle_tree::MerkleTreeMmcs;
@@ -386,6 +385,31 @@ impl ProofConfig for GoldilocksBlake3Config {
 
     fn log_blowup(&self) -> usize {
         self.log_blowup
+    }
+
+    /// The committed LDE holds the trace polynomial's evaluations on a coset
+    /// `gK`; those on `gH` give its coefficients, which are evaluated back on
+    /// the trace domain `H`.
+    fn committed_trace(
+        &self,
+        data: &crate::config::PcsData<Self>,
+        index: usize,
+        degree: usize,
+    ) -> Option<RowMajorMatrix<Val>> {
+        use crate::traits::{EvaluationDomain as _, Pcs as _};
+        use p3_dft::TwoAdicSubgroupDft;
+        use p3_matrix::Matrix;
+        let coset = self
+            .pcs
+            .natural_domain_for_degree(degree)
+            .create_disjoint_domain(degree);
+        let evaluations = self
+            .pcs
+            .get_evaluations_on_domain(data, index, coset)
+            .to_row_major_matrix();
+        let dft = Radix2DitParallel::<Val>::default();
+        let coefficients = dft.coset_idft_batch(evaluations, coset.first_point());
+        Some(dft.dft_batch(coefficients).to_row_major_matrix())
     }
 
     #[cfg(feature = "cuda")]
@@ -924,10 +948,10 @@ impl ProofConfig for GoldilocksBlake3Config {
         // kernel from the same residency predicate; the kernel must not be
         // re-chosen here or it can run under the other path's budget.
         let evaluate = |input: &crate::config::LookupCommitInput<'_, Self>,
+                        values: &crate::lookup::LookupValues<Val>,
                         graph_path: bool,
                         cooperative: bool| {
-            let (height, num_lookups, multiplicities, args, arg_offsets) =
-                input.lookup_values.cuda_parts();
+            let (height, num_lookups, multiplicities, args, arg_offsets) = values.cuda_parts();
             let group_size = input.circuit.lookup_group_size.max(1);
             let main = graph_path.then(|| {
                 input
@@ -969,7 +993,7 @@ impl ProofConfig for GoldilocksBlake3Config {
                     self.log_blowup,
                     move |rows| {
                         pool.install(|| {
-                            input.lookup_values.cuda_stage_2_deltas::<ExtVal>(
+                            values.cuda_stage_2_deltas::<ExtVal>(
                                 rows,
                                 group_size,
                                 lookup_challenge,
@@ -1074,7 +1098,19 @@ impl ProofConfig for GoldilocksBlake3Config {
                 && output_bytes >= (8usize << 30)
                 && num_lookups >= 64
                 && arg_offsets.last().copied().unwrap_or(0) >= 256;
-            results[index] = Some(evaluate(&inputs[index], graph_path, cooperative)?);
+            // The direct paths read lookup values on the host. A shape-only
+            // witness gets them from the committed stage-one trace here.
+            let materialized = (!graph_path && !input.lookup_values.is_materialized()).then(|| {
+                let _g = tracing::info_span!("cuda/materialize_lookups", index).entered();
+                let trace = self.pcs.mmcs.committed_trace(
+                    input.stage_1.0,
+                    input.stage_1.1,
+                    self.log_blowup,
+                );
+                crate::system::compute_lookup_values(input.circuit, &trace)
+            });
+            let values = materialized.as_ref().unwrap_or(input.lookup_values);
+            results[index] = Some(evaluate(input, values, graph_path, cooperative)?);
             if crate::cuda::memory_diagnostics_enabled() {
                 eprintln!(
                     "[multi-stark/cuda] lookup job {index} complete: {:.3}s",

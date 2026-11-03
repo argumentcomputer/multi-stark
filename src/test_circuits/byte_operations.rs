@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::lookup::Lookup;
+    use crate::lookup::{Lookup, LookupValues};
     use crate::p3_adapter::{LookupAir, preprocessed_var, var};
     use crate::system::{System, SystemWitness};
     use crate::test_circuits::SymbExpr;
@@ -153,7 +153,15 @@ mod tests {
         let claim3 = &[f(2), f(100), f(40), f(100 | 40)];
         let claim4 = &[f(3), f(200), f(100)];
         let claims: &[&[Val]] = &[claim1, claim2, claim3, claim4];
+        let shape = SystemWitness {
+            traces: witness.traces.clone(),
+            lookups: witness.lookups.iter().map(LookupValues::shape).collect(),
+        };
         let proof = system.prove_multiple_claims(&key, claims, witness);
         system.verify_multiple_claims(claims, &proof).unwrap();
+        // Lookups over preprocessed columns rebuild from the committed trace
+        // and the circuit's preprocessed table alike.
+        let rebuilt = system.prove_multiple_claims(&key, claims, shape);
+        assert_eq!(proof.to_bytes().unwrap(), rebuilt.to_bytes().unwrap());
     }
 }

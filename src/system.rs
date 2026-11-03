@@ -363,7 +363,8 @@ impl<F: Field> SystemWitness<F> {
 
 /// Computes a circuit's concrete lookup values by sweeping the compiled
 /// lookup prefix over each row (with wrap-around for the next-row window).
-fn compute_lookup_values<F: Field>(
+/// Rows are independent, so they are swept in parallel.
+pub(crate) fn compute_lookup_values<F: Field>(
     circuit: &Circuit<F>,
     trace: &RowMajorMatrix<F>,
 ) -> LookupValues<F> {

@@ -327,6 +327,36 @@ where
     // FRI-based config is two-adic anyway.
     Val<SC>: TwoAdicField + Ord,
 {
+    /// Fills every shape-only lookup witness of the active circuits from the
+    /// committed stage-one traces, for prover paths that read lookup values
+    /// on the host. Materialized witnesses pass through unchanged.
+    fn materialize_lookups(
+        &self,
+        data: &PcsData<SC>,
+        active_indices: &[usize],
+        log_degrees: &[usize],
+        lookups: Vec<LookupValues<Val<SC>>>,
+    ) -> Vec<LookupValues<Val<SC>>> {
+        lookups
+            .into_iter()
+            .enumerate()
+            .map(|(position, values)| {
+                if values.is_materialized() {
+                    return values;
+                }
+                let _g = tracing::info_span!("stark/materialize_lookups", position).entered();
+                let trace = self
+                    .config
+                    .committed_trace(data, position, 1 << log_degrees[position])
+                    .expect("shape-only lookup witnesses need a configuration that rebuilds committed traces");
+                crate::system::compute_lookup_values(
+                    &self.circuits[active_indices[position]],
+                    &trace,
+                )
+            })
+            .collect()
+    }
+
     /// Generates a STARK proof for the system with a single claim.
     ///
     /// This is a convenience wrapper around [`Self::prove_multiple_claims`].
@@ -556,6 +586,15 @@ where
                 drop(_g);
                 result
             } else {
+                // Host paths read every lookup value; derive any a shape-only
+                // witness omitted from the committed stage-one traces.
+                drop(lookup_inputs);
+                let active_lookups = self.materialize_lookups(
+                    &stage_1_trace_data,
+                    &active_indices,
+                    &log_degrees,
+                    active_lookups,
+                );
                 let (stage_2_traces, intermediate_accumulators) = self
                     .config
                     .accelerated_lookup_traces(
