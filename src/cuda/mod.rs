@@ -3015,6 +3015,14 @@ unsafe extern "C" {
     ) -> i32;
 
     #[cfg(test)]
+    fn multi_stark_cuda_copy_to_device(
+        device_id: i32,
+        output: *mut u64,
+        input: *const u64,
+        words: usize,
+    ) -> i32;
+
+    #[cfg(test)]
     fn multi_stark_cuda_lde_copy_row(
         device_id: i32,
         handle: *const c_void,
@@ -3481,6 +3489,7 @@ mod tests {
 
     mod lookup_graph;
     mod quotient;
+    mod witness;
 
     #[test]
     fn device_coset_selectors_match_cpu() {

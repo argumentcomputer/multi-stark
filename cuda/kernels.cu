@@ -2239,6 +2239,20 @@ extern "C" int multi_stark_cuda_lde_copy_to_host(int device_id,
     return static_cast<int>(status);
 }
 
+extern "C" int multi_stark_cuda_copy_to_device(int device_id, uint64_t* output,
+                                               const uint64_t* input, size_t words) {
+    if ((output == nullptr || input == nullptr) && words != 0) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    cudaError_t status = cudaSetDevice(device_id);
+    if (status == cudaSuccess && words != 0) {
+        status = cudaMemcpyAsync(output, input, words * sizeof(uint64_t),
+                                 cudaMemcpyHostToDevice, cudaStreamPerThread);
+    }
+    if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
+    return static_cast<int>(status);
+}
+
 extern "C" int multi_stark_cuda_lde_copy_row(int device_id,
                                                const void* handle,
                                                size_t row,

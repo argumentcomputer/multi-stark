@@ -1028,10 +1028,11 @@ impl ProofConfig for GoldilocksBlake3Config {
                 ))
             };
             // SAFETY: evaluation is synchronous and complete, while the
-            // retained matrix remains owned by the prover data.
+            // retained matrix remains owned by the prover data. A generator's
+            // device cache stays: admission releases it under memory pressure,
+            // and later lookups over the same record would otherwise rebuild it.
             if let Some(main) = main {
                 unsafe { main.release_trace() };
-                main.release_generator_device();
             }
             result
         };
