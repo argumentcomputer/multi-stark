@@ -332,6 +332,7 @@ where
     /// on the host. Materialized witnesses pass through unchanged.
     fn materialize_lookups(
         &self,
+        key: &ProverKey<SC>,
         data: &PcsData<SC>,
         active_indices: &[usize],
         log_degrees: &[usize],
@@ -349,9 +350,28 @@ where
                     .config
                     .committed_trace(data, position, 1 << log_degrees[position])
                     .expect("shape-only lookup witnesses need a configuration that rebuilds committed traces");
-                crate::system::compute_lookup_values(
-                    &self.circuits[active_indices[position]],
+                let circuit_index = active_indices[position];
+                let circuit = &self.circuits[circuit_index];
+                // A system built without its fixed matrices reads each one
+                // back from the preprocessed commitment when it is needed.
+                let fixed = circuit
+                    .preprocessed
+                    .is_none()
+                    .then(|| {
+                        key.preprocessed_data
+                            .as_ref()
+                            .zip(self.preprocessed_indices[circuit_index])
+                    })
+                    .flatten()
+                    .map(|(fixed, index)| {
+                        self.config
+                            .committed_trace(fixed, index, 1 << log_degrees[position])
+                            .expect("shape-only lookup witnesses need a configuration that rebuilds committed traces")
+                    });
+                crate::system::compute_lookup_values_with_fixed(
+                    circuit,
                     &trace,
+                    circuit.preprocessed.as_ref().or(fixed.as_ref()),
                 )
             })
             .collect()
@@ -590,6 +610,7 @@ where
                 // witness omitted from the committed stage-one traces.
                 drop(lookup_inputs);
                 let active_lookups = self.materialize_lookups(
+                    key,
                     &stage_1_trace_data,
                     &active_indices,
                     &log_degrees,

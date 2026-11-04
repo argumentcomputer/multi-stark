@@ -1119,7 +1119,22 @@ impl ProofConfig for GoldilocksBlake3Config {
                     input.stage_1.1,
                     self.log_blowup,
                 );
-                crate::system::compute_lookup_values(input.circuit, &trace)
+                // A system built without its fixed matrices reads each one
+                // back from the preprocessed commitment when it is needed.
+                let fixed = input
+                    .circuit
+                    .preprocessed
+                    .is_none()
+                    .then_some(input.preprocessed)
+                    .flatten()
+                    .map(|(data, matrix)| {
+                        self.pcs.mmcs.committed_trace(data, matrix, self.log_blowup)
+                    });
+                crate::system::compute_lookup_values_with_fixed(
+                    input.circuit,
+                    &trace,
+                    input.circuit.preprocessed.as_ref().or(fixed.as_ref()),
+                )
             });
             let values = materialized.as_ref().unwrap_or(input.lookup_values);
             results[index] = Some(evaluate(input, values, graph_path, cooperative)?);
