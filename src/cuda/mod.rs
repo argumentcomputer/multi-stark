@@ -2248,6 +2248,12 @@ fn raw_u64(value: Goldilocks) -> u64 {
     value.as_canonical_u64()
 }
 
+/// The most stage-one LDEs a commitment builds concurrently, each on its own
+/// Rayon worker stream. The bound keeps pageable upload staging within the
+/// driver's reliable concurrency range while retaining substantial overlap;
+/// it also bounds how many trace writers run at once.
+pub const MAX_CONCURRENT_LDES: usize = 16;
+
 pub(crate) fn device_memory_info(device_id: i32) -> (usize, usize) {
     let mut free_bytes = 0;
     let mut total_bytes = 0;

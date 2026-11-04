@@ -1070,7 +1070,6 @@ where
         // Each Rayon worker uses its own per-thread CUDA stream. A bounded
         // admission window keeps pageable upload staging within the driver's
         // reliable concurrency range while retaining substantial overlap.
-        const CUDA_LDE_WAVE: usize = 16;
         let mut ldes = Vec::with_capacity(evaluations.len());
         let wave_size = if release_traces_during_construction {
             1
@@ -1079,7 +1078,7 @@ where
                 .saturating_sub(source_bytes)
                 .saturating_sub(lde_bytes)
                 .saturating_sub(minimum_free);
-            (workspace_budget / max_transform_workspace.max(1)).clamp(1, CUDA_LDE_WAVE)
+            (workspace_budget / max_transform_workspace.max(1)).clamp(1, super::MAX_CONCURRENT_LDES)
         };
         for wave in evaluations.chunks(wave_size) {
             let transform =

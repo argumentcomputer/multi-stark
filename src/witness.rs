@@ -1,4 +1,5 @@
-//! Owned, deterministic main-trace sources. Producers do not allocate device memory.
+//! Owned, deterministic main-trace sources. A producer allocates device memory
+//! only for the workspace it declares to commitment admission.
 
 use std::sync::Arc;
 
@@ -15,6 +16,15 @@ pub trait TraceGenerator<F: Field>: Send + Sync {
     /// Fill a device tile synchronously on its owning device and calling stream.
     #[cfg(feature = "cuda")]
     fn write_device_rows(&self, output: crate::cuda::DeviceTraceView<'_>) -> Result<(), String>;
+
+    /// Device scratch one `write_device_rows` call may allocate besides its
+    /// output tile. Up to [`crate::cuda::MAX_CONCURRENT_LDES`] calls on
+    /// different sources can run at once, and commitment admission reserves
+    /// this for each.
+    #[cfg(feature = "cuda")]
+    fn device_workspace_bytes(&self) -> usize {
+        0
+    }
 
     /// Free whatever the source keeps on `device_id` to serve tiles faster,
     /// such as seeds left resident between a commitment and the lookup pass

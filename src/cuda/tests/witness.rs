@@ -47,6 +47,10 @@ impl TraceGenerator<Goldilocks> for HostRows {
         .unwrap();
     }
 
+    fn device_workspace_bytes(&self) -> usize {
+        1 << 20
+    }
+
     fn write_device_rows(&self, view: DeviceTraceView<'_>) -> Result<(), String> {
         self.runs(view.first_row(), view.rows(), |offset, values| {
             // SAFETY: the tile holds `rows * width` words from `as_mut_ptr`,

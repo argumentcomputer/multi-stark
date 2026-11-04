@@ -102,7 +102,9 @@ pub(crate) fn commit_with(
                 blowup,
                 Val::GENERATOR / domain.shift(),
             );
-            plan.scratch_bytes().saturating_add(plan.constant_bytes())
+            plan.scratch_bytes()
+                .saturating_add(plan.constant_bytes())
+                .saturating_add(writer_workspace(source))
         })
         .max()
         .unwrap_or(0);
@@ -125,7 +127,7 @@ pub(crate) fn commit_with(
             .saturating_sub(reserve)
             .checked_div(max_workspace.max(1))
             .unwrap_or(1)
-            .clamp(1, CUDA_LDE_WAVE);
+            .clamp(1, super::MAX_CONCURRENT_LDES);
         construct_resident(pcs, evaluations, source_bytes, total, wave_size)
     } else {
         construct_bounded(pcs, evaluations, reserve)
@@ -201,9 +203,12 @@ pub(crate) fn commit_with(
     )
 }
 
-/// Concurrent LDE construction, bounded by the device's transform workspace,
-/// as the all-host path admits it.
-const CUDA_LDE_WAVE: usize = 16;
+fn writer_workspace(source: &TraceSource<Val>) -> usize {
+    match source {
+        TraceSource::Host(_) => 0,
+        TraceSource::Generated(generator) => generator.device_workspace_bytes(),
+    }
+}
 
 fn lde_of(pcs: &CudaPcs, domain: &Domain<Config>, source: &TraceSource<Val>) -> CudaLde {
     let blowup = pcs.fri.log_blowup;
@@ -330,6 +335,7 @@ fn construct_bounded(
             .saturating_mul((1 << blowup) + 1)
             .saturating_add(plan.scratch_bytes())
             .saturating_add(plan.constant_bytes())
+            .saturating_add(writer_workspace(&source))
             .saturating_add(reserve);
         // Generator caches go before any LDE spills: they are rebuilt from
         // host seeds on demand, a spilled LDE is uploaded again.
