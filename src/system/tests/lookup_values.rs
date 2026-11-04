@@ -282,6 +282,46 @@ fn witness_circuit_order_and_lookup_totals() {
 }
 
 #[test]
+fn per_circuit_stage_2_traces_chain_like_a_joint_pass() {
+    let (circuits, traces): (Vec<_>, Vec<_>) = [65, 0, 513, 64]
+        .into_iter()
+        .map(|height| fixture::<Val>(height, true))
+        .unzip();
+    let lookups: Vec<_> = traces
+        .iter()
+        .zip(&circuits)
+        .map(|(trace, circuit)| compute_lookup_values(circuit, trace))
+        .collect();
+    let group_sizes = [2, 1, 3, 1];
+    let challenges = [
+        ExtVal::from_u8(29),
+        ExtVal::from_u8(31),
+        ExtVal::from_u8(37),
+    ];
+    let (joint_traces, joint_totals) = LookupValues::stage_2_traces(
+        &lookups,
+        &group_sizes,
+        challenges[0],
+        &challenges[1],
+        challenges[2],
+    );
+    let mut acc = challenges[2];
+    for (position, values) in lookups.iter().enumerate() {
+        let (traces, totals) = LookupValues::stage_2_traces(
+            std::slice::from_ref(values),
+            &group_sizes[position..=position],
+            challenges[0],
+            &challenges[1],
+            acc,
+        );
+        assert_eq!(totals, [joint_totals[position]]);
+        assert_eq!(traces[0].dimensions(), joint_traces[position].dimensions());
+        assert_eq!(traces[0].values, joint_traces[position].values);
+        acc = totals[0];
+    }
+}
+
+#[test]
 fn lookup_witness_preserves_proof_bytes() {
     let inputs = [false, true].map(|pull| CircuitInputs {
         main_width: 2,

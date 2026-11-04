@@ -327,54 +327,112 @@ where
     // FRI-based config is two-adic anyway.
     Val<SC>: TwoAdicField + Ord,
 {
-    /// Fills every shape-only lookup witness of the active circuits from the
-    /// committed stage-one traces, for prover paths that read lookup values
-    /// on the host. Materialized witnesses pass through unchanged.
-    fn materialize_lookups(
+    /// Builds the stage-two traces and intermediate accumulators on the host,
+    /// one circuit at a time. A shape-only witness is filled from the
+    /// committed stage-one trace just before its circuit is processed and
+    /// freed right after, so at most one circuit's lookup values (and its
+    /// messages and their inverses) are live at once. Circuits only interact
+    /// through the accumulator chain, which is carried between iterations,
+    /// so the traces equal those of a single pass over every circuit.
+    #[allow(clippy::too_many_arguments)]
+    fn host_lookup_traces(
         &self,
         key: &ProverKey<SC>,
         data: &PcsData<SC>,
         active_indices: &[usize],
         log_degrees: &[usize],
         lookups: Vec<LookupValues<Val<SC>>>,
-    ) -> Vec<LookupValues<Val<SC>>> {
-        lookups
-            .into_iter()
-            .enumerate()
-            .map(|(position, values)| {
-                if values.is_materialized() {
-                    return values;
-                }
-                let _g = tracing::info_span!("stark/materialize_lookups", position).entered();
-                let trace = self
-                    .config
-                    .committed_trace(data, position, 1 << log_degrees[position])
-                    .expect("shape-only lookup witnesses need a configuration that rebuilds committed traces");
-                let circuit_index = active_indices[position];
-                let circuit = &self.circuits[circuit_index];
-                // A system built without its fixed matrices reads each one
-                // back from the preprocessed commitment when it is needed.
-                let fixed = circuit
-                    .preprocessed
-                    .is_none()
-                    .then(|| {
-                        key.preprocessed_data
-                            .as_ref()
-                            .zip(self.preprocessed_indices[circuit_index])
-                    })
-                    .flatten()
-                    .map(|(fixed, index)| {
-                        self.config
-                            .committed_trace(fixed, index, 1 << log_degrees[position])
-                            .expect("shape-only lookup witnesses need a configuration that rebuilds committed traces")
-                    });
-                crate::system::compute_lookup_values_with_fixed(
-                    circuit,
-                    &trace,
-                    circuit.preprocessed.as_ref().or(fixed.as_ref()),
+        group_sizes: &[usize],
+        lookup_argument_challenge: SC::Challenge,
+        fingerprint_challenge: SC::Challenge,
+        mut acc: SC::Challenge,
+    ) -> (Vec<RowMajorMatrix<SC::Challenge>>, Vec<SC::Challenge>) {
+        let mut traces = Vec::with_capacity(lookups.len());
+        let mut intermediate_accumulators = Vec::with_capacity(lookups.len());
+        for (position, values) in lookups.into_iter().enumerate() {
+            let values =
+                [
+                    self.materialize_lookup(
+                        key,
+                        data,
+                        active_indices,
+                        log_degrees,
+                        position,
+                        values,
+                    ),
+                ];
+            let group_size = &group_sizes[position..=position];
+            let (circuit_traces, accumulators) = self
+                .config
+                .accelerated_lookup_traces(
+                    &values,
+                    group_size,
+                    lookup_argument_challenge,
+                    fingerprint_challenge,
+                    acc,
                 )
+                .unwrap_or_else(|| {
+                    LookupValues::stage_2_traces(
+                        &values,
+                        group_size,
+                        lookup_argument_challenge,
+                        &fingerprint_challenge,
+                        acc,
+                    )
+                });
+            drop(values);
+            acc = *accumulators.last().expect("one accumulator per circuit");
+            traces.extend(circuit_traces);
+            intermediate_accumulators.extend(accumulators);
+        }
+        (traces, intermediate_accumulators)
+    }
+
+    /// Fills a shape-only lookup witness of the circuit at an active position
+    /// from its committed stage-one trace. A materialized witness passes
+    /// through unchanged.
+    fn materialize_lookup(
+        &self,
+        key: &ProverKey<SC>,
+        data: &PcsData<SC>,
+        active_indices: &[usize],
+        log_degrees: &[usize],
+        position: usize,
+        values: LookupValues<Val<SC>>,
+    ) -> LookupValues<Val<SC>> {
+        if values.is_materialized() {
+            return values;
+        }
+        let _g = tracing::info_span!("stark/materialize_lookups", position).entered();
+        let trace = self
+            .config
+            .committed_trace(data, position, 1 << log_degrees[position])
+            .expect(
+                "shape-only lookup witnesses need a configuration that rebuilds committed traces",
+            );
+        let circuit_index = active_indices[position];
+        let circuit = &self.circuits[circuit_index];
+        // A system built without its fixed matrices reads each one
+        // back from the preprocessed commitment when it is needed.
+        let fixed = circuit
+            .preprocessed
+            .is_none()
+            .then(|| {
+                key.preprocessed_data
+                    .as_ref()
+                    .zip(self.preprocessed_indices[circuit_index])
             })
-            .collect()
+            .flatten()
+            .map(|(fixed, index)| {
+                self.config
+                    .committed_trace(fixed, index, 1 << log_degrees[position])
+                    .expect("shape-only lookup witnesses need a configuration that rebuilds committed traces")
+            });
+        crate::system::compute_lookup_values_with_fixed(
+            circuit,
+            &trace,
+            circuit.preprocessed.as_ref().or(fixed.as_ref()),
+        )
     }
 
     /// Generates a STARK proof for the system with a single claim.
@@ -606,37 +664,18 @@ where
                 drop(_g);
                 result
             } else {
-                // Host paths read every lookup value; derive any a shape-only
-                // witness omitted from the committed stage-one traces.
                 drop(lookup_inputs);
-                let active_lookups = self.materialize_lookups(
+                let (stage_2_traces, intermediate_accumulators) = self.host_lookup_traces(
                     key,
                     &stage_1_trace_data,
                     &active_indices,
                     &log_degrees,
                     active_lookups,
+                    &group_sizes,
+                    lookup_argument_challenge,
+                    fingerprint_challenge,
+                    acc,
                 );
-                let (stage_2_traces, intermediate_accumulators) = self
-                    .config
-                    .accelerated_lookup_traces(
-                        &active_lookups,
-                        &group_sizes,
-                        lookup_argument_challenge,
-                        fingerprint_challenge,
-                        acc,
-                    )
-                    .unwrap_or_else(|| {
-                        LookupValues::stage_2_traces(
-                            &active_lookups,
-                            &group_sizes,
-                            lookup_argument_challenge,
-                            &fingerprint_challenge,
-                            acc,
-                        )
-                    });
-                // The lookup witness can be as large as the traces themselves; free it
-                // now instead of holding it through the commit/quotient/FRI stages.
-                drop(active_lookups);
                 drop(_g);
 
                 // Cost: "Stage 2 commit" — LDE + Merkle for flattened extension traces.
