@@ -2275,28 +2275,49 @@ pub const MAX_CONCURRENT_LDES: usize = 16;
 /// Maps `items` in order with at most `concurrency` calls in flight, each on
 /// a Rayon worker. A call starts as soon as any earlier one finishes rather
 /// than with a fixed wave, so one long transform, or one long host upload,
-/// no longer holds back the calls behind it while the device idles.
+/// no longer holds back the calls behind it while the device idles. A
+/// panicking call stops the others from taking further items before the
+/// panic propagates. Without the `parallel` feature the calls run serially.
 pub(crate) fn bounded_parallel_map<T: Sync, R: Send>(
     items: &[T],
     concurrency: usize,
     transform: impl Fn(&T) -> R + Sync,
 ) -> Vec<R> {
-    use rayon::prelude::*;
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let mut results: Vec<(usize, R)> = (0..concurrency.clamp(1, items.len().max(1)))
-        .into_par_iter()
-        .flat_map_iter(|_| {
-            let mut done = Vec::new();
-            loop {
-                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(item) = items.get(index) else { break };
-                done.push((index, transform(item)));
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct StopOnPanic<'a>(&'a AtomicBool);
+        impl Drop for StopOnPanic<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    self.0.store(true, Ordering::Relaxed);
+                }
             }
-            done
-        })
-        .collect();
-    results.sort_unstable_by_key(|&(index, _)| index);
-    results.into_iter().map(|(_, result)| result).collect()
+        }
+        let next = AtomicUsize::new(0);
+        let stop = AtomicBool::new(false);
+        let mut results: Vec<(usize, R)> = (0..concurrency.clamp(1, items.len().max(1)))
+            .into_par_iter()
+            .flat_map_iter(|_| {
+                let _guard = StopOnPanic(&stop);
+                let mut done = Vec::new();
+                while !stop.load(Ordering::Relaxed) {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(item) = items.get(index) else { break };
+                    done.push((index, transform(item)));
+                }
+                done
+            })
+            .collect();
+        results.sort_unstable_by_key(|&(index, _)| index);
+        results.into_iter().map(|(_, result)| result).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let _ = concurrency;
+        items.iter().map(transform).collect()
+    }
 }
 
 pub(crate) fn device_memory_info(device_id: i32) -> (usize, usize) {
@@ -3559,6 +3580,24 @@ mod tests {
             assert!(peak.load(Ordering::SeqCst) <= concurrency);
         }
         assert!(bounded_parallel_map(&[] as &[usize], 4, |&i| i).is_empty());
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn bounded_parallel_map_stops_taking_items_after_a_panic() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let items: Vec<usize> = (0..10_000).collect();
+        let calls = AtomicUsize::new(0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bounded_parallel_map(&items, 4, |&item| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_micros(50));
+                assert_ne!(item, 10, "injected");
+                item
+            })
+        }));
+        assert!(result.is_err());
+        assert!(calls.load(Ordering::SeqCst) < 100);
     }
 
     #[test]
