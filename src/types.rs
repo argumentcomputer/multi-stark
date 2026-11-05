@@ -1053,9 +1053,13 @@ impl ProofConfig for GoldilocksBlake3Config {
                         data.resident_with_host_trace(matrix).is_some()
                     })
             };
+            // A graph lookup over a trace no longer on the device regenerates
+            // it, which can re-upload generator state that admission released.
             let target_for = |graph_path: bool| {
                 let temporary_bytes = if graph_path {
-                    graph_temporary_bytes.unwrap()
+                    graph_temporary_bytes
+                        .unwrap()
+                        .saturating_add(input.stage_1.0.regeneration_bytes(input.stage_1.1))
                 } else {
                     direct_temporary_bytes
                 };

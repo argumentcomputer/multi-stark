@@ -387,14 +387,32 @@ impl CudaLde {
     /// Frees what the trace generator, if any, caches on this device. The
     /// generator stays attached and keeps serving tiles from the host.
     pub(crate) fn release_generator_device(&self) {
-        let context = unsafe { multi_stark_cuda_lde_generator_context(self.raw_handle()) };
-        if context.is_null() {
-            return;
+        if let Some(generator) = self.generator() {
+            generator.release_device(self.device_id);
         }
+    }
+
+    /// Device bytes regenerating this LDE's trace may allocate: its
+    /// generator's releasable state, whether or not it is resident now, since
+    /// admission can release it before the regeneration runs, plus one write
+    /// workspace. Zero while the trace is on the device or without a
+    /// generator.
+    pub(crate) fn regeneration_bytes(&self) -> usize {
+        if self.has_device_trace() {
+            return 0;
+        }
+        self.generator().map_or(0, |generator| {
+            generator
+                .device_state_bytes()
+                .saturating_add(generator.device_workspace_bytes())
+        })
+    }
+
+    fn generator(&self) -> Option<&Generator> {
+        let context = unsafe { multi_stark_cuda_lde_generator_context(self.raw_handle()) };
         // SAFETY: the handle owns the boxed generator until it is destroyed,
         // and the box holds exactly the `Generator` the LDE was created with.
-        let generator = unsafe { &*context.cast::<Generator>() };
-        generator.release_device(self.device_id);
+        (!context.is_null()).then(|| unsafe { &*context.cast::<Generator>() })
     }
 
     pub(crate) const fn raw_handle(&self) -> *const c_void {

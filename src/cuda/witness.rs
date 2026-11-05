@@ -108,11 +108,17 @@ pub(crate) fn commit_with(
         })
         .max()
         .unwrap_or(0);
+    let restore = evaluations
+        .iter()
+        .map(|(_, source)| state_restore_bytes(source))
+        .max()
+        .unwrap_or(0);
     // Every trace and LDE stays resident through the tree build, as on the
     // all-host path when its batch fits beside the minimum free headroom.
     let resident_footprint = source_bytes
         .saturating_add(lde_bytes)
         .saturating_add(max_workspace)
+        .saturating_add(restore)
         .saturating_add(max_height.saturating_mul(96))
         .saturating_add(reserve);
     let keep_traces = keep_traces.unwrap_or(resident_footprint <= initial_free);
@@ -124,6 +130,7 @@ pub(crate) fn commit_with(
         let wave_size = initial_free
             .saturating_sub(source_bytes)
             .saturating_sub(lde_bytes)
+            .saturating_sub(restore)
             .saturating_sub(reserve)
             .checked_div(max_workspace.max(1))
             .unwrap_or(1)
@@ -207,6 +214,17 @@ fn writer_workspace(source: &TraceSource<Val>) -> usize {
     match source {
         TraceSource::Host(_) => 0,
         TraceSource::Generated(generator) => generator.device_workspace_bytes(),
+    }
+}
+
+/// Device bytes a generated source allocates to restore released state
+/// before its first tile.
+fn state_restore_bytes(source: &TraceSource<Val>) -> usize {
+    match source {
+        TraceSource::Generated(generator) if !generator.device_state_resident() => {
+            generator.device_state_bytes()
+        }
+        _ => 0,
     }
 }
 
@@ -336,14 +354,18 @@ fn construct_bounded(
             .saturating_add(plan.scratch_bytes())
             .saturating_add(plan.constant_bytes())
             .saturating_add(writer_workspace(&source))
+            .saturating_add(state_restore_bytes(&source))
             .saturating_add(reserve);
         // Generator caches go before any LDE spills: they are rebuilt from
-        // host seeds on demand, a spilled LDE is uploaded again.
-        for slot in resident.iter() {
-            if device_memory_info(device).0 >= needed {
-                break;
+        // host seeds on demand, a spilled LDE is uploaded again. A generated
+        // source would rebuild a released cache at once, so it releases none.
+        if matches!(source, TraceSource::Host(_)) {
+            for slot in resident.iter() {
+                if device_memory_info(device).0 >= needed {
+                    break;
+                }
+                slot.as_ref().unwrap().release_generator_device();
             }
-            slot.as_ref().unwrap().release_generator_device();
         }
         for index in 0..resident.len() {
             if device_memory_info(device).0 >= needed {

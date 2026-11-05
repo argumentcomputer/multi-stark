@@ -230,6 +230,18 @@ impl CudaMmcsData<RowMajorMatrix<Goldilocks>> {
         }
     }
 
+    /// Device bytes the graph lookup over matrix `index` may allocate to
+    /// regenerate its trace; see [`CudaLde::regeneration_bytes`]. A spilled
+    /// hybrid LDE keeps its generator and counts too.
+    pub(crate) fn regeneration_bytes(&self, index: usize) -> usize {
+        let lde = match self {
+            Self::Cuda { resident, .. } => resident.get(index),
+            Self::Hybrid { resident, .. } => resident.get(index).and_then(Option::as_ref),
+            Self::Cpu(_) => None,
+        };
+        lde.map_or(0, CudaLde::regeneration_bytes)
+    }
+
     /// The resident LDE together with a retained host copy of its trace, if
     /// any, for readers that take the original trace without attaching it to
     /// the LDE. Unlike [`Self::resident_with_trace`] this never mutates the

@@ -26,6 +26,22 @@ pub trait TraceGenerator<F: Field>: Send + Sync {
         0
     }
 
+    /// Device bytes of the state [`Self::release_device`] frees, such as
+    /// uploaded seeds; the next tile allocates it again. Generated sources of
+    /// one batch are taken to share this state, so admission reserves the
+    /// largest of them once rather than their sum.
+    #[cfg(feature = "cuda")]
+    fn device_state_bytes(&self) -> usize {
+        0
+    }
+
+    /// Whether the state [`Self::device_state_bytes`] counts is on the
+    /// device now, so that writing a tile allocates none of it.
+    #[cfg(feature = "cuda")]
+    fn device_state_resident(&self) -> bool {
+        true
+    }
+
     /// Free whatever the source keeps on `device_id` to serve tiles faster,
     /// such as seeds left resident between a commitment and the lookup pass
     /// that regenerates rows from them. Tiles must still be served afterwards.
