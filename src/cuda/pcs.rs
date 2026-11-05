@@ -1070,7 +1070,6 @@ where
         // Each Rayon worker uses its own per-thread CUDA stream. A bounded
         // admission window keeps pageable upload staging within the driver's
         // reliable concurrency range while retaining substantial overlap.
-        let mut ldes = Vec::with_capacity(evaluations.len());
         let wave_size = if release_traces_during_construction {
             1
         } else {
@@ -1080,31 +1079,27 @@ where
                 .saturating_sub(minimum_free);
             (workspace_budget / max_transform_workspace.max(1)).clamp(1, super::MAX_CONCURRENT_LDES)
         };
-        for wave in evaluations.chunks(wave_size) {
-            let transform =
-                |(domain, evals): &(TwoAdicMultiplicativeCoset<Val>, RowMajorMatrix<Val>)| {
-                    assert_eq!(domain.size(), evals.height());
-                    let shift = Val::GENERATOR / domain.shift();
-                    dft.coset_lde_batch_resident(evals, log_blowup, shift)
-                };
-            // Ix's inner proof contains hundreds of tiny matrices. Entering
-            // CUDA concurrently for that low-volume batch costs more than it
-            // saves and can exhaust driver-side pageable-copy workers.
-            let wave_ldes: Vec<_> = if source_cells < 10_000_000 {
-                wave.iter().map(transform).collect()
-            } else {
-                wave.par_iter().map(transform).collect()
-            };
-            if release_traces_during_construction {
-                for lde in &wave_ldes {
-                    // SAFETY: this wave has completed synchronously. The host
-                    // matrices remain owned below and are retained for every
+        let transform =
+            |(domain, evals): &(TwoAdicMultiplicativeCoset<Val>, RowMajorMatrix<Val>)| {
+                assert_eq!(domain.size(), evals.height());
+                let shift = Val::GENERATOR / domain.shift();
+                let lde = dft.coset_lde_batch_resident(evals, log_blowup, shift);
+                if release_traces_during_construction {
+                    // SAFETY: the LDE has completed synchronously. The host
+                    // matrix remains owned below and is retained for every
                     // later consumer of the original trace.
                     unsafe { lde.release_trace() };
                 }
-            }
-            ldes.extend(wave_ldes);
-        }
+                lde
+            };
+        // Ix's inner proof contains hundreds of tiny matrices. Entering
+        // CUDA concurrently for that low-volume batch costs more than it
+        // saves and can exhaust driver-side pageable-copy workers.
+        let ldes: Vec<_> = if source_cells < 10_000_000 {
+            evaluations.iter().map(transform).collect()
+        } else {
+            super::bounded_parallel_map(&evaluations, wave_size, transform)
+        };
         // Preserve enough device headroom for lookup, quotient, and FRI
         // allocations. Spill the largest retained traces first, deriving the
         // policy from this device rather than a 96-GiB development machine.

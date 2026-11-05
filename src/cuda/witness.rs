@@ -5,7 +5,6 @@ use std::sync::{OnceLock, atomic::AtomicBool};
 use p3_commit::Pcs;
 use p3_field::Field;
 use p3_matrix::{Dimensions, dense::RowMajorMatrix};
-use p3_maybe_rayon::prelude::*;
 use p3_symmetric::MerkleCap;
 
 use super::mmcs::CudaMmcsData;
@@ -273,17 +272,13 @@ fn construct_resident(
     // Small batches of many tiny matrices lose more to concurrent CUDA entry
     // than they gain from overlap.
     let parallel = source_bytes >= 10_000_000 * size_of::<Val>();
-    let mut ldes = Vec::with_capacity(evaluations.len());
-    for wave in evaluations.chunks(wave_size) {
-        let transform =
-            |(domain, source): &(Domain<Config>, TraceSource<Val>)| lde_of(pcs, domain, source);
-        let wave_ldes: Vec<_> = if parallel {
-            wave.par_iter().map(transform).collect()
-        } else {
-            wave.iter().map(transform).collect()
-        };
-        ldes.extend(wave_ldes);
-    }
+    let transform =
+        |(domain, source): &(Domain<Config>, TraceSource<Val>)| lde_of(pcs, domain, source);
+    let ldes = if parallel {
+        super::bounded_parallel_map(&evaluations, wave_size, transform)
+    } else {
+        evaluations.iter().map(transform).collect()
+    };
     let (free_bytes, _) = device_memory_info(device);
     let minimum_free = super::minimum_free_bytes(total_bytes);
     let proactive_spill = source_bytes >= total_bytes / 12;

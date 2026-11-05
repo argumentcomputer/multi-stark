@@ -2272,6 +2272,33 @@ fn raw_u64(value: Goldilocks) -> u64 {
 /// it also bounds how many trace writers run at once.
 pub const MAX_CONCURRENT_LDES: usize = 16;
 
+/// Maps `items` in order with at most `concurrency` calls in flight, each on
+/// a Rayon worker. A call starts as soon as any earlier one finishes rather
+/// than with a fixed wave, so one long transform, or one long host upload,
+/// no longer holds back the calls behind it while the device idles.
+pub(crate) fn bounded_parallel_map<T: Sync, R: Send>(
+    items: &[T],
+    concurrency: usize,
+    transform: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    use rayon::prelude::*;
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut results: Vec<(usize, R)> = (0..concurrency.clamp(1, items.len().max(1)))
+        .into_par_iter()
+        .flat_map_iter(|_| {
+            let mut done = Vec::new();
+            loop {
+                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(item) = items.get(index) else { break };
+                done.push((index, transform(item)));
+            }
+            done
+        })
+        .collect();
+    results.sort_unstable_by_key(|&(index, _)| index);
+    results.into_iter().map(|(_, result)| result).collect()
+}
+
 pub(crate) fn device_memory_info(device_id: i32) -> (usize, usize) {
     let mut free_bytes = 0;
     let mut total_bytes = 0;
@@ -3514,6 +3541,25 @@ mod tests {
     mod lookup_graph;
     mod quotient;
     mod witness;
+
+    #[test]
+    fn bounded_parallel_map_keeps_order_and_bounds_calls_in_flight() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let items: Vec<usize> = (0..200).collect();
+        for concurrency in [1, 3, 16, 400] {
+            let (running, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+            let mapped = bounded_parallel_map(&items, concurrency, |&item| {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_micros(200));
+                running.fetch_sub(1, Ordering::SeqCst);
+                item * 2
+            });
+            assert_eq!(mapped, items.iter().map(|i| i * 2).collect::<Vec<_>>());
+            assert!(peak.load(Ordering::SeqCst) <= concurrency);
+        }
+        assert!(bounded_parallel_map(&[] as &[usize], 4, |&i| i).is_empty());
+    }
 
     #[test]
     fn device_coset_selectors_match_cpu() {
