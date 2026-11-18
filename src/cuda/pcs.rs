@@ -651,7 +651,7 @@ where
         let max_transform_workspace = transform_workspaces.iter().copied().max().unwrap_or(0);
         let (initial_free, total_bytes) =
             crate::cuda::device_memory_info(self.mmcs.cuda_device_id());
-        let minimum_free = crate::cuda::minimum_free_bytes(total_bytes);
+        let minimum_free = crate::cuda::minimum_free_bytes();
         let source_bytes = source_cells.saturating_mul(size_of::<Val>());
         let lde_bytes = source_bytes
             .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))

@@ -82,7 +82,7 @@ pub(crate) fn commit_with(
     }
     let max_height = dimensions.iter().map(|d| d.height).max().unwrap();
     let (initial_free, total) = device_memory_info(device);
-    let minimum_free = super::minimum_free_bytes(total);
+    let minimum_free = super::minimum_free_bytes();
     let reserve = minimum_free.saturating_add(128 << 20);
     let source_bytes = evaluations
         .iter()
@@ -280,7 +280,7 @@ fn construct_resident(
         evaluations.iter().map(transform).collect()
     };
     let (free_bytes, _) = device_memory_info(device);
-    let minimum_free = super::minimum_free_bytes(total_bytes);
+    let minimum_free = super::minimum_free_bytes();
     let proactive_spill = source_bytes >= total_bytes / 12;
     let large_matrix = total_bytes / 120;
     let mut projected_free = free_bytes;

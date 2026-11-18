@@ -2338,13 +2338,15 @@ pub fn release_device_memory() {
     check_cuda(status, "CUDA memory release");
 }
 
-/// Device bytes the prover keeps free for its later stages: a quarter of the
-/// device unless `MULTI_STARK_CUDA_MIN_FREE_BYTES` says otherwise.
-pub(crate) fn minimum_free_bytes(total_bytes: usize) -> usize {
+/// Device bytes admission keeps free beyond what a phase needs:
+/// `MULTI_STARK_CUDA_MIN_FREE_BYTES`, by default none. Every phase admits
+/// its own allocations against the device's current free memory and spills
+/// to the host when they do not fit, so no standing reserve is needed.
+pub(crate) fn minimum_free_bytes() -> usize {
     std::env::var("MULTI_STARK_CUDA_MIN_FREE_BYTES")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(total_bytes / 4)
+        .unwrap_or(0)
 }
 
 pub(crate) fn memory_diagnostics_enabled() -> bool {

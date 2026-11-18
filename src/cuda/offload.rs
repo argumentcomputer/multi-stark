@@ -148,15 +148,16 @@ fn try_worker(
     let input_bytes = matrix.values.len().checked_mul(size_of::<Goldilocks>())?;
     let blowup = 1usize.checked_shl(u32::try_from(added_bits).ok()?)?;
     let output_bytes = input_bytes.checked_mul(blowup)?;
-    let (free_bytes, total_bytes) = device_memory_info(worker.device_id);
+    let (free_bytes, _) = device_memory_info(worker.device_id);
     // Constants are counted even if their cached allocation is already included
-    // in the snapshot. The reserve also covers lazy sppark device parameters.
+    // in the snapshot. The fixed 128 MiB covers lazy sppark device parameters,
+    // as in witness construction.
     let required_bytes = admitted_bytes(
         input_bytes,
         output_bytes,
         plan.scratch_bytes(),
         plan.constant_bytes(),
-        minimum_free_bytes(total_bytes),
+        minimum_free_bytes().saturating_add(128 << 20),
     )?;
     if required_bytes > free_bytes {
         return None;

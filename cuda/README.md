@@ -61,7 +61,7 @@ Useful environment variables:
 - `MULTI_STARK_CUDA_DEVICE`: device used by the prover and microbenchmarks
   (default: `0`; `CUDA_VISIBLE_DEVICES` remapping is also honored)
 - `MULTI_STARK_CUDA_MIN_FREE_BYTES`: device headroom retained by spilling
-  source traces (default: one quarter of total device memory)
+  source traces (default: none)
 
 Only native cubins are emitted. This avoids a newer toolkit's PTX being chosen
 by a slightly older driver instead of a compatible native cubin.
