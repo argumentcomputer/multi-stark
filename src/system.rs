@@ -33,6 +33,11 @@ pub struct CircuitInputs<F: Field> {
     pub preprocessed: Option<RowMajorMatrix<F>>,
     pub constraints: Vec<Expr<F>>,
     pub ext_constraints: Vec<ExtExpr<F>>,
+    /// Lookup multiplicities and arguments are evaluated on the trace rows
+    /// when the lookup witness is built, so they may read only the
+    /// preprocessed and main traces: stage-2 columns and public values (the
+    /// lookup challenges and accumulators, which do not exist yet) are
+    /// rejected at compile time.
     pub lookups: Vec<Lookup<Expr<F>>>,
     /// How many logUp messages share one chained-accumulator step (and one
     /// committed accumulator column): stage-2 width becomes `⌈L/k⌉·D` at
@@ -456,6 +461,7 @@ mod tests {
     mod lookup_values;
 
     use super::*;
+    use crate::graph::CompileError;
     use crate::p3_adapter::LookupAir;
     use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
     use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
@@ -547,6 +553,37 @@ mod tests {
         let no_claims: &[&[Val]] = &[];
         let proof = system.prove_multiple_claims(&key, no_claims, witness);
         system.verify_multiple_claims(no_claims, &proof).unwrap();
+    }
+
+    /// Public values are the coordinates of the lookup challenges and
+    /// accumulators, which do not exist when the lookup witness is built. A
+    /// lookup reading one used to compile and then panic (index out of
+    /// bounds) in `SystemWitness::from_stage_1`; it must be rejected at
+    /// compile time. Base constraints may still read public values.
+    #[test]
+    fn public_in_lookup_rejected() {
+        let params = extension_params::<GoldilocksBlake3Config>();
+        let public = || Expr::<Val>::public(0);
+        for lookup in [
+            Lookup::push(public(), vec![Expr::main(0)]),
+            Lookup::push(Expr::main(0), vec![Expr::main(0) * public()]),
+        ] {
+            let inputs = CircuitInputs {
+                main_width: 1,
+                lookups: vec![lookup],
+                ..Default::default()
+            };
+            assert_eq!(
+                inputs.compile_graph(&params).unwrap_err(),
+                CompileError::PublicInLookup
+            );
+        }
+        let inputs = CircuitInputs {
+            main_width: 1,
+            constraints: vec![Expr::main(0) * public()],
+            ..Default::default()
+        };
+        assert!(inputs.compile_graph(&params).is_ok());
     }
 
     #[test]

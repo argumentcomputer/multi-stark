@@ -96,6 +96,10 @@ pub enum CompileError {
     /// Stage-2 columns are extension coordinates; base constraints and
     /// lookup expressions must not touch them.
     Stage2InBaseContext,
+    /// Public values are the coordinates of the lookup challenges and
+    /// accumulators, which do not exist yet when the lookup witness is
+    /// built; lookup expressions must not touch them.
+    PublicInLookup,
     /// A fully base-field extension constraint: state it as a base
     /// constraint instead.
     PurelyBaseExtConstraint {
@@ -109,6 +113,18 @@ pub enum CompileError {
         constraint: usize,
         coordinate: Option<usize>,
     },
+}
+
+/// Where an expression occurs, which decides the leaves it may read.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Context {
+    /// A lookup multiplicity or argument: evaluated on the trace rows when
+    /// the lookup witness is built, before any challenge is sampled.
+    Lookup,
+    /// A base constraint.
+    Base,
+    /// A coordinate of an extension constraint.
+    Extension,
 }
 
 /// Compiles a circuit spec. Interning order: lookups first (they form the
@@ -127,11 +143,11 @@ pub(crate) fn compile<F: Field>(
 
     let mut lookups = Vec::with_capacity(spec.lookups.len());
     for lookup in &spec.lookups {
-        let multiplicity = interner.compile_expr(&lookup.multiplicity, spec, false)?;
+        let multiplicity = interner.compile_expr(&lookup.multiplicity, spec, Context::Lookup)?;
         let args = lookup
             .args
             .iter()
-            .map(|arg| interner.compile_expr(arg, spec, false))
+            .map(|arg| interner.compile_expr(arg, spec, Context::Lookup))
             .collect::<Result<Vec<_>, _>>()?;
         lookups.push(Lookup { multiplicity, args });
     }
@@ -139,7 +155,7 @@ pub(crate) fn compile<F: Field>(
 
     let mut zeros = Vec::new();
     for (i, constraint) in spec.constraints.iter().enumerate() {
-        let root = interner.compile_expr(constraint, spec, false)?;
+        let root = interner.compile_expr(constraint, spec, Context::Base)?;
         record_zero(&interner, &mut zeros, root, i, None)?;
     }
     for (i, constraint) in spec.ext_constraints.iter().enumerate() {
@@ -329,7 +345,7 @@ impl<F: Field> Interner<F> {
         &mut self,
         expr: &Expr<F>,
         spec: &CircuitSpec<F>,
-        allow_stage2: bool,
+        context: Context,
     ) -> Result<NodeId, CompileError> {
         Ok(match expr {
             Expr::Const(c) => self.constant(*c),
@@ -338,7 +354,7 @@ impl<F: Field> Interner<F> {
                     Source::Preprocessed => spec.preprocessed_width,
                     Source::Main => spec.main_width,
                     Source::Stage2 => {
-                        if !allow_stage2 {
+                        if context != Context::Extension {
                             return Err(CompileError::Stage2InBaseContext);
                         }
                         spec.stage2_width
@@ -354,6 +370,9 @@ impl<F: Field> Interner<F> {
                 self.intern(Node::Var(*col))
             }
             Expr::Public(index) => {
+                if context == Context::Lookup {
+                    return Err(CompileError::PublicInLookup);
+                }
                 if *index as usize >= spec.num_publics {
                     return Err(CompileError::PublicOutOfRange {
                         index: *index,
@@ -366,22 +385,22 @@ impl<F: Field> Interner<F> {
             Expr::IsLastRow => self.intern(Node::IsLastRow),
             Expr::IsTransition => self.intern(Node::IsTransition),
             Expr::Add(a, b) => {
-                let a = self.compile_expr(a, spec, allow_stage2)?;
-                let b = self.compile_expr(b, spec, allow_stage2)?;
+                let a = self.compile_expr(a, spec, context)?;
+                let b = self.compile_expr(b, spec, context)?;
                 self.add(a, b)
             }
             Expr::Sub(a, b) => {
-                let a = self.compile_expr(a, spec, allow_stage2)?;
-                let b = self.compile_expr(b, spec, allow_stage2)?;
+                let a = self.compile_expr(a, spec, context)?;
+                let b = self.compile_expr(b, spec, context)?;
                 self.sub(a, b)
             }
             Expr::Mul(a, b) => {
-                let a = self.compile_expr(a, spec, allow_stage2)?;
-                let b = self.compile_expr(b, spec, allow_stage2)?;
+                let a = self.compile_expr(a, spec, context)?;
+                let b = self.compile_expr(b, spec, context)?;
                 self.mul(a, b)
             }
             Expr::Neg(a) => {
-                let a = self.compile_expr(a, spec, allow_stage2)?;
+                let a = self.compile_expr(a, spec, context)?;
                 self.neg(a)
             }
         })
@@ -408,13 +427,13 @@ impl<F: Field> Interner<F> {
                 }
                 coords
                     .iter()
-                    .map(|c| self.compile_expr(c, spec, true))
+                    .map(|c| self.compile_expr(c, spec, Context::Extension))
                     .collect::<Result<Vec<_>, _>>()?
             }
             ExtExpr::Base(base) => {
                 let zero = self.constant(F::ZERO);
                 let mut coords = vec![zero; d];
-                coords[0] = self.compile_expr(base, spec, true)?;
+                coords[0] = self.compile_expr(base, spec, Context::Extension)?;
                 coords
             }
             ExtExpr::Add(a, b) => {
