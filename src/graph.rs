@@ -100,6 +100,14 @@ pub enum CompileError {
     /// accumulators, which do not exist yet when the lookup witness is
     /// built; lookup expressions must not touch them.
     PublicInLookup,
+    /// The built-in row selectors are not 0/1 indicators: the constraints
+    /// see Plonky3's unnormalised selectors, whose values on the trace rows
+    /// depend on the trace height (`IsFirstRow` is `n` on the first of `n`
+    /// rows). Lookup expressions must not touch them; read a 0/1 column
+    /// instead (see [`crate::system::CircuitInputs::lookups`]).
+    SelectorInLookup {
+        selector: RowSelector,
+    },
     /// A fully base-field extension constraint: state it as a base
     /// constraint instead.
     PurelyBaseExtConstraint {
@@ -115,11 +123,21 @@ pub enum CompileError {
     },
 }
 
+/// A built-in row selector, named by the frontend leaf that reads it
+/// ([`Expr::IsFirstRow`], [`Expr::IsLastRow`], [`Expr::IsTransition`]).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum RowSelector {
+    IsFirstRow,
+    IsLastRow,
+    IsTransition,
+}
+
 /// Where an expression occurs, which decides the leaves it may read.
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Context {
     /// A lookup multiplicity or argument: evaluated on the trace rows when
-    /// the lookup witness is built, before any challenge is sampled.
+    /// the lookup witness is built, before any challenge is sampled. It
+    /// reads the preprocessed and main traces only.
     Lookup,
     /// A base constraint.
     Base,
@@ -341,6 +359,24 @@ impl<F: Field> Interner<F> {
         self.intern(Node::Neg(a))
     }
 
+    /// Interns a row selector. Constraints may gate on it; a lookup may not
+    /// read it, because the lookup witness would need its value as a 0/1
+    /// indicator while the constraints see the unnormalised selector.
+    fn selector(
+        &mut self,
+        selector: RowSelector,
+        context: Context,
+    ) -> Result<NodeId, CompileError> {
+        if context == Context::Lookup {
+            return Err(CompileError::SelectorInLookup { selector });
+        }
+        Ok(self.intern(match selector {
+            RowSelector::IsFirstRow => Node::IsFirstRow,
+            RowSelector::IsLastRow => Node::IsLastRow,
+            RowSelector::IsTransition => Node::IsTransition,
+        }))
+    }
+
     fn compile_expr(
         &mut self,
         expr: &Expr<F>,
@@ -381,9 +417,9 @@ impl<F: Field> Interner<F> {
                 }
                 self.intern(Node::Public(*index))
             }
-            Expr::IsFirstRow => self.intern(Node::IsFirstRow),
-            Expr::IsLastRow => self.intern(Node::IsLastRow),
-            Expr::IsTransition => self.intern(Node::IsTransition),
+            Expr::IsFirstRow => self.selector(RowSelector::IsFirstRow, context)?,
+            Expr::IsLastRow => self.selector(RowSelector::IsLastRow, context)?,
+            Expr::IsTransition => self.selector(RowSelector::IsTransition, context)?,
             Expr::Add(a, b) => {
                 let a = self.compile_expr(a, spec, context)?;
                 let b = self.compile_expr(b, spec, context)?;
