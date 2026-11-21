@@ -191,6 +191,39 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
     group_size: usize,
     out: &mut Vec<A>,
 ) {
+    for_each_logup_constraint_value(
+        lookups,
+        node_vals,
+        stage2,
+        stage2_next,
+        publics,
+        delta_scaled,
+        is_last_row,
+        w,
+        d,
+        group_size,
+        |val| out.push(val),
+    );
+}
+
+/// Evaluates the logUp constraint values in canonical protocol order and passes
+/// each base-field constraint value directly to `emit`, allowing callers such
+/// as `quotient_values` to fuse alpha-power accumulation with zero allocation.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn for_each_logup_constraint_value<F: Field, A: Algebra<F> + Copy>(
+    lookups: &[Lookup<crate::graph::NodeId>],
+    node_vals: &[A],
+    stage2: &[A],
+    stage2_next: &[A],
+    publics: &[A],
+    delta_scaled: &[A],
+    is_last_row: A,
+    w: F,
+    d: usize,
+    group_size: usize,
+    mut emit: impl FnMut(A),
+) {
     let group_size = group_size.max(1);
     debug_assert!(group_size <= MAX_LOOKUP_GROUP);
     // Native-field PCS backends need no coordinate vectors. Keep grouped
@@ -198,7 +231,7 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
     if d == 1 {
         let injection = is_last_row * delta_scaled[0];
         if lookups.is_empty() {
-            out.push(stage2_next[0] - stage2[0] + injection);
+            emit(stage2_next[0] - stage2[0] + injection);
             return;
         }
         let last_group = lookups.len().div_ceil(group_size) - 1;
@@ -230,7 +263,7 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
             for (j, lookup) in chunk.iter().enumerate() {
                 value -= prefix[j] * suffix[j + 1] * node_vals[lookup.multiplicity.index()];
             }
-            out.push(value);
+            emit(value);
         }
         return;
     }
@@ -250,8 +283,8 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
 
         if lookups.is_empty() {
             // Pass-through accumulator: acc′ − acc + is_last_row·Δ = 0.
-            out.push(stage2_next[0] - stage2[0] + inj.0);
-            out.push(stage2_next[1] - stage2[1] + inj.1);
+            emit(stage2_next[0] - stage2[0] + inj.0);
+            emit(stage2_next[1] - stage2[1] + inj.1);
             return;
         }
 
@@ -282,8 +315,8 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
                 // machinery on the default path.
                 let c = mul2(msgs[0], (target.0 - source.0, target.1 - source.1), w);
                 let mv = nv(chunk[0].multiplicity);
-                out.push(c.0 - mv);
-                out.push(c.1);
+                emit(c.0 - mv);
+                emit(c.1);
                 continue;
             }
 
@@ -317,8 +350,8 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
                 rhs.0 += others.0 * mv;
                 rhs.1 += others.1 * mv;
             }
-            out.push(c.0 - rhs.0);
-            out.push(c.1 - rhs.1);
+            emit(c.0 - rhs.0);
+            emit(c.1 - rhs.1);
         }
         return;
     }
@@ -331,7 +364,7 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
 
     if lookups.is_empty() {
         for k in 0..d {
-            out.push(stage2_next[k] - stage2[k] + inj[k]);
+            emit(stage2_next[k] - stage2[k] + inj[k]);
         }
         return;
     }
@@ -387,7 +420,9 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
                 *c -= o * mv;
             }
         }
-        out.extend_from_slice(&constraint);
+        for c in constraint {
+            emit(c);
+        }
     }
 }
 

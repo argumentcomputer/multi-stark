@@ -101,6 +101,66 @@ impl<F: Field> ConstraintGraph<F> {
         self.zeros.iter().map(|z| buf[z.index()]).collect()
     }
 
+    /// Folds the user-constraint roots (`self.zeros`) with interleaved degree-2
+    /// alpha-power pairs `[c0, c1]` directly off the sweep buffer, avoiding any
+    /// intermediate `constraint_values` allocation.
+    #[inline]
+    pub fn fold_constraints_d2<W: Algebra<F>>(&self, buf: &[W], alpha_pairs: &[[F; 2]]) -> (W, W) {
+        debug_assert!(alpha_pairs.len() >= self.zeros.len());
+        let mut a0 = W::ZERO;
+        let mut a1 = W::ZERO;
+        let mut a2 = W::ZERO;
+        let mut a3 = W::ZERO;
+        let mut b0 = W::ZERO;
+        let mut b1 = W::ZERO;
+        let mut b2 = W::ZERO;
+        let mut b3 = W::ZERO;
+
+        let (z_chunks, z_rem) = self.zeros.as_chunks::<4>();
+        let (p_chunks, p_rem) = alpha_pairs[..self.zeros.len()].as_chunks::<4>();
+        for (zc, pc) in z_chunks.iter().zip(p_chunks) {
+            let v0 = buf[zc[0].index()];
+            let v1 = buf[zc[1].index()];
+            let v2 = buf[zc[2].index()];
+            let v3 = buf[zc[3].index()];
+            a0 += v0 * pc[0][0];
+            b0 += v0 * pc[0][1];
+            a1 += v1 * pc[1][0];
+            b1 += v1 * pc[1][1];
+            a2 += v2 * pc[2][0];
+            b2 += v2 * pc[2][1];
+            a3 += v3 * pc[3][0];
+            b3 += v3 * pc[3][1];
+        }
+        let mut acc0 = (a0 + a1) + (a2 + a3);
+        let mut acc1 = (b0 + b1) + (b2 + b3);
+        for (z, p) in z_rem.iter().zip(p_rem) {
+            let v = buf[z.index()];
+            acc0 += v * p[0];
+            acc1 += v * p[1];
+        }
+        (acc0, acc1)
+    }
+
+    /// Folds the user-constraint roots (`self.zeros`) with decomposed alpha
+    /// powers into `acc` (one accumulator per basis coordinate), avoiding any
+    /// intermediate `constraint_values` allocation.
+    #[inline]
+    pub fn fold_constraints<W: Algebra<F>>(
+        &self,
+        buf: &[W],
+        decomposed_alpha_powers: &[Vec<F>],
+        acc: &mut [W],
+    ) {
+        debug_assert_eq!(acc.len(), decomposed_alpha_powers.len());
+        for (idx, z) in self.zeros.iter().enumerate() {
+            let v = buf[z.index()];
+            for (slot, coeffs) in acc.iter_mut().zip(decomposed_alpha_powers) {
+                *slot += v * coeffs[idx];
+            }
+        }
+    }
+
     /// The concrete lookup values, read off a (prefix or full) sweep buffer.
     pub fn lookup_values<W: Copy>(&self, buf: &[W]) -> Vec<Lookup<W>> {
         self.lookups

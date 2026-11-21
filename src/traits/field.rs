@@ -160,6 +160,17 @@ pub trait Packed<F: Field>: Algebra<F> {
     /// matrix, `WIDTH` vertically adjacent rows per packet — the sweep's
     /// input gather. Row indices wrap modulo the height.
     fn packed_row_pair<M: Matrix<F>>(matrix: &M, i: usize, step: usize) -> Vec<Self>;
+
+    /// Fill `out` (`out.len() <= matrix.width()`) with the first `out.len()`
+    /// columns of vertically packed rows `i..i + WIDTH` (wrapping modulo
+    /// `matrix.height()`), reusing caller-owned scratch memory.
+    fn fill_packed_row<M: Matrix<F>>(matrix: &M, i: usize, out: &mut [Self]) {
+        if out.is_empty() {
+            return;
+        }
+        let pair = Self::packed_row_pair(matrix, i, 0);
+        out.copy_from_slice(&pair[..out.len()]);
+    }
 }
 
 /// The challenge field as a binomial extension `X^D = W` of the base
@@ -175,6 +186,17 @@ pub trait ExtensionOf<F: Field>: Field + Algebra<F> {
 
     fn as_basis_coefficients_slice(&self) -> &[F];
     fn from_basis_coefficients_fn(f: impl FnMut(usize) -> F) -> Self;
+
+    /// Flatten a vector of extension elements into contiguous base-field
+    /// basis coordinates. Extensions laid out as `[F; D]` override this to
+    /// reinterpret the backing allocation in place with zero copies.
+    fn flatten_vec_to_base(values: Vec<Self>) -> Vec<F> {
+        let mut out = F::zero_vec(values.len() * Self::D);
+        out.par_chunks_exact_mut(Self::D)
+            .zip(values.par_iter())
+            .for_each(|(dst, src)| dst.copy_from_slice(src.as_basis_coefficients_slice()));
+        out
+    }
 }
 
 /// Packed challenge values: `D` base packets, used to reassemble the
@@ -192,10 +214,7 @@ pub fn flatten_to_base<F: Field, EF: ExtensionOf<F>>(
     m: p3_matrix::dense::RowMajorMatrix<EF>,
 ) -> p3_matrix::dense::RowMajorMatrix<F> {
     let width = m.width * EF::D;
-    let mut values = Vec::with_capacity(m.values.len() * EF::D);
-    for value in m.values {
-        values.extend_from_slice(value.as_basis_coefficients_slice());
-    }
+    let values = EF::flatten_vec_to_base(m.values);
     p3_matrix::dense::RowMajorMatrix::new(values, width)
 }
 
@@ -252,10 +271,17 @@ mod tests {
                 })
             })
             .collect();
-        let flat = flatten_to_base::<Goldilocks, Ext>(RowMajorMatrix::new(values.clone(), 3));
+        let expected = values.clone();
+        let original_ptr = values.as_ptr().cast::<Goldilocks>();
+        let flat = flatten_to_base::<Goldilocks, Ext>(RowMajorMatrix::new(values, 3));
+        assert_eq!(
+            flat.values.as_ptr(),
+            original_ptr,
+            "p3 binomial extension flatten_to_base must be zero-copy"
+        );
         assert_eq!(flat.width, 6);
         assert_eq!(flat.values.len(), 12);
-        for (i, value) in values.iter().enumerate() {
+        for (i, value) in expected.iter().enumerate() {
             assert_eq!(
                 &flat.values[2 * i..2 * i + 2],
                 value.as_basis_coefficients_slice()

@@ -127,6 +127,11 @@ impl<F: Field> Circuit<F> {
     pub fn quotient_degree(&self) -> usize {
         (self.max_constraint_degree().max(2) - 1).next_power_of_two()
     }
+
+    /// Returns `true` if any compiled node reads a column from `source` at `offset`.
+    pub fn uses_row(&self, source: crate::expr::Source, offset: crate::expr::RowOffset) -> bool {
+        self.graph.uses_row(source, offset)
+    }
 }
 
 /// A multi-circuit STARK system over compiled constraint circuits. Contains
@@ -150,9 +155,8 @@ pub struct ProverKey<SC: ProofConfig> {
 
 impl<SC: ProofConfig> System<SC> {
     pub fn opens_next_row(&self, circuit: usize, source: crate::expr::Source) -> bool {
-        !self.config.omit_unused_next_row_openings() || self.circuits[circuit].graph.nodes.iter().any(|node| {
-            matches!(node, crate::graph::Node::Var(col) if col.source == source && col.offset == crate::expr::RowOffset::Next)
-        })
+        !self.config.omit_unused_next_row_openings()
+            || self.circuits[circuit].uses_row(source, crate::expr::RowOffset::Next)
     }
 
     /// Builds the system from per-circuit inputs.

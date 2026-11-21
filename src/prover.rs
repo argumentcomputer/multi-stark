@@ -1034,7 +1034,9 @@ where
     let qdb = log2_strict_usize(quotient_domain.size()) - log2_strict_usize(trace_domain.size());
     let next_step = 1 << qdb;
 
-    for _ in quotient_size..PackedVal::<SC>::WIDTH {
+    let width = PackedVal::<SC>::WIDTH;
+    let padded_len = quotient_size.next_multiple_of(width);
+    for _ in quotient_size..padded_len {
         sels.is_first_row.push(Val::<SC>::ZERO);
         sels.is_last_row.push(Val::<SC>::ZERO);
         sels.is_transition.push(Val::<SC>::ZERO);
@@ -1042,18 +1044,31 @@ where
     }
 
     // α powers in reverse (constraint i of k weighted by α^{k-1-i}),
-    // decomposed per basis coordinate for the batched base-field fold.
+    // decomposed per basis coordinate for the fused base-field fold.
+    let ext_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
     let mut alpha_powers: Vec<SC::Challenge> = alpha.powers().take(constraint_count).collect();
     alpha_powers.reverse();
-    let decomposed_alpha_powers: Vec<Vec<Val<SC>>> = (0
-        ..<SC::Challenge as ExtensionOf<Val<SC>>>::D)
-        .map(|i| {
-            alpha_powers
-                .iter()
-                .map(|x| x.as_basis_coefficients_slice()[i])
-                .collect()
-        })
-        .collect();
+    let alpha_table = if ext_d == 2 {
+        let pairs: Vec<[Val<SC>; 2]> = alpha_powers
+            .iter()
+            .map(|x| {
+                let coords = x.as_basis_coefficients_slice();
+                [coords[0], coords[1]]
+            })
+            .collect();
+        AlphaTable::Degree2(pairs)
+    } else {
+        let decomposed: Vec<Vec<Val<SC>>> = (0..ext_d)
+            .map(|i| {
+                alpha_powers
+                    .iter()
+                    .map(|x| x.as_basis_coefficients_slice()[i])
+                    .collect()
+            })
+            .collect();
+        AlphaTable::Generic(decomposed)
+    };
+    drop(alpha_powers);
 
     // Public coordinates broadcast to packed base values.
     let publics_packed: Vec<PackedVal<SC>> = lookup_publics
@@ -1063,7 +1078,6 @@ where
 
     // Δ/(n·g) per coordinate, broadcast: the logUp boundary injection with
     // the last-row selector's normalization constant pre-absorbed.
-    let ext_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
     let delta_scaled: Vec<PackedVal<SC>> = (0..ext_d)
         .map(|k| {
             PackedVal::<SC>::from(
@@ -1073,63 +1087,127 @@ where
         .collect();
 
     let ext_params = crate::system::extension_params::<SC>();
-    let inner = |i_start: usize| {
-        quotient_values_inner::<SC>(
-            circuit,
-            &sels,
-            quotient_size,
-            preprocessed_on_quotient_domain,
-            stage_1_on_quotient_domain,
-            stage_2_on_quotient_domain,
-            main_width,
-            stage_2_width,
-            preprocessed_width,
-            &publics_packed,
-            &delta_scaled,
-            &decomposed_alpha_powers,
-            next_step,
-            i_start,
-            ext_params.w,
-            ext_params.degree,
-        )
+
+    // Determine once per circuit which row slices are actually referenced,
+    // skipping `next` (and any unused `current`) row gathers inside the hot loop.
+    let has_prep = preprocessed_on_quotient_domain.is_some();
+    let prep_cur_len = if has_prep
+        && circuit.uses_row(
+            crate::expr::Source::Preprocessed,
+            crate::expr::RowOffset::Current,
+        ) {
+        preprocessed_width
+    } else {
+        0
     };
-    #[cfg(feature = "parallel")]
+    let prep_next_len = if has_prep
+        && circuit.uses_row(
+            crate::expr::Source::Preprocessed,
+            crate::expr::RowOffset::Next,
+        ) {
+        preprocessed_width
+    } else {
+        0
+    };
+    let main_cur_len =
+        if circuit.uses_row(crate::expr::Source::Main, crate::expr::RowOffset::Current) {
+            main_width
+        } else {
+            0
+        };
+    let main_next_len = if circuit.uses_row(crate::expr::Source::Main, crate::expr::RowOffset::Next)
     {
-        (0..quotient_size)
-            .into_par_iter()
-            .step_by(PackedVal::<SC>::WIDTH)
-            .flat_map_iter(inner)
-            .collect()
-    }
-    #[cfg(not(feature = "parallel"))]
+        main_width
+    } else {
+        0
+    };
+    let s2_next_len = if circuit.uses_row(crate::expr::Source::Stage2, crate::expr::RowOffset::Next)
     {
-        (0..quotient_size)
-            .step_by(PackedVal::<SC>::WIDTH)
-            .flat_map_iter(inner)
-            .collect()
-    }
+        stage_2_width
+    } else {
+        // `logup_constraint_values` only reads the wrap slot `stage_2_next[0..ext_d]`.
+        ext_d.min(stage_2_width)
+    };
+    let node_count = circuit.graph.nodes.len();
+    let accs_len = if ext_d == 2 { 0 } else { ext_d };
+
+    const PACKS_PER_CHUNK: usize = 16;
+    let chunk_rows = PACKS_PER_CHUNK * width;
+    let mut out = vec![<SC::Challenge as Algebra<SC::Challenge>>::ZERO; quotient_size];
+
+    out.par_chunks_mut(chunk_rows).enumerate().for_each_init(
+        || QuotientScratch {
+            prep_cur: vec![PackedVal::<SC>::ZERO; prep_cur_len],
+            prep_next: vec![PackedVal::<SC>::ZERO; prep_next_len],
+            main_cur: vec![PackedVal::<SC>::ZERO; main_cur_len],
+            main_next: vec![PackedVal::<SC>::ZERO; main_next_len],
+            s2_cur: vec![PackedVal::<SC>::ZERO; stage_2_width],
+            s2_next: vec![PackedVal::<SC>::ZERO; s2_next_len],
+            buf: Vec::with_capacity(node_count),
+            accs: vec![PackedVal::<SC>::ZERO; accs_len],
+        },
+        |scratch, (chunk_idx, chunk_out)| {
+            let chunk_start = chunk_idx * chunk_rows;
+            for (pack_idx, pack_out) in chunk_out.chunks_mut(width).enumerate() {
+                let i_start = chunk_start + pack_idx * width;
+                eval_quotient_pack::<SC>(
+                    circuit,
+                    &sels,
+                    preprocessed_on_quotient_domain,
+                    stage_1_on_quotient_domain,
+                    stage_2_on_quotient_domain,
+                    &publics_packed,
+                    &delta_scaled,
+                    &alpha_table,
+                    next_step,
+                    i_start,
+                    ext_params.w,
+                    ext_params.degree,
+                    constraint_count,
+                    scratch,
+                    pack_out,
+                );
+            }
+        },
+    );
+    out
+}
+
+enum AlphaTable<F> {
+    Degree2(Vec<[F; 2]>),
+    Generic(Vec<Vec<F>>),
+}
+
+struct QuotientScratch<P> {
+    prep_cur: Vec<P>,
+    prep_next: Vec<P>,
+    main_cur: Vec<P>,
+    main_next: Vec<P>,
+    s2_cur: Vec<P>,
+    s2_next: Vec<P>,
+    buf: Vec<P>,
+    accs: Vec<P>,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn quotient_values_inner<SC>(
+#[inline]
+fn eval_quotient_pack<SC>(
     circuit: &crate::system::Circuit<Val<SC>>,
     sels: &LagrangeSelectors<Vec<Val<SC>>>,
-    quotient_size: usize,
     preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_, SC>>,
     stage_1_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
     stage_2_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
-    main_width: usize,
-    stage_2_width: usize,
-    preprocessed_width: usize,
     publics_packed: &[PackedVal<SC>],
     delta_scaled: &[PackedVal<SC>],
-    decomposed_alpha_powers: &[Vec<Val<SC>>],
+    alpha_table: &AlphaTable<Val<SC>>,
     next_step: usize,
     i_start: usize,
     ext_w: Val<SC>,
     ext_degree: usize,
-) -> impl Iterator<Item = SC::Challenge>
-where
+    constraint_count: usize,
+    scratch: &mut QuotientScratch<PackedVal<SC>>,
+    pack_out: &mut [SC::Challenge],
+) where
     SC: ProofConfig,
     Val<SC>: TwoAdicField + Ord,
 {
@@ -1139,72 +1217,111 @@ where
     let is_transition = *PackedVal::<SC>::from_slice(&sels.is_transition[i_range.clone()]);
     let inv_vanishing = *PackedVal::<SC>::from_slice(&sels.inv_vanishing[i_range]);
 
-    // Packed two-row windows of each trace, as base columns.
-    let preprocessed_pair: Option<Vec<PackedVal<SC>>> = preprocessed_on_quotient_domain
-        .as_ref()
-        .map(|m| PackedVal::<SC>::packed_row_pair(m, i_start, next_step));
-    let stage_1_pair =
-        PackedVal::<SC>::packed_row_pair(stage_1_on_quotient_domain, i_start, next_step);
-    let stage_2_pair =
-        PackedVal::<SC>::packed_row_pair(stage_2_on_quotient_domain, i_start, next_step);
-
-    let (stage_1_cur, stage_1_next) = stage_1_pair.split_at(main_width);
-    let (stage_2_cur, stage_2_next) = stage_2_pair.split_at(stage_2_width);
-    let (preprocessed_cur, preprocessed_next): (&[PackedVal<SC>], &[PackedVal<SC>]) =
-        match &preprocessed_pair {
-            Some(pair) => pair.split_at(preprocessed_width),
-            None => (&[], &[]),
-        };
+    if let Some(prep) = preprocessed_on_quotient_domain.as_ref() {
+        if !scratch.prep_cur.is_empty() {
+            PackedVal::<SC>::fill_packed_row(prep, i_start, &mut scratch.prep_cur);
+        }
+        if !scratch.prep_next.is_empty() {
+            PackedVal::<SC>::fill_packed_row(prep, i_start + next_step, &mut scratch.prep_next);
+        }
+    }
+    if !scratch.main_cur.is_empty() {
+        PackedVal::<SC>::fill_packed_row(
+            stage_1_on_quotient_domain,
+            i_start,
+            &mut scratch.main_cur,
+        );
+    }
+    if !scratch.main_next.is_empty() {
+        PackedVal::<SC>::fill_packed_row(
+            stage_1_on_quotient_domain,
+            i_start + next_step,
+            &mut scratch.main_next,
+        );
+    }
+    PackedVal::<SC>::fill_packed_row(stage_2_on_quotient_domain, i_start, &mut scratch.s2_cur);
+    PackedVal::<SC>::fill_packed_row(
+        stage_2_on_quotient_domain,
+        i_start + next_step,
+        &mut scratch.s2_next,
+    );
 
     let view = VarValues {
-        preprocessed: [preprocessed_cur, preprocessed_next],
-        main: [stage_1_cur, stage_1_next],
-        stage2: [stage_2_cur, stage_2_next],
+        preprocessed: [&scratch.prep_cur, &scratch.prep_next],
+        main: [&scratch.main_cur, &scratch.main_next],
+        stage2: [&scratch.s2_cur, &scratch.s2_next],
         publics: publics_packed,
         is_first_row,
         is_last_row,
         is_transition,
     };
-    let mut buf = Vec::new();
-    circuit.graph.sweep(&view, &mut buf);
-    let mut constraint_values = circuit.graph.constraint_values(&buf);
-    // The logUp constraint values are evaluated directly (they are not
-    // compiled into the graph), appended after the user roots in the
-    // canonical protocol order. Coordinate-expanded logUp constraints are
-    // base-field-only, so they evaluate in `PackedVal` like everything else;
-    // the lookup expressions are read straight out of the sweep buffer.
-    crate::lookup::logup_constraint_values(
-        &circuit.graph.lookups,
-        &buf,
-        stage_2_cur,
-        stage_2_next,
-        publics_packed,
-        delta_scaled,
-        // p3's (unnormalized) last-row selector; the normalization
-        // constant is pre-absorbed into `delta_scaled`.
-        is_last_row,
-        ext_w,
-        ext_degree,
-        circuit.lookup_group_size,
-        &mut constraint_values,
-    );
-    debug_assert_eq!(constraint_values.len(), circuit.constraint_count());
+    circuit.graph.sweep(&view, &mut scratch.buf);
 
-    // Fold the base constraint values with α through the decomposed path,
-    // reassembling one packed extension accumulator.
-    let accumulator = PackedChallenge::<SC>::from_basis_coefficients_fn(|coeff_idx| {
-        PackedVal::<SC>::batched_linear_combination(
-            &constraint_values,
-            &decomposed_alpha_powers[coeff_idx],
-        )
-    });
+    // Fuse user-constraint and logUp-constraint α folding directly without
+    // allocating a per-pack `constraint_values` vector.
+    let accumulator = match alpha_table {
+        AlphaTable::Degree2(alpha_pairs) => {
+            let (mut acc0, mut acc1) = circuit.graph.fold_constraints_d2(&scratch.buf, alpha_pairs);
+            let mut idx = circuit.graph.zeros.len();
+            crate::lookup::for_each_logup_constraint_value(
+                &circuit.graph.lookups,
+                &scratch.buf,
+                &scratch.s2_cur,
+                &scratch.s2_next,
+                publics_packed,
+                delta_scaled,
+                is_last_row,
+                ext_w,
+                ext_degree,
+                circuit.lookup_group_size,
+                |val| {
+                    let pair = alpha_pairs[idx];
+                    acc0 += val * pair[0];
+                    acc1 += val * pair[1];
+                    idx += 1;
+                },
+            );
+            debug_assert_eq!(idx, constraint_count);
+            PackedChallenge::<SC>::from_basis_coefficients_fn(|coeff_idx| {
+                if coeff_idx == 0 { acc0 } else { acc1 }
+            })
+        }
+        AlphaTable::Generic(decomposed_alpha_powers) => {
+            scratch.accs.fill(PackedVal::<SC>::ZERO);
+            circuit.graph.fold_constraints(
+                &scratch.buf,
+                decomposed_alpha_powers,
+                &mut scratch.accs,
+            );
+            let mut idx = circuit.graph.zeros.len();
+            crate::lookup::for_each_logup_constraint_value(
+                &circuit.graph.lookups,
+                &scratch.buf,
+                &scratch.s2_cur,
+                &scratch.s2_next,
+                publics_packed,
+                delta_scaled,
+                is_last_row,
+                ext_w,
+                ext_degree,
+                circuit.lookup_group_size,
+                |val| {
+                    for (acc, coeffs) in scratch.accs.iter_mut().zip(decomposed_alpha_powers) {
+                        *acc += val * coeffs[idx];
+                    }
+                    idx += 1;
+                },
+            );
+            debug_assert_eq!(idx, constraint_count);
+            PackedChallenge::<SC>::from_basis_coefficients_fn(|coeff_idx| scratch.accs[coeff_idx])
+        }
+    };
+
     let quotient = accumulator * inv_vanishing;
-
-    (0..quotient_size.min(PackedVal::<SC>::WIDTH)).map(move |idx_in_packing| {
-        SC::Challenge::from_basis_coefficients_fn(|coeff_idx| {
-            PackedExtension::<Val<SC>, SC::Challenge>::as_basis_coefficients_slice(&quotient)
-                [coeff_idx]
-                .as_slice()[idx_in_packing]
-        })
-    })
+    let basis = PackedExtension::<Val<SC>, SC::Challenge>::as_basis_coefficients_slice(&quotient);
+    for (idx_in_packing, slot) in pack_out.iter_mut().enumerate() {
+        *slot = SC::Challenge::from_basis_coefficients_fn(|coeff_idx| {
+            basis[coeff_idx].as_slice()[idx_in_packing]
+        });
+    }
 }
