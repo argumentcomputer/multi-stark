@@ -77,6 +77,16 @@ pub struct ConstraintGraph<F> {
     pub max_constraint_degree: u32,
 }
 
+impl<F> ConstraintGraph<F> {
+    /// Returns `true` if any lookup expression (multiplicity or argument)
+    /// reads at least one preprocessed column.
+    pub fn lookup_prefix_uses_preprocessed(&self) -> bool {
+        self.nodes[..self.lookup_prefix_len]
+            .iter()
+            .any(|node| matches!(node, Node::Var(col) if col.source == Source::Preprocessed))
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum CompileError {
     CoordsLength {

@@ -45,8 +45,9 @@
 //! [`MAX_LOOKUP_GROUP`] so the evaluator's scratch space stays on the
 //! stack.
 
+use crate::eval::VarValues;
 use crate::traits::{Algebra, ExtensionOf, Field, batch_inverse};
-use p3_matrix::dense::RowMajorMatrix;
+use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 
 use crate::expr::{Expr, ExtExpr, RowOffset};
@@ -684,6 +685,27 @@ impl<F: Field> LookupValues<F> {
         }
     }
 
+    /// Whether the concrete `multiplicities` and `args` payload is materialized.
+    ///
+    /// Returns `false` for [`Self::shape_only`] witnesses whose lookup messages
+    /// are evaluated on demand from the committed traces.
+    #[inline]
+    pub const fn is_materialized(&self) -> bool {
+        self.materialized
+    }
+
+    /// Number of trace rows represented by this lookup witness.
+    #[inline]
+    pub const fn height(&self) -> usize {
+        self.height
+    }
+
+    /// Number of lookups per row.
+    #[inline]
+    pub const fn num_lookups(&self) -> usize {
+        self.num_lookups
+    }
+
     /// Panics unless the witness payload is present.
     fn require_payload(&self) {
         assert!(
@@ -703,6 +725,79 @@ impl<F: Field> LookupValues<F> {
         &self.args[start + self.arg_offsets[lookup]..start + self.arg_offsets[lookup + 1]]
     }
 
+    /// Computes a single circuit's stage-2 lookup trace and total accumulator
+    /// contribution in bounded row chunks, keeping temporary message and
+    /// inverse buffers small regardless of trace height.
+    pub fn stage_2_trace<EF: ExtensionOf<F>>(
+        &self,
+        group_size: usize,
+        lookup_challenge: EF,
+        fingerprint_challenge: &EF,
+    ) -> (RowMajorMatrix<EF>, EF) {
+        self.require_payload();
+        let group_size = group_size.max(1);
+        let num_slots = lookup_groups(self.num_lookups, group_size);
+        let zero = <EF as Algebra<EF>>::ZERO;
+        if self.num_lookups == 0 || self.height == 0 {
+            return (
+                RowMajorMatrix::new(vec![zero; self.height * num_slots], num_slots),
+                zero,
+            );
+        }
+
+        let chunk_rows = stage_2_chunk_rows(self.height, self.num_lookups);
+        let mut vec = vec![zero; self.height * num_slots];
+        let mut running = zero;
+
+        for row_start in (0..self.height).step_by(chunk_rows) {
+            let n_rows = (self.height - row_start).min(chunk_rows);
+            let num_chunk_messages = n_rows * self.num_lookups;
+            let messages: Vec<EF> = (0..num_chunk_messages)
+                .into_par_iter()
+                .map(|idx| {
+                    let local_row = idx / self.num_lookups;
+                    let lookup = idx % self.num_lookups;
+                    let args = self.args_at(row_start + local_row, lookup);
+                    lookup_challenge + fingerprint(fingerprint_challenge, args.iter().copied())
+                })
+                .collect();
+            let inverses = batch_inverse(&messages);
+            drop(messages);
+
+            let chunk_out = &mut vec[row_start * num_slots..(row_start + n_rows) * num_slots];
+            let chunk_mults = &self.multiplicities
+                [row_start * self.num_lookups..(row_start + n_rows) * self.num_lookups];
+            chunk_out
+                .par_chunks_exact_mut(num_slots)
+                .zip(chunk_mults.par_chunks_exact(self.num_lookups))
+                .zip(inverses.par_chunks_exact(self.num_lookups))
+                .for_each(|((out_row, row_mults), row_invs)| {
+                    for (slot_out, (group_mults, group_invs)) in out_row.iter_mut().zip(
+                        row_mults
+                            .chunks(group_size)
+                            .zip(row_invs.chunks(group_size)),
+                    ) {
+                        let mut delta = zero;
+                        for (&multiplicity, &message_inverse) in group_mults.iter().zip(group_invs)
+                        {
+                            delta += EF::from(multiplicity) * message_inverse;
+                        }
+                        *slot_out = delta;
+                    }
+                });
+            drop(inverses);
+
+            // Exclusive prefix scan over this chunk's group deltas.
+            for cell in chunk_out.iter_mut() {
+                let delta = *cell;
+                *cell = running;
+                running += delta;
+            }
+        }
+
+        (RowMajorMatrix::new(vec, num_slots), running)
+    }
+
     /// Computes the stage 2 traces and the intermediate accumulators for each
     /// circuit given a lookup challenge, a fingerprint challenge and the current
     /// accumulator value (computed from the initial claims).
@@ -716,90 +811,251 @@ impl<F: Field> LookupValues<F> {
         for circuit in circuits {
             circuit.require_payload();
         }
-        // Compute the message for each lookup, in flat circuit-major order.
-        let _g = tracing::info_span!("stark/lookup_messages").entered();
-        let num_messages = circuits
-            .iter()
-            .map(|circuit| circuit.height * circuit.num_lookups)
-            .sum();
-        let mut messages: Vec<EF> = Vec::with_capacity(num_messages);
-        for circuit in circuits {
-            messages.extend(
-                (0..circuit.height * circuit.num_lookups)
-                    .into_par_iter()
-                    .map(|idx| {
-                        let (row, lookup) = (idx / circuit.num_lookups, idx % circuit.num_lookups);
-                        let args = circuit.args_at(row, lookup);
-                        lookup_challenge + fingerprint(fingerprint_challenge, args.iter().cloned())
-                    })
-                    .collect::<Vec<_>>(),
-            );
-        }
-        drop(_g);
-
-        // Compute the inverses of all messages in batch.
-        let messages_inverses =
-            tracing::info_span!("stark/batch_inverse").in_scope(|| batch_inverse(&messages));
-        // Only the inverses are consumed below.
-        drop(messages);
-
-        // Compute and collect intermediate accumulators and traces.
         let _g = tracing::info_span!("stark/lookup_traces").entered();
         let mut intermediate_accumulators = Vec::with_capacity(circuits.len());
         let mut traces = Vec::with_capacity(circuits.len());
-        let mut offset = 0;
         for (circuit, &group_size) in circuits.iter().zip(group_sizes) {
-            let group_size = group_size.max(1);
-            // Get the slice containing the messages inverses for the current circuit.
-            let num_circuit_messages = circuit.height * circuit.num_lookups;
-            let circuit_messages_inverses =
-                &messages_inverses[offset..offset + num_circuit_messages];
-            offset += num_circuit_messages;
-
-            let num_slots = lookup_groups(circuit.num_lookups, group_size);
-            let vec = if circuit.num_lookups == 0 {
-                // Pass-through accumulator column; the committed values are
-                // gauge-free (only differences are constrained), zero by
-                // convention.
-                vec![<EF as Algebra<EF>>::ZERO; circuit.height]
-            } else {
-                // One partial accumulator per lookup GROUP: `acc_g` is the
-                // running sum ENTERING group g's step; the last group's
-                // result carries into the next row's slot 0. Single pass,
-                // one multiply-add per (row, lookup). The column is
-                // gauge-free, so it starts at zero regardless of the global
-                // accumulator; the circuit's total contribution is added to
-                // the global chain at the end.
-                let mut vec = Vec::with_capacity(circuit.height * num_slots);
-                let mut local = <EF as Algebra<EF>>::ZERO;
-                for (row_multiplicities, row_messages_inverses) in circuit
-                    .multiplicities
-                    .chunks_exact(circuit.num_lookups)
-                    .zip(circuit_messages_inverses.chunks_exact(circuit.num_lookups))
-                {
-                    for (group_mults, group_invs) in row_multiplicities
-                        .chunks(group_size)
-                        .zip(row_messages_inverses.chunks(group_size))
-                    {
-                        vec.push(local);
-                        for (&multiplicity, &message_inverse) in group_mults.iter().zip(group_invs)
-                        {
-                            local += EF::from(multiplicity) * message_inverse;
-                        }
-                    }
-                }
-                accumulator += local;
-                vec
-            };
-            let width = num_slots;
-            debug_assert_eq!(vec.len() % width, 0);
-            let trace = RowMajorMatrix::new(vec, width);
+            let (trace, delta) =
+                circuit.stage_2_trace(group_size, lookup_challenge, fingerprint_challenge);
+            accumulator += delta;
             intermediate_accumulators.push(accumulator);
             traces.push(trace);
         }
         drop(_g);
         (traces, intermediate_accumulators)
     }
+}
+
+/// Target number of lookup messages per chunk (~8 MiB at 16 bytes/EF).
+const STAGE_2_TARGET_CHUNK_MESSAGES: usize = 1 << 19;
+
+fn stage_2_chunk_rows(height: usize, num_lookups: usize) -> usize {
+    (STAGE_2_TARGET_CHUNK_MESSAGES / num_lookups.max(1))
+        .clamp(1, 1 << 12)
+        .min(height.max(1))
+}
+
+/// Row-window view over a chunk of rows of a 1× trace, providing each row and
+/// its cyclic successor without copying in-memory traces.
+pub(crate) trait TraceRowChunk<F: Field>: Sync {
+    fn row_pair(&self, local_row: usize) -> (&[F], &[F]);
+}
+
+/// Zero-copy row-window view backed by a resident [`RowMajorMatrix`].
+pub(crate) struct InMemoryChunk<'a, F> {
+    matrix: &'a RowMajorMatrix<F>,
+    start: usize,
+    height: usize,
+    width: usize,
+}
+
+impl<'a, F: Field> InMemoryChunk<'a, F> {
+    pub(crate) fn new(matrix: &'a RowMajorMatrix<F>, start: usize) -> Self {
+        Self {
+            matrix,
+            start,
+            height: matrix.height(),
+            width: matrix.width(),
+        }
+    }
+}
+
+impl<F: Field> TraceRowChunk<F> for InMemoryChunk<'_, F> {
+    #[inline]
+    fn row_pair(&self, local_row: usize) -> (&[F], &[F]) {
+        if self.width == 0 {
+            return (&[], &[]);
+        }
+        let r = self.start + local_row;
+        let r_next = (r + 1) % self.height;
+        (
+            &self.matrix.values[r * self.width..(r + 1) * self.width],
+            &self.matrix.values[r_next * self.width..(r_next + 1) * self.width],
+        )
+    }
+}
+
+/// Owned row-window chunk holding `n_rows + 1` rows (the chunk plus one
+/// wrap-around halo row), used when streaming chunks from disk.
+#[cfg(not(feature = "cuda"))]
+pub(crate) struct OwnedWindowChunk<F> {
+    rows: RowMajorMatrix<F>,
+}
+
+#[cfg(not(feature = "cuda"))]
+impl<F: Field> OwnedWindowChunk<F> {
+    pub(crate) fn new(rows: RowMajorMatrix<F>) -> Self {
+        Self { rows }
+    }
+}
+
+#[cfg(not(feature = "cuda"))]
+impl<F: Field> TraceRowChunk<F> for OwnedWindowChunk<F> {
+    #[inline]
+    fn row_pair(&self, local_row: usize) -> (&[F], &[F]) {
+        let w = self.rows.width();
+        if w == 0 {
+            return (&[], &[]);
+        }
+        (
+            &self.rows.values[local_row * w..(local_row + 1) * w],
+            &self.rows.values[(local_row + 1) * w..(local_row + 2) * w],
+        )
+    }
+}
+
+/// Builds a single circuit's stage-2 lookup trace directly from chunked 1×
+/// main (and optional preprocessed) row windows, without materializing
+/// [`LookupValues`].
+///
+/// Returns `(stage_2_trace, circuit_total_delta)`.
+pub(crate) fn stage_2_trace_chunked<F, EF, MainChunk, PrepChunk>(
+    circuit: &crate::system::Circuit<F>,
+    height: usize,
+    lookup_challenge: EF,
+    fingerprint_challenge: &EF,
+    mut load_main_chunk: impl FnMut(usize, usize) -> MainChunk,
+    mut load_prep_chunk: Option<impl FnMut(usize, usize) -> PrepChunk>,
+) -> (RowMajorMatrix<EF>, EF)
+where
+    F: Field,
+    EF: ExtensionOf<F>,
+    MainChunk: TraceRowChunk<F>,
+    PrepChunk: TraceRowChunk<F>,
+{
+    let num_lookups = circuit.graph.lookups.len();
+    let group_size = circuit.lookup_group_size.max(1);
+    let num_slots = lookup_groups(num_lookups, group_size);
+    let zero = <EF as Algebra<EF>>::ZERO;
+    if num_lookups == 0 || height == 0 {
+        return (
+            RowMajorMatrix::new(vec![zero; height * num_slots], num_slots),
+            zero,
+        );
+    }
+
+    let uses_preprocessed = circuit.graph.lookup_prefix_uses_preprocessed();
+    assert!(
+        !uses_preprocessed || load_prep_chunk.is_some(),
+        "circuit lookup expressions read preprocessed columns, but no preprocessed trace was supplied"
+    );
+
+    let chunk_rows = stage_2_chunk_rows(height, num_lookups);
+    let mut vec = vec![zero; height * num_slots];
+    let mut running = zero;
+    let empty: [F; 0] = [];
+
+    for row_start in (0..height).step_by(chunk_rows) {
+        let n_rows = (height - row_start).min(chunk_rows);
+        let main_chunk = load_main_chunk(row_start, n_rows);
+        let prep_chunk = if uses_preprocessed {
+            load_prep_chunk
+                .as_mut()
+                .map(|loader| loader(row_start, n_rows))
+        } else {
+            None
+        };
+
+        let mut multiplicities = F::zero_vec(n_rows * num_lookups);
+        let mut messages = vec![zero; n_rows * num_lookups];
+
+        multiplicities
+            .par_chunks_exact_mut(num_lookups)
+            .zip(messages.par_chunks_exact_mut(num_lookups))
+            .enumerate()
+            .for_each_init(Vec::new, |buf, (local_row, (row_mults, row_msgs))| {
+                let r = row_start + local_row;
+                let (main_cur, main_next) = main_chunk.row_pair(local_row);
+                let (pp_cur, pp_next) = match &prep_chunk {
+                    Some(prep) => prep.row_pair(local_row),
+                    None => (&empty[..], &empty[..]),
+                };
+                let view = VarValues {
+                    preprocessed: [pp_cur, pp_next],
+                    main: [main_cur, main_next],
+                    stage2: [&empty, &empty],
+                    publics: &empty,
+                    is_first_row: if r == 0 { F::ONE } else { F::ZERO },
+                    is_last_row: if r == height - 1 { F::ONE } else { F::ZERO },
+                    is_transition: if r == height - 1 { F::ZERO } else { F::ONE },
+                };
+                circuit.graph.sweep_lookup_prefix(&view, buf);
+                for (slot, lookup) in circuit.graph.lookups.iter().enumerate() {
+                    row_mults[slot] = buf[lookup.multiplicity.index()];
+                    let fp = fingerprint(
+                        fingerprint_challenge,
+                        lookup.args.iter().map(|arg| buf[arg.index()]),
+                    );
+                    row_msgs[slot] = lookup_challenge + fp;
+                }
+            });
+        drop(main_chunk);
+        drop(prep_chunk);
+
+        let inverses = batch_inverse(&messages);
+        drop(messages);
+
+        let chunk_out = &mut vec[row_start * num_slots..(row_start + n_rows) * num_slots];
+        chunk_out
+            .par_chunks_exact_mut(num_slots)
+            .zip(multiplicities.par_chunks_exact(num_lookups))
+            .zip(inverses.par_chunks_exact(num_lookups))
+            .for_each(|((out_row, row_mults), row_invs)| {
+                for (slot_out, (group_mults, group_invs)) in out_row.iter_mut().zip(
+                    row_mults
+                        .chunks(group_size)
+                        .zip(row_invs.chunks(group_size)),
+                ) {
+                    let mut delta = zero;
+                    for (&multiplicity, &message_inverse) in group_mults.iter().zip(group_invs) {
+                        delta += EF::from(multiplicity) * message_inverse;
+                    }
+                    *slot_out = delta;
+                }
+            });
+        drop(multiplicities);
+        drop(inverses);
+
+        for cell in chunk_out.iter_mut() {
+            let delta = *cell;
+            *cell = running;
+            running += delta;
+        }
+    }
+
+    (RowMajorMatrix::new(vec, num_slots), running)
+}
+
+/// Builds a single circuit's stage-2 lookup trace directly from its 1× main
+/// trace (and optional 1× preprocessed trace) in bounded row chunks, without
+/// materializing [`LookupValues`].
+///
+/// Returns `(stage_2_trace, circuit_total_delta)`.
+pub fn stage_2_trace_from_trace<F: Field, EF: ExtensionOf<F>>(
+    circuit: &crate::system::Circuit<F>,
+    main_trace: &RowMajorMatrix<F>,
+    preprocessed: Option<&RowMajorMatrix<F>>,
+    lookup_challenge: EF,
+    fingerprint_challenge: &EF,
+) -> (RowMajorMatrix<EF>, EF) {
+    let height = main_trace.height();
+    if let Some(pp) = preprocessed
+        && height > 0
+    {
+        assert_eq!(
+            pp.height(),
+            height,
+            "preprocessed trace height must equal main trace height"
+        );
+    }
+    stage_2_trace_chunked(
+        circuit,
+        height,
+        lookup_challenge,
+        fingerprint_challenge,
+        |start, _len| InMemoryChunk::new(main_trace, start),
+        preprocessed.map(|pp| move |start, _len| InMemoryChunk::new(pp, start)),
+    )
 }
 
 #[cfg(feature = "cuda")]

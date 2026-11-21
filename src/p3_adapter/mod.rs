@@ -6,5 +6,7 @@ pub mod challenger;
 pub mod domain;
 pub mod field;
 pub mod pcs;
+#[cfg(not(feature = "cuda"))]
+pub mod spill;
 
 pub use air::*;

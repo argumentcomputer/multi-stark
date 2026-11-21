@@ -363,6 +363,37 @@ where
         self.prove_committed(key, claims, stage_1)
     }
 
+    /// Generates a STARK proof with a single claim by streaming stage-1 traces
+    /// lazily and evaluating lookups on demand.
+    ///
+    /// Produces proofs byte-identical to [`Self::prove`].
+    pub fn prove_streaming<I>(&self, key: &ProverKey<SC>, claim: &[Val<SC>], traces: I) -> Proof<SC>
+    where
+        I: IntoIterator,
+        I::Item: Into<crate::witness::TraceSource<Val<SC>>>,
+    {
+        self.prove_multiple_claims_streaming(key, &[claim], traces)
+    }
+
+    /// Generates a STARK proof with multiple claims by streaming stage-1 traces
+    /// lazily without materializing [`LookupValues`] upfront.
+    ///
+    /// Produces proofs byte-identical to [`Self::prove_multiple_claims`].
+    #[tracing::instrument(level = "info", skip_all, name = "stark/prove_streaming")]
+    pub fn prove_multiple_claims_streaming<I>(
+        &self,
+        key: &ProverKey<SC>,
+        claims: &[&[Val<SC>]],
+        traces: I,
+    ) -> Proof<SC>
+    where
+        I: IntoIterator,
+        I::Item: Into<crate::witness::TraceSource<Val<SC>>>,
+    {
+        let stage_1 = self.prove_stage_1_streaming(traces);
+        self.prove_committed(key, claims, stage_1)
+    }
+
     /// Continue an ordinary proof from independently prepared stage-one data.
     ///
     /// # Panics
@@ -454,25 +485,6 @@ where
             "cannot prove with every circuit deactivated (all traces empty)"
         );
 
-        // Cost: "Stage 1 commit" — coset LDE (FFT) of each trace from n_i to
-        // n_i·B rows (an iDFT plus B coset DFTs per column), then Merkle
-        // tree. FFT work: Σ w_i · (B+1) · n_i · log₂(n_i).
-        let mut log_degrees = vec![];
-        let evaluations = witness
-            .traces
-            .into_iter()
-            .zip(active.clone())
-            .filter_map(|(trace, is_active)| is_active.then_some(trace))
-            .map(|trace| {
-                let degree = trace.height();
-                let log_degree = log2_strict_usize(degree);
-                let trace_domain = pcs.natural_domain_for_degree(degree);
-                log_degrees.push(log_degree);
-                (trace_domain, trace)
-            });
-        let (stage_1_trace_commit, stage_1_trace_data) =
-            self.config.commit_main(evaluations.collect());
-
         // Only active circuits enter the accumulator chain; the chain (and
         // `intermediate_accumulators`) is indexed by active position.
         let lookups: Vec<_> = witness
@@ -481,6 +493,108 @@ where
             .zip(&active)
             .filter_map(|(l, &is_active)| is_active.then_some(l))
             .collect();
+
+        // Cost: "Stage 1 commit" — coset LDE (FFT) of each trace from n_i to
+        // n_i·B rows (an iDFT plus B coset DFTs per column), then Merkle
+        // tree. FFT work: Σ w_i · (B+1) · n_i · log₂(n_i).
+        let mut log_degrees = Vec::with_capacity(active_indices.len());
+        let mut evaluations = witness
+            .traces
+            .into_iter()
+            .enumerate()
+            .zip(&active)
+            .filter_map(|((ci, trace), &is_active)| is_active.then_some((ci, trace)))
+            .zip(&lookups)
+            .map(|((ci, trace), lookup)| {
+                let degree = trace.height();
+                let log_degree = log2_strict_usize(degree);
+                let trace_domain = pcs.natural_domain_for_degree(degree);
+                log_degrees.push(log_degree);
+                let retain_1x = !lookup.is_materialized() && self.circuits[ci].num_lookups > 0;
+                (trace_domain, trace, retain_1x)
+            });
+        let (stage_1_trace_commit, stage_1_trace_data) = self
+            .config
+            .commit_main_streaming(&mut evaluations)
+            .expect("cannot prove with every circuit deactivated (all traces empty)");
+
+        Stage1 {
+            active,
+            active_indices,
+            log_degrees,
+            stage_1_trace_commit,
+            stage_1_trace_data,
+            lookups,
+        }
+    }
+
+    /// Streaming round one of a proof: pulls each circuit's stage-1 trace
+    /// lazily from `traces` without holding all traces or [`LookupValues`] in
+    /// memory simultaneously.
+    ///
+    /// Lookup expressions are evaluated on demand in bounded row chunks during
+    /// stage-2 trace construction. Produces proofs byte-identical to
+    /// [`Self::prove_stage_1`] with [`SystemWitness::from_stage_1`].
+    ///
+    /// # Panics
+    /// Panics if `traces` does not yield one trace per circuit, if an active
+    /// circuit's height disagrees with its preprocessed trace height, or if
+    /// every circuit's trace is empty.
+    #[tracing::instrument(level = "info", skip_all, name = "stark/stage1_commit_streaming")]
+    pub fn prove_stage_1_streaming<I>(&self, traces: I) -> Stage1<SC>
+    where
+        I: IntoIterator,
+        I::Item: Into<crate::witness::TraceSource<Val<SC>>>,
+    {
+        let pcs = self.config.pcs();
+        let mut active = Vec::with_capacity(self.circuits.len());
+        let mut active_indices = Vec::new();
+        let mut log_degrees = Vec::new();
+        let mut lookups = Vec::new();
+
+        let mut evaluations = traces.into_iter().enumerate().filter_map(|(ci, trace)| {
+            assert!(
+                ci < self.circuits.len(),
+                "expected one trace per circuit (got more than {})",
+                self.circuits.len()
+            );
+            let trace: crate::witness::TraceSource<Val<SC>> = trace.into();
+            let height = trace.height();
+            let circuit = &self.circuits[ci];
+            if height == 0 {
+                active.push(false);
+                return None;
+            }
+            if circuit.preprocessed_height != 0 {
+                assert_eq!(
+                    height, circuit.preprocessed_height,
+                    "circuit {ci}: main trace height must equal preprocessed trace height"
+                );
+            }
+            active.push(true);
+            active_indices.push(ci);
+            log_degrees.push(log2_strict_usize(height));
+            let slot_widths: Vec<usize> = circuit
+                .graph
+                .lookups
+                .iter()
+                .map(|lookup| lookup.args.len())
+                .collect();
+            lookups.push(LookupValues::shape_only(height, &slot_widths));
+            let trace_domain = pcs.natural_domain_for_degree(height);
+            let retain_1x = circuit.num_lookups > 0;
+            Some((trace_domain, trace, retain_1x))
+        });
+
+        let committed = self.config.commit_main_streaming(&mut evaluations);
+        for _ in evaluations {}
+        assert_eq!(
+            active.len(),
+            self.circuits.len(),
+            "expected one trace per circuit"
+        );
+        let (stage_1_trace_commit, stage_1_trace_data) =
+            committed.expect("cannot prove with every circuit deactivated (all traces empty)");
 
         Stage1 {
             active,
@@ -556,24 +670,95 @@ where
                 drop(_g);
                 result
             } else {
-                let (stage_2_traces, intermediate_accumulators) = self
-                    .config
-                    .accelerated_lookup_traces(
-                        &active_lookups,
-                        &group_sizes,
-                        lookup_argument_challenge,
-                        fingerprint_challenge,
-                        acc,
-                    )
-                    .unwrap_or_else(|| {
-                        LookupValues::stage_2_traces(
+                let any_unmaterialized = active_lookups.iter().any(|l| !l.is_materialized());
+                let (stage_2_traces, intermediate_accumulators) = if any_unmaterialized {
+                    let mut traces = Vec::with_capacity(active_indices.len());
+                    let mut intermediates = Vec::with_capacity(active_indices.len());
+                    let mut running = acc;
+                    for ((pos, &ci), (lookup_values, &log_degree)) in active_indices
+                        .iter()
+                        .enumerate()
+                        .zip(active_lookups.iter().zip(&log_degrees))
+                    {
+                        let circuit = &self.circuits[ci];
+                        let (trace, delta) = if lookup_values.is_materialized() {
+                            lookup_values.stage_2_trace(
+                                circuit.lookup_group_size,
+                                lookup_argument_challenge,
+                                &fingerprint_challenge,
+                            )
+                        } else if circuit.graph.lookups.is_empty() {
+                            (
+                                RowMajorMatrix::new(
+                                    vec![
+                                        <SC::Challenge as Algebra<SC::Challenge>>::ZERO;
+                                        1 << log_degree
+                                    ],
+                                    1,
+                                ),
+                                <SC::Challenge as Algebra<SC::Challenge>>::ZERO,
+                            )
+                        } else {
+                            let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
+                            let main_trace = pcs
+                                .get_evaluations_on_domain(&stage_1_trace_data, pos, trace_domain)
+                                .to_row_major_matrix();
+                            let owned_prep;
+                            let prep_ref = if circuit.graph.lookup_prefix_uses_preprocessed() {
+                                if let Some(pp) = circuit.preprocessed.as_ref() {
+                                    Some(pp)
+                                } else {
+                                    let (prep_data, prep_idx) = key
+                                        .preprocessed_data
+                                        .as_ref()
+                                        .zip(self.preprocessed_indices[ci])
+                                        .expect(
+                                            "circuit lookup expressions require preprocessed trace",
+                                        );
+                                    owned_prep = pcs
+                                        .get_evaluations_on_domain(
+                                            prep_data,
+                                            prep_idx,
+                                            trace_domain,
+                                        )
+                                        .to_row_major_matrix();
+                                    Some(&owned_prep)
+                                }
+                            } else {
+                                None
+                            };
+                            crate::lookup::stage_2_trace_from_trace(
+                                circuit,
+                                &main_trace,
+                                prep_ref,
+                                lookup_argument_challenge,
+                                &fingerprint_challenge,
+                            )
+                        };
+                        running += delta;
+                        intermediates.push(running);
+                        traces.push(trace);
+                    }
+                    (traces, intermediates)
+                } else {
+                    self.config
+                        .accelerated_lookup_traces(
                             &active_lookups,
                             &group_sizes,
                             lookup_argument_challenge,
-                            &fingerprint_challenge,
+                            fingerprint_challenge,
                             acc,
                         )
-                    });
+                        .unwrap_or_else(|| {
+                            LookupValues::stage_2_traces(
+                                &active_lookups,
+                                &group_sizes,
+                                lookup_argument_challenge,
+                                &fingerprint_challenge,
+                                acc,
+                            )
+                        })
+                };
                 // The lookup witness can be as large as the traces themselves; free it
                 // now instead of holding it through the commit/quotient/FRI stages.
                 drop(active_lookups);

@@ -154,6 +154,65 @@ pub trait ProofConfig {
         )
     }
 
+    /// Commit preprocessed evaluation matrices from a streaming iterator.
+    ///
+    /// Each item is `(domain, matrix, retain_1x_for_lookups)`, where
+    /// `retain_1x_for_lookups` is `true` when the system does not retain
+    /// `circuit.preprocessed` in RAM and the circuit's lookup expressions read
+    /// preprocessed columns.
+    ///
+    /// Backends that spill LDEs to disk can process one matrix at a time so
+    /// all preprocessed matrices never coexist in RAM simultaneously. Returns
+    /// `None` if the iterator yields no matrices.
+    fn commit_preprocessed(
+        &self,
+        evaluations: &mut dyn Iterator<
+            Item = (
+                Domain<Self>,
+                p3_matrix::dense::RowMajorMatrix<Val<Self>>,
+                bool,
+            ),
+        >,
+    ) -> Option<(Com<Self>, PcsData<Self>)>
+    where
+        Self: Sized,
+    {
+        let evals: Vec<_> = evaluations
+            .map(|(domain, matrix, _retain_1x)| (domain, matrix))
+            .collect();
+        if evals.is_empty() {
+            None
+        } else {
+            Some(self.pcs().commit(evals))
+        }
+    }
+
+    /// Commit deterministic main-trace sources from a streaming iterator.
+    ///
+    /// Each item is `(domain, trace_source, retain_1x_for_lookups)`, where
+    /// `retain_1x_for_lookups` is `true` when the circuit's lookup witness is
+    /// unmaterialized (`shape_only`) and the circuit has at least one lookup.
+    ///
+    /// Returns `None` if the iterator yields no active traces.
+    fn commit_main_streaming(
+        &self,
+        evaluations: &mut dyn Iterator<
+            Item = (Domain<Self>, crate::witness::TraceSource<Val<Self>>, bool),
+        >,
+    ) -> Option<(Com<Self>, PcsData<Self>)>
+    where
+        Self: Sized,
+    {
+        let evals: Vec<_> = evaluations
+            .map(|(domain, trace, _retain_1x)| (domain, trace))
+            .collect();
+        if evals.is_empty() {
+            None
+        } else {
+            Some(self.commit_main(evals))
+        }
+    }
+
     /// Normalize any backend-dependent field representatives before proof
     /// serialization. Most fields have canonical in-memory representations;
     /// configurations whose field permits lazy reduction can override this.

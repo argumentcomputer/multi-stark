@@ -265,6 +265,42 @@ fn plonkish_baby_bear_native_field_proof() {
     let witness = SystemWitness::from_stage_1(circuit.traces(&assignment).unwrap(), &system);
     let proof = system.prove_multiple_claims(&key, &claims, witness);
     system.verify_multiple_claims(&claims, &proof).unwrap();
+
+    // Verify generic ProofConfig portable fallback for lazy lookups and
+    // `new_without_preprocessed` produces byte-identical proofs.
+    let lazy_witness =
+        SystemWitness::from_stage_1_lazy(circuit.traces(&assignment).unwrap(), &system);
+    assert!(lazy_witness.lookups.iter().all(|l| !l.is_materialized()));
+    let lazy_proof = system.prove_multiple_claims(&key, &claims, lazy_witness);
+    assert_eq!(lazy_proof.to_bytes().unwrap(), proof.to_bytes().unwrap());
+
+    let config_no_prep = BabyBearPoseidon2Config::new(
+        CommitmentParameters {
+            log_blowup: 1,
+            cap_height: 0,
+        },
+        FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 20,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        },
+    );
+    let (system_no_prep, key_no_prep) =
+        System::new_without_preprocessed(config_no_prep, circuit.circuit_inputs());
+    let streamed_proof = system_no_prep.prove_multiple_claims_streaming(
+        &key_no_prep,
+        &claims,
+        circuit.traces(&assignment).unwrap(),
+    );
+    system_no_prep
+        .verify_multiple_claims(&claims, &streamed_proof)
+        .unwrap();
+    assert_eq!(
+        streamed_proof.to_bytes().unwrap(),
+        proof.to_bytes().unwrap()
+    );
 }
 
 impl<F> BaseAir<F> for MulAir {

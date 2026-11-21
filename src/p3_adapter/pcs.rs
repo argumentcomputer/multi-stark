@@ -69,6 +69,16 @@ impl<F, EF, Challenger, Dft: Default, ValMmcs, ChallengeMmcs, Inner>
     pub fn fri_parameters(&self) -> FriParameters {
         self.fri_parameters
     }
+
+    #[cfg(not(feature = "cuda"))]
+    pub(crate) fn inner_mut(&mut self) -> &mut Inner {
+        &mut self.inner
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    pub(crate) fn quotient_dft(&self) -> &Dft {
+        &self.quotient_dft
+    }
 }
 
 impl<F, EF, Challenger, Dft, ValMmcs, ChallengeMmcs, Inner> Pcs
@@ -195,7 +205,7 @@ where
 /// natural trace domain guarantees it). What survives is a single parallel
 /// gather off the DFT storage with ONE constant weight per slice:
 /// `wₖ = N⁻¹ · GENERATOR^{−k·n}`.
-fn shifted_quotient_slices<F: TwoAdicField + Ord>(
+pub(crate) fn shifted_quotient_slices<F: TwoAdicField + Ord>(
     dft: &impl TwoAdicSubgroupDft<F>,
     quotient_evals: RowMajorMatrix<F>,
     domain_shift: F,
@@ -276,7 +286,7 @@ fn shifted_quotient_slices<F: TwoAdicField + Ord>(
 /// `coset_dft_batch`, no reassembly copies, and `Radix2DitParallel`'s
 /// native output order is already the bit-reversed storage order, so the
 /// final unwrap is copy-free.
-fn lde_from_shifted_coefficients<F: TwoAdicField + Ord>(
+pub(crate) fn lde_from_shifted_coefficients<F: TwoAdicField + Ord>(
     dft: &impl TwoAdicSubgroupDft<F>,
     mut coefficients: RowMajorMatrix<F>,
     log_blowup: usize,
