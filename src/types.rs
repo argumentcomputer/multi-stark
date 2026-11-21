@@ -533,6 +533,17 @@ impl ProofConfig for GoldilocksBlake3Config {
         let mut spill_pack = spill_dir.map(SpillPackWriter::create);
         let mut spilled_ldes =
             Vec::with_capacity(if spill_dir.is_some() { inputs.len() } else { 0 });
+        let mut prehashed = Vec::with_capacity(if spill_dir.is_some() { inputs.len() } else { 0 });
+        let height_counts: std::collections::HashMap<usize, usize> = if spill_dir.is_some() {
+            let mut counts = std::collections::HashMap::new();
+            for input in inputs {
+                let lde_height = input.lookup_values.height() << self.log_blowup;
+                *counts.entry(lde_height).or_insert(0) += 1;
+            }
+            counts
+        } else {
+            std::collections::HashMap::new()
+        };
         let mut in_memory_ldes =
             Vec::with_capacity(if spill_dir.is_none() { inputs.len() } else { 0 });
         let mut intermediates = Vec::with_capacity(inputs.len());
@@ -608,7 +619,14 @@ impl ProofConfig for GoldilocksBlake3Config {
             let domain = self.pcs.natural_domain_for_degree(stage_2_base.height());
             let lde = self.pcs.compute_lde(domain, stage_2_base);
             if let Some(pack) = &mut spill_pack {
-                spilled_ldes.push(pack.append_matrix(&lde));
+                if height_counts.get(&lde.height()).copied() == Some(1) {
+                    let (spilled, digests) = pack.append_matrix_and_hash(&lde);
+                    spilled_ldes.push(spilled);
+                    prehashed.push(Some(digests));
+                } else {
+                    spilled_ldes.push(pack.append_matrix(&lde));
+                    prehashed.push(None);
+                }
                 // Drop `lde` immediately before building the next circuit's stage-2 trace.
             } else {
                 in_memory_ldes.push(lde);
@@ -624,7 +642,8 @@ impl ProofConfig for GoldilocksBlake3Config {
 
         let (commitment, data) = if let Some(mut pack) = spill_pack {
             pack.flush();
-            self.pcs.commit_spilled_ldes(spilled_ldes, None)
+            self.pcs
+                .commit_spilled_ldes_prehashed(spilled_ldes, None, prehashed)
         } else {
             self.pcs.commit_in_memory_ldes(in_memory_ldes)
         };
@@ -644,8 +663,15 @@ impl ProofConfig for GoldilocksBlake3Config {
         let spill_dir = self.spill_dir()?;
         let mut pack = SpillPackWriter::create(spill_dir);
         let mut spilled_ldes = Vec::with_capacity(inputs.len());
+        let mut prehashed = Vec::with_capacity(inputs.len());
         let dft = self.pcs.quotient_dft();
         let log_blowup = self.log_blowup;
+        let mut height_counts = std::collections::HashMap::new();
+        for input in inputs {
+            let lde_height =
+                (input.quotient_domain.size() / input.circuit.quotient_degree()) << log_blowup;
+            *height_counts.entry(lde_height).or_insert(0) += 1;
+        }
 
         for input in inputs {
             let circuit = input.circuit;
@@ -689,11 +715,21 @@ impl ProofConfig for GoldilocksBlake3Config {
                 quotient_degree,
             );
             let lde = lde_from_shifted_coefficients(dft, sliced, log_blowup);
-            spilled_ldes.push(pack.append_matrix(&lde));
+            if height_counts.get(&lde.height()).copied() == Some(1) {
+                let (spilled, digests) = pack.append_matrix_and_hash(&lde);
+                spilled_ldes.push(spilled);
+                prehashed.push(Some(digests));
+            } else {
+                spilled_ldes.push(pack.append_matrix(&lde));
+                prehashed.push(None);
+            }
         }
 
         pack.flush();
-        Some(self.pcs.commit_spilled_ldes(spilled_ldes, None))
+        Some(
+            self.pcs
+                .commit_spilled_ldes_prehashed(spilled_ldes, None, prehashed),
+        )
     }
 
     fn canonicalize_proof(proof: &mut crate::prover::Proof<Self>) {

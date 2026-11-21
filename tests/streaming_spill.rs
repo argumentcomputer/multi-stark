@@ -269,21 +269,57 @@ fn make_config(
 #[test]
 fn streaming_and_spilled_proofs_are_byte_identical_across_configs() {
     // Test matrix:
-    // (lookup_group_size, log_blowup, cap_height, max_log_arity, pow_bits, work_rows, activate_aux)
+    // (lookup_group_size, log_blowup, cap_height, max_log_arity, pow_bits, work_rows, activate_aux, fc4336b_blake3_pin)
     let cases = [
         // Default ungrouped lookups, blowup 2, cap 0, binary FRI, sparse inactive preprocessed circuit.
-        (1usize, 1usize, 0usize, 1usize, 0usize, 16usize, false),
+        (
+            1usize,
+            1usize,
+            0usize,
+            1usize,
+            0usize,
+            16usize,
+            false,
+            "f227d2e461a5e8219d53a79add0895d331d772813e7a14782d9d603871b7613d",
+        ),
         // Grouped lookups k = 2, blowup 4 (q=4 supported), cap 1, higher arity, positive PoW.
-        (2, 2, 1, 2, 4, 32, false),
+        (
+            2,
+            2,
+            1,
+            2,
+            4,
+            32,
+            false,
+            "bbb754d7390697ae17394266c2cb262c5c937a3584d5b56646cbf3a8a3b9b7a5",
+        ),
         // Grouped lookups k = 3, blowup 2 (q=4 -> log_blowup=2), cap 2, all circuits active.
-        (3, 2, 2, 1, 0, 16, true),
+        (
+            3,
+            2,
+            2,
+            1,
+            0,
+            16,
+            true,
+            "ae7b731bf392f7a6988677261ab4ee30f21cac2ac143d018da2b4141e286ea8e",
+        ),
         // Grouped lookups k = 4 (5 lookups => groups of 4 and 1!), blowup 2, cap 0.
-        (4, 2, 0, 2, 3, 16, false),
+        (
+            4,
+            2,
+            0,
+            2,
+            3,
+            16,
+            false,
+            "cd603a7772b7df77ab3785ed6db70b16a3011849c4e71a276f8ffed7be51622f",
+        ),
     ];
 
     for (
         case_idx,
-        &(k, log_blowup, cap_height, max_log_arity, pow_bits, work_rows, activate_aux),
+        &(k, log_blowup, cap_height, max_log_arity, pow_bits, work_rows, activate_aux, ref_pin),
     ) in cases.iter().enumerate()
     {
         #[cfg(feature = "cuda")]
@@ -303,6 +339,12 @@ fn streaming_and_spilled_proofs_are_byte_identical_across_configs() {
             .verify_multiple_claims(&claim_slices, &proof_base)
             .expect("baseline proof must verify");
         let expected_bytes = proof_base.to_bytes().unwrap();
+        assert_eq!(
+            blake3::hash(&expected_bytes).to_hex().as_str(),
+            ref_pin,
+            "case {case_idx}: proof bytes drifted from fc4336b baseline ({} bytes)",
+            expected_bytes.len()
+        );
 
         // 2. Lazy lookups in-memory (System::new + SystemWitness::from_stage_1_lazy).
         let wit_lazy = SystemWitness::from_stage_1_lazy(traces.clone(), &sys_base);
@@ -571,6 +613,13 @@ fn streaming_and_spilled_batches_are_byte_identical() {
         .verify_batch(&batch_base)
         .expect("baseline batch must verify");
     let expected_bytes = batch_base.to_bytes().unwrap();
+    #[cfg(not(feature = "cuda"))]
+    assert_eq!(
+        blake3::hash(&expected_bytes).to_hex().as_str(),
+        "d293d541b35ec6bbfa5e64383cbd0559fa9b341578a710a063d9b7fb42eace53",
+        "batch proof bytes drifted from fc4336b baseline ({} bytes)",
+        expected_bytes.len()
+    );
 
     // Disk-spilled + lazy lookups under BOTH Retention::Retain and Retention::Regenerate.
     let spill_dir = fresh_spill_dir("batch");

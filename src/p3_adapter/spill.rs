@@ -13,6 +13,7 @@
 
 use std::borrow::Cow;
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::marker::PhantomData;
@@ -26,8 +27,9 @@ use p3_commit::{BatchOpening, BatchOpeningRef, Mmcs, OpenedValues, Pcs, Periodic
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::coset::TwoAdicMultiplicativeCoset;
 use p3_field::{
-    ExtensionField, Field, PackedFieldExtension, PrimeCharacteristicRing, PrimeField64,
-    TwoAdicField, batch_multiplicative_inverse, dot_product, scale_slice_in_place_single_core,
+    BasedVectorSpace, ExtensionField, Field, PackedFieldExtension, PackedValue,
+    PrimeCharacteristicRing, PrimeField64, TwoAdicField, dot_product,
+    scale_slice_in_place_single_core,
 };
 use p3_fri::verifier::{self, FriError};
 use p3_fri::{
@@ -42,17 +44,17 @@ use p3_matrix::interpolation::{Interpolate, compute_adjusted_weights};
 use p3_matrix::{Dimensions, Matrix};
 use p3_maybe_rayon::prelude::*;
 use p3_merkle_tree::{MerkleTreeMmcs, PrunedMerklePaths};
-use p3_symmetric::{CryptographicHasher, MerkleCap, PseudoCompressionFunction, SerializingHasher};
+use p3_symmetric::{CryptographicHasher, MerkleCap, SerializingHasher};
 use p3_util::linear_map::LinearMap;
 use p3_util::{log2_ceil_usize, log2_strict_usize, reverse_slice_index_bits};
 use tracing::debug_span;
 
-use crate::types::{Blake3CompressionFunction, ExtVal, Val};
+use super::blake3_simd;
+use crate::types::{Blake3CompressionFunction, ExtVal, PackedVal, Val};
 
-/// CPU reference MMCS used for in-memory commitments and verification.
+/// CPU reference MMCS used for verification and reference tests.
 pub type CpuMmcs =
     MerkleTreeMmcs<Val, u8, SerializingHasher<Blake3>, Blake3CompressionFunction, 2, 32>;
-type CpuData<M> = <CpuMmcs as Mmcs<Val>>::ProverData<M>;
 type SpillCommitResult = (
     <SpillableMmcs as Mmcs<Val>>::Commitment,
     SpillableMmcsData<RowMajorMatrix<Val>>,
@@ -62,8 +64,8 @@ type SpillCommitResult = (
 /// opening passes (64 MiB).
 const STREAM_BLOCK_BYTES: usize = 64 << 20;
 
-/// Write buffer size for sequential spill-file packing (1 MiB of field elements).
-const SPILL_WRITE_CHUNK_ELEMS: usize = 1 << 17;
+/// Write buffer size for sequential spill-file packing (8 MiB = 1M field elements).
+const SPILL_WRITE_CHUNK_ELEMS: usize = 1 << 20;
 
 static SPILL_FILE_SEQ: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_SPILL_FILES: AtomicUsize = AtomicUsize::new(0);
@@ -183,10 +185,32 @@ impl SpillPackWriter {
             .expect("failed to clone spill file handle for writing");
         Self {
             spill,
-            writer: BufWriter::with_capacity(1 << 20, write_handle),
+            writer: BufWriter::with_capacity(4 << 20, write_handle),
             next_offset: 0,
-            scratch: Vec::with_capacity(SPILL_WRITE_CHUNK_ELEMS * size_of::<u64>()),
+            scratch: Vec::new(),
         }
+    }
+
+    #[inline]
+    fn pack_chunk_bytes(&mut self, chunk: &[Val]) -> usize {
+        let byte_len = chunk.len() * size_of::<u64>();
+        if self.scratch.len() < byte_len {
+            self.scratch.resize(byte_len, 0);
+        }
+        let dst = &mut self.scratch[..byte_len];
+        if chunk.len() >= 4096 {
+            dst.par_chunks_exact_mut(8)
+                .zip(chunk.par_iter())
+                .for_each(|(out, elem)| {
+                    out.copy_from_slice(&elem.as_canonical_u64().to_le_bytes());
+                });
+        } else {
+            let (out_chunks, _) = dst.as_chunks_mut::<8>();
+            for (out, elem) in out_chunks.iter_mut().zip(chunk) {
+                *out = elem.as_canonical_u64().to_le_bytes();
+            }
+        }
+        byte_len
     }
 
     /// Appends `mat` in canonical little-endian `u64` row-major order and
@@ -197,13 +221,9 @@ impl SpillPackWriter {
         let offset = self.next_offset;
         let total_elems = mat.values.len();
         for chunk in mat.values.chunks(SPILL_WRITE_CHUNK_ELEMS) {
-            self.scratch.clear();
-            for elem in chunk {
-                self.scratch
-                    .extend_from_slice(&elem.as_canonical_u64().to_le_bytes());
-            }
+            let byte_len = self.pack_chunk_bytes(chunk);
             self.writer
-                .write_all(&self.scratch)
+                .write_all(&self.scratch[..byte_len])
                 .expect("failed to write matrix chunk to spill file");
         }
         let bytes = u64::try_from(total_elems)
@@ -221,6 +241,72 @@ impl SpillPackWriter {
             height,
             width,
         }
+    }
+
+    /// Appends `mat` to the spill file AND computes each row's BLAKE3 leaf
+    /// digest from the same cache-hot serialized chunks, eliminating a full
+    /// disk read pass for single-matrix height groups.
+    pub(crate) fn append_matrix_and_hash(
+        &mut self,
+        mat: &RowMajorMatrix<Val>,
+    ) -> (SpilledMatrix, Vec<[u8; 32]>) {
+        let height = mat.height();
+        let width = mat.width();
+        let offset = self.next_offset;
+        if width == 0 {
+            let empty_digest = Blake3.hash_slice(&[]);
+            return (
+                SpilledMatrix {
+                    file: Arc::clone(&self.spill),
+                    offset,
+                    height,
+                    width,
+                },
+                vec![empty_digest; height],
+            );
+        }
+        let row_bytes = width * size_of::<u64>();
+        let chunk_rows =
+            ((SPILL_WRITE_CHUNK_ELEMS * size_of::<u64>()) / row_bytes).clamp(1, height.max(1));
+        // SAFETY: the loop partitions `0..height` into disjoint contiguous chunks
+        // `row_start..row_start + n_rows` and initializes each via `hash_raw_rows_uninit`.
+        let digests = unsafe {
+            blake3_simd::alloc_and_fill_digests(height, height, |dst| {
+                for row_start in (0..height).step_by(chunk_rows) {
+                    let n_rows = (height - row_start).min(chunk_rows);
+                    let elem_start = row_start * width;
+                    let elem_end = (row_start + n_rows) * width;
+                    let byte_len = self.pack_chunk_bytes(&mat.values[elem_start..elem_end]);
+                    blake3_simd::hash_raw_rows_uninit(
+                        &self.scratch[..byte_len],
+                        row_bytes,
+                        &mut dst[row_start..row_start + n_rows],
+                    );
+                    self.writer
+                        .write_all(&self.scratch[..byte_len])
+                        .expect("failed to write matrix chunk to spill file");
+                }
+            })
+        };
+        let total_elems = mat.values.len();
+        let bytes = u64::try_from(total_elems)
+            .expect("matrix element count exceeds u64")
+            .checked_mul(u64::try_from(size_of::<u64>()).unwrap())
+            .expect("matrix byte length overflow");
+        self.next_offset = self
+            .next_offset
+            .checked_add(bytes)
+            .expect("spill pack offset overflow");
+        TOTAL_SPILLED_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        (
+            SpilledMatrix {
+                file: Arc::clone(&self.spill),
+                offset,
+                height,
+                width,
+            },
+            digests,
+        )
     }
 
     /// Flushes all buffered writes to the OS file before positional reads.
@@ -340,10 +426,17 @@ impl SpilledMatrix {
 fn bytes_to_goldilocks(raw: &[u8]) -> Vec<Val> {
     let (chunks, remainder) = raw.as_chunks::<8>();
     debug_assert!(remainder.is_empty());
-    chunks
-        .iter()
-        .map(|&chunk| Goldilocks::new(u64::from_le_bytes(chunk)))
-        .collect()
+    if chunks.len() >= 4096 {
+        chunks
+            .par_iter()
+            .map(|&chunk| Goldilocks::new(u64::from_le_bytes(chunk)))
+            .collect()
+    } else {
+        chunks
+            .iter()
+            .map(|&chunk| Goldilocks::new(u64::from_le_bytes(chunk)))
+            .collect()
+    }
 }
 
 /// Binary Merkle-tree padded layer length (matching `p3_merkle_tree::padded_len(raw_len, 2)`).
@@ -358,16 +451,18 @@ const fn padded_len_binary(raw_len: usize) -> usize {
 
 /// Validates that every matrix height sits on the `ceil(max_height / 2^k)`
 /// ladder anchored at the tallest matrix (matching `p3_merkle_tree`).
-fn validate_reachable_heights(matrices: &[SpilledMatrix]) -> usize {
-    let max_height = matrices
-        .iter()
-        .map(SpilledMatrix::height)
+fn validate_reachable_heights_iter(heights: impl Iterator<Item = usize> + Clone) -> usize {
+    let max_height = heights
+        .clone()
         .max()
         .filter(|&h| h > 0)
         .expect("all matrices have height 0");
     let log_max_height = log2_ceil_usize(max_height);
-    for m in matrices {
-        let h = m.height();
+    for h in heights {
+        assert!(
+            h > 0,
+            "matrix height 0 incompatible with tallest height {max_height}"
+        );
         let bits_reduced = log_max_height - log2_ceil_usize(h);
         let expected_height = ((max_height - 1) >> bits_reduced) + 1;
         assert_eq!(
@@ -378,13 +473,237 @@ fn validate_reachable_heights(matrices: &[SpilledMatrix]) -> usize {
     max_height
 }
 
+/// Shared Merkle digest layers and opening-proof traversal for both in-memory
+/// and disk-spilled binary BLAKE3 Merkle trees.
+struct MerkleDigests {
+    digest_layers: Vec<Vec<[u8; 32]>>,
+    arity_schedule: Vec<usize>,
+}
+
+impl MerkleDigests {
+    fn cap(&self, cap_height: usize) -> MerkleCap<Val, [u8; 32]> {
+        let num_layers = self.digest_layers.len();
+        let effective_cap_height = cap_height.min(num_layers.saturating_sub(1));
+        let layer_idx = num_layers - 1 - effective_cap_height;
+        let layer = &self.digest_layers[layer_idx];
+        let cap_len: usize = self.arity_schedule[layer_idx..].iter().product();
+        let cap_len = cap_len.min(layer.len());
+        MerkleCap::new(layer[..cap_len].to_vec())
+    }
+
+    fn open_single_proof(&self, index: usize, cap_height: usize) -> Vec<[u8; 32]> {
+        let num_layers = self.digest_layers.len();
+        let effective_cap_height = cap_height.min(num_layers.saturating_sub(1));
+        let proof_levels = num_layers
+            .saturating_sub(1)
+            .saturating_sub(effective_cap_height);
+
+        let mut proof = Vec::with_capacity(proof_levels);
+        let mut idx = index;
+        for layer_idx in 0..proof_levels {
+            let step = self.arity_schedule[layer_idx];
+            let group_start = (idx / step) * step;
+            let pos_in_group = idx % step;
+            for k in 0..step {
+                if k != pos_in_group {
+                    proof.push(self.digest_layers[layer_idx][group_start + k]);
+                }
+            }
+            idx /= step;
+        }
+        proof
+    }
+
+    fn open_multi_proof(&self, indices: &[usize], cap_height: usize) -> PrunedMerklePaths<u8, 32> {
+        let num_layers = self.digest_layers.len();
+        let effective_cap_height = cap_height.min(num_layers.saturating_sub(1));
+        let proof_levels = num_layers
+            .saturating_sub(1)
+            .saturating_sub(effective_cap_height);
+
+        // Walk the pruned frontier bottom-up in the exact wire order defined by
+        // `p3_merkle_tree::pruning::walk_frontier`:
+        // - sorted unique leaf indices
+        // - level 0 .. proof_levels
+        // - ascending parent groups, emitting missing child positions ascending.
+        let mut nodes: Vec<usize> = indices.to_vec();
+        nodes.sort_unstable();
+        nodes.dedup();
+
+        let mut sibling_hashes = Vec::new();
+        if !nodes.is_empty() {
+            let mut parents: Vec<usize> = Vec::with_capacity(nodes.len());
+            for (level, &arity) in self.arity_schedule[..proof_levels].iter().enumerate() {
+                parents.clear();
+                let mut i = 0;
+                while i < nodes.len() {
+                    let group = nodes[i] / arity;
+                    let group_start = group * arity;
+                    let mut member = i;
+                    for k in 0..arity {
+                        if member < nodes.len() && nodes[member] == group_start + k {
+                            member += 1;
+                        } else {
+                            sibling_hashes.push(self.digest_layers[level][group_start + k]);
+                        }
+                    }
+                    parents.push(group);
+                    i = member;
+                }
+                core::mem::swap(&mut nodes, &mut parents);
+            }
+        }
+
+        PrunedMerklePaths { sibling_hashes }
+    }
+}
+
+/// Fast in-memory binary BLAKE3 Merkle tree accelerated with multi-buffer SIMD
+/// hashing for both leaf rows and internal 2-to-1 compression layers.
+struct FastInMemoryMerkleTree<M> {
+    leaves: Vec<M>,
+    digests: MerkleDigests,
+}
+
+impl<M: Matrix<Val>> FastInMemoryMerkleTree<M> {
+    fn build(leaves: Vec<M>) -> Self {
+        assert!(!leaves.is_empty(), "No matrices given?");
+        let max_height = validate_reachable_heights_iter(leaves.iter().map(Matrix::height));
+
+        let mut order: Vec<usize> = (0..leaves.len()).collect();
+        order.sort_by_key(|&idx| Reverse(leaves[idx].height()));
+
+        let tallest_end = order
+            .iter()
+            .take_while(|&&idx| leaves[idx].height() == max_height)
+            .count();
+        let tallest = &order[..tallest_end];
+        let mut cursor = tallest_end;
+
+        let tallest_refs: Vec<&M> = tallest.iter().map(|&idx| &leaves[idx]).collect();
+        // SAFETY: `hash_matrix_rows_uninit` initializes every element of `dst` (`0..max_height`).
+        let first_layer = unsafe {
+            blake3_simd::alloc_and_fill_digests(padded_len_binary(max_height), max_height, |dst| {
+                blake3_simd::hash_matrix_rows_uninit(&tallest_refs, 0, dst);
+            })
+        };
+
+        let mut digest_layers = vec![first_layer];
+        let mut arity_schedule = Vec::new();
+
+        loop {
+            let prev_layer = digest_layers.last().unwrap().as_slice();
+            if prev_layer.len() <= 1 {
+                break;
+            }
+            let step = 2usize;
+            let raw_next = prev_layer.len() / step;
+            let next_layer_len = raw_next.next_power_of_two();
+
+            let inject_start = cursor;
+            while cursor < order.len()
+                && leaves[order[cursor]].height().next_power_of_two() == next_layer_len
+            {
+                cursor += 1;
+            }
+            let inject_group = &order[inject_start..cursor];
+
+            let next_digests = if inject_group.is_empty() {
+                compress_layer_binary(prev_layer)
+            } else {
+                let inject_refs: Vec<&M> = inject_group.iter().map(|&idx| &leaves[idx]).collect();
+                compress_and_inject_in_memory(prev_layer, &inject_refs)
+            };
+            arity_schedule.push(step);
+            digest_layers.push(next_digests);
+        }
+
+        Self {
+            leaves,
+            digests: MerkleDigests {
+                digest_layers,
+                arity_schedule,
+            },
+        }
+    }
+
+    fn cap(&self, cap_height: usize) -> MerkleCap<Val, [u8; 32]> {
+        self.digests.cap(cap_height)
+    }
+
+    fn max_height(&self) -> usize {
+        self.leaves
+            .iter()
+            .map(Matrix::height)
+            .max()
+            .expect("No committed matrices?")
+    }
+
+    fn matrix_heights(&self) -> Vec<usize> {
+        self.leaves.iter().map(Matrix::height).collect()
+    }
+
+    fn dimensions(&self) -> Vec<Dimensions> {
+        self.leaves.iter().map(Matrix::dimensions).collect()
+    }
+
+    fn open_batch(&self, index: usize, cap_height: usize) -> (Vec<Vec<Val>>, Vec<[u8; 32]>) {
+        let max_height = self.max_height();
+        assert!(
+            index < max_height,
+            "index {index} out of bounds for height {max_height}"
+        );
+        let log_max_height = log2_ceil_usize(max_height);
+        let openings: Vec<Vec<Val>> = self
+            .leaves
+            .iter()
+            .map(|matrix| {
+                let log2_height = log2_ceil_usize(matrix.height());
+                let bits_reduced = log_max_height - log2_height;
+                let reduced_index = index >> bits_reduced;
+                matrix.row(reduced_index).unwrap().into_iter().collect()
+            })
+            .collect();
+        let proof = self.digests.open_single_proof(index, cap_height);
+        (openings, proof)
+    }
+
+    fn open_multi_batch(
+        &self,
+        indices: &[usize],
+        cap_height: usize,
+    ) -> (Vec<Vec<Vec<Val>>>, PrunedMerklePaths<u8, 32>) {
+        let max_height = self.max_height();
+        let log_max_height = log2_ceil_usize(max_height);
+        let opened_values: Vec<Vec<Vec<Val>>> = indices
+            .iter()
+            .map(|&index| {
+                assert!(
+                    index < max_height,
+                    "index {index} out of bounds for height {max_height}"
+                );
+                self.leaves
+                    .iter()
+                    .map(|matrix| {
+                        let log2_height = log2_ceil_usize(matrix.height());
+                        let bits_reduced = log_max_height - log2_height;
+                        let reduced_index = index >> bits_reduced;
+                        matrix.row(reduced_index).unwrap().into_iter().collect()
+                    })
+                    .collect()
+            })
+            .collect();
+        let proof = self.digests.open_multi_proof(indices, cap_height);
+        (opened_values, proof)
+    }
+}
+
 /// A binary Blake3 Merkle tree whose leaf matrices reside on disk in
 /// [`SpilledMatrix`] handles, while only the compact internal `digest_layers`
 /// remain in RAM.
 pub(crate) struct SpilledMerkleTree {
     matrices: Vec<SpilledMatrix>,
-    digest_layers: Vec<Vec<[u8; 32]>>,
-    arity_schedule: Vec<usize>,
+    digests: MerkleDigests,
     /// Optional spilled 1× original traces retained for zero-FFT on-demand
     /// lookup evaluation; released once stage-2 completes for stage-1 data,
     /// or retained for the lifetime of `ProverKey` for preprocessed data.
@@ -392,13 +711,14 @@ pub(crate) struct SpilledMerkleTree {
 }
 
 impl SpilledMerkleTree {
-    pub(crate) fn build(
+    pub(crate) fn build_with_prehashed(
         matrices: Vec<SpilledMatrix>,
         original_traces: Vec<Option<SpilledMatrix>>,
-        compress: &Blake3CompressionFunction,
+        mut prehashed: Vec<Option<Vec<[u8; 32]>>>,
     ) -> Self {
         assert!(!matrices.is_empty(), "No matrices given?");
-        let max_height = validate_reachable_heights(&matrices);
+        let max_height =
+            validate_reachable_heights_iter(matrices.iter().map(SpilledMatrix::height));
 
         // Stable sort tallest-first to match `MerkleTree::new` insertion order
         // within each height group.
@@ -412,7 +732,15 @@ impl SpilledMerkleTree {
         let tallest = &order[..tallest_end];
         let mut cursor = tallest_end;
 
-        let first_layer = hash_leaf_group_streaming(&matrices, tallest, max_height);
+        let first_layer = if let &[single_idx] = tallest
+            && let Some(mut digests) = prehashed.get_mut(single_idx).and_then(Option::take)
+        {
+            debug_assert_eq!(digests.len(), max_height);
+            digests.resize(padded_len_binary(max_height), [0u8; 32]);
+            digests
+        } else {
+            hash_leaf_group_streaming(&matrices, tallest, max_height)
+        };
         let mut digest_layers = vec![first_layer];
         let mut arity_schedule = Vec::new();
 
@@ -434,9 +762,13 @@ impl SpilledMerkleTree {
             let inject_group = &order[inject_start..cursor];
 
             let next_digests = if inject_group.is_empty() {
-                compress_layer_binary(prev_layer, compress)
+                compress_layer_binary(prev_layer)
+            } else if let &[single_idx] = inject_group
+                && let Some(rows_digests) = prehashed.get_mut(single_idx).and_then(Option::take)
+            {
+                compress_and_inject_prehashed(prev_layer, &rows_digests)
             } else {
-                compress_and_inject_streaming(prev_layer, &matrices, inject_group, compress)
+                compress_and_inject_streaming(prev_layer, &matrices, inject_group)
             };
             arity_schedule.push(step);
             digest_layers.push(next_digests);
@@ -444,20 +776,16 @@ impl SpilledMerkleTree {
 
         Self {
             matrices,
-            digest_layers,
-            arity_schedule,
+            digests: MerkleDigests {
+                digest_layers,
+                arity_schedule,
+            },
             original_traces: Mutex::new(original_traces),
         }
     }
 
     pub(crate) fn cap(&self, cap_height: usize) -> MerkleCap<Val, [u8; 32]> {
-        let num_layers = self.digest_layers.len();
-        let effective_cap_height = cap_height.min(num_layers.saturating_sub(1));
-        let layer_idx = num_layers - 1 - effective_cap_height;
-        let layer = &self.digest_layers[layer_idx];
-        let cap_len: usize = self.arity_schedule[layer_idx..].iter().product();
-        let cap_len = cap_len.min(layer.len());
-        MerkleCap::new(layer[..cap_len].to_vec())
+        self.digests.cap(cap_height)
     }
 
     pub(crate) fn max_height(&self) -> usize {
@@ -502,25 +830,7 @@ impl SpilledMerkleTree {
             })
             .collect();
 
-        let num_layers = self.digest_layers.len();
-        let effective_cap_height = cap_height.min(num_layers.saturating_sub(1));
-        let proof_levels = num_layers
-            .saturating_sub(1)
-            .saturating_sub(effective_cap_height);
-
-        let mut proof = Vec::with_capacity(proof_levels);
-        let mut idx = index;
-        for layer_idx in 0..proof_levels {
-            let step = self.arity_schedule[layer_idx];
-            let group_start = (idx / step) * step;
-            let pos_in_group = idx % step;
-            for k in 0..step {
-                if k != pos_in_group {
-                    proof.push(self.digest_layers[layer_idx][group_start + k]);
-                }
-            }
-            idx /= step;
-        }
+        let proof = self.digests.open_single_proof(index, cap_height);
         (openings, proof)
     }
 
@@ -531,11 +841,6 @@ impl SpilledMerkleTree {
     ) -> (Vec<Vec<Vec<Val>>>, PrunedMerklePaths<u8, 32>) {
         let max_height = self.max_height();
         let log_max_height = log2_ceil_usize(max_height);
-        let num_layers = self.digest_layers.len();
-        let effective_cap_height = cap_height.min(num_layers.saturating_sub(1));
-        let proof_levels = num_layers
-            .saturating_sub(1)
-            .saturating_sub(effective_cap_height);
 
         let opened_values: Vec<Vec<Vec<Val>>> = indices
             .iter()
@@ -556,40 +861,8 @@ impl SpilledMerkleTree {
             })
             .collect();
 
-        // Walk the pruned frontier bottom-up in the exact wire order defined by
-        // `p3_merkle_tree::pruning::walk_frontier`:
-        // - sorted unique leaf indices
-        // - level 0 .. proof_levels
-        // - ascending parent groups, emitting missing child positions ascending.
-        let mut nodes: Vec<usize> = indices.to_vec();
-        nodes.sort_unstable();
-        nodes.dedup();
-
-        let mut sibling_hashes = Vec::new();
-        if !nodes.is_empty() {
-            let mut parents: Vec<usize> = Vec::with_capacity(nodes.len());
-            for (level, &arity) in self.arity_schedule[..proof_levels].iter().enumerate() {
-                parents.clear();
-                let mut i = 0;
-                while i < nodes.len() {
-                    let group = nodes[i] / arity;
-                    let group_start = group * arity;
-                    let mut member = i;
-                    for k in 0..arity {
-                        if member < nodes.len() && nodes[member] == group_start + k {
-                            member += 1;
-                        } else {
-                            sibling_hashes.push(self.digest_layers[level][group_start + k]);
-                        }
-                    }
-                    parents.push(group);
-                    i = member;
-                }
-                core::mem::swap(&mut nodes, &mut parents);
-            }
-        }
-
-        (opened_values, PrunedMerklePaths { sibling_hashes })
+        let proof = self.digests.open_multi_proof(indices, cap_height);
+        (opened_values, proof)
     }
 
     pub(crate) fn spilled_original_trace(&self, idx: usize) -> Option<SpilledMatrix> {
@@ -626,106 +899,152 @@ fn hash_leaf_group_streaming(
     max_height: usize,
 ) -> Vec<[u8; 32]> {
     let padded = padded_len_binary(max_height);
-    let mut digests = vec![[0u8; 32]; padded];
     let block_rows = block_rows_for_group(matrices, group, max_height);
-    let hasher = Blake3;
-
-    for start in (0..max_height).step_by(block_rows) {
-        let n_rows = (max_height - start).min(block_rows);
-        let blocks: Vec<(Vec<u8>, usize)> = group
-            .iter()
-            .map(|&idx| {
-                let m = &matrices[idx];
-                (m.read_raw_rows(start, n_rows), m.row_bytes())
-            })
-            .collect();
-        digests[start..start + n_rows]
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(local_row, digest)| {
-                *digest = if let [(buf, row_bytes)] = blocks.as_slice() {
-                    hasher.hash_slice(&buf[local_row * *row_bytes..(local_row + 1) * *row_bytes])
-                } else {
-                    hasher.hash_iter_slices(blocks.iter().map(|(buf, row_bytes)| {
-                        &buf[local_row * *row_bytes..(local_row + 1) * *row_bytes]
-                    }))
-                };
-            });
+    // SAFETY: the loop covers `0..max_height` in contiguous chunks and initializes
+    // each via `hash_raw_multi_rows_uninit`.
+    unsafe {
+        blake3_simd::alloc_and_fill_digests(padded, max_height, |dst| {
+            for start in (0..max_height).step_by(block_rows) {
+                let n_rows = (max_height - start).min(block_rows);
+                let blocks: Vec<(Vec<u8>, usize)> = group
+                    .iter()
+                    .map(|&idx| {
+                        let m = &matrices[idx];
+                        (m.read_raw_rows(start, n_rows), m.row_bytes())
+                    })
+                    .collect();
+                blake3_simd::hash_raw_multi_rows_uninit(&blocks, &mut dst[start..start + n_rows]);
+            }
+        })
     }
-    digests
 }
 
-fn compress_layer_binary(
-    prev_layer: &[[u8; 32]],
-    compress: &Blake3CompressionFunction,
-) -> Vec<[u8; 32]> {
+fn compress_layer_binary(prev_layer: &[[u8; 32]]) -> Vec<[u8; 32]> {
     let raw_next = prev_layer.len() / 2;
     let next_len_padded = padded_len_binary(raw_next);
-    let mut next_digests = vec![[0u8; 32]; next_len_padded];
-    next_digests[..raw_next]
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, digest)| {
-            *digest = compress.compress([prev_layer[2 * i], prev_layer[2 * i + 1]]);
-        });
-    next_digests
+    // SAFETY: `compress_pairs_uninit` initializes every element of `dst` (`0..raw_next`).
+    unsafe {
+        blake3_simd::alloc_and_fill_digests(next_len_padded, raw_next, |dst| {
+            blake3_simd::compress_pairs_uninit(prev_layer, dst);
+        })
+    }
+}
+
+fn compress_and_inject_prehashed(
+    prev_layer: &[[u8; 32]],
+    rows_digests: &[[u8; 32]],
+) -> Vec<[u8; 32]> {
+    let next_len = rows_digests.len();
+    let raw_next = prev_layer.len() / 2;
+    let next_len_padded = padded_len_binary(raw_next);
+    // SAFETY: initializes `dst[..next_len]` and (if `raw_next > next_len`)
+    // `dst[next_len..raw_next]`, covering all of `0..raw_next`.
+    unsafe {
+        blake3_simd::alloc_and_fill_digests(next_len_padded, raw_next, |dst| {
+            blake3_simd::compress_and_inject_from_digests_uninit(
+                prev_layer,
+                rows_digests,
+                &mut dst[..next_len],
+            );
+            if raw_next > next_len {
+                let zeros = vec![[0u8; 32]; raw_next - next_len];
+                blake3_simd::compress_and_inject_from_digests_uninit(
+                    &prev_layer[2 * next_len..],
+                    &zeros,
+                    &mut dst[next_len..raw_next],
+                );
+            }
+        })
+    }
+}
+
+fn compress_and_inject_in_memory<M: Matrix<Val>>(
+    prev_layer: &[[u8; 32]],
+    inject_group: &[&M],
+) -> Vec<[u8; 32]> {
+    let next_len = inject_group[0].height();
+    let raw_next = prev_layer.len() / 2;
+    let next_len_padded = padded_len_binary(raw_next);
+    const BLOCK_ROWS: usize = 1 << 14;
+    let mut row_digests = vec![[0u8; 32]; next_len.min(BLOCK_ROWS)];
+
+    // SAFETY: initializes `dst[..next_len]` in contiguous chunks and (if
+    // `raw_next > next_len`) `dst[next_len..raw_next]`, covering all of `0..raw_next`.
+    unsafe {
+        blake3_simd::alloc_and_fill_digests(next_len_padded, raw_next, |dst| {
+            for start in (0..next_len).step_by(BLOCK_ROWS) {
+                let n_rows = (next_len - start).min(BLOCK_ROWS);
+                blake3_simd::hash_matrix_rows(inject_group, start, &mut row_digests[..n_rows]);
+                blake3_simd::compress_and_inject_from_digests_uninit(
+                    &prev_layer[2 * start..],
+                    &row_digests[..n_rows],
+                    &mut dst[start..start + n_rows],
+                );
+            }
+
+            if raw_next > next_len {
+                let zeros = vec![[0u8; 32]; raw_next - next_len];
+                blake3_simd::compress_and_inject_from_digests_uninit(
+                    &prev_layer[2 * next_len..],
+                    &zeros,
+                    &mut dst[next_len..raw_next],
+                );
+            }
+        })
+    }
 }
 
 fn compress_and_inject_streaming(
     prev_layer: &[[u8; 32]],
     matrices: &[SpilledMatrix],
     inject_group: &[usize],
-    compress: &Blake3CompressionFunction,
 ) -> Vec<[u8; 32]> {
     let next_len = matrices[inject_group[0]].height();
     let raw_next = prev_layer.len() / 2;
     let next_len_padded = padded_len_binary(raw_next);
-    let mut next_digests = vec![[0u8; 32]; next_len_padded];
     let block_rows = block_rows_for_group(matrices, inject_group, next_len);
-    let hasher = Blake3;
+    let mut row_digests = vec![[0u8; 32]; block_rows];
 
-    for start in (0..next_len).step_by(block_rows) {
-        let n_rows = (next_len - start).min(block_rows);
-        let blocks: Vec<(Vec<u8>, usize)> = inject_group
-            .iter()
-            .map(|&idx| {
-                let m = &matrices[idx];
-                (m.read_raw_rows(start, n_rows), m.row_bytes())
-            })
-            .collect();
-        next_digests[start..start + n_rows]
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(local_row, out)| {
-                let i = start + local_row;
-                let digest = compress.compress([prev_layer[2 * i], prev_layer[2 * i + 1]]);
-                let rows_digest = if let [(buf, row_bytes)] = blocks.as_slice() {
-                    hasher.hash_slice(&buf[local_row * *row_bytes..(local_row + 1) * *row_bytes])
-                } else {
-                    hasher.hash_iter_slices(blocks.iter().map(|(buf, row_bytes)| {
-                        &buf[local_row * *row_bytes..(local_row + 1) * *row_bytes]
-                    }))
-                };
-                *out = compress.compress([digest, rows_digest]);
-            });
+    // SAFETY: initializes `dst[..next_len]` in contiguous chunks and (if
+    // `raw_next > next_len`) `dst[next_len..raw_next]`, covering all of `0..raw_next`.
+    unsafe {
+        blake3_simd::alloc_and_fill_digests(next_len_padded, raw_next, |dst| {
+            for start in (0..next_len).step_by(block_rows) {
+                let n_rows = (next_len - start).min(block_rows);
+                let blocks: Vec<(Vec<u8>, usize)> = inject_group
+                    .iter()
+                    .map(|&idx| {
+                        let m = &matrices[idx];
+                        (m.read_raw_rows(start, n_rows), m.row_bytes())
+                    })
+                    .collect();
+                blake3_simd::hash_raw_multi_rows(&blocks, &mut row_digests[..n_rows]);
+                blake3_simd::compress_and_inject_from_digests_uninit(
+                    &prev_layer[2 * start..],
+                    &row_digests[..n_rows],
+                    &mut dst[start..start + n_rows],
+                );
+            }
+
+            if raw_next > next_len {
+                let zeros = vec![[0u8; 32]; raw_next - next_len];
+                blake3_simd::compress_and_inject_from_digests_uninit(
+                    &prev_layer[2 * next_len..],
+                    &zeros,
+                    &mut dst[next_len..raw_next],
+                );
+            }
+        })
     }
-
-    for (i, out) in next_digests[next_len..raw_next].iter_mut().enumerate() {
-        let idx = next_len + i;
-        let digest = compress.compress([prev_layer[2 * idx], prev_layer[2 * idx + 1]]);
-        *out = compress.compress([digest, [0u8; 32]]);
-    }
-
-    next_digests
 }
 
-/// Prover data for [`SpillableMmcs`]: either Plonky3's standard in-memory
-/// [`p3_merkle_tree::MerkleTree`] or a disk-spilled [`SpilledMerkleTree`].
+/// Prover data for [`SpillableMmcs`]: either an in-memory multi-buffer SIMD
+/// BLAKE3 Merkle tree or a disk-spilled [`SpilledMerkleTree`].
 pub struct SpillableMmcsData<M>(SpillableMmcsDataInner<M>);
 
 enum SpillableMmcsDataInner<M> {
     InMemory {
-        tree: CpuData<M>,
+        tree: FastInMemoryMerkleTree<M>,
         /// Optional 1× original traces retained for zero-FFT lazy lookup
         /// evaluation in in-memory mode; released once stage-2 completes.
         retained_traces: Mutex<Vec<Option<RowMajorMatrix<Val>>>>,
@@ -794,12 +1113,12 @@ impl<M> SpillableMmcsData<M> {
     }
 }
 
-/// CPU MMCS supporting both in-memory commitments (default, zero overhead) and
-/// disk-spilled commitments with identical commitments and opening proofs.
+/// CPU MMCS supporting both in-memory commitments (default, accelerated via
+/// multi-buffer SIMD BLAKE3) and disk-spilled commitments with identical
+/// commitments and opening proofs.
 #[derive(Clone, Debug)]
 pub struct SpillableMmcs {
     cpu: CpuMmcs,
-    compress: Blake3CompressionFunction,
 }
 
 impl SpillableMmcs {
@@ -809,8 +1128,7 @@ impl SpillableMmcs {
         cap_height: usize,
     ) -> Self {
         Self {
-            cpu: CpuMmcs::new(hash, compress.clone(), cap_height),
-            compress,
+            cpu: CpuMmcs::new(hash, compress, cap_height),
         }
     }
 
@@ -823,7 +1141,8 @@ impl SpillableMmcs {
         ldes: Vec<RowMajorMatrix<Val>>,
         original_traces: Vec<Option<RowMajorMatrix<Val>>>,
     ) -> SpillCommitResult {
-        let (commitment, tree) = self.cpu.commit(ldes);
+        let tree = FastInMemoryMerkleTree::build(ldes);
+        let commitment = tree.cap(self.cap_height());
         (
             commitment,
             SpillableMmcsData(SpillableMmcsDataInner::InMemory {
@@ -833,13 +1152,14 @@ impl SpillableMmcs {
         )
     }
 
-    pub(crate) fn commit_spilled(
+    pub(crate) fn commit_spilled_prehashed(
         &self,
         matrices: Vec<SpilledMatrix>,
         original_traces: Vec<Option<SpilledMatrix>>,
+        prehashed: Vec<Option<Vec<[u8; 32]>>>,
     ) -> SpillCommitResult {
         let count = matrices.len();
-        let tree = SpilledMerkleTree::build(matrices, original_traces, &self.compress);
+        let tree = SpilledMerkleTree::build_with_prehashed(matrices, original_traces, prehashed);
         let cap = tree.cap(self.cap_height());
         let materialized = (0..count).map(|_| OnceLock::new()).collect();
         (
@@ -852,17 +1172,21 @@ impl SpillableMmcs {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn commit_spilled(
+        &self,
+        matrices: Vec<SpilledMatrix>,
+        original_traces: Vec<Option<SpilledMatrix>>,
+    ) -> SpillCommitResult {
+        self.commit_spilled_prehashed(matrices, original_traces, Vec::new())
+    }
+
     pub(crate) fn matrix_dimensions<M: Matrix<Val>>(
         &self,
         prover_data: &SpillableMmcsData<M>,
     ) -> Vec<Dimensions> {
         match &prover_data.0 {
-            SpillableMmcsDataInner::InMemory { tree, .. } => self
-                .cpu
-                .get_matrices(tree)
-                .into_iter()
-                .map(Matrix::dimensions)
-                .collect(),
+            SpillableMmcsDataInner::InMemory { tree, .. } => tree.dimensions(),
             SpillableMmcsDataInner::Spilled { tree, .. } => tree.dimensions(),
         }
     }
@@ -876,7 +1200,8 @@ impl Mmcs<Val> for SpillableMmcs {
     type Error = <CpuMmcs as Mmcs<Val>>::Error;
 
     fn commit<M: Matrix<Val>>(&self, inputs: Vec<M>) -> (Self::Commitment, Self::ProverData<M>) {
-        let (commitment, tree) = self.cpu.commit(inputs);
+        let tree = FastInMemoryMerkleTree::build(inputs);
+        let commitment = tree.cap(self.cap_height());
         (
             commitment,
             SpillableMmcsData(SpillableMmcsDataInner::InMemory {
@@ -893,7 +1218,7 @@ impl Mmcs<Val> for SpillableMmcs {
     ) -> BatchOpening<Val, Self> {
         match &prover_data.0 {
             SpillableMmcsDataInner::InMemory { tree, .. } => {
-                let (opened_values, opening_proof) = self.cpu.open_batch(index, tree).unpack();
+                let (opened_values, opening_proof) = tree.open_batch(index, self.cap_height());
                 BatchOpening::new(opened_values, opening_proof)
             }
             SpillableMmcsDataInner::Spilled { tree, .. } => {
@@ -905,7 +1230,7 @@ impl Mmcs<Val> for SpillableMmcs {
 
     fn get_matrices<'a, M: Matrix<Val>>(&self, prover_data: &'a Self::ProverData<M>) -> Vec<&'a M> {
         match &prover_data.0 {
-            SpillableMmcsDataInner::InMemory { tree, .. } => self.cpu.get_matrices(tree),
+            SpillableMmcsDataInner::InMemory { tree, .. } => tree.leaves.iter().collect(),
             SpillableMmcsDataInner::Spilled {
                 tree,
                 materialized,
@@ -921,14 +1246,14 @@ impl Mmcs<Val> for SpillableMmcs {
 
     fn get_matrix_heights<M: Matrix<Val>>(&self, prover_data: &Self::ProverData<M>) -> Vec<usize> {
         match &prover_data.0 {
-            SpillableMmcsDataInner::InMemory { tree, .. } => self.cpu.get_matrix_heights(tree),
+            SpillableMmcsDataInner::InMemory { tree, .. } => tree.matrix_heights(),
             SpillableMmcsDataInner::Spilled { tree, .. } => tree.matrix_heights(),
         }
     }
 
     fn get_max_height<M: Matrix<Val>>(&self, prover_data: &Self::ProverData<M>) -> usize {
         match &prover_data.0 {
-            SpillableMmcsDataInner::InMemory { tree, .. } => self.cpu.get_max_height(tree),
+            SpillableMmcsDataInner::InMemory { tree, .. } => tree.max_height(),
             SpillableMmcsDataInner::Spilled { tree, .. } => tree.max_height(),
         }
     }
@@ -956,7 +1281,7 @@ impl Mmcs<Val> for SpillableMmcs {
     ) -> (Vec<Vec<Vec<Val>>>, Self::MultiProof) {
         match &prover_data.0 {
             SpillableMmcsDataInner::InMemory { tree, .. } => {
-                self.cpu.open_multi_batch(indices, tree)
+                tree.open_multi_batch(indices, self.cap_height())
             }
             SpillableMmcsDataInner::Spilled { tree, .. } => {
                 tree.open_multi_batch(indices, self.cap_height())
@@ -1026,10 +1351,11 @@ impl<Dft, FriMmcs> SpillableTwoAdicFriPcs<Dft, FriMmcs> {
             .to_row_major_matrix()
     }
 
-    pub(crate) fn commit_spilled_ldes(
+    pub(crate) fn commit_spilled_ldes_prehashed(
         &self,
         spilled_ldes: Vec<SpilledMatrix>,
         original_traces: Option<Vec<Option<SpilledMatrix>>>,
+        prehashed: Vec<Option<Vec<[u8; 32]>>>,
     ) -> SpillCommitResult {
         let min_height = 1usize << self.fri.log_blowup;
         for lde in &spilled_ldes {
@@ -1040,7 +1366,8 @@ impl<Dft, FriMmcs> SpillableTwoAdicFriPcs<Dft, FriMmcs> {
             );
         }
         let originals = original_traces.unwrap_or_default();
-        self.mmcs.commit_spilled(spilled_ldes, originals)
+        self.mmcs
+            .commit_spilled_prehashed(spilled_ldes, originals, prehashed)
     }
 
     pub(crate) fn commit_in_memory_ldes(
@@ -1062,7 +1389,8 @@ impl<Dft, FriMmcs> SpillableTwoAdicFriPcs<Dft, FriMmcs> {
     ///
     /// Returns `None` if the iterator yields no items. When disk spilling is
     /// enabled, processes one matrix at a time so neither all 1× traces nor all
-    /// 4× LDEs coexist in memory simultaneously.
+    /// 4× LDEs coexist in memory simultaneously, hashing unique-height matrices
+    /// in RAM before dropping them to avoid a second disk pass.
     pub(crate) fn commit_streaming_with_originals(
         &self,
         evaluations: &mut dyn Iterator<
@@ -1077,6 +1405,8 @@ impl<Dft, FriMmcs> SpillableTwoAdicFriPcs<Dft, FriMmcs> {
             let mut orig_pack: Option<SpillPackWriter> = None;
             let mut spilled_ldes = Vec::new();
             let mut spilled_originals = Vec::new();
+            let mut prehashed: Vec<Option<Vec<[u8; 32]>>> = Vec::new();
+            let mut first_idx_for_height: HashMap<usize, Option<usize>> = HashMap::new();
 
             for (domain, evals, retain_1x) in evaluations {
                 if retain_1x {
@@ -1086,8 +1416,26 @@ impl<Dft, FriMmcs> SpillableTwoAdicFriPcs<Dft, FriMmcs> {
                     spilled_originals.push(None);
                 }
                 let lde = self.compute_lde(domain, evals);
+                let lde_height = lde.height();
+                let idx = spilled_ldes.len();
                 let writer = lde_pack.get_or_insert_with(|| SpillPackWriter::create(dir));
-                spilled_ldes.push(writer.append_matrix(&lde));
+                match first_idx_for_height.get_mut(&lde_height) {
+                    None => {
+                        let (spilled, digests) = writer.append_matrix_and_hash(&lde);
+                        spilled_ldes.push(spilled);
+                        prehashed.push(Some(digests));
+                        first_idx_for_height.insert(lde_height, Some(idx));
+                    }
+                    Some(prev) => {
+                        // A second matrix shares this height; drop the single-matrix
+                        // prehash so this height group streams concatenated rows.
+                        if let Some(prev_idx) = prev.take() {
+                            prehashed[prev_idx] = None;
+                        }
+                        spilled_ldes.push(writer.append_matrix(&lde));
+                        prehashed.push(None);
+                    }
+                }
                 // `lde` drops here before pulling the next matrix.
             }
 
@@ -1105,7 +1453,7 @@ impl<Dft, FriMmcs> SpillableTwoAdicFriPcs<Dft, FriMmcs> {
             } else {
                 None
             };
-            Some(self.commit_spilled_ldes(spilled_ldes, originals))
+            Some(self.commit_spilled_ldes_prehashed(spilled_ldes, originals, prehashed))
         } else {
             let mut ldes = Vec::new();
             let mut originals = Vec::new();
@@ -1161,12 +1509,30 @@ where
         if let Some(dir) = &self.spill_dir {
             let mut pack = SpillPackWriter::create(dir);
             let mut spilled_ldes = Vec::new();
+            let mut prehashed: Vec<Option<Vec<[u8; 32]>>> = Vec::new();
+            let mut first_idx_for_height: HashMap<usize, Option<usize>> = HashMap::new();
             for (domain, evals) in evaluations {
                 let lde = self.compute_lde(domain, evals);
-                spilled_ldes.push(pack.append_matrix(&lde));
+                let h = lde.height();
+                let idx = spilled_ldes.len();
+                match first_idx_for_height.get_mut(&h) {
+                    None => {
+                        let (spilled, digests) = pack.append_matrix_and_hash(&lde);
+                        spilled_ldes.push(spilled);
+                        prehashed.push(Some(digests));
+                        first_idx_for_height.insert(h, Some(idx));
+                    }
+                    Some(prev) => {
+                        if let Some(prev_idx) = prev.take() {
+                            prehashed[prev_idx] = None;
+                        }
+                        spilled_ldes.push(pack.append_matrix(&lde));
+                        prehashed.push(None);
+                    }
+                }
             }
             pack.flush();
-            self.commit_spilled_ldes(spilled_ldes, None)
+            self.commit_spilled_ldes_prehashed(spilled_ldes, None, prehashed)
         } else {
             let ldes: Vec<_> = evaluations
                 .into_iter()
@@ -1197,13 +1563,26 @@ where
             );
         }
         if let Some(dir) = &self.spill_dir {
+            let mut height_counts: HashMap<usize, usize> = HashMap::new();
+            for lde in &ldes {
+                *height_counts.entry(lde.height()).or_insert(0) += 1;
+            }
             let mut pack = SpillPackWriter::create(dir);
             let mut spilled = Vec::with_capacity(ldes.len());
+            let mut prehashed = Vec::with_capacity(ldes.len());
             for lde in ldes {
-                spilled.push(pack.append_matrix(&lde));
+                if height_counts[&lde.height()] == 1 {
+                    let (sp, digests) = pack.append_matrix_and_hash(&lde);
+                    spilled.push(sp);
+                    prehashed.push(Some(digests));
+                } else {
+                    spilled.push(pack.append_matrix(&lde));
+                    prehashed.push(None);
+                }
             }
             pack.flush();
-            self.mmcs.commit_spilled(spilled, Vec::new())
+            self.mmcs
+                .commit_spilled_prehashed(spilled, Vec::new(), prehashed)
         } else {
             self.mmcs.commit(ldes)
         }
@@ -1217,7 +1596,7 @@ where
     ) -> Self::EvaluationsOnDomain<'a> {
         match &prover_data.0 {
             SpillableMmcsDataInner::InMemory { tree, .. } => {
-                let lde = self.mmcs.cpu.get_matrices(tree)[idx];
+                let lde = &tree.leaves[idx];
                 if domain.shift() == Val::GENERATOR && lde.height() >= domain.size() {
                     return lde.split_rows(domain.size()).0.as_cow().bit_reverse_rows();
                 }
@@ -1284,13 +1663,7 @@ where
             .expect("No Matrices Supplied?");
         let log_global_max_height = log2_strict_usize(global_max_height);
 
-        let coset = {
-            let coset =
-                TwoAdicMultiplicativeCoset::new(Val::GENERATOR, log_global_max_height).unwrap();
-            let mut coset_points: Vec<Val> = coset.iter().collect();
-            reverse_slice_index_bits(&mut coset_points);
-            coset_points
-        };
+        let coset = build_bitrev_coset(log_global_max_height);
 
         let inv_denoms = compute_inverse_denominators_from_dims(&dims_and_points, &coset);
         drop(coset);
@@ -1319,7 +1692,7 @@ where
                         }
                         match &data.0 {
                             SpillableMmcsDataInner::InMemory { tree, .. } => {
-                                let mat = self.mmcs.cpu.get_matrices(tree)[mat_idx];
+                                let mat = &tree.leaves[mat_idx];
                                 let mat_view = mat.as_view();
                                 let (low_coset, _) = mat_view.split_rows(h);
                                 points_for_mat
@@ -1415,7 +1788,7 @@ where
 
                 match &data.0 {
                     SpillableMmcsDataInner::InMemory { tree, .. } => {
-                        let mat = self.mmcs.cpu.get_matrices(tree)[mat_idx];
+                        let mat = &tree.leaves[mat_idx];
                         let mat_compressed: Vec<ExtVal> = mat
                             .as_view()
                             .rowwise_packed_dot_product::<ExtVal>(&packed_alpha_powers)
@@ -1541,6 +1914,151 @@ impl<Dft: TwoAdicSubgroupDft<Val>, FriMmcs> SpillableTwoAdicFriPcs<Dft, FriMmcs>
     }
 }
 
+/// Builds the bit-reversed evaluation coset `GENERATOR * <g>` of size
+/// `1 << log_size` in parallel chunks.
+fn build_bitrev_coset(log_size: usize) -> Vec<Val> {
+    let size = 1usize << log_size;
+    let g = Val::two_adic_generator(log_size);
+    let mut coset = Val::zero_vec(size);
+    const CHUNK: usize = 4096;
+    if size <= CHUNK {
+        let mut cur = Val::GENERATOR;
+        for slot in &mut coset {
+            *slot = cur;
+            cur *= g;
+        }
+    } else {
+        coset
+            .par_chunks_mut(CHUNK)
+            .enumerate()
+            .for_each(|(chunk_idx, chunk)| {
+                let mut cur = Val::GENERATOR
+                    * g.exp_u64(u64::try_from(chunk_idx * CHUNK).expect("coset index exceeds u64"));
+                for slot in chunk {
+                    *slot = cur;
+                    cur *= g;
+                }
+            });
+    }
+    reverse_slice_index_bits(&mut coset);
+    coset
+}
+
+#[inline]
+fn invert_lanes_in_place(lanes: &[Val], invs: &mut [Val]) {
+    let n = lanes.len();
+    if n == 0 {
+        return;
+    }
+    let mut acc = Val::ONE;
+    for (slot, &v) in invs.iter_mut().zip(lanes) {
+        *slot = acc;
+        acc *= v;
+    }
+    let mut inv = acc.inverse();
+    for i in (0..n).rev() {
+        invs[i] *= inv;
+        inv *= lanes[i];
+    }
+}
+
+struct NormScratch {
+    reals: Vec<PackedVal>,
+    norms: Vec<PackedVal>,
+    prefixes: Vec<PackedVal>,
+    lane_invs: Vec<Val>,
+}
+
+/// Computes `[(z - x)^{-1} for x in coset]` in `Goldilocks[X]/(X^2 - W)` using
+/// the base-field norm trick:
+///
+/// ```text
+/// (z_0 - x + z_1·X)^{-1} = ((z_0 - x) - z_1·X) / ((z_0 - x)^2 - W·z_1^2)
+/// ```
+///
+/// Every chunk runs Montgomery batch inversion in the base field `PackedVal`
+/// inside L1 cache (3× fewer base multiplications than extension-field batch
+/// inversion, SIMD-vectorized across `PackedVal::WIDTH` lanes, parallelized
+/// across all cores, and with zero intermediate `diffs` allocation).
+fn goldilocks_quadratic_inverse_denominators(z: ExtVal, coset: &[Val]) -> Vec<ExtVal> {
+    const CHUNK: usize = 1024;
+    let coords = <ExtVal as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&z);
+    let z0 = coords[0];
+    let z1 = coords[1];
+    let neg_z1 = -z1;
+    let w = <ExtVal as crate::traits::ExtensionOf<Val>>::W;
+    let w_z1_sq = w * z1 * z1;
+
+    let pw = PackedVal::WIDTH;
+    let packs_per_chunk = CHUNK / pw;
+    let mut out = ExtVal::zero_vec(coset.len());
+
+    let process_chunk = |scratch: &mut NormScratch, x_chunk: &[Val], out_chunk: &mut [ExtVal]| {
+        let (x_packed, x_tail) = PackedVal::pack_slice_with_suffix(x_chunk);
+        let n_packs = x_packed.len();
+        if n_packs > 0 {
+            let z0_p = PackedVal::from(z0);
+            let neg_z1_p = PackedVal::from(neg_z1);
+            let w_z1_sq_p = PackedVal::from(w_z1_sq);
+            let mut acc = PackedVal::ONE;
+            for (i, &xp) in x_packed.iter().enumerate() {
+                let real = z0_p - xp;
+                let norm = real * real - w_z1_sq_p;
+                scratch.reals[i] = real;
+                scratch.norms[i] = norm;
+                scratch.prefixes[i] = acc;
+                acc *= norm;
+            }
+            invert_lanes_in_place(acc.as_slice(), &mut scratch.lane_invs);
+            let mut inv = *PackedVal::from_slice(&scratch.lane_invs);
+            for i in (0..n_packs).rev() {
+                let inv_norm = scratch.prefixes[i] * inv;
+                inv *= scratch.norms[i];
+                let c0 = scratch.reals[i] * inv_norm;
+                let c1 = neg_z1_p * inv_norm;
+                let c0_s = c0.as_slice();
+                let c1_s = c1.as_slice();
+                let dst = &mut out_chunk[i * pw..(i + 1) * pw];
+                for lane in 0..pw {
+                    dst[lane] = ExtVal::new([c0_s[lane], c1_s[lane]]);
+                }
+            }
+        }
+        if !x_tail.is_empty() {
+            let tail_out = &mut out_chunk[n_packs * pw..];
+            for (&x, dst) in x_tail.iter().zip(tail_out.iter_mut()) {
+                let real = z0 - x;
+                let inv_norm = (real * real - w_z1_sq).inverse();
+                *dst = ExtVal::new([real * inv_norm, neg_z1 * inv_norm]);
+            }
+        }
+    };
+
+    if coset.len() <= CHUNK {
+        let mut scratch = NormScratch {
+            reals: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+            norms: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+            prefixes: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+            lane_invs: vec![Val::ZERO; pw],
+        };
+        process_chunk(&mut scratch, coset, &mut out);
+    } else {
+        out.par_chunks_mut(CHUNK)
+            .zip(coset.par_chunks(CHUNK))
+            .for_each_init(
+                || NormScratch {
+                    reals: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+                    norms: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+                    prefixes: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+                    lane_invs: vec![Val::ZERO; pw],
+                },
+                |scratch, (out_chunk, x_chunk)| process_chunk(scratch, x_chunk, out_chunk),
+            );
+    }
+
+    out
+}
+
 fn compute_inverse_denominators_from_dims(
     dims_and_points: &[(Vec<Dimensions>, &Vec<Vec<ExtVal>>)],
     coset: &[Val],
@@ -1562,8 +2080,10 @@ fn compute_inverse_denominators_from_dims(
     max_log_height_for_point
         .into_iter()
         .map(|(z, log_height)| {
-            let diffs: Vec<ExtVal> = coset[..(1 << log_height)].iter().map(|&x| z - x).collect();
-            (z, batch_multiplicative_inverse(&diffs))
+            (
+                z,
+                goldilocks_quadratic_inverse_denominators(z, &coset[..(1 << log_height)]),
+            )
         })
         .collect()
 }
@@ -1613,6 +2133,7 @@ fn interpolate_spilled_coset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p3_field::batch_multiplicative_inverse;
     use rand::rngs::SmallRng;
     use rand::{RngExt, SeedableRng};
 
@@ -1647,6 +2168,19 @@ mod tests {
         let (cpu, spillable) = make_mmcs(cap_height);
         let (cpu_com, cpu_data) = cpu.commit(mats.to_vec());
 
+        // Also check our SIMD in-memory MMCS matches `CpuMmcs` bit-for-bit.
+        let (mem_com, mem_data) = spillable.commit(mats.to_vec());
+        assert_eq!(
+            mem_com.roots(),
+            cpu_com.roots(),
+            "in-memory SIMD cap mismatch for {tag} (cap_height={cap_height})"
+        );
+        let (cpu_vals, cpu_multi) = cpu.open_multi_batch(query_indices, &cpu_data);
+        let (mem_vals, mem_multi) = spillable.open_multi_batch(query_indices, &mem_data);
+        assert_eq!(mem_vals, cpu_vals);
+        assert_eq!(mem_multi.sibling_hashes, cpu_multi.sibling_hashes);
+
+        // Check spilled (streaming disk hash) path.
         let mut pack = SpillPackWriter::create(&dir);
         let spilled_mats: Vec<_> = mats.iter().map(|m| pack.append_matrix(m)).collect();
         pack.flush();
@@ -1682,7 +2216,6 @@ mod tests {
             .expect("CpuMmcs must accept spilled single opening");
         }
 
-        let (cpu_vals, cpu_multi) = cpu.open_multi_batch(query_indices, &cpu_data);
         let (spilled_vals, spilled_multi) =
             spillable.open_multi_batch(query_indices, &spilled_data);
         assert_eq!(spilled_vals, cpu_vals);
@@ -1695,6 +2228,34 @@ mod tests {
             &spilled_multi,
         )
         .expect("CpuMmcs must accept spilled multi-batch opening");
+
+        // Also check hash-before-spill (`append_matrix_and_hash` + `commit_spilled_prehashed`).
+        let mut height_counts: HashMap<usize, usize> = HashMap::new();
+        for m in mats {
+            *height_counts.entry(m.height()).or_insert(0) += 1;
+        }
+        let mut pack_pre = SpillPackWriter::create(&dir);
+        let mut sp_pre = Vec::with_capacity(mats.len());
+        let mut prehashed = Vec::with_capacity(mats.len());
+        for m in mats {
+            if height_counts[&m.height()] == 1 {
+                let (sp, digests) = pack_pre.append_matrix_and_hash(m);
+                sp_pre.push(sp);
+                prehashed.push(Some(digests));
+            } else {
+                sp_pre.push(pack_pre.append_matrix(m));
+                prehashed.push(None);
+            }
+        }
+        pack_pre.flush();
+        let (pre_com, pre_data) = spillable.commit_spilled_prehashed(sp_pre, Vec::new(), prehashed);
+        assert_eq!(pre_com.roots(), cpu_com.roots());
+        let (pre_vals, pre_multi) = spillable.open_multi_batch(query_indices, &pre_data);
+        assert_eq!(pre_vals, cpu_vals);
+        assert_eq!(pre_multi.sibling_hashes, cpu_multi.sibling_hashes);
+        assert_eq!(pre_data.materialized_spilled_count(), 0);
+        drop(pre_data);
+        drop(pack_pre);
 
         // Ensure nothing materialized the spilled matrices back into RAM.
         assert_eq!(spilled_data.materialized_spilled_count(), 0);
@@ -1866,5 +2427,35 @@ mod tests {
         drop(pack);
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parallel_bitrev_coset_and_norm_trick_match_reference() {
+        for log_size in [0usize, 1, 2, 3, 5, 10, 13] {
+            let expected_coset: Vec<Val> = {
+                let mut pts: Vec<Val> = TwoAdicMultiplicativeCoset::new(Val::GENERATOR, log_size)
+                    .unwrap()
+                    .iter()
+                    .collect();
+                reverse_slice_index_bits(&mut pts);
+                pts
+            };
+            let got_coset = build_bitrev_coset(log_size);
+            assert_eq!(got_coset, expected_coset, "coset mismatch at 2^{log_size}");
+
+            for point in [
+                ExtVal::new([Goldilocks::new(12345), Goldilocks::new(67890)]),
+                ExtVal::new([Goldilocks::new(987_654_321), Goldilocks::ZERO]),
+                ExtVal::new([Goldilocks::ZERO, Goldilocks::new(42)]),
+            ] {
+                let diffs: Vec<ExtVal> = expected_coset.iter().map(|&x| point - x).collect();
+                let expected_invs = batch_multiplicative_inverse(&diffs);
+                let got_invs = goldilocks_quadratic_inverse_denominators(point, &got_coset);
+                assert_eq!(
+                    got_invs, expected_invs,
+                    "norm-trick inverse mismatch at 2^{log_size}"
+                );
+            }
+        }
     }
 }

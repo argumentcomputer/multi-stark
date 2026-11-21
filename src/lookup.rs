@@ -46,7 +46,7 @@
 //! stack.
 
 use crate::eval::VarValues;
-use crate::traits::{Algebra, ExtensionOf, Field, batch_inverse};
+use crate::traits::{Algebra, ExtensionOf, Field};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 
@@ -598,6 +598,28 @@ where
         .fold(F::ZERO, |acc, coeff| acc * *r + coeff.into())
 }
 
+/// Fast Horner fingerprint for base-field coefficients into an extension field:
+/// skips the vacuous `0 * r` multiply and uses scalar-by-extension scaling for
+/// the leading term (3× fewer base muls on 2-arg byte-table lookups).
+#[inline]
+fn fingerprint_base<F: Field, EF: ExtensionOf<F>>(
+    r: &EF,
+    coeffs: impl DoubleEndedIterator<Item = F>,
+) -> EF {
+    let mut rev = coeffs.rev();
+    let Some(last) = rev.next() else {
+        return <EF as Algebra<EF>>::ZERO;
+    };
+    let Some(second) = rev.next() else {
+        return EF::from(last);
+    };
+    let mut acc = *r * last + EF::from(second);
+    for coeff in rev {
+        acc = acc * *r + EF::from(coeff);
+    }
+    acc
+}
+
 pub(crate) fn try_claims_accumulator<F: Field, EF: Field + Algebra<F>>(
     beta: EF,
     gamma: &EF,
@@ -784,24 +806,33 @@ impl<F: Field> LookupValues<F> {
         let mut vec = vec![zero; self.height * num_slots];
         let mut running = zero;
 
+        let one = <EF as Algebra<EF>>::ONE;
         for row_start in (0..self.height).step_by(chunk_rows) {
             let n_rows = (self.height - row_start).min(chunk_rows);
             let num_chunk_messages = n_rows * self.num_lookups;
-            let messages: Vec<EF> = (0..num_chunk_messages)
-                .into_par_iter()
-                .map(|idx| {
-                    let local_row = idx / self.num_lookups;
-                    let lookup = idx % self.num_lookups;
-                    let args = self.args_at(row_start + local_row, lookup);
-                    lookup_challenge + fingerprint(fingerprint_challenge, args.iter().copied())
-                })
-                .collect();
-            let inverses = batch_inverse(&messages);
+            let chunk_mults = &self.multiplicities
+                [row_start * self.num_lookups..(row_start + n_rows) * self.num_lookups];
+            let mut messages = vec![one; num_chunk_messages];
+            messages
+                .par_chunks_exact_mut(self.num_lookups)
+                .zip(chunk_mults.par_chunks_exact(self.num_lookups))
+                .enumerate()
+                .for_each(|(local_row, (row_msgs, row_mults))| {
+                    let row = row_start + local_row;
+                    for (lookup, (msg_slot, &mult)) in
+                        row_msgs.iter_mut().zip(row_mults).enumerate()
+                    {
+                        if !mult.is_zero() {
+                            let args = self.args_at(row, lookup);
+                            *msg_slot = lookup_challenge
+                                + fingerprint_base(fingerprint_challenge, args.iter().copied());
+                        }
+                    }
+                });
+            let inverses = batch_inverse_masked(&messages, chunk_mults);
             drop(messages);
 
             let chunk_out = &mut vec[row_start * num_slots..(row_start + n_rows) * num_slots];
-            let chunk_mults = &self.multiplicities
-                [row_start * self.num_lookups..(row_start + n_rows) * self.num_lookups];
             chunk_out
                 .par_chunks_exact_mut(num_slots)
                 .zip(chunk_mults.par_chunks_exact(self.num_lookups))
@@ -815,19 +846,23 @@ impl<F: Field> LookupValues<F> {
                         let mut delta = zero;
                         for (&multiplicity, &message_inverse) in group_mults.iter().zip(group_invs)
                         {
-                            delta += EF::from(multiplicity) * message_inverse;
+                            if !multiplicity.is_zero() {
+                                if multiplicity == F::ONE {
+                                    delta += message_inverse;
+                                } else if multiplicity == F::NEG_ONE {
+                                    delta -= message_inverse;
+                                } else {
+                                    delta += message_inverse * multiplicity;
+                                }
+                            }
                         }
                         *slot_out = delta;
                     }
                 });
             drop(inverses);
 
-            // Exclusive prefix scan over this chunk's group deltas.
-            for cell in chunk_out.iter_mut() {
-                let delta = *cell;
-                *cell = running;
-                running += delta;
-            }
+            // Parallel exclusive prefix scan over this chunk's group deltas.
+            running = parallel_exclusive_prefix_scan::<F, EF>(chunk_out, running);
         }
 
         (RowMajorMatrix::new(vec, num_slots), running)
@@ -859,6 +894,130 @@ impl<F: Field> LookupValues<F> {
         drop(_g);
         (traces, intermediate_accumulators)
     }
+}
+
+/// Batch inversion restricted to entries where `multiplicities[i] != 0`.
+/// Entries with zero multiplicity are skipped during both Montgomery passes
+/// (saving 3 extension multiplications per padding/inactive lookup) and their
+/// output slots are left at zero (never read by the masked delta accumulator).
+/// Uses 4 independent interleaved Montgomery chains per chunk to hide
+/// extension-field multiplication latency.
+fn batch_inverse_masked<F: Field, EF: ExtensionOf<F>>(
+    messages: &[EF],
+    multiplicities: &[F],
+) -> Vec<EF> {
+    debug_assert_eq!(messages.len(), multiplicities.len());
+    const CHUNK: usize = 1 << 10;
+    let zero = <EF as Algebra<EF>>::ZERO;
+    let one = <EF as Algebra<EF>>::ONE;
+    let mut out = vec![zero; messages.len()];
+    out.par_chunks_mut(CHUNK)
+        .zip(messages.par_chunks(CHUNK))
+        .zip(multiplicities.par_chunks(CHUNK))
+        .for_each(|((out_chunk, msg_chunk), mult_chunk)| {
+            let (m_chunks, m_rem) = msg_chunk.as_chunks::<4>();
+            let (mu_chunks, mu_rem) = mult_chunk.as_chunks::<4>();
+            let (o_chunks, o_rem) = out_chunk.as_chunks_mut::<4>();
+
+            let mut acc = [one; 4];
+            for ((oc, mc), muc) in o_chunks.iter_mut().zip(m_chunks).zip(mu_chunks) {
+                for k in 0..4 {
+                    if !muc[k].is_zero() {
+                        oc[k] = acc[k];
+                        acc[k] *= mc[k];
+                    }
+                }
+            }
+            for ((slot, &v), &m) in o_rem.iter_mut().zip(m_rem).zip(mu_rem) {
+                if !m.is_zero() {
+                    *slot = acc[0];
+                    acc[0] *= v;
+                }
+            }
+
+            let p01 = acc[0] * acc[1];
+            let p23 = acc[2] * acc[3];
+            let total = p01 * p23;
+            assert!(!total.is_zero(), "batch_inverse: zero input");
+            let inv_total = total.inverse();
+            let inv01 = p23 * inv_total;
+            let inv23 = p01 * inv_total;
+            let mut inv = [
+                acc[1] * inv01,
+                acc[0] * inv01,
+                acc[3] * inv23,
+                acc[2] * inv23,
+            ];
+
+            for i in (0..m_rem.len()).rev() {
+                if !mu_rem[i].is_zero() {
+                    o_rem[i] *= inv[0];
+                    inv[0] *= m_rem[i];
+                }
+            }
+            for ((oc, mc), muc) in o_chunks.iter_mut().zip(m_chunks).zip(mu_chunks).rev() {
+                for k in 0..4 {
+                    if !muc[k].is_zero() {
+                        oc[k] *= inv[k];
+                        inv[k] *= mc[k];
+                    }
+                }
+            }
+        });
+    out
+}
+
+/// In-place exclusive prefix scan over `slice` starting from `running`,
+/// returning the updated running total. Parallelized in two block passes
+/// for large chunks.
+fn parallel_exclusive_prefix_scan<F: Field, EF: ExtensionOf<F>>(
+    slice: &mut [EF],
+    running: EF,
+) -> EF {
+    const MIN_PARALLEL_LEN: usize = 1 << 13;
+    const BLOCK_LEN: usize = 1 << 12;
+    if slice.len() < MIN_PARALLEL_LEN {
+        let mut acc = running;
+        for cell in slice.iter_mut() {
+            let delta = *cell;
+            *cell = acc;
+            acc += delta;
+        }
+        return acc;
+    }
+
+    let zero = <EF as Algebra<EF>>::ZERO;
+    let block_sums: Vec<EF> = slice
+        .par_chunks(BLOCK_LEN)
+        .map(|block| {
+            let mut sum = zero;
+            for &v in block {
+                sum += v;
+            }
+            sum
+        })
+        .collect();
+
+    let mut block_offsets = Vec::with_capacity(block_sums.len());
+    let mut acc = running;
+    for sum in block_sums {
+        block_offsets.push(acc);
+        acc += sum;
+    }
+
+    slice
+        .par_chunks_mut(BLOCK_LEN)
+        .zip(block_offsets.par_iter())
+        .for_each(|(block, &offset)| {
+            let mut local = offset;
+            for cell in block.iter_mut() {
+                let delta = *cell;
+                *cell = local;
+                local += delta;
+            }
+        });
+
+    acc
 }
 
 /// Target number of lookup messages per chunk (~8 MiB at 16 bytes/EF).
@@ -991,8 +1150,9 @@ where
             None
         };
 
+        let one = <EF as Algebra<EF>>::ONE;
         let mut multiplicities = F::zero_vec(n_rows * num_lookups);
-        let mut messages = vec![zero; n_rows * num_lookups];
+        let mut messages = vec![one; n_rows * num_lookups];
 
         multiplicities
             .par_chunks_exact_mut(num_lookups)
@@ -1016,18 +1176,23 @@ where
                 };
                 circuit.graph.sweep_lookup_prefix(&view, buf);
                 for (slot, lookup) in circuit.graph.lookups.iter().enumerate() {
-                    row_mults[slot] = buf[lookup.multiplicity.index()];
-                    let fp = fingerprint(
-                        fingerprint_challenge,
-                        lookup.args.iter().map(|arg| buf[arg.index()]),
-                    );
-                    row_msgs[slot] = lookup_challenge + fp;
+                    let mult = buf[lookup.multiplicity.index()];
+                    row_mults[slot] = mult;
+                    if mult.is_zero() {
+                        row_msgs[slot] = one;
+                    } else {
+                        let fp = fingerprint_base(
+                            fingerprint_challenge,
+                            lookup.args.iter().map(|arg| buf[arg.index()]),
+                        );
+                        row_msgs[slot] = lookup_challenge + fp;
+                    }
                 }
             });
         drop(main_chunk);
         drop(prep_chunk);
 
-        let inverses = batch_inverse(&messages);
+        let inverses = batch_inverse_masked(&messages, &multiplicities);
         drop(messages);
 
         let chunk_out = &mut vec[row_start * num_slots..(row_start + n_rows) * num_slots];
@@ -1043,7 +1208,15 @@ where
                 ) {
                     let mut delta = zero;
                     for (&multiplicity, &message_inverse) in group_mults.iter().zip(group_invs) {
-                        delta += EF::from(multiplicity) * message_inverse;
+                        if !multiplicity.is_zero() {
+                            if multiplicity == F::ONE {
+                                delta += message_inverse;
+                            } else if multiplicity == F::NEG_ONE {
+                                delta -= message_inverse;
+                            } else {
+                                delta += message_inverse * multiplicity;
+                            }
+                        }
                     }
                     *slot_out = delta;
                 }
@@ -1051,11 +1224,7 @@ where
         drop(multiplicities);
         drop(inverses);
 
-        for cell in chunk_out.iter_mut() {
-            let delta = *cell;
-            *cell = running;
-            running += delta;
-        }
+        running = parallel_exclusive_prefix_scan::<F, EF>(chunk_out, running);
     }
 
     (RowMajorMatrix::new(vec, num_slots), running)
@@ -1122,7 +1291,7 @@ impl LookupValues<p3_goldilocks::Goldilocks> {
                     )
             })
             .collect::<Vec<_>>();
-        let inverses = batch_inverse(&messages);
+        let inverses = crate::traits::batch_inverse(&messages);
         drop(messages);
         (0..(rows.end - rows.start) * slots)
             .into_par_iter()
@@ -1819,5 +1988,66 @@ mod tests {
         let split_claims: &[&[Val]] = &[&[f(0), f(4)], &[f(1)]];
         let result = system.verify_multiple_claims(split_claims, &proof);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parallel_prefix_scan_and_masked_batch_inverse_match_serial() {
+        use crate::types::ExtVal;
+
+        let f = Val::from_u64;
+        let ef = |a: u64, b: u64| ExtVal::new([f(a), f(b)]);
+
+        for len in [0usize, 1, 17, 4096, 8192, 20_000] {
+            let input: Vec<ExtVal> = (0..len)
+                .map(|i| ef((i as u64) * 37 + 5, (i as u64) * 19 + 11))
+                .collect();
+            let init = ef(1234, 5678);
+
+            let mut expected = input.clone();
+            let mut exp_total = init;
+            for cell in &mut expected {
+                let d = *cell;
+                *cell = exp_total;
+                exp_total += d;
+            }
+
+            let mut got = input;
+            let got_total = parallel_exclusive_prefix_scan::<Val, ExtVal>(&mut got, init);
+            assert_eq!(got, expected, "prefix scan mismatch at len={len}");
+            assert_eq!(got_total, exp_total, "prefix total mismatch at len={len}");
+        }
+
+        // Masked batch inverse with zero multiplicities and even zero-valued skipped messages.
+        let n = 9000usize;
+        let mults: Vec<Val> = (0..n)
+            .map(|i| {
+                if i % 3 == 0 {
+                    Val::ZERO
+                } else if i % 3 == 1 {
+                    Val::ONE
+                } else {
+                    f(u64::try_from(i).unwrap() + 2)
+                }
+            })
+            .collect();
+        let msgs: Vec<ExtVal> = (0..n)
+            .map(|i| {
+                if mults[i].is_zero() {
+                    // Even a zero dummy must be safely skipped when multiplicity is zero.
+                    <ExtVal as Algebra<ExtVal>>::ZERO
+                } else {
+                    ef(
+                        u64::try_from(i).unwrap() * 13 + 7,
+                        u64::try_from(i).unwrap() * 5 + 3,
+                    )
+                }
+            })
+            .collect();
+        let invs = batch_inverse_masked::<Val, ExtVal>(&msgs, &mults);
+        for i in 0..n {
+            if !mults[i].is_zero() {
+                assert_eq!(msgs[i] * invs[i], <ExtVal as Algebra<ExtVal>>::ONE);
+            }
+        }
     }
 }
