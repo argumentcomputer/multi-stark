@@ -61,10 +61,66 @@ impl<F: Field> TraceSource<F> {
     }
 }
 
+impl<F: Field> From<RowMajorMatrix<F>> for TraceSource<F> {
+    fn from(matrix: RowMajorMatrix<F>) -> Self {
+        Self::Host(matrix)
+    }
+}
+
 #[derive(Clone)]
 pub struct PreparedWitness<F: Field> {
     pub traces: Vec<TraceSource<F>>,
     pub lookups: Vec<crate::lookup::LookupValues<F>>,
+}
+
+impl<F: Field> PreparedWitness<F> {
+    /// Builds a lazy prepared witness from stage-1 trace sources without
+    /// materializing [`crate::lookup::LookupValues`] upfront.
+    ///
+    /// Lookup expressions are evaluated on demand in bounded row chunks during
+    /// stage-2 trace construction, producing proofs byte-identical to
+    /// [`crate::system::SystemWitness::from_stage_1`].
+    ///
+    /// # Panics
+    /// Panics if the number of traces differs from the number of circuits, or
+    /// if an active circuit with a preprocessed trace receives a trace of a
+    /// different height.
+    pub fn from_stage_1_lazy<SC>(
+        traces: Vec<TraceSource<F>>,
+        system: &crate::system::System<SC>,
+    ) -> Self
+    where
+        SC: crate::config::ProofConfig,
+        SC::Pcs: crate::traits::Pcs<F = F>,
+    {
+        assert_eq!(
+            traces.len(),
+            system.circuits.len(),
+            "expected one trace per circuit"
+        );
+        let lookups = traces
+            .iter()
+            .zip(&system.circuits)
+            .enumerate()
+            .map(|(i, (trace, circuit))| {
+                let height = trace.height();
+                if circuit.preprocessed_height != 0 && height != 0 {
+                    assert_eq!(
+                        height, circuit.preprocessed_height,
+                        "circuit {i}: main trace height must equal preprocessed trace height"
+                    );
+                }
+                let slot_widths: Vec<usize> = circuit
+                    .graph
+                    .lookups
+                    .iter()
+                    .map(|lookup| lookup.args.len())
+                    .collect();
+                crate::lookup::LookupValues::shape_only(height, &slot_widths)
+            })
+            .collect();
+        Self { traces, lookups }
+    }
 }
 
 impl<F: Field> From<crate::system::SystemWitness<F>> for PreparedWitness<F> {

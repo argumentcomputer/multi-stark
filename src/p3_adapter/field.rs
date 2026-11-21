@@ -115,11 +115,67 @@ impl<F: P3Field + Field> Packed<F> for P3Packing<F> {
 
     #[inline]
     fn packed_row_pair<M: Matrix<F>>(matrix: &M, i: usize, step: usize) -> Vec<Self> {
-        matrix
-            .vertically_packed_row_pair::<<F as P3Field>::Packing>(i, step)
-            .into_iter()
-            .map(Self)
-            .collect()
+        let width = matrix.width();
+        let mut out = vec![Self::ZERO; 2 * width];
+        Self::fill_packed_row(matrix, i, &mut out[..width]);
+        Self::fill_packed_row(matrix, i + step, &mut out[width..]);
+        out
+    }
+
+    #[inline]
+    fn fill_packed_row<M: Matrix<F>>(matrix: &M, i: usize, out: &mut [Self]) {
+        let cols = out.len();
+        debug_assert!(cols <= matrix.width());
+        if cols == 0 {
+            return;
+        }
+        match Self::WIDTH {
+            1 => fill_packed_row_fixed::<F, M, 1>(matrix, i, out),
+            2 => fill_packed_row_fixed::<F, M, 2>(matrix, i, out),
+            4 => fill_packed_row_fixed::<F, M, 4>(matrix, i, out),
+            8 => fill_packed_row_fixed::<F, M, 8>(matrix, i, out),
+            16 => fill_packed_row_fixed::<F, M, 16>(matrix, i, out),
+            32 => fill_packed_row_fixed::<F, M, 32>(matrix, i, out),
+            _ => {
+                let rows = matrix.wrapping_row_slices(i, Self::WIDTH);
+                for (c, dst) in out.iter_mut().enumerate() {
+                    *dst = Self(<<F as P3Field>::Packing as PackedValue>::from_fn(|lane| {
+                        rows[lane][c]
+                    }));
+                }
+            }
+        }
+    }
+}
+
+#[inline]
+fn fill_packed_row_fixed<F: P3Field + Field, M: Matrix<F>, const W: usize>(
+    matrix: &M,
+    i: usize,
+    out: &mut [P3Packing<F>],
+) {
+    debug_assert_eq!(W, P3Packing::<F>::WIDTH);
+    let cols = out.len();
+    let height = matrix.height();
+    let mask = height.is_power_of_two().then_some(height - 1);
+    let rows = core::array::from_fn::<_, W, _>(|lane| {
+        let r = match mask {
+            Some(m) => (i + lane) & m,
+            None => (i + lane) % height,
+        };
+        // SAFETY: `r < height` and `cols <= matrix.width()`.
+        unsafe { matrix.row_subslice_unchecked(r, 0, cols) }
+    });
+    let slices: [&[F]; W] = core::array::from_fn(|lane| {
+        let slice: &[F] = &rows[lane];
+        assert!(slice.len() >= cols);
+        slice
+    });
+    for (c, dst) in out.iter_mut().enumerate() {
+        // SAFETY: `c < cols <= slices[lane].len()` for all `lane < W == WIDTH`.
+        *dst = P3Packing(<<F as P3Field>::Packing as PackedValue>::from_fn(
+            |lane| unsafe { *slices[lane].get_unchecked(c) },
+        ));
     }
 }
 
@@ -255,6 +311,11 @@ macro_rules! impl_extension_via_p3 {
             fn from_basis_coefficients_fn(f: impl FnMut(usize) -> $base) -> Self {
                 <$ext as p3_field::BasedVectorSpace<$base>>::from_basis_coefficients_fn(f)
             }
+
+            #[inline]
+            fn flatten_vec_to_base(values: Vec<Self>) -> Vec<$base> {
+                <$ext as p3_field::BasedVectorSpace<$base>>::flatten_to_base(values)
+            }
         }
     };
 }
@@ -277,5 +338,46 @@ impl crate::traits::PrimeField for p3_goldilocks::Goldilocks {
     }
     fn modulus_u64() -> Option<u64> {
         Some(<Self as p3_field::PrimeField64>::ORDER_U64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p3_goldilocks::Goldilocks;
+    use p3_matrix::dense::RowMajorMatrix;
+
+    #[test]
+    fn fill_packed_row_matches_vertically_packed_row_pair() {
+        type P = P3Packing<Goldilocks>;
+        for (height, width) in [(1usize, 5usize), (4, 7), (7, 9), (16, 11)] {
+            let values: Vec<Goldilocks> = (0..height * width)
+                .map(|i| Goldilocks::new((i * 37 + 13) as u64))
+                .collect();
+            let mat = RowMajorMatrix::new(values, width);
+            for i in [0usize, 1, height / 2, height - 1] {
+                for step in [1usize, 2, height] {
+                    let expected: Vec<Goldilocks> = mat
+                        .vertically_packed_row_pair::<<Goldilocks as P3Field>::Packing>(i, step)
+                        .into_iter()
+                        .flat_map(|p| p.as_slice().to_vec())
+                        .collect();
+                    let pair = P::packed_row_pair(&mat, i, step);
+                    let got_pair: Vec<Goldilocks> = pair
+                        .iter()
+                        .flat_map(|p| p.as_slice().iter().copied())
+                        .collect();
+                    assert_eq!(got_pair, expected);
+
+                    // Verify prefix fill (`cols < width`) matches the first `cols` columns.
+                    let prefix_cols = 2.min(width);
+                    let mut prefix = vec![P::ZERO; prefix_cols];
+                    P::fill_packed_row(&mat, i + step, &mut prefix);
+                    for (got, exp) in prefix.iter().zip(&pair[width..width + prefix_cols]) {
+                        assert_eq!(got.as_slice(), exp.as_slice());
+                    }
+                }
+            }
+        }
     }
 }

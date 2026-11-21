@@ -19,12 +19,12 @@ use p3_field::{
     extension::BinomialExtensionField,
 };
 use p3_fri::FriParameters as InnerFriParameters;
-#[cfg(not(feature = "cuda"))]
-use p3_fri::TwoAdicFriPcs;
 use p3_goldilocks::Goldilocks;
-#[cfg(feature = "cuda")]
+#[cfg(not(feature = "cuda"))]
+use p3_matrix::Matrix;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
+#[cfg(feature = "cuda")]
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
 
@@ -182,14 +182,15 @@ mod grind_tests {
         }
     }
 }
+#[cfg(feature = "cuda")]
 type CpuMmcs = MerkleTreeMmcs<Val, u8, SerializingHasher<Blake3>, Blake3CompressionFunction, 2, 32>;
 #[cfg(not(feature = "cuda"))]
-pub type Mmcs = CpuMmcs;
+pub type Mmcs = crate::p3_adapter::spill::SpillableMmcs;
 #[cfg(feature = "cuda")]
 pub type Mmcs = crate::cuda::mmcs::CudaMmcs;
 pub type ExtMmcs = ExtensionMmcs<Val, ExtVal, Mmcs>;
 #[cfg(not(feature = "cuda"))]
-pub type InnerPcs = TwoAdicFriPcs<Val, PcsDft, Mmcs, ExtMmcs>;
+pub type InnerPcs = crate::p3_adapter::spill::SpillableTwoAdicFriPcs<PcsDft, ExtMmcs>;
 #[cfg(feature = "cuda")]
 pub type InnerPcs = crate::cuda::pcs::CudaTwoAdicFriPcs<Val, PcsDft, Mmcs, ExtMmcs>;
 
@@ -293,6 +294,45 @@ impl GoldilocksBlake3Config {
         self.fri_parameters
     }
 
+    /// Enables disk-backed spilling of committed LDE matrices on the CPU
+    /// prover, writing temporary spill files into `dir`.
+    ///
+    /// On Unix, spill files are unlinked immediately upon creation so their
+    /// disk space is reclaimed automatically on drop, panic, or abnormal
+    /// termination. Proofs produced with disk spilling enabled are
+    /// byte-identical to proofs produced in memory.
+    ///
+    /// On CUDA builds this is a no-op (CUDA manages its own device offload).
+    #[cfg_attr(feature = "cuda", allow(unused_mut))]
+    pub fn with_disk_spill(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        #[cfg(not(feature = "cuda"))]
+        self.pcs.inner_mut().set_spill_dir(Some(dir.into()));
+        #[cfg(feature = "cuda")]
+        let _ = dir.into();
+        self
+    }
+
+    /// Disables disk spilling (forces in-memory LDE storage on CPU).
+    #[cfg_attr(feature = "cuda", allow(unused_mut))]
+    pub fn without_disk_spill(mut self) -> Self {
+        #[cfg(not(feature = "cuda"))]
+        self.pcs.inner_mut().set_spill_dir(None);
+        self
+    }
+
+    /// Returns the configured disk-spill directory, if disk spilling is
+    /// enabled on the CPU backend.
+    pub fn spill_dir(&self) -> Option<&std::path::Path> {
+        #[cfg(not(feature = "cuda"))]
+        {
+            self.pcs.spill_dir()
+        }
+        #[cfg(feature = "cuda")]
+        {
+            None
+        }
+    }
+
     pub fn new(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Self {
         Self::with_device(commitment_parameters, fri_parameters, None)
     }
@@ -301,6 +341,10 @@ impl GoldilocksBlake3Config {
     /// the device `MULTI_STARK_CUDA_DEVICE` names, or 0). Without the
     /// `cuda` feature only device 0 exists. Configurations on distinct
     /// devices prove concurrently in one process.
+    ///
+    /// On CPU builds, setting `MULTI_STARK_SPILL_DIR` to a non-empty path
+    /// enables disk-backed LDE spilling by default; call
+    /// [`Self::with_disk_spill`] or [`Self::without_disk_spill`] to override.
     pub fn with_device(
         commitment_parameters: CommitmentParameters,
         fri_parameters: FriParameters,
@@ -324,13 +368,19 @@ impl GoldilocksBlake3Config {
             device_id.unwrap_or_else(crate::cuda::configured_device),
         );
         #[cfg(not(feature = "cuda"))]
-        let (pcs, _dft) = {
+        let (mut pcs, _dft) = {
             assert!(
                 device_id.is_none_or(|device| device == 0),
                 "no CUDA backend to place a prover on device {device_id:?}"
             );
             new_pcs(commitment_parameters, fri_parameters)
         };
+        #[cfg(not(feature = "cuda"))]
+        if let Some(dir) = std::env::var_os("MULTI_STARK_SPILL_DIR")
+            && !dir.is_empty()
+        {
+            pcs.set_spill_dir(Some(std::path::PathBuf::from(dir)));
+        }
         // Seed the challenger with a protocol tag for domain separation,
         // followed by every protocol parameter. Binding the parameters into
         // the seed means transcripts produced under different parameters
@@ -397,6 +447,289 @@ impl ProofConfig for GoldilocksBlake3Config {
         )>,
     ) -> (crate::config::Com<Self>, crate::config::PcsData<Self>) {
         crate::cuda::witness::commit(&self.pcs, evaluations)
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn commit_preprocessed(
+        &self,
+        evaluations: &mut dyn Iterator<
+            Item = (crate::config::Domain<Self>, RowMajorMatrix<Val>, bool),
+        >,
+    ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
+        self.pcs.commit_streaming_with_originals(evaluations)
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn commit_main_streaming(
+        &self,
+        evaluations: &mut dyn Iterator<
+            Item = (
+                crate::config::Domain<Self>,
+                crate::witness::TraceSource<Val>,
+                bool,
+            ),
+        >,
+    ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
+        let mut materialized =
+            evaluations.map(|(domain, trace, retain_1x)| (domain, trace.materialize(), retain_1x));
+        self.pcs.commit_streaming_with_originals(&mut materialized)
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn accelerated_lookup_commit(
+        &self,
+        inputs: &[crate::config::LookupCommitInput<'_, Self>],
+        lookup_challenge: ExtVal,
+        fingerprint_challenge: ExtVal,
+        mut accumulator: ExtVal,
+    ) -> Option<crate::config::AcceleratedLookupCommitment<Self>> {
+        use crate::lookup::{
+            InMemoryChunk, OwnedWindowChunk, TraceRowChunk, stage_2_trace_chunked,
+        };
+        use crate::p3_adapter::spill::{SpillPackWriter, SpilledMatrix};
+        use crate::traits::{Pcs as _, flatten_to_base};
+
+        enum CpuRowChunk<'a> {
+            InMemory(InMemoryChunk<'a, Val>),
+            Spilled(OwnedWindowChunk<Val>),
+        }
+
+        impl TraceRowChunk<Val> for CpuRowChunk<'_> {
+            #[inline]
+            fn row_pair(&self, local_row: usize) -> (&[Val], &[Val]) {
+                match self {
+                    Self::InMemory(chunk) => chunk.row_pair(local_row),
+                    Self::Spilled(chunk) => chunk.row_pair(local_row),
+                }
+            }
+        }
+
+        enum TraceBacking<'a> {
+            Borrowed(&'a RowMajorMatrix<Val>),
+            Owned(RowMajorMatrix<Val>),
+            Spilled(SpilledMatrix),
+        }
+
+        impl TraceBacking<'_> {
+            fn load_chunk(&self, start: usize, len: usize) -> CpuRowChunk<'_> {
+                match self {
+                    Self::Borrowed(mat) => CpuRowChunk::InMemory(InMemoryChunk::new(mat, start)),
+                    Self::Owned(mat) => CpuRowChunk::InMemory(InMemoryChunk::new(mat, start)),
+                    Self::Spilled(spilled) => CpuRowChunk::Spilled(OwnedWindowChunk::new(
+                        spilled.read_window_with_wrap(start, len),
+                    )),
+                }
+            }
+        }
+
+        let spill_dir = self.spill_dir();
+        let any_unmaterialized = inputs
+            .iter()
+            .any(|input| !input.lookup_values.is_materialized());
+        if spill_dir.is_none() && !any_unmaterialized {
+            return None;
+        }
+
+        let mut spill_pack = spill_dir.map(SpillPackWriter::create);
+        let mut spilled_ldes =
+            Vec::with_capacity(if spill_dir.is_some() { inputs.len() } else { 0 });
+        let mut prehashed = Vec::with_capacity(if spill_dir.is_some() { inputs.len() } else { 0 });
+        let height_counts: std::collections::HashMap<usize, usize> = if spill_dir.is_some() {
+            let mut counts = std::collections::HashMap::new();
+            for input in inputs {
+                let lde_height = input.lookup_values.height() << self.log_blowup;
+                *counts.entry(lde_height).or_insert(0) += 1;
+            }
+            counts
+        } else {
+            std::collections::HashMap::new()
+        };
+        let mut in_memory_ldes =
+            Vec::with_capacity(if spill_dir.is_none() { inputs.len() } else { 0 });
+        let mut intermediates = Vec::with_capacity(inputs.len());
+
+        for input in inputs {
+            let circuit = input.circuit;
+            let height = input.lookup_values.height();
+            let (stage_2_ext, delta) = if input.lookup_values.is_materialized() {
+                input.lookup_values.stage_2_trace(
+                    circuit.lookup_group_size,
+                    lookup_challenge,
+                    &fingerprint_challenge,
+                )
+            } else if circuit.graph.lookups.is_empty() {
+                (
+                    RowMajorMatrix::new(vec![ExtVal::ZERO; height], 1),
+                    ExtVal::ZERO,
+                )
+            } else {
+                let (s1_data, s1_idx) = input.stage_1;
+                let main_backing = if let Some(spilled) = s1_data.spilled_original_trace(s1_idx) {
+                    TraceBacking::Spilled(spilled)
+                } else if let Some(owned) = s1_data.take_in_memory_original_trace(s1_idx) {
+                    TraceBacking::Owned(owned)
+                } else {
+                    let trace_domain = self.pcs.natural_domain_for_degree(height);
+                    TraceBacking::Owned(
+                        self.pcs
+                            .get_evaluations_on_domain(s1_data, s1_idx, trace_domain)
+                            .to_row_major_matrix(),
+                    )
+                };
+
+                let prep_backing = if circuit.graph.lookup_prefix_uses_preprocessed() {
+                    if let Some(pp) = circuit.preprocessed.as_ref() {
+                        Some(TraceBacking::Borrowed(pp))
+                    } else if let Some((prep_data, prep_idx)) = input.preprocessed {
+                        if let Some(spilled) = prep_data.spilled_original_trace(prep_idx) {
+                            Some(TraceBacking::Spilled(spilled))
+                        } else {
+                            let trace_domain = self.pcs.natural_domain_for_degree(height);
+                            Some(TraceBacking::Owned(
+                                self.pcs
+                                    .get_evaluations_on_domain(prep_data, prep_idx, trace_domain)
+                                    .to_row_major_matrix(),
+                            ))
+                        }
+                    } else {
+                        panic!(
+                            "circuit lookup expressions read preprocessed columns, but no preprocessed trace is available"
+                        );
+                    }
+                } else {
+                    None
+                };
+
+                stage_2_trace_chunked(
+                    circuit,
+                    height,
+                    lookup_challenge,
+                    &fingerprint_challenge,
+                    |start, len| main_backing.load_chunk(start, len),
+                    prep_backing
+                        .as_ref()
+                        .map(|prep| move |start, len| prep.load_chunk(start, len)),
+                )
+            };
+
+            accumulator += delta;
+            intermediates.push(accumulator);
+
+            let stage_2_base = flatten_to_base::<Val, ExtVal>(stage_2_ext);
+            let domain = self.pcs.natural_domain_for_degree(stage_2_base.height());
+            let lde = self.pcs.compute_lde(domain, stage_2_base);
+            if let Some(pack) = &mut spill_pack {
+                if height_counts.get(&lde.height()).copied() == Some(1) {
+                    let (spilled, digests) = pack.append_matrix_and_hash(&lde);
+                    spilled_ldes.push(spilled);
+                    prehashed.push(Some(digests));
+                } else {
+                    spilled_ldes.push(pack.append_matrix(&lde));
+                    prehashed.push(None);
+                }
+                // Drop `lde` immediately before building the next circuit's stage-2 trace.
+            } else {
+                in_memory_ldes.push(lde);
+            }
+        }
+
+        // Release retained/spilled 1× main traces now that stage-2 is complete.
+        // Preprocessed 1× traces stay attached to `ProverKey` for reuse across
+        // proofs/shards.
+        if let Some(first) = inputs.first() {
+            first.stage_1.0.release_original_traces();
+        }
+
+        let (commitment, data) = if let Some(mut pack) = spill_pack {
+            pack.flush();
+            self.pcs
+                .commit_spilled_ldes_prehashed(spilled_ldes, None, prehashed)
+        } else {
+            self.pcs.commit_in_memory_ldes(in_memory_ldes)
+        };
+        Some((commitment, data, intermediates))
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn accelerated_quotient_commit(
+        &self,
+        inputs: &[crate::config::QuotientCommitInput<'_, Self>],
+        alpha: ExtVal,
+    ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
+        use crate::p3_adapter::pcs::{lde_from_shifted_coefficients, shifted_quotient_slices};
+        use crate::p3_adapter::spill::SpillPackWriter;
+        use crate::traits::{EvaluationDomain, Pcs as _, flatten_to_base};
+
+        let spill_dir = self.spill_dir()?;
+        let mut pack = SpillPackWriter::create(spill_dir);
+        let mut spilled_ldes = Vec::with_capacity(inputs.len());
+        let mut prehashed = Vec::with_capacity(inputs.len());
+        let dft = self.pcs.quotient_dft();
+        let log_blowup = self.log_blowup;
+        let mut height_counts = std::collections::HashMap::new();
+        for input in inputs {
+            let lde_height =
+                (input.quotient_domain.size() / input.circuit.quotient_degree()) << log_blowup;
+            *height_counts.entry(lde_height).or_insert(0) += 1;
+        }
+
+        for input in inputs {
+            let circuit = input.circuit;
+            let quotient_degree = circuit.quotient_degree();
+            let preprocessed_evals = input.preprocessed.map(|(data, idx)| {
+                self.pcs
+                    .get_evaluations_on_domain(data, idx, input.quotient_domain)
+            });
+            let stage_1_evals = self.pcs.get_evaluations_on_domain(
+                input.stage_1.0,
+                input.stage_1.1,
+                input.quotient_domain,
+            );
+            let stage_2_evals = self.pcs.get_evaluations_on_domain(
+                input.stage_2.0,
+                input.stage_2.1,
+                input.quotient_domain,
+            );
+            let q_vals = crate::prover::quotient_values::<Self>(
+                circuit,
+                &input.lookup_publics,
+                input.trace_domain,
+                input.quotient_domain,
+                &preprocessed_evals,
+                &stage_1_evals,
+                &stage_2_evals,
+                alpha,
+                input.constraint_count,
+            );
+            // Release this circuit's trace evaluations before running quotient
+            // DFTs and LDE expansion.
+            drop(preprocessed_evals);
+            drop(stage_1_evals);
+            drop(stage_2_evals);
+
+            let quotient_flat = flatten_to_base::<Val, ExtVal>(RowMajorMatrix::new_col(q_vals));
+            let sliced = shifted_quotient_slices(
+                dft,
+                quotient_flat,
+                EvaluationDomain::first_point(&input.quotient_domain),
+                quotient_degree,
+            );
+            let lde = lde_from_shifted_coefficients(dft, sliced, log_blowup);
+            if height_counts.get(&lde.height()).copied() == Some(1) {
+                let (spilled, digests) = pack.append_matrix_and_hash(&lde);
+                spilled_ldes.push(spilled);
+                prehashed.push(Some(digests));
+            } else {
+                spilled_ldes.push(pack.append_matrix(&lde));
+                prehashed.push(None);
+            }
+        }
+
+        pack.flush();
+        Some(
+            self.pcs
+                .commit_spilled_ldes_prehashed(spilled_ldes, None, prehashed),
+        )
     }
 
     fn canonicalize_proof(proof: &mut crate::prover::Proof<Self>) {
@@ -1064,6 +1397,9 @@ impl ProofConfig for GoldilocksBlake3Config {
             if free_bytes < target {
                 return None;
             }
+            if !graph_path && !input.lookup_values.is_materialized() {
+                return None;
+            }
             if crate::cuda::memory_diagnostics_enabled() {
                 eprintln!(
                     "[multi-stark/cuda] lookup job {index}: graph={graph_path} output={output_bytes} temporary={temporary_bytes} target={target} free={free_bytes}"
@@ -1190,11 +1526,15 @@ fn new_mmcs(cap_height: usize, #[cfg(feature = "cuda")] device_id: i32) -> Mmcs 
     let byte_hash = Blake3;
     let field_hash = SerializingHasher::new(byte_hash);
     let compress = Blake3CompressionFunction::new(byte_hash);
-    let cpu = CpuMmcs::new(field_hash, compress, cap_height);
     #[cfg(not(feature = "cuda"))]
-    return cpu;
+    {
+        crate::p3_adapter::spill::SpillableMmcs::new(field_hash, compress, cap_height)
+    }
     #[cfg(feature = "cuda")]
-    crate::cuda::mmcs::CudaMmcs::with_device(cpu, device_id)
+    {
+        let cpu = CpuMmcs::new(field_hash, compress, cap_height);
+        crate::cuda::mmcs::CudaMmcs::with_device(cpu, device_id)
+    }
 }
 
 fn new_pcs(

@@ -127,6 +127,11 @@ impl<F: Field> Circuit<F> {
     pub fn quotient_degree(&self) -> usize {
         (self.max_constraint_degree().max(2) - 1).next_power_of_two()
     }
+
+    /// Returns `true` if any compiled node reads a column from `source` at `offset`.
+    pub fn uses_row(&self, source: crate::expr::Source, offset: crate::expr::RowOffset) -> bool {
+        self.graph.uses_row(source, offset)
+    }
 }
 
 /// A multi-circuit STARK system over compiled constraint circuits. Contains
@@ -150,9 +155,8 @@ pub struct ProverKey<SC: ProofConfig> {
 
 impl<SC: ProofConfig> System<SC> {
     pub fn opens_next_row(&self, circuit: usize, source: crate::expr::Source) -> bool {
-        !self.config.omit_unused_next_row_openings() || self.circuits[circuit].graph.nodes.iter().any(|node| {
-            matches!(node, crate::graph::Node::Var(col) if col.source == source && col.offset == crate::expr::RowOffset::Next)
-        })
+        !self.config.omit_unused_next_row_openings()
+            || self.circuits[circuit].uses_row(source, crate::expr::RowOffset::Next)
     }
 
     /// Builds the system from per-circuit inputs.
@@ -167,9 +171,15 @@ impl<SC: ProofConfig> System<SC> {
         Self::new_inner(config, inputs, true)
     }
 
-    /// Commit preprocessing without retaining its evaluation matrices in the system.
-    /// Use with `prove_committed` and a backend that reconstructs lookup traces from
-    /// committed data. Ordinary witness construction may need those matrices.
+    /// Commit preprocessing without retaining its evaluation matrices in the
+    /// system.
+    ///
+    /// When disk spilling is enabled on the configuration, preprocessed traces
+    /// are streamed one circuit at a time through commitment without holding
+    /// all preprocessed matrices in memory simultaneously. Works with both
+    /// lazy lookup evaluation ([`SystemWitness::from_stage_1_lazy`],
+    /// [`crate::witness::PreparedWitness::from_stage_1_lazy`],
+    /// [`Self::prove_stage_1_streaming`]) and `prove_committed`.
     pub fn new_without_preprocessed(
         config: SC,
         inputs: impl IntoIterator<Item: Into<CircuitInputs<Val<SC>>>>,
@@ -183,13 +193,15 @@ impl<SC: ProofConfig> System<SC> {
         retain_preprocessed: bool,
     ) -> (Self, ProverKey<SC>) {
         let pcs = config.pcs();
+        let max_quotient_degree = config.max_quotient_degree();
         let params = extension_params::<SC>();
         let d = params.degree;
 
         let mut circuits = vec![];
-        let mut preprocessed_traces = vec![];
         let mut preprocessed_indices = vec![];
-        for (i, input) in inputs.into_iter().enumerate() {
+        let mut next_preprocessed_index = 0usize;
+
+        let mut prep_iter = inputs.into_iter().enumerate().filter_map(|(i, input)| {
             let input = input.into();
             let num_lookups = input.lookups.len();
             let group_size = input.lookup_group_size.max(1);
@@ -244,33 +256,40 @@ impl<SC: ProofConfig> System<SC> {
             // factor for FRI). Beyond that, proving would silently produce
             // invalid proofs, so reject the circuit upfront.
             assert!(
-                circuit.quotient_degree() <= config.max_quotient_degree(),
+                circuit.quotient_degree() <= max_quotient_degree,
                 "circuit {i}: constraint degree {} needs quotient degree {}, but the PCS only \
                  supports {}; increase log_blowup or lower the constraint degree",
                 circuit.max_constraint_degree(),
                 circuit.quotient_degree(),
-                config.max_quotient_degree(),
+                max_quotient_degree,
             );
 
-            if let Some(preprocessed) = circuit.preprocessed.take() {
-                preprocessed_indices.push(Some(preprocessed_traces.len()));
+            let item = if let Some(preprocessed) = circuit.preprocessed.take() {
+                preprocessed_indices.push(Some(next_preprocessed_index));
+                next_preprocessed_index += 1;
                 let domain = pcs.natural_domain_for_degree(preprocessed.height());
+                let retain_1x =
+                    !retain_preprocessed && circuit.graph.lookup_prefix_uses_preprocessed();
                 if retain_preprocessed {
                     circuit.preprocessed = Some(preprocessed.clone());
                 }
-                preprocessed_traces.push((domain, preprocessed));
+                Some((domain, preprocessed, retain_1x))
             } else {
                 preprocessed_indices.push(None);
-            }
+                None
+            };
             circuits.push(circuit);
-        }
+            item
+        });
 
-        let (preprocessed_commit, preprocessed_data) = if preprocessed_traces.is_empty() {
-            (None, None)
-        } else {
-            let (commit, data) = pcs.commit(preprocessed_traces);
-            (Some(commit), Some(data))
-        };
+        let (preprocessed_commit, preprocessed_data) =
+            match config.commit_preprocessed(&mut prep_iter) {
+                Some((commit, data)) => (Some(commit), Some(data)),
+                None => (None, None),
+            };
+        // Ensure all inputs are drained even if a custom backend stopped early.
+        for _ in prep_iter {}
+
         let system = Self {
             config,
             circuits,
@@ -357,6 +376,52 @@ impl<F: Field> SystemWitness<F> {
             seconds = started.elapsed().as_secs_f64(),
             "Lookup expressions materialized"
         );
+        Self { traces, lookups }
+    }
+
+    /// Builds a lazy witness from the stage-1 traces without materializing
+    /// [`LookupValues`] upfront.
+    ///
+    /// Lookup expressions are evaluated on demand in bounded row chunks during
+    /// stage-2 trace construction instead of holding concrete lookup arguments
+    /// and multiplicities in RAM alongside the traces and LDEs. Produces proofs
+    /// byte-identical to [`Self::from_stage_1`].
+    ///
+    /// # Panics
+    /// Panics under the same shape checks as [`Self::from_stage_1`]: trace
+    /// count must match circuit count, and any active circuit with a
+    /// preprocessed trace must match its preprocessed height.
+    pub fn from_stage_1_lazy<SC>(traces: Vec<RowMajorMatrix<F>>, system: &System<SC>) -> Self
+    where
+        SC: ProofConfig,
+        SC::Pcs: Pcs<F = F>,
+    {
+        assert_eq!(
+            traces.len(),
+            system.circuits.len(),
+            "expected one trace per circuit"
+        );
+        let lookups = traces
+            .iter()
+            .zip(&system.circuits)
+            .enumerate()
+            .map(|(i, (trace, circuit))| {
+                let height = trace.height();
+                if circuit.preprocessed_height != 0 && height != 0 {
+                    assert_eq!(
+                        height, circuit.preprocessed_height,
+                        "circuit {i}: main trace height must equal preprocessed trace height"
+                    );
+                }
+                let slot_widths: Vec<usize> = circuit
+                    .graph
+                    .lookups
+                    .iter()
+                    .map(|lookup| lookup.args.len())
+                    .collect();
+                LookupValues::shape_only(height, &slot_widths)
+            })
+            .collect();
         Self { traces, lookups }
     }
 }

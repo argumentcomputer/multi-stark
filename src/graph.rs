@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use crate::traits::Field;
 
-use crate::expr::{CircuitSpec, ColRef, Expr, ExtExpr, Source};
+use crate::expr::{CircuitSpec, ColRef, Expr, ExtExpr, RowOffset, Source};
 use crate::lookup::Lookup;
 
 /// Index of a node in the compiled vector.
@@ -75,6 +75,23 @@ pub struct ConstraintGraph<F> {
     /// lookup expressions.
     pub lookup_prefix_len: usize,
     pub max_constraint_degree: u32,
+}
+
+impl<F> ConstraintGraph<F> {
+    /// Returns `true` if any lookup expression (multiplicity or argument)
+    /// reads at least one preprocessed column.
+    pub fn lookup_prefix_uses_preprocessed(&self) -> bool {
+        self.nodes[..self.lookup_prefix_len]
+            .iter()
+            .any(|node| matches!(node, Node::Var(col) if col.source == Source::Preprocessed))
+    }
+
+    /// Returns `true` if any node in the graph reads a column from `source` at `offset`.
+    pub fn uses_row(&self, source: Source, offset: RowOffset) -> bool {
+        self.nodes.iter().any(
+            |node| matches!(node, Node::Var(col) if col.source == source && col.offset == offset),
+        )
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

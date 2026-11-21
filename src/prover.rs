@@ -363,6 +363,37 @@ where
         self.prove_committed(key, claims, stage_1)
     }
 
+    /// Generates a STARK proof with a single claim by streaming stage-1 traces
+    /// lazily and evaluating lookups on demand.
+    ///
+    /// Produces proofs byte-identical to [`Self::prove`].
+    pub fn prove_streaming<I>(&self, key: &ProverKey<SC>, claim: &[Val<SC>], traces: I) -> Proof<SC>
+    where
+        I: IntoIterator,
+        I::Item: Into<crate::witness::TraceSource<Val<SC>>>,
+    {
+        self.prove_multiple_claims_streaming(key, &[claim], traces)
+    }
+
+    /// Generates a STARK proof with multiple claims by streaming stage-1 traces
+    /// lazily without materializing [`LookupValues`] upfront.
+    ///
+    /// Produces proofs byte-identical to [`Self::prove_multiple_claims`].
+    #[tracing::instrument(level = "info", skip_all, name = "stark/prove_streaming")]
+    pub fn prove_multiple_claims_streaming<I>(
+        &self,
+        key: &ProverKey<SC>,
+        claims: &[&[Val<SC>]],
+        traces: I,
+    ) -> Proof<SC>
+    where
+        I: IntoIterator,
+        I::Item: Into<crate::witness::TraceSource<Val<SC>>>,
+    {
+        let stage_1 = self.prove_stage_1_streaming(traces);
+        self.prove_committed(key, claims, stage_1)
+    }
+
     /// Continue an ordinary proof from independently prepared stage-one data.
     ///
     /// # Panics
@@ -454,25 +485,6 @@ where
             "cannot prove with every circuit deactivated (all traces empty)"
         );
 
-        // Cost: "Stage 1 commit" — coset LDE (FFT) of each trace from n_i to
-        // n_i·B rows (an iDFT plus B coset DFTs per column), then Merkle
-        // tree. FFT work: Σ w_i · (B+1) · n_i · log₂(n_i).
-        let mut log_degrees = vec![];
-        let evaluations = witness
-            .traces
-            .into_iter()
-            .zip(active.clone())
-            .filter_map(|(trace, is_active)| is_active.then_some(trace))
-            .map(|trace| {
-                let degree = trace.height();
-                let log_degree = log2_strict_usize(degree);
-                let trace_domain = pcs.natural_domain_for_degree(degree);
-                log_degrees.push(log_degree);
-                (trace_domain, trace)
-            });
-        let (stage_1_trace_commit, stage_1_trace_data) =
-            self.config.commit_main(evaluations.collect());
-
         // Only active circuits enter the accumulator chain; the chain (and
         // `intermediate_accumulators`) is indexed by active position.
         let lookups: Vec<_> = witness
@@ -481,6 +493,108 @@ where
             .zip(&active)
             .filter_map(|(l, &is_active)| is_active.then_some(l))
             .collect();
+
+        // Cost: "Stage 1 commit" — coset LDE (FFT) of each trace from n_i to
+        // n_i·B rows (an iDFT plus B coset DFTs per column), then Merkle
+        // tree. FFT work: Σ w_i · (B+1) · n_i · log₂(n_i).
+        let mut log_degrees = Vec::with_capacity(active_indices.len());
+        let mut evaluations = witness
+            .traces
+            .into_iter()
+            .enumerate()
+            .zip(&active)
+            .filter_map(|((ci, trace), &is_active)| is_active.then_some((ci, trace)))
+            .zip(&lookups)
+            .map(|((ci, trace), lookup)| {
+                let degree = trace.height();
+                let log_degree = log2_strict_usize(degree);
+                let trace_domain = pcs.natural_domain_for_degree(degree);
+                log_degrees.push(log_degree);
+                let retain_1x = !lookup.is_materialized() && self.circuits[ci].num_lookups > 0;
+                (trace_domain, trace, retain_1x)
+            });
+        let (stage_1_trace_commit, stage_1_trace_data) = self
+            .config
+            .commit_main_streaming(&mut evaluations)
+            .expect("cannot prove with every circuit deactivated (all traces empty)");
+
+        Stage1 {
+            active,
+            active_indices,
+            log_degrees,
+            stage_1_trace_commit,
+            stage_1_trace_data,
+            lookups,
+        }
+    }
+
+    /// Streaming round one of a proof: pulls each circuit's stage-1 trace
+    /// lazily from `traces` without holding all traces or [`LookupValues`] in
+    /// memory simultaneously.
+    ///
+    /// Lookup expressions are evaluated on demand in bounded row chunks during
+    /// stage-2 trace construction. Produces proofs byte-identical to
+    /// [`Self::prove_stage_1`] with [`SystemWitness::from_stage_1`].
+    ///
+    /// # Panics
+    /// Panics if `traces` does not yield one trace per circuit, if an active
+    /// circuit's height disagrees with its preprocessed trace height, or if
+    /// every circuit's trace is empty.
+    #[tracing::instrument(level = "info", skip_all, name = "stark/stage1_commit_streaming")]
+    pub fn prove_stage_1_streaming<I>(&self, traces: I) -> Stage1<SC>
+    where
+        I: IntoIterator,
+        I::Item: Into<crate::witness::TraceSource<Val<SC>>>,
+    {
+        let pcs = self.config.pcs();
+        let mut active = Vec::with_capacity(self.circuits.len());
+        let mut active_indices = Vec::new();
+        let mut log_degrees = Vec::new();
+        let mut lookups = Vec::new();
+
+        let mut evaluations = traces.into_iter().enumerate().filter_map(|(ci, trace)| {
+            assert!(
+                ci < self.circuits.len(),
+                "expected one trace per circuit (got more than {})",
+                self.circuits.len()
+            );
+            let trace: crate::witness::TraceSource<Val<SC>> = trace.into();
+            let height = trace.height();
+            let circuit = &self.circuits[ci];
+            if height == 0 {
+                active.push(false);
+                return None;
+            }
+            if circuit.preprocessed_height != 0 {
+                assert_eq!(
+                    height, circuit.preprocessed_height,
+                    "circuit {ci}: main trace height must equal preprocessed trace height"
+                );
+            }
+            active.push(true);
+            active_indices.push(ci);
+            log_degrees.push(log2_strict_usize(height));
+            let slot_widths: Vec<usize> = circuit
+                .graph
+                .lookups
+                .iter()
+                .map(|lookup| lookup.args.len())
+                .collect();
+            lookups.push(LookupValues::shape_only(height, &slot_widths));
+            let trace_domain = pcs.natural_domain_for_degree(height);
+            let retain_1x = circuit.num_lookups > 0;
+            Some((trace_domain, trace, retain_1x))
+        });
+
+        let committed = self.config.commit_main_streaming(&mut evaluations);
+        for _ in evaluations {}
+        assert_eq!(
+            active.len(),
+            self.circuits.len(),
+            "expected one trace per circuit"
+        );
+        let (stage_1_trace_commit, stage_1_trace_data) =
+            committed.expect("cannot prove with every circuit deactivated (all traces empty)");
 
         Stage1 {
             active,
@@ -556,24 +670,95 @@ where
                 drop(_g);
                 result
             } else {
-                let (stage_2_traces, intermediate_accumulators) = self
-                    .config
-                    .accelerated_lookup_traces(
-                        &active_lookups,
-                        &group_sizes,
-                        lookup_argument_challenge,
-                        fingerprint_challenge,
-                        acc,
-                    )
-                    .unwrap_or_else(|| {
-                        LookupValues::stage_2_traces(
+                let any_unmaterialized = active_lookups.iter().any(|l| !l.is_materialized());
+                let (stage_2_traces, intermediate_accumulators) = if any_unmaterialized {
+                    let mut traces = Vec::with_capacity(active_indices.len());
+                    let mut intermediates = Vec::with_capacity(active_indices.len());
+                    let mut running = acc;
+                    for ((pos, &ci), (lookup_values, &log_degree)) in active_indices
+                        .iter()
+                        .enumerate()
+                        .zip(active_lookups.iter().zip(&log_degrees))
+                    {
+                        let circuit = &self.circuits[ci];
+                        let (trace, delta) = if lookup_values.is_materialized() {
+                            lookup_values.stage_2_trace(
+                                circuit.lookup_group_size,
+                                lookup_argument_challenge,
+                                &fingerprint_challenge,
+                            )
+                        } else if circuit.graph.lookups.is_empty() {
+                            (
+                                RowMajorMatrix::new(
+                                    vec![
+                                        <SC::Challenge as Algebra<SC::Challenge>>::ZERO;
+                                        1 << log_degree
+                                    ],
+                                    1,
+                                ),
+                                <SC::Challenge as Algebra<SC::Challenge>>::ZERO,
+                            )
+                        } else {
+                            let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
+                            let main_trace = pcs
+                                .get_evaluations_on_domain(&stage_1_trace_data, pos, trace_domain)
+                                .to_row_major_matrix();
+                            let owned_prep;
+                            let prep_ref = if circuit.graph.lookup_prefix_uses_preprocessed() {
+                                if let Some(pp) = circuit.preprocessed.as_ref() {
+                                    Some(pp)
+                                } else {
+                                    let (prep_data, prep_idx) = key
+                                        .preprocessed_data
+                                        .as_ref()
+                                        .zip(self.preprocessed_indices[ci])
+                                        .expect(
+                                            "circuit lookup expressions require preprocessed trace",
+                                        );
+                                    owned_prep = pcs
+                                        .get_evaluations_on_domain(
+                                            prep_data,
+                                            prep_idx,
+                                            trace_domain,
+                                        )
+                                        .to_row_major_matrix();
+                                    Some(&owned_prep)
+                                }
+                            } else {
+                                None
+                            };
+                            crate::lookup::stage_2_trace_from_trace(
+                                circuit,
+                                &main_trace,
+                                prep_ref,
+                                lookup_argument_challenge,
+                                &fingerprint_challenge,
+                            )
+                        };
+                        running += delta;
+                        intermediates.push(running);
+                        traces.push(trace);
+                    }
+                    (traces, intermediates)
+                } else {
+                    self.config
+                        .accelerated_lookup_traces(
                             &active_lookups,
                             &group_sizes,
                             lookup_argument_challenge,
-                            &fingerprint_challenge,
+                            fingerprint_challenge,
                             acc,
                         )
-                    });
+                        .unwrap_or_else(|| {
+                            LookupValues::stage_2_traces(
+                                &active_lookups,
+                                &group_sizes,
+                                lookup_argument_challenge,
+                                &fingerprint_challenge,
+                                acc,
+                            )
+                        })
+                };
                 // The lookup witness can be as large as the traces themselves; free it
                 // now instead of holding it through the commit/quotient/FRI stages.
                 drop(active_lookups);
@@ -849,7 +1034,9 @@ where
     let qdb = log2_strict_usize(quotient_domain.size()) - log2_strict_usize(trace_domain.size());
     let next_step = 1 << qdb;
 
-    for _ in quotient_size..PackedVal::<SC>::WIDTH {
+    let width = PackedVal::<SC>::WIDTH;
+    let padded_len = quotient_size.next_multiple_of(width);
+    for _ in quotient_size..padded_len {
         sels.is_first_row.push(Val::<SC>::ZERO);
         sels.is_last_row.push(Val::<SC>::ZERO);
         sels.is_transition.push(Val::<SC>::ZERO);
@@ -857,18 +1044,31 @@ where
     }
 
     // α powers in reverse (constraint i of k weighted by α^{k-1-i}),
-    // decomposed per basis coordinate for the batched base-field fold.
+    // decomposed per basis coordinate for the fused base-field fold.
+    let ext_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
     let mut alpha_powers: Vec<SC::Challenge> = alpha.powers().take(constraint_count).collect();
     alpha_powers.reverse();
-    let decomposed_alpha_powers: Vec<Vec<Val<SC>>> = (0
-        ..<SC::Challenge as ExtensionOf<Val<SC>>>::D)
-        .map(|i| {
-            alpha_powers
-                .iter()
-                .map(|x| x.as_basis_coefficients_slice()[i])
-                .collect()
-        })
-        .collect();
+    let alpha_table = if ext_d == 2 {
+        let pairs: Vec<[Val<SC>; 2]> = alpha_powers
+            .iter()
+            .map(|x| {
+                let coords = x.as_basis_coefficients_slice();
+                [coords[0], coords[1]]
+            })
+            .collect();
+        AlphaTable::Degree2(pairs)
+    } else {
+        let decomposed: Vec<Vec<Val<SC>>> = (0..ext_d)
+            .map(|i| {
+                alpha_powers
+                    .iter()
+                    .map(|x| x.as_basis_coefficients_slice()[i])
+                    .collect()
+            })
+            .collect();
+        AlphaTable::Generic(decomposed)
+    };
+    drop(alpha_powers);
 
     // Public coordinates broadcast to packed base values.
     let publics_packed: Vec<PackedVal<SC>> = lookup_publics
@@ -878,7 +1078,6 @@ where
 
     // Δ/(n·g) per coordinate, broadcast: the logUp boundary injection with
     // the last-row selector's normalization constant pre-absorbed.
-    let ext_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
     let delta_scaled: Vec<PackedVal<SC>> = (0..ext_d)
         .map(|k| {
             PackedVal::<SC>::from(
@@ -888,63 +1087,127 @@ where
         .collect();
 
     let ext_params = crate::system::extension_params::<SC>();
-    let inner = |i_start: usize| {
-        quotient_values_inner::<SC>(
-            circuit,
-            &sels,
-            quotient_size,
-            preprocessed_on_quotient_domain,
-            stage_1_on_quotient_domain,
-            stage_2_on_quotient_domain,
-            main_width,
-            stage_2_width,
-            preprocessed_width,
-            &publics_packed,
-            &delta_scaled,
-            &decomposed_alpha_powers,
-            next_step,
-            i_start,
-            ext_params.w,
-            ext_params.degree,
-        )
+
+    // Determine once per circuit which row slices are actually referenced,
+    // skipping `next` (and any unused `current`) row gathers inside the hot loop.
+    let has_prep = preprocessed_on_quotient_domain.is_some();
+    let prep_cur_len = if has_prep
+        && circuit.uses_row(
+            crate::expr::Source::Preprocessed,
+            crate::expr::RowOffset::Current,
+        ) {
+        preprocessed_width
+    } else {
+        0
     };
-    #[cfg(feature = "parallel")]
+    let prep_next_len = if has_prep
+        && circuit.uses_row(
+            crate::expr::Source::Preprocessed,
+            crate::expr::RowOffset::Next,
+        ) {
+        preprocessed_width
+    } else {
+        0
+    };
+    let main_cur_len =
+        if circuit.uses_row(crate::expr::Source::Main, crate::expr::RowOffset::Current) {
+            main_width
+        } else {
+            0
+        };
+    let main_next_len = if circuit.uses_row(crate::expr::Source::Main, crate::expr::RowOffset::Next)
     {
-        (0..quotient_size)
-            .into_par_iter()
-            .step_by(PackedVal::<SC>::WIDTH)
-            .flat_map_iter(inner)
-            .collect()
-    }
-    #[cfg(not(feature = "parallel"))]
+        main_width
+    } else {
+        0
+    };
+    let s2_next_len = if circuit.uses_row(crate::expr::Source::Stage2, crate::expr::RowOffset::Next)
     {
-        (0..quotient_size)
-            .step_by(PackedVal::<SC>::WIDTH)
-            .flat_map_iter(inner)
-            .collect()
-    }
+        stage_2_width
+    } else {
+        // `logup_constraint_values` only reads the wrap slot `stage_2_next[0..ext_d]`.
+        ext_d.min(stage_2_width)
+    };
+    let node_count = circuit.graph.nodes.len();
+    let accs_len = if ext_d == 2 { 0 } else { ext_d };
+
+    const PACKS_PER_CHUNK: usize = 16;
+    let chunk_rows = PACKS_PER_CHUNK * width;
+    let mut out = vec![<SC::Challenge as Algebra<SC::Challenge>>::ZERO; quotient_size];
+
+    out.par_chunks_mut(chunk_rows).enumerate().for_each_init(
+        || QuotientScratch {
+            prep_cur: vec![PackedVal::<SC>::ZERO; prep_cur_len],
+            prep_next: vec![PackedVal::<SC>::ZERO; prep_next_len],
+            main_cur: vec![PackedVal::<SC>::ZERO; main_cur_len],
+            main_next: vec![PackedVal::<SC>::ZERO; main_next_len],
+            s2_cur: vec![PackedVal::<SC>::ZERO; stage_2_width],
+            s2_next: vec![PackedVal::<SC>::ZERO; s2_next_len],
+            buf: Vec::with_capacity(node_count),
+            accs: vec![PackedVal::<SC>::ZERO; accs_len],
+        },
+        |scratch, (chunk_idx, chunk_out)| {
+            let chunk_start = chunk_idx * chunk_rows;
+            for (pack_idx, pack_out) in chunk_out.chunks_mut(width).enumerate() {
+                let i_start = chunk_start + pack_idx * width;
+                eval_quotient_pack::<SC>(
+                    circuit,
+                    &sels,
+                    preprocessed_on_quotient_domain,
+                    stage_1_on_quotient_domain,
+                    stage_2_on_quotient_domain,
+                    &publics_packed,
+                    &delta_scaled,
+                    &alpha_table,
+                    next_step,
+                    i_start,
+                    ext_params.w,
+                    ext_params.degree,
+                    constraint_count,
+                    scratch,
+                    pack_out,
+                );
+            }
+        },
+    );
+    out
+}
+
+enum AlphaTable<F> {
+    Degree2(Vec<[F; 2]>),
+    Generic(Vec<Vec<F>>),
+}
+
+struct QuotientScratch<P> {
+    prep_cur: Vec<P>,
+    prep_next: Vec<P>,
+    main_cur: Vec<P>,
+    main_next: Vec<P>,
+    s2_cur: Vec<P>,
+    s2_next: Vec<P>,
+    buf: Vec<P>,
+    accs: Vec<P>,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn quotient_values_inner<SC>(
+#[inline]
+fn eval_quotient_pack<SC>(
     circuit: &crate::system::Circuit<Val<SC>>,
     sels: &LagrangeSelectors<Vec<Val<SC>>>,
-    quotient_size: usize,
     preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_, SC>>,
     stage_1_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
     stage_2_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
-    main_width: usize,
-    stage_2_width: usize,
-    preprocessed_width: usize,
     publics_packed: &[PackedVal<SC>],
     delta_scaled: &[PackedVal<SC>],
-    decomposed_alpha_powers: &[Vec<Val<SC>>],
+    alpha_table: &AlphaTable<Val<SC>>,
     next_step: usize,
     i_start: usize,
     ext_w: Val<SC>,
     ext_degree: usize,
-) -> impl Iterator<Item = SC::Challenge>
-where
+    constraint_count: usize,
+    scratch: &mut QuotientScratch<PackedVal<SC>>,
+    pack_out: &mut [SC::Challenge],
+) where
     SC: ProofConfig,
     Val<SC>: TwoAdicField + Ord,
 {
@@ -954,72 +1217,111 @@ where
     let is_transition = *PackedVal::<SC>::from_slice(&sels.is_transition[i_range.clone()]);
     let inv_vanishing = *PackedVal::<SC>::from_slice(&sels.inv_vanishing[i_range]);
 
-    // Packed two-row windows of each trace, as base columns.
-    let preprocessed_pair: Option<Vec<PackedVal<SC>>> = preprocessed_on_quotient_domain
-        .as_ref()
-        .map(|m| PackedVal::<SC>::packed_row_pair(m, i_start, next_step));
-    let stage_1_pair =
-        PackedVal::<SC>::packed_row_pair(stage_1_on_quotient_domain, i_start, next_step);
-    let stage_2_pair =
-        PackedVal::<SC>::packed_row_pair(stage_2_on_quotient_domain, i_start, next_step);
-
-    let (stage_1_cur, stage_1_next) = stage_1_pair.split_at(main_width);
-    let (stage_2_cur, stage_2_next) = stage_2_pair.split_at(stage_2_width);
-    let (preprocessed_cur, preprocessed_next): (&[PackedVal<SC>], &[PackedVal<SC>]) =
-        match &preprocessed_pair {
-            Some(pair) => pair.split_at(preprocessed_width),
-            None => (&[], &[]),
-        };
+    if let Some(prep) = preprocessed_on_quotient_domain.as_ref() {
+        if !scratch.prep_cur.is_empty() {
+            PackedVal::<SC>::fill_packed_row(prep, i_start, &mut scratch.prep_cur);
+        }
+        if !scratch.prep_next.is_empty() {
+            PackedVal::<SC>::fill_packed_row(prep, i_start + next_step, &mut scratch.prep_next);
+        }
+    }
+    if !scratch.main_cur.is_empty() {
+        PackedVal::<SC>::fill_packed_row(
+            stage_1_on_quotient_domain,
+            i_start,
+            &mut scratch.main_cur,
+        );
+    }
+    if !scratch.main_next.is_empty() {
+        PackedVal::<SC>::fill_packed_row(
+            stage_1_on_quotient_domain,
+            i_start + next_step,
+            &mut scratch.main_next,
+        );
+    }
+    PackedVal::<SC>::fill_packed_row(stage_2_on_quotient_domain, i_start, &mut scratch.s2_cur);
+    PackedVal::<SC>::fill_packed_row(
+        stage_2_on_quotient_domain,
+        i_start + next_step,
+        &mut scratch.s2_next,
+    );
 
     let view = VarValues {
-        preprocessed: [preprocessed_cur, preprocessed_next],
-        main: [stage_1_cur, stage_1_next],
-        stage2: [stage_2_cur, stage_2_next],
+        preprocessed: [&scratch.prep_cur, &scratch.prep_next],
+        main: [&scratch.main_cur, &scratch.main_next],
+        stage2: [&scratch.s2_cur, &scratch.s2_next],
         publics: publics_packed,
         is_first_row,
         is_last_row,
         is_transition,
     };
-    let mut buf = Vec::new();
-    circuit.graph.sweep(&view, &mut buf);
-    let mut constraint_values = circuit.graph.constraint_values(&buf);
-    // The logUp constraint values are evaluated directly (they are not
-    // compiled into the graph), appended after the user roots in the
-    // canonical protocol order. Coordinate-expanded logUp constraints are
-    // base-field-only, so they evaluate in `PackedVal` like everything else;
-    // the lookup expressions are read straight out of the sweep buffer.
-    crate::lookup::logup_constraint_values(
-        &circuit.graph.lookups,
-        &buf,
-        stage_2_cur,
-        stage_2_next,
-        publics_packed,
-        delta_scaled,
-        // p3's (unnormalized) last-row selector; the normalization
-        // constant is pre-absorbed into `delta_scaled`.
-        is_last_row,
-        ext_w,
-        ext_degree,
-        circuit.lookup_group_size,
-        &mut constraint_values,
-    );
-    debug_assert_eq!(constraint_values.len(), circuit.constraint_count());
+    circuit.graph.sweep(&view, &mut scratch.buf);
 
-    // Fold the base constraint values with α through the decomposed path,
-    // reassembling one packed extension accumulator.
-    let accumulator = PackedChallenge::<SC>::from_basis_coefficients_fn(|coeff_idx| {
-        PackedVal::<SC>::batched_linear_combination(
-            &constraint_values,
-            &decomposed_alpha_powers[coeff_idx],
-        )
-    });
+    // Fuse user-constraint and logUp-constraint α folding directly without
+    // allocating a per-pack `constraint_values` vector.
+    let accumulator = match alpha_table {
+        AlphaTable::Degree2(alpha_pairs) => {
+            let (mut acc0, mut acc1) = circuit.graph.fold_constraints_d2(&scratch.buf, alpha_pairs);
+            let mut idx = circuit.graph.zeros.len();
+            crate::lookup::for_each_logup_constraint_value(
+                &circuit.graph.lookups,
+                &scratch.buf,
+                &scratch.s2_cur,
+                &scratch.s2_next,
+                publics_packed,
+                delta_scaled,
+                is_last_row,
+                ext_w,
+                ext_degree,
+                circuit.lookup_group_size,
+                |val| {
+                    let pair = alpha_pairs[idx];
+                    acc0 += val * pair[0];
+                    acc1 += val * pair[1];
+                    idx += 1;
+                },
+            );
+            debug_assert_eq!(idx, constraint_count);
+            PackedChallenge::<SC>::from_basis_coefficients_fn(|coeff_idx| {
+                if coeff_idx == 0 { acc0 } else { acc1 }
+            })
+        }
+        AlphaTable::Generic(decomposed_alpha_powers) => {
+            scratch.accs.fill(PackedVal::<SC>::ZERO);
+            circuit.graph.fold_constraints(
+                &scratch.buf,
+                decomposed_alpha_powers,
+                &mut scratch.accs,
+            );
+            let mut idx = circuit.graph.zeros.len();
+            crate::lookup::for_each_logup_constraint_value(
+                &circuit.graph.lookups,
+                &scratch.buf,
+                &scratch.s2_cur,
+                &scratch.s2_next,
+                publics_packed,
+                delta_scaled,
+                is_last_row,
+                ext_w,
+                ext_degree,
+                circuit.lookup_group_size,
+                |val| {
+                    for (acc, coeffs) in scratch.accs.iter_mut().zip(decomposed_alpha_powers) {
+                        *acc += val * coeffs[idx];
+                    }
+                    idx += 1;
+                },
+            );
+            debug_assert_eq!(idx, constraint_count);
+            PackedChallenge::<SC>::from_basis_coefficients_fn(|coeff_idx| scratch.accs[coeff_idx])
+        }
+    };
+
     let quotient = accumulator * inv_vanishing;
-
-    (0..quotient_size.min(PackedVal::<SC>::WIDTH)).map(move |idx_in_packing| {
-        SC::Challenge::from_basis_coefficients_fn(|coeff_idx| {
-            PackedExtension::<Val<SC>, SC::Challenge>::as_basis_coefficients_slice(&quotient)
-                [coeff_idx]
-                .as_slice()[idx_in_packing]
-        })
-    })
+    let basis = PackedExtension::<Val<SC>, SC::Challenge>::as_basis_coefficients_slice(&quotient);
+    for (idx_in_packing, slot) in pack_out.iter_mut().enumerate() {
+        *slot = SC::Challenge::from_basis_coefficients_fn(|coeff_idx| {
+            basis[coeff_idx].as_slice()[idx_in_packing]
+        });
+    }
 }
