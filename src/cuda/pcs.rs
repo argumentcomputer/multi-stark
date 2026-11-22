@@ -112,8 +112,10 @@ fn goldilocks_cubic_trinomial_inverse_denominators(
         .collect()
 }
 
-fn cuda_ext_degree_and_w<Val: TwoAdicField + PrimeField64, Challenge: ExtensionField<Val>>()
--> (usize, Goldilocks) {
+pub(super) fn cuda_ext_degree_and_w<
+    Val: TwoAdicField + PrimeField64,
+    Challenge: ExtensionField<Val>,
+>() -> (usize, Goldilocks) {
     let d = <Challenge as BasedVectorSpace<Val>>::DIMENSION;
     assert!(
         d == 2 || d == 3,
@@ -144,7 +146,7 @@ fn cuda_ext_degree_and_w<Val: TwoAdicField + PrimeField64, Challenge: ExtensionF
 }
 
 #[inline]
-fn ext_to_goldilocks<Val: PrimeField64, Challenge: ExtensionField<Val>>(
+pub(super) fn ext_to_goldilocks<Val: PrimeField64, Challenge: ExtensionField<Val>>(
     value: Challenge,
     d: usize,
 ) -> ([Goldilocks; 3], usize) {
@@ -157,7 +159,7 @@ fn ext_to_goldilocks<Val: PrimeField64, Challenge: ExtensionField<Val>>(
 }
 
 #[inline]
-fn ext_from_goldilocks<Val: PrimeField64, Challenge: ExtensionField<Val>>(
+pub(super) fn ext_from_goldilocks<Val: PrimeField64, Challenge: ExtensionField<Val>>(
     slice: &[Goldilocks],
 ) -> Challenge {
     let mut coeffs = [Val::ZERO; 3];
@@ -395,7 +397,7 @@ pub struct CudaTwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs> {
 /// `i < 2^k`, so every smaller coset is a prefix of a larger one: one vector
 /// per process serves every height, and grows only when a larger height is
 /// opened. Every shard of a proof opens on the same coset.
-fn bit_reversed_coset<Val: TwoAdicField + PrimeField64>(
+pub(super) fn bit_reversed_coset<Val: TwoAdicField + PrimeField64>(
     log_height: usize,
 ) -> std::sync::Arc<Vec<Goldilocks>> {
     static CACHE: std::sync::Mutex<Option<std::sync::Arc<Vec<Goldilocks>>>> =
@@ -2455,7 +2457,7 @@ where
 ///
 /// Return a LinearMap which allows us to recover the computed vectors for each `z`.
 #[instrument(skip_all)]
-fn compute_inverse_denominators<F: TwoAdicField, EF: ExtensionField<F>, M: Matrix<F>>(
+pub(super) fn compute_inverse_denominators<F: TwoAdicField, EF: ExtensionField<F>, M: Matrix<F>>(
     mats_and_points: &[(Vec<M>, &Vec<Vec<EF>>)],
     coset: &[F],
 ) -> LinearMap<EF, Vec<EF>> {

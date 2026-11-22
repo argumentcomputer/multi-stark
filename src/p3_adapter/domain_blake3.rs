@@ -53,6 +53,17 @@ pub const V6_TRANSCRIPT_BATCH_CONTEXT: &str = "multi-stark/v6/transcript/batch";
 /// Domain-separation context string for v6 canonical VK / constraint-graph digests.
 pub const V6_VK_CONTEXT: &str = "multi-stark/v6/vk";
 
+/// Domain-separation context string for v6-zk salted Merkle leaf row hashes.
+pub const V6ZK_MERKLE_LEAF_CONTEXT: &str = "multi-stark/v6-zk/merkle/leaf";
+/// Domain-separation context string for v6-zk Merkle 2-to-1 internal compressions.
+pub const V6ZK_MERKLE_COMPRESS_CONTEXT: &str = "multi-stark/v6-zk/merkle/compress";
+/// Domain-separation context string for v6-zk single-proof Fiat-Shamir transcripts.
+pub const V6ZK_TRANSCRIPT_SINGLE_CONTEXT: &str = "multi-stark/v6-zk/transcript/single";
+/// Domain-separation context string for v6-zk batch-proof Fiat-Shamir transcripts.
+pub const V6ZK_TRANSCRIPT_BATCH_CONTEXT: &str = "multi-stark/v6-zk/transcript/batch";
+/// Domain-separation context string for v6-zk canonical VK / constraint-graph digests.
+pub const V6ZK_VK_CONTEXT: &str = "multi-stark/v6-zk/vk";
+
 const fn g_const(
     mut state: [u32; 16],
     a: usize,
@@ -149,6 +160,12 @@ const KEY_TRANSCRIPT_SINGLE: [u32; 8] = derive_context_key(V6_TRANSCRIPT_SINGLE_
 const KEY_TRANSCRIPT_BATCH: [u32; 8] = derive_context_key(V6_TRANSCRIPT_BATCH_CONTEXT);
 const KEY_VK: [u32; 8] = derive_context_key(V6_VK_CONTEXT);
 
+const KEY_ZK_MERKLE_LEAF: [u32; 8] = derive_context_key(V6ZK_MERKLE_LEAF_CONTEXT);
+const KEY_ZK_MERKLE_COMPRESS: [u32; 8] = derive_context_key(V6ZK_MERKLE_COMPRESS_CONTEXT);
+const KEY_ZK_TRANSCRIPT_SINGLE: [u32; 8] = derive_context_key(V6ZK_TRANSCRIPT_SINGLE_CONTEXT);
+const KEY_ZK_TRANSCRIPT_BATCH: [u32; 8] = derive_context_key(V6ZK_TRANSCRIPT_BATCH_CONTEXT);
+const KEY_ZK_VK: [u32; 8] = derive_context_key(V6ZK_VK_CONTEXT);
+
 /// Cryptographic domain for BLAKE3 hashing.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Blake3Domain {
@@ -164,6 +181,16 @@ pub enum Blake3Domain {
     TranscriptBatch,
     /// Protocol `v6` canonical verifying-key / constraint-graph digest (`derive_key("multi-stark/v6/vk")`).
     VerifyingKey,
+    /// Protocol `v6-zk` salted Merkle leaf row hashing (`derive_key("multi-stark/v6-zk/merkle/leaf")`).
+    ZkMerkleLeaf,
+    /// Protocol `v6-zk` Merkle internal 2-to-1 compression (`derive_key("multi-stark/v6-zk/merkle/compress")`).
+    ZkMerkleCompress,
+    /// Protocol `v6-zk` single-proof Fiat-Shamir transcript (`derive_key("multi-stark/v6-zk/transcript/single")`).
+    ZkTranscriptSingle,
+    /// Protocol `v6-zk` batch-proof Fiat-Shamir transcript (`derive_key("multi-stark/v6-zk/transcript/batch")`).
+    ZkTranscriptBatch,
+    /// Protocol `v6-zk` canonical verifying-key / constraint-graph digest (`derive_key("multi-stark/v6-zk/vk")`).
+    ZkVerifyingKey,
 }
 
 impl Blake3Domain {
@@ -177,6 +204,11 @@ impl Blake3Domain {
             Self::TranscriptSingle => Some(V6_TRANSCRIPT_SINGLE_CONTEXT),
             Self::TranscriptBatch => Some(V6_TRANSCRIPT_BATCH_CONTEXT),
             Self::VerifyingKey => Some(V6_VK_CONTEXT),
+            Self::ZkMerkleLeaf => Some(V6ZK_MERKLE_LEAF_CONTEXT),
+            Self::ZkMerkleCompress => Some(V6ZK_MERKLE_COMPRESS_CONTEXT),
+            Self::ZkTranscriptSingle => Some(V6ZK_TRANSCRIPT_SINGLE_CONTEXT),
+            Self::ZkTranscriptBatch => Some(V6ZK_TRANSCRIPT_BATCH_CONTEXT),
+            Self::ZkVerifyingKey => Some(V6ZK_VK_CONTEXT),
         }
     }
 
@@ -191,6 +223,11 @@ impl Blake3Domain {
             Self::TranscriptSingle => KEY_TRANSCRIPT_SINGLE,
             Self::TranscriptBatch => KEY_TRANSCRIPT_BATCH,
             Self::VerifyingKey => KEY_VK,
+            Self::ZkMerkleLeaf => KEY_ZK_MERKLE_LEAF,
+            Self::ZkMerkleCompress => KEY_ZK_MERKLE_COMPRESS,
+            Self::ZkTranscriptSingle => KEY_ZK_TRANSCRIPT_SINGLE,
+            Self::ZkTranscriptBatch => KEY_ZK_TRANSCRIPT_BATCH,
+            Self::ZkVerifyingKey => KEY_ZK_VK,
         }
     }
 
@@ -204,7 +241,12 @@ impl Blake3Domain {
             | Self::MerkleCompress
             | Self::TranscriptSingle
             | Self::TranscriptBatch
-            | Self::VerifyingKey => BLAKE3_DERIVE_KEY_MATERIAL,
+            | Self::VerifyingKey
+            | Self::ZkMerkleLeaf
+            | Self::ZkMerkleCompress
+            | Self::ZkTranscriptSingle
+            | Self::ZkTranscriptBatch
+            | Self::ZkVerifyingKey => BLAKE3_DERIVE_KEY_MATERIAL,
         }
     }
 
@@ -282,6 +324,11 @@ mod tests {
             Blake3Domain::TranscriptSingle,
             Blake3Domain::TranscriptBatch,
             Blake3Domain::VerifyingKey,
+            Blake3Domain::ZkMerkleLeaf,
+            Blake3Domain::ZkMerkleCompress,
+            Blake3Domain::ZkTranscriptSingle,
+            Blake3Domain::ZkTranscriptBatch,
+            Blake3Domain::ZkVerifyingKey,
         ];
         // Test empty, 64-byte single-block, and multi-chunk (>1024 B) inputs.
         let inputs: Vec<Vec<u8>> = vec![
@@ -350,7 +397,7 @@ mod tests {
                 }
                 seen.push((domain, got));
             }
-            // All 6 domains must produce pairwise distinct digests on the same input.
+            // All 11 domains must produce pairwise distinct digests on the same input.
             for i in 0..seen.len() {
                 for j in (i + 1)..seen.len() {
                     assert_ne!(
@@ -392,6 +439,34 @@ mod tests {
                 0x6439_610D,
                 0x89E8_6BE6,
                 0x02E2_2A34,
+            ]
+        );
+        // Pinned `v6-zk` constants shared with `cuda/kernels.cu`
+        // (`BLAKE3_V6ZK_LEAF_CV` and `BLAKE3_V6ZK_COMPRESS_CV`).
+        assert_eq!(
+            Blake3Domain::ZkMerkleLeaf.key_words(),
+            [
+                0x8A66_3924,
+                0x051A_410E,
+                0xB592_9C7A,
+                0x52E6_E08C,
+                0x51D3_B0FA,
+                0x1D16_87C6,
+                0x472E_9E06,
+                0x5A32_4ECA,
+            ]
+        );
+        assert_eq!(
+            Blake3Domain::ZkMerkleCompress.key_words(),
+            [
+                0x6E9B_081E,
+                0xBAEE_B5DA,
+                0x1865_2A0D,
+                0xA2D1_B4E1,
+                0x9E40_FB01,
+                0xE905_254D,
+                0x4516_28D5,
+                0x3D60_6842,
             ]
         );
     }

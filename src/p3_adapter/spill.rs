@@ -79,7 +79,7 @@ type SpillCommitResult = (
 
 /// Target memory budget per streamed row block during Merkle hashing and FRI
 /// opening passes (64 MiB).
-const STREAM_BLOCK_BYTES: usize = 64 << 20;
+pub(super) const STREAM_BLOCK_BYTES: usize = 64 << 20;
 
 /// Write buffer size for sequential spill-file packing (8 MiB = 1M field elements).
 const SPILL_WRITE_CHUNK_ELEMS: usize = 1 << 20;
@@ -328,6 +328,68 @@ impl SpillPackWriter {
         )
     }
 
+    /// Appends `mat` to the spill file AND computes each row's salted BLAKE3
+    /// leaf digest on the fly from `salt_seed`, avoiding a second disk read
+    /// pass for single-matrix height groups in `v6-zk`.
+    pub(crate) fn append_matrix_and_hash_salted(
+        &mut self,
+        mat: &RowMajorMatrix<Val>,
+        leaf_domain: Blake3Domain,
+        salt_seed: &[u8; 32],
+    ) -> (SpilledMatrix, Vec<[u8; 32]>) {
+        let height = mat.height();
+        let width = mat.width();
+        let offset = self.next_offset;
+        let row_bytes = width * size_of::<u64>();
+        let chunk_rows = ((SPILL_WRITE_CHUNK_ELEMS * size_of::<u64>()) / row_bytes.max(64))
+            .clamp(1, height.max(1));
+        // SAFETY: the loop partitions `0..height` into disjoint contiguous chunks
+        // and initializes each via `hash_raw_rows_salted_uninit`.
+        let digests = unsafe {
+            blake3_simd::alloc_and_fill_digests(height, height, |dst| {
+                for row_start in (0..height).step_by(chunk_rows) {
+                    let n_rows = (height - row_start).min(chunk_rows);
+                    let elem_start = row_start * width;
+                    let elem_end = (row_start + n_rows) * width;
+                    let byte_len = self.pack_chunk_bytes(&mat.values[elem_start..elem_end]);
+                    blake3_simd::hash_raw_rows_salted_uninit(
+                        &self.scratch[..byte_len],
+                        row_bytes,
+                        height,
+                        row_start,
+                        salt_seed,
+                        &mut dst[row_start..row_start + n_rows],
+                        leaf_domain,
+                    );
+                    if byte_len > 0 {
+                        self.writer
+                            .write_all(&self.scratch[..byte_len])
+                            .expect("failed to write matrix chunk to spill file");
+                    }
+                }
+            })
+        };
+        let total_elems = mat.values.len();
+        let bytes = u64::try_from(total_elems)
+            .expect("matrix element count exceeds u64")
+            .checked_mul(u64::try_from(size_of::<u64>()).unwrap())
+            .expect("matrix byte length overflow");
+        self.next_offset = self
+            .next_offset
+            .checked_add(bytes)
+            .expect("spill pack offset overflow");
+        TOTAL_SPILLED_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        (
+            SpilledMatrix {
+                file: Arc::clone(&self.spill),
+                offset,
+                height,
+                width,
+            },
+            digests,
+        )
+    }
+
     /// Flushes all buffered writes to the OS file before positional reads.
     pub(crate) fn flush(&mut self) {
         self.writer.flush().expect("failed to flush spill file");
@@ -364,7 +426,7 @@ impl SpilledMatrix {
     }
 
     #[inline]
-    const fn row_bytes(&self) -> usize {
+    pub(super) const fn row_bytes(&self) -> usize {
         self.width * size_of::<u64>()
     }
 
@@ -460,7 +522,7 @@ fn bytes_to_goldilocks(raw: &[u8]) -> Vec<Val> {
 
 /// Binary Merkle-tree padded layer length (matching `p3_merkle_tree::padded_len(raw_len, 2)`).
 #[inline]
-const fn padded_len_binary(raw_len: usize) -> usize {
+pub(super) const fn padded_len_binary(raw_len: usize) -> usize {
     if raw_len <= 1 {
         raw_len
     } else {
@@ -470,7 +532,9 @@ const fn padded_len_binary(raw_len: usize) -> usize {
 
 /// Validates that every matrix height sits on the `ceil(max_height / 2^k)`
 /// ladder anchored at the tallest matrix (matching `p3_merkle_tree`).
-fn validate_reachable_heights_iter(heights: impl Iterator<Item = usize> + Clone) -> usize {
+pub(super) fn validate_reachable_heights_iter(
+    heights: impl Iterator<Item = usize> + Clone,
+) -> usize {
     let max_height = heights
         .clone()
         .max()
@@ -494,13 +558,13 @@ fn validate_reachable_heights_iter(heights: impl Iterator<Item = usize> + Clone)
 
 /// Shared Merkle digest layers and opening-proof traversal for both in-memory
 /// and disk-spilled binary BLAKE3 Merkle trees.
-struct MerkleDigests {
-    digest_layers: Vec<Vec<[u8; 32]>>,
-    arity_schedule: Vec<usize>,
+pub(super) struct MerkleDigests {
+    pub(super) digest_layers: Vec<Vec<[u8; 32]>>,
+    pub(super) arity_schedule: Vec<usize>,
 }
 
 impl MerkleDigests {
-    fn cap(&self, cap_height: usize) -> MerkleCap<Val, [u8; 32]> {
+    pub(super) fn cap(&self, cap_height: usize) -> MerkleCap<Val, [u8; 32]> {
         let num_layers = self.digest_layers.len();
         let effective_cap_height = cap_height.min(num_layers.saturating_sub(1));
         let layer_idx = num_layers - 1 - effective_cap_height;
@@ -510,7 +574,7 @@ impl MerkleDigests {
         MerkleCap::new(layer[..cap_len].to_vec())
     }
 
-    fn open_single_proof(&self, index: usize, cap_height: usize) -> Vec<[u8; 32]> {
+    pub(super) fn open_single_proof(&self, index: usize, cap_height: usize) -> Vec<[u8; 32]> {
         let num_layers = self.digest_layers.len();
         let effective_cap_height = cap_height.min(num_layers.saturating_sub(1));
         let proof_levels = num_layers
@@ -533,7 +597,11 @@ impl MerkleDigests {
         proof
     }
 
-    fn open_multi_proof(&self, indices: &[usize], cap_height: usize) -> PrunedMerklePaths<u8, 32> {
+    pub(super) fn open_multi_proof(
+        &self,
+        indices: &[usize],
+        cap_height: usize,
+    ) -> PrunedMerklePaths<u8, 32> {
         let num_layers = self.digest_layers.len();
         let effective_cap_height = cap_height.min(num_layers.saturating_sub(1));
         let proof_levels = num_layers
@@ -914,7 +982,11 @@ impl SpilledMerkleTree {
     }
 }
 
-fn block_rows_for_group(matrices: &[SpilledMatrix], group: &[usize], height: usize) -> usize {
+pub(super) fn block_rows_for_group(
+    matrices: &[SpilledMatrix],
+    group: &[usize],
+    height: usize,
+) -> usize {
     let total_row_bytes: usize = group
         .iter()
         .map(|&idx| matrices[idx].row_bytes())
@@ -956,7 +1028,10 @@ fn hash_leaf_group_streaming(
     }
 }
 
-fn compress_layer_binary(prev_layer: &[[u8; 32]], compress_domain: Blake3Domain) -> Vec<[u8; 32]> {
+pub(super) fn compress_layer_binary(
+    prev_layer: &[[u8; 32]],
+    compress_domain: Blake3Domain,
+) -> Vec<[u8; 32]> {
     let raw_next = prev_layer.len() / 2;
     let next_len_padded = padded_len_binary(raw_next);
     // SAFETY: `compress_pairs_uninit` initializes every element of `dst` (`0..raw_next`).
@@ -967,7 +1042,7 @@ fn compress_layer_binary(prev_layer: &[[u8; 32]], compress_domain: Blake3Domain)
     }
 }
 
-fn compress_and_inject_prehashed(
+pub(super) fn compress_and_inject_prehashed(
     prev_layer: &[[u8; 32]],
     rows_digests: &[[u8; 32]],
     compress_domain: Blake3Domain,
@@ -1402,6 +1477,12 @@ impl CapValidatingMmcs<Val> for SpillableMmcs {
         log_max_height: usize,
     ) -> Result<(), Self::Error> {
         verify_merkle_cap_len_for_log_height(self.cap_height(), commit, log_max_height)
+    }
+
+    fn empty_multi_proof() -> Self::MultiProof {
+        PrunedMerklePaths {
+            sibling_hashes: Vec::new(),
+        }
     }
 }
 
@@ -2081,7 +2162,7 @@ impl<Dft: TwoAdicSubgroupDft<Val>, FriMmcs> SpillableTwoAdicFriPcs<Dft, FriMmcs>
 
 /// Builds the bit-reversed evaluation coset `GENERATOR * <g>` of size
 /// `1 << log_size` in parallel chunks.
-fn build_bitrev_coset(log_size: usize) -> Vec<Val> {
+pub(super) fn build_bitrev_coset(log_size: usize) -> Vec<Val> {
     let size = 1usize << log_size;
     let g = Val::two_adic_generator(log_size);
     let mut coset = Val::zero_vec(size);
@@ -2376,7 +2457,7 @@ fn compute_inverse_denominators_for_point<EF: ExtensionField<Val> + ExtensionOf<
     }
 }
 
-fn compute_inverse_denominators_from_dims<EF: ExtensionField<Val> + ExtensionOf<Val>>(
+pub(super) fn compute_inverse_denominators_from_dims<EF: ExtensionField<Val> + ExtensionOf<Val>>(
     dims_and_points: &[(Vec<Dimensions>, &Vec<Vec<EF>>)],
     coset: &[Val],
 ) -> LinearMap<EF, Vec<EF>> {
@@ -2408,7 +2489,7 @@ fn compute_inverse_denominators_from_dims<EF: ExtensionField<Val> + ExtensionOf<
 /// Streams rows `0..h` of `spilled` once in bounded chunks and computes the
 /// exact barycentric interpolation at every point in `points`, matching
 /// `Interpolate::interpolate_coset_with_precomputation`.
-fn interpolate_spilled_coset<EF: ExtensionField<Val>>(
+pub(super) fn interpolate_spilled_coset<EF: ExtensionField<Val>>(
     spilled: &SpilledMatrix,
     h: usize,
     points: &[EF],

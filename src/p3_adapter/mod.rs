@@ -13,5 +13,8 @@ pub mod fri_batching;
 pub mod pcs;
 #[cfg(not(feature = "cuda"))]
 pub mod spill;
+#[cfg(not(feature = "cuda"))]
+pub mod spill_zk;
+pub mod zk;
 
 pub use air::*;

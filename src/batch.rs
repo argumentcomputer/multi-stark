@@ -331,11 +331,23 @@ impl<SC: StarkGenericConfig> System<SC> {
         &self,
         preamble: &BatchPreamble<SC>,
     ) -> Result<(), VerificationError<PcsError<SC>>> {
+        let is_zk = self.config.is_zk();
+        let zk_shift = usize::from(is_zk);
         ensure!(
             !self.circuits.is_empty(),
             VerificationError::InvalidSystem;
             "system has no circuits"
         );
+        if is_zk {
+            ensure!(
+                self.config.zk_randomizer_width() >= crate::p3_adapter::zk::ZK_RANDOMIZER_WIDTH
+                    && self.config.log_blowup() >= 1,
+                VerificationError::InvalidSystem;
+                randomizer_width = self.config.zk_randomizer_width(),
+                log_blowup = self.config.log_blowup(),
+                "invalid v6-zk randomizer width or log_blowup"
+            );
+        }
         let num_preprocessed = self
             .preprocessed_indices
             .iter()
@@ -362,7 +374,7 @@ impl<SC: StarkGenericConfig> System<SC> {
                     && max_prep_height.is_power_of_two()
                     && self.config.validate_commitment_cap(
                         commit,
-                        log2_strict_usize(max_prep_height) + self.config.log_blowup(),
+                        log2_strict_usize(max_prep_height) + zk_shift + self.config.log_blowup(),
                     ),
                 VerificationError::InvalidSystem;
                 max_prep_height,
@@ -374,8 +386,10 @@ impl<SC: StarkGenericConfig> System<SC> {
             VerificationError::BatchShapeMismatch;
             "batch preamble has no shard headers"
         );
+        let min_log_degree = self.config.min_log_degree();
         let max_log_degree = self.config.max_log_degree();
         let max_log_quotient_domain = self.config.max_log_quotient_domain();
+        let max_quotient_degree = self.config.max_quotient_degree();
         let log_blowup = self.config.log_blowup();
         for (idx, header) in preamble.headers.iter().enumerate() {
             ensure!(
@@ -414,11 +428,31 @@ impl<SC: StarkGenericConfig> System<SC> {
                         "batch preamble header trace height does not match preprocessed height"
                     );
                 }
-                let quotient_degree = circuit.quotient_degree();
+                let quotient_degree = circuit.quotient_degree_for(is_zk);
+                ensure!(
+                    quotient_degree <= max_quotient_degree,
+                    VerificationError::InvalidSystem;
+                    shard = idx,
+                    circuit = ci,
+                    quotient_degree,
+                    max_quotient_degree,
+                    "batch circuit quotient degree exceeds PCS blowup budget"
+                );
+                if is_zk {
+                    ensure!(
+                        usize::from(log_degree) >= min_log_degree,
+                        VerificationError::BatchShapeMismatch;
+                        shard = idx,
+                        circuit = ci,
+                        log_degree,
+                        min_log_degree,
+                        "batch preamble header trace height below v6-zk minimum floor"
+                    );
+                }
                 ensure!(
                     usize::from(log_degree) <= max_log_degree
                         && usize::from(log_degree) < usize::BITS as usize
-                        && usize::from(log_degree) + log2_strict_usize(quotient_degree)
+                        && usize::from(log_degree) + zk_shift + log2_strict_usize(quotient_degree)
                             <= max_log_quotient_domain,
                     VerificationError::BatchShapeMismatch;
                     shard = idx,
@@ -437,6 +471,7 @@ impl<SC: StarkGenericConfig> System<SC> {
                 .map(usize::from)
                 .max()
                 .expect("active_indices is non-empty")
+                + zk_shift
                 + log_blowup;
             ensure!(
                 self.config

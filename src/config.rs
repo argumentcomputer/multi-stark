@@ -31,6 +31,24 @@ pub type AcceleratedLookupTraces<SC> = (
 pub type AcceleratedLookupCommitment<SC> =
     (Com<SC>, PcsData<SC>, Vec<<SC as ProofConfig>::Challenge>);
 
+/// Reference to the committed cross-circuit LogUp accumulator boundary mask
+/// matrix `U` (matrix `#num_active` inside `stage_2_trace`) for multi-circuit
+/// `v6-zk` proofs (`num_active > 1`).
+pub struct ZkBoundaryMask<'a, SC: ProofConfig> {
+    pub data: &'a PcsData<SC>,
+    pub matrix_index: usize,
+    pub active_pos: usize,
+    pub num_active: usize,
+}
+
+impl<SC: ProofConfig> Clone for ZkBoundaryMask<'_, SC> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<SC: ProofConfig> Copy for ZkBoundaryMask<'_, SC> {}
+
 /// One circuit's inputs to an optional fused quotient commitment backend.
 /// Keeping this protocol-level description free of CUDA types lets the
 /// generic CPU prover remain entirely independent of accelerator support.
@@ -43,6 +61,7 @@ pub struct QuotientCommitInput<'a, SC: ProofConfig> {
     pub stage_1: (&'a PcsData<SC>, usize),
     pub stage_2: (&'a PcsData<SC>, usize),
     pub constraint_count: usize,
+    pub zk_boundary_mask: Option<ZkBoundaryMask<'a, SC>>,
 }
 
 /// One circuit's inputs to an optional fused lookup construction and
@@ -75,6 +94,13 @@ pub enum ProtocolVersion {
     /// canonical VK & constraint-graph digest plus extension degree/modulus
     /// bound in the transcript, and configurable multilinear tensor FRI batching.
     V6,
+    /// Zero-knowledge `v6-zk` protocol: 2× interleaved odd-coset hiding PCS
+    /// with zero-storage BLAKE3-CTR leaf salting (`multi-stark/v6-zk/*`),
+    /// `W_R >= 4` base-field randomizer polynomial merged into quotient
+    /// commitment, telescoping half-stride quotient blinding, minimum trace
+    /// height floor, and boundary-mask blinding of `intermediate_accumulators`
+    /// when multiple circuits are active.
+    V6Zk,
 }
 
 /// Transcript mode separating standalone single-proof transcripts from
@@ -108,6 +134,48 @@ pub trait ProofConfig {
     /// compatibility with existing configurations.
     fn protocol_version(&self) -> ProtocolVersion {
         ProtocolVersion::V5
+    }
+
+    /// Returns `true` when zero-knowledge mode (`ProtocolVersion::V6Zk`) is
+    /// enabled. Non-ZK `v5` and `v6` configurations return `false` with zero
+    /// runtime overhead.
+    fn is_zk(&self) -> bool {
+        self.protocol_version() == ProtocolVersion::V6Zk
+    }
+
+    /// Minimum admissible `log2(trace_height)` for active circuits (`0` in
+    /// non-ZK modes; enforces `N >= next_pow2(2Q + 2D)` in `v6-zk`).
+    fn min_log_degree(&self) -> usize {
+        0
+    }
+
+    /// Base-field column width `W_R` of the randomizer polynomial `R(X)`
+    /// merged into `quotient_chunks` (`0` in non-ZK modes; `>= 4` in `v6-zk`).
+    fn zk_randomizer_width(&self) -> usize {
+        0
+    }
+
+    /// Samples `count` uniformly random base-field elements from a CSPRNG for
+    /// `v6-zk` blinding (e.g. cross-circuit accumulator boundary masking).
+    fn sample_zk_base_randomness(&self, _count: usize) -> Vec<Val<Self>> {
+        unimplemented!("ProofConfig does not support v6-zk CSPRNG sampling")
+    }
+
+    /// Commits ZK blinded quotient polynomials (`2 * q_zk` telescoping slices
+    /// per active circuit) together with the `W_R`-column randomizer `R(X)` in
+    /// one hiding MMCS round.
+    fn commit_quotient_zk(
+        &self,
+        _quotients: Vec<(
+            Domain<Self>,
+            p3_matrix::dense::RowMajorMatrix<Val<Self>>,
+            usize,
+        )>,
+    ) -> (Com<Self>, PcsData<Self>)
+    where
+        Self: Sized,
+    {
+        unimplemented!("ProofConfig does not support v6-zk quotient commitment")
     }
 
     /// Returns a fresh challenger.

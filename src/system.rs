@@ -129,6 +129,21 @@ impl<F: Field> Circuit<F> {
         (self.max_constraint_degree().max(2) - 1).next_power_of_two()
     }
 
+    /// Quotient degree multiple for non-ZK (`is_zk == false`) or `v6-zk`
+    /// (`is_zk == true`).
+    ///
+    /// In `v6-zk`, 2× odd-coset witness blinding yields trace polynomials of
+    /// degree `< 2N` so `deg(Q) <= (2d - 1)N - d + 1 < 2N · q_zk` where
+    /// `q_zk = max(d, 1).next_power_of_two()` (matching Plonky3's
+    /// `get_log_num_quotient_chunks(..., is_zk = 1)`).
+    pub fn quotient_degree_for(&self, is_zk: bool) -> usize {
+        if is_zk {
+            self.max_constraint_degree().max(1).next_power_of_two()
+        } else {
+            self.quotient_degree()
+        }
+    }
+
     /// Returns `true` if any compiled node reads a column from `source` at `offset`.
     pub fn uses_row(&self, source: Source, offset: RowOffset) -> bool {
         self.graph.uses_row(source, offset)
@@ -199,6 +214,25 @@ impl<SC: ProofConfig> System<SC> {
         retain_preprocessed: bool,
     ) -> (Self, ProverKey<SC>) {
         let pcs = config.pcs();
+        let is_zk = config.is_zk();
+        if is_zk {
+            assert!(
+                config.zk_randomizer_width() >= crate::p3_adapter::zk::ZK_RANDOMIZER_WIDTH,
+                "v6-zk requires randomizer width W_R >= {} (got {})",
+                crate::p3_adapter::zk::ZK_RANDOMIZER_WIDTH,
+                config.zk_randomizer_width()
+            );
+            assert!(
+                config.log_blowup() >= 1,
+                "v6-zk requires log_blowup >= 1 (got {})",
+                config.log_blowup()
+            );
+        }
+        let min_zk_height = if is_zk {
+            1usize << config.min_log_degree()
+        } else {
+            0
+        };
         let max_quotient_degree = config.max_quotient_degree();
         let params = extension_params::<SC>();
         let d = params.degree;
@@ -258,17 +292,26 @@ impl<SC: ProofConfig> System<SC> {
             };
             // The prover obtains trace evaluations on the quotient domain
             // from the PCS, which can only serve domains up to
-            // `max_quotient_degree` times the trace domain (the blowup
-            // factor for FRI). Beyond that, proving would silently produce
-            // invalid proofs, so reject the circuit upfront.
+            // `max_quotient_degree` times the committed trace domain (the
+            // blowup factor for FRI). Beyond that, proving would silently
+            // produce invalid proofs, so reject the circuit upfront.
+            let required_quotient_degree = circuit.quotient_degree_for(is_zk);
             assert!(
-                circuit.quotient_degree() <= max_quotient_degree,
+                required_quotient_degree <= max_quotient_degree,
                 "circuit {i}: constraint degree {} needs quotient degree {}, but the PCS only \
                  supports {}; increase log_blowup or lower the constraint degree",
                 circuit.max_constraint_degree(),
-                circuit.quotient_degree(),
+                required_quotient_degree,
                 max_quotient_degree,
             );
+            if is_zk && circuit.preprocessed_height > 0 {
+                assert!(
+                    circuit.preprocessed_height >= min_zk_height,
+                    "circuit {i}: preprocessed trace height {} is below v6-zk minimum height {}",
+                    circuit.preprocessed_height,
+                    min_zk_height,
+                );
+            }
 
             let item = if let Some(preprocessed) = circuit.preprocessed.take() {
                 preprocessed_indices.push(Some(next_preprocessed_index));
@@ -296,7 +339,12 @@ impl<SC: ProofConfig> System<SC> {
         // Ensure all inputs are drained even if a custom backend stopped early.
         for _ in prep_iter {}
 
-        let vk_digest = compute_vk_digest::<Val<SC>, SC::Challenge>(&circuits);
+        let vk_domain = match config.protocol_version() {
+            ProtocolVersion::V6Zk => Blake3Domain::ZkVerifyingKey,
+            ProtocolVersion::V5 | ProtocolVersion::V6 => Blake3Domain::VerifyingKey,
+        };
+        let vk_digest =
+            compute_vk_digest_with_domain::<Val<SC>, SC::Challenge>(&circuits, vk_domain);
         let system = Self {
             config,
             circuits,
@@ -307,15 +355,18 @@ impl<SC: ProofConfig> System<SC> {
         (system, ProverKey { preprocessed_data })
     }
 
-    /// Binds the system shape (and, under protocol `v6`, the extension
-    /// degree/modulus and canonical VK / constraint-graph digest) into the
-    /// Fiat-Shamir transcript. The prover and the verifier must call this
-    /// identically, before observing any commitment, so that transcripts of
-    /// systems with different constraint graphs or circuit shapes never
+    /// Binds the system shape (and, under protocol `v6` / `v6-zk`, the
+    /// extension degree/modulus and canonical VK / constraint-graph digest)
+    /// into the Fiat-Shamir transcript. The prover and the verifier must call
+    /// this identically, before observing any commitment, so that transcripts
+    /// of systems with different constraint graphs or circuit shapes never
     /// collide. The protocol parameters are bound separately via the
     /// challenger seed (see [`ProofConfig::initialise_challenger_for_mode`]).
     pub fn observe_shape(&self, challenger: &mut SC::Challenger) {
-        if self.config.protocol_version() == ProtocolVersion::V6 {
+        if matches!(
+            self.config.protocol_version(),
+            ProtocolVersion::V6 | ProtocolVersion::V6Zk
+        ) {
             challenger.observe_field(Val::<SC>::from_usize(
                 <SC::Challenge as ExtensionOf<Val<SC>>>::D,
             ));
@@ -352,7 +403,17 @@ impl<SC: ProofConfig> System<SC> {
 /// `System::new_without_preprocessed` produce identical digests (the
 /// preprocessed traces themselves are bound via `preprocessed_commit`).
 pub fn compute_vk_digest<F: Field, EF: ExtensionOf<F>>(circuits: &[Circuit<F>]) -> [u8; 32] {
-    let mut hasher = Blake3Domain::VerifyingKey.hasher();
+    compute_vk_digest_with_domain::<F, EF>(circuits, Blake3Domain::VerifyingKey)
+}
+
+/// Computes the canonical verifying-key / constraint-graph digest under the
+/// requested BLAKE3 `derive_key` domain (`VerifyingKey` for `v6`,
+/// `ZkVerifyingKey` for `v6-zk`).
+pub fn compute_vk_digest_with_domain<F: Field, EF: ExtensionOf<F>>(
+    circuits: &[Circuit<F>],
+    domain: Blake3Domain,
+) -> [u8; 32] {
+    let mut hasher = domain.hasher();
     let bincode_cfg = bincode::config::standard()
         .with_little_endian()
         .with_fixed_int_encoding();

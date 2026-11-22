@@ -20,6 +20,7 @@ use p3_maybe_rayon::prelude::*;
 use p3_symmetric::CryptographicHasher;
 
 use super::domain_blake3::{BLAKE3_IV as IV, Blake3Domain, DomainBlake3};
+use super::zk::{ZK_LEAF_SALT_BYTES, derive_leaf_salt};
 use crate::types::Val;
 
 const BLOCK_LEN: usize = 64;
@@ -784,6 +785,395 @@ pub(crate) fn hash_matrix_rows<M: Matrix<Val>>(
     // SAFETY: `hash_matrix_rows_uninit` only writes initialized `[u8; 32]` values.
     let uninit = unsafe { as_uninit_slice(out) };
     hash_matrix_rows_uninit(matrices, start_row, uninit, domain);
+}
+
+/// Hashes `out.len()` contiguous fixed-length rows of `row_bytes` bytes each
+/// with an on-the-fly BLAKE3-CTR leaf salt (`derive_leaf_salt(salt_seed, height, start_row + i)`)
+/// appended to each leaf message.
+pub(crate) fn hash_raw_rows_salted_uninit(
+    raw: &[u8],
+    row_bytes: usize,
+    height: usize,
+    start_row: usize,
+    salt_seed: &[u8; 32],
+    out: &mut [MaybeUninit<[u8; 32]>],
+    domain: Blake3Domain,
+) {
+    assert_eq!(raw.len(), out.len() * row_bytes);
+    if out.is_empty() {
+        return;
+    }
+    let total_msg_bytes = row_bytes + ZK_LEAF_SALT_BYTES;
+    if total_msg_bytes > MAX_MULTIBUF_ROW_BYTES {
+        let hasher = DomainBlake3::new(domain);
+        out.par_iter_mut().enumerate().for_each(|(local_row, dst)| {
+            let salt = derive_leaf_salt(salt_seed, height, start_row + local_row);
+            let row = &raw[local_row * row_bytes..(local_row + 1) * row_bytes];
+            dst.write(hasher.hash_iter_slices([row, &salt[..]]));
+        });
+        return;
+    }
+    let backend = detect_backend();
+    let batch = match backend {
+        #[cfg(target_arch = "x86_64")]
+        SimdBackend::Avx512 => 16usize,
+        #[cfg(target_arch = "x86_64")]
+        SimdBackend::Avx2 => 8usize,
+        SimdBackend::Scalar => 1usize,
+    };
+    if batch == 1 {
+        let hasher = DomainBlake3::new(domain);
+        out.par_iter_mut().enumerate().for_each(|(local_row, dst)| {
+            let salt = derive_leaf_salt(salt_seed, height, start_row + local_row);
+            let row = &raw[local_row * row_bytes..(local_row + 1) * row_bytes];
+            dst.write(hasher.hash_iter_slices([row, &salt[..]]));
+        });
+        return;
+    }
+    let chunk_rows = (65_536 / total_msg_bytes.max(64))
+        .clamp(batch, 256)
+        .next_multiple_of(batch);
+    let process_chunk = |scratch: &mut Vec<u8>,
+                         chunk_offset: usize,
+                         dst: &mut [MaybeUninit<[u8; 32]>]| {
+        let mut offset = 0;
+        while offset < dst.len() {
+            let take = (dst.len() - offset).min(batch);
+            for lane in 0..take {
+                let local_row = chunk_offset + offset + lane;
+                let base = lane * total_msg_bytes;
+                if row_bytes > 0 {
+                    scratch[base..base + row_bytes]
+                        .copy_from_slice(&raw[local_row * row_bytes..(local_row + 1) * row_bytes]);
+                }
+                let salt = derive_leaf_salt(salt_seed, height, start_row + local_row);
+                scratch[base + row_bytes..base + total_msg_bytes].copy_from_slice(&salt);
+            }
+            hash_raw_rows_slice(
+                &scratch[..take * total_msg_bytes],
+                total_msg_bytes,
+                &mut dst[offset..offset + take],
+                backend,
+                domain,
+            );
+            offset += take;
+        }
+    };
+    if out.len() <= chunk_rows {
+        let mut scratch = vec![0u8; batch * total_msg_bytes];
+        process_chunk(&mut scratch, 0, out);
+    } else {
+        out.par_chunks_mut(chunk_rows).enumerate().for_each_init(
+            || vec![0u8; batch * total_msg_bytes],
+            |scratch, (chunk_idx, dst)| {
+                process_chunk(scratch, chunk_idx * chunk_rows, dst);
+            },
+        );
+    }
+}
+
+/// Hashes `out.len()` rows formed by concatenating the corresponding row slices
+/// across `blocks` plus the on-the-fly derived 16-byte leaf salt.
+pub(crate) fn hash_raw_multi_rows_salted_uninit(
+    blocks: &[(Vec<u8>, usize)],
+    height: usize,
+    start_row: usize,
+    salt_seed: &[u8; 32],
+    out: &mut [MaybeUninit<[u8; 32]>],
+    domain: Blake3Domain,
+) {
+    if out.is_empty() {
+        return;
+    }
+    if let [(buf, row_bytes)] = blocks {
+        hash_raw_rows_salted_uninit(buf, *row_bytes, height, start_row, salt_seed, out, domain);
+        return;
+    }
+    let total_row_bytes: usize = blocks.iter().map(|(_, rb)| *rb).sum();
+    let total_msg_bytes = total_row_bytes + ZK_LEAF_SALT_BYTES;
+    if total_msg_bytes > MAX_MULTIBUF_ROW_BYTES {
+        let hasher = DomainBlake3::new(domain);
+        out.par_iter_mut()
+            .enumerate()
+            .for_each(|(local_row, digest)| {
+                let salt = derive_leaf_salt(salt_seed, height, start_row + local_row);
+                digest.write(
+                    hasher.hash_iter_slices(
+                        blocks
+                            .iter()
+                            .map(|(buf, rb)| &buf[local_row * *rb..(local_row + 1) * *rb])
+                            .chain(core::iter::once(&salt[..])),
+                    ),
+                );
+            });
+        return;
+    }
+    let backend = detect_backend();
+    let batch = match backend {
+        #[cfg(target_arch = "x86_64")]
+        SimdBackend::Avx512 => 16usize,
+        #[cfg(target_arch = "x86_64")]
+        SimdBackend::Avx2 => 8usize,
+        SimdBackend::Scalar => 1usize,
+    };
+    if batch == 1 {
+        let hasher = DomainBlake3::new(domain);
+        out.par_iter_mut()
+            .enumerate()
+            .for_each(|(local_row, digest)| {
+                let salt = derive_leaf_salt(salt_seed, height, start_row + local_row);
+                digest.write(
+                    hasher.hash_iter_slices(
+                        blocks
+                            .iter()
+                            .map(|(buf, rb)| &buf[local_row * *rb..(local_row + 1) * *rb])
+                            .chain(core::iter::once(&salt[..])),
+                    ),
+                );
+            });
+        return;
+    }
+    let chunk_rows = (65_536 / total_msg_bytes.max(64))
+        .clamp(batch, 256)
+        .next_multiple_of(batch);
+    out.par_chunks_mut(chunk_rows).enumerate().for_each_init(
+        || vec![0u8; batch * total_msg_bytes],
+        |scratch, (chunk_idx, dst)| {
+            let chunk_start = chunk_idx * chunk_rows;
+            let mut offset = 0;
+            while offset < dst.len() {
+                let take = (dst.len() - offset).min(batch);
+                for lane in 0..take {
+                    let local_row = chunk_start + offset + lane;
+                    let mut pos = lane * total_msg_bytes;
+                    for (buf, rb) in blocks {
+                        if *rb > 0 {
+                            scratch[pos..pos + *rb]
+                                .copy_from_slice(&buf[local_row * *rb..(local_row + 1) * *rb]);
+                            pos += *rb;
+                        }
+                    }
+                    let salt = derive_leaf_salt(salt_seed, height, start_row + local_row);
+                    scratch[pos..pos + ZK_LEAF_SALT_BYTES].copy_from_slice(&salt);
+                }
+                hash_raw_rows_slice(
+                    &scratch[..take * total_msg_bytes],
+                    total_msg_bytes,
+                    &mut dst[offset..offset + take],
+                    backend,
+                    domain,
+                );
+                offset += take;
+            }
+        },
+    );
+}
+
+/// Safe wrapper over [`hash_raw_multi_rows_salted_uninit`] writing into an
+/// initialized digest buffer.
+pub(crate) fn hash_raw_multi_rows_salted(
+    blocks: &[(Vec<u8>, usize)],
+    height: usize,
+    start_row: usize,
+    salt_seed: &[u8; 32],
+    out: &mut [[u8; 32]],
+    domain: Blake3Domain,
+) {
+    // SAFETY: `hash_raw_multi_rows_salted_uninit` only writes initialized digests.
+    let uninit = unsafe { as_uninit_slice(out) };
+    hash_raw_multi_rows_salted_uninit(blocks, height, start_row, salt_seed, uninit, domain);
+}
+
+/// Hashes `out.len()` rows starting at `start_row` across one or more in-memory
+/// Goldilocks matrices (`Matrix<Val>`) with an on-the-fly derived 16-byte leaf
+/// salt appended to each leaf message.
+pub(crate) fn hash_matrix_rows_salted_uninit<M: Matrix<Val>>(
+    matrices: &[&M],
+    height: usize,
+    start_row: usize,
+    salt_seed: &[u8; 32],
+    out: &mut [MaybeUninit<[u8; 32]>],
+    domain: Blake3Domain,
+) {
+    if out.is_empty() {
+        return;
+    }
+    let total_width: usize = matrices.iter().map(|m| m.width()).sum();
+    let total_row_bytes = total_width * size_of::<u64>();
+    let total_msg_bytes = total_row_bytes + ZK_LEAF_SALT_BYTES;
+    let backend = detect_backend();
+    let hasher = DomainBlake3::new(domain);
+
+    if total_msg_bytes > MAX_MULTIBUF_ROW_BYTES {
+        out.par_iter_mut().enumerate().for_each_init(
+            || vec![0u8; total_msg_bytes],
+            |scratch, (local_row, digest)| {
+                let r = start_row + local_row;
+                let mut pos = 0;
+                for m in matrices {
+                    // SAFETY: `r < m.height()`.
+                    for elem in unsafe { m.row_unchecked(r) } {
+                        scratch[pos..pos + 8]
+                            .copy_from_slice(&elem.as_canonical_u64().to_le_bytes());
+                        pos += 8;
+                    }
+                }
+                let salt = derive_leaf_salt(salt_seed, height, r);
+                scratch[pos..pos + ZK_LEAF_SALT_BYTES].copy_from_slice(&salt);
+                digest.write(hasher.hash_slice(scratch));
+            },
+        );
+        return;
+    }
+
+    let batch = match backend {
+        #[cfg(target_arch = "x86_64")]
+        SimdBackend::Avx512 => 16usize,
+        #[cfg(target_arch = "x86_64")]
+        SimdBackend::Avx2 => 8usize,
+        SimdBackend::Scalar => 1usize,
+    };
+
+    #[cfg(target_arch = "x86_64")]
+    if total_msg_bytes <= BLOCK_LEN && batch > 1 {
+        let key = domain.key_words();
+        let domain_flags = domain.domain_flags();
+        let block_len_u32 = u32::try_from(total_msg_bytes).unwrap();
+        let chunk_rows = 256usize;
+        let process_small = |chunk_start: usize, dst: &mut [MaybeUninit<[u8; 32]>]| {
+            let mut offset = 0;
+            while offset + batch <= dst.len() {
+                let mut blocks = [[0u8; BLOCK_LEN]; 16];
+                for (lane, block) in blocks[..batch].iter_mut().enumerate() {
+                    let r = chunk_start + offset + lane;
+                    let mut pos = 0;
+                    for m in matrices {
+                        // SAFETY: `r < m.height()`.
+                        for elem in unsafe { m.row_unchecked(r) } {
+                            block[pos..pos + 8]
+                                .copy_from_slice(&elem.as_canonical_u64().to_le_bytes());
+                            pos += 8;
+                        }
+                    }
+                    let salt = derive_leaf_salt(salt_seed, height, r);
+                    block[pos..pos + ZK_LEAF_SALT_BYTES].copy_from_slice(&salt);
+                }
+                if backend == SimdBackend::Avx512 {
+                    // SAFETY: `avx512f` detected at runtime; `dst[offset..offset+16]` has 16 slots.
+                    unsafe {
+                        avx512::hash_16_single_block(
+                            &blocks,
+                            block_len_u32,
+                            dst[offset..].as_mut_ptr().cast(),
+                            key,
+                            domain_flags,
+                        );
+                    }
+                } else {
+                    // SAFETY: `avx2` detected at runtime; `dst[offset..offset+8]` has 8 slots.
+                    unsafe {
+                        avx2::hash_8_single_block(
+                            (&blocks[..8]).try_into().unwrap(),
+                            block_len_u32,
+                            dst[offset..].as_mut_ptr().cast(),
+                            key,
+                            domain_flags,
+                        );
+                    }
+                }
+                offset += batch;
+            }
+            if offset < dst.len() {
+                let mut block = [0u8; BLOCK_LEN];
+                while offset < dst.len() {
+                    let r = chunk_start + offset;
+                    let mut pos = 0;
+                    for m in matrices {
+                        // SAFETY: `r < m.height()`.
+                        for elem in unsafe { m.row_unchecked(r) } {
+                            block[pos..pos + 8]
+                                .copy_from_slice(&elem.as_canonical_u64().to_le_bytes());
+                            pos += 8;
+                        }
+                    }
+                    let salt = derive_leaf_salt(salt_seed, height, r);
+                    block[pos..pos + ZK_LEAF_SALT_BYTES].copy_from_slice(&salt);
+                    dst[offset].write(hasher.hash_slice(&block[..total_msg_bytes]));
+                    offset += 1;
+                }
+            }
+        };
+        if out.len() <= chunk_rows {
+            process_small(start_row, out);
+        } else {
+            out.par_chunks_mut(chunk_rows)
+                .enumerate()
+                .for_each(|(chunk_idx, dst)| {
+                    process_small(start_row + chunk_idx * chunk_rows, dst);
+                });
+        }
+        return;
+    }
+
+    let chunk_rows = (65_536 / total_msg_bytes.max(64))
+        .clamp(batch, 256)
+        .next_multiple_of(batch);
+    let process_chunk =
+        |scratch: &mut Vec<u8>, chunk_start: usize, dst: &mut [MaybeUninit<[u8; 32]>]| {
+            let mut offset = 0;
+            while offset < dst.len() {
+                let take = (dst.len() - offset).min(batch);
+                for lane in 0..take {
+                    let r = chunk_start + offset + lane;
+                    let mut pos = lane * total_msg_bytes;
+                    for m in matrices {
+                        // SAFETY: `r < m.height()`.
+                        for elem in unsafe { m.row_unchecked(r) } {
+                            scratch[pos..pos + 8]
+                                .copy_from_slice(&elem.as_canonical_u64().to_le_bytes());
+                            pos += 8;
+                        }
+                    }
+                    let salt = derive_leaf_salt(salt_seed, height, r);
+                    scratch[pos..pos + ZK_LEAF_SALT_BYTES].copy_from_slice(&salt);
+                }
+                hash_raw_rows_slice(
+                    &scratch[..take * total_msg_bytes],
+                    total_msg_bytes,
+                    &mut dst[offset..offset + take],
+                    backend,
+                    domain,
+                );
+                offset += take;
+            }
+        };
+
+    if out.len() <= chunk_rows {
+        let mut scratch = vec![0u8; batch * total_msg_bytes];
+        process_chunk(&mut scratch, start_row, out);
+    } else {
+        out.par_chunks_mut(chunk_rows).enumerate().for_each_init(
+            || vec![0u8; batch * total_msg_bytes],
+            |scratch, (chunk_idx, dst)| {
+                process_chunk(scratch, start_row + chunk_idx * chunk_rows, dst);
+            },
+        );
+    }
+}
+
+/// Safe wrapper over [`hash_matrix_rows_salted_uninit`] writing into an
+/// initialized digest buffer.
+pub(crate) fn hash_matrix_rows_salted<M: Matrix<Val>>(
+    matrices: &[&M],
+    height: usize,
+    start_row: usize,
+    salt_seed: &[u8; 32],
+    out: &mut [[u8; 32]],
+    domain: Blake3Domain,
+) {
+    // SAFETY: `hash_matrix_rows_salted_uninit` only writes initialized digests.
+    let uninit = unsafe { as_uninit_slice(out) };
+    hash_matrix_rows_salted_uninit(matrices, height, start_row, salt_seed, uninit, domain);
 }
 
 #[cfg(target_arch = "x86_64")]

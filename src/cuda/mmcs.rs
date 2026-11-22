@@ -1602,6 +1602,12 @@ impl CapValidatingMmcs<Goldilocks> for CudaMmcs {
     ) -> Result<(), Self::Error> {
         verify_merkle_cap_len_for_log_height(self.cap_height(), commit, log_max_height)
     }
+
+    fn empty_multi_proof() -> Self::MultiProof {
+        p3_merkle_tree::PrunedMerklePaths {
+            sibling_hashes: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

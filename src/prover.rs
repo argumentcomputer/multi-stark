@@ -499,6 +499,10 @@ where
             .filter_map(|(l, &is_active)| is_active.then_some(l))
             .collect();
 
+        let is_zk = self.config.is_zk();
+        let min_log_degree = self.config.min_log_degree();
+        let max_log_degree = self.config.max_log_degree();
+
         // Cost: "Stage 1 commit" — coset LDE (FFT) of each trace from n_i to
         // n_i·B rows (an iDFT plus B coset DFTs per column), then Merkle
         // tree. FFT work: Σ w_i · (B+1) · n_i · log₂(n_i).
@@ -513,6 +517,17 @@ where
             .map(|((ci, trace), lookup)| {
                 let degree = trace.height();
                 let log_degree = log2_strict_usize(degree);
+                if is_zk {
+                    assert!(
+                        log_degree >= min_log_degree,
+                        "circuit {ci}: trace height {degree} (2^{log_degree}) is below v6-zk minimum height {} (2^{min_log_degree})",
+                        1usize << min_log_degree,
+                    );
+                    assert!(
+                        log_degree <= max_log_degree,
+                        "circuit {ci}: trace log_degree {log_degree} exceeds v6-zk max_log_degree {max_log_degree}",
+                    );
+                }
                 let trace_domain = pcs.natural_domain_for_degree(degree);
                 log_degrees.push(log_degree);
                 let retain_1x = !lookup.is_materialized() && self.circuits[ci].num_lookups > 0;
@@ -552,6 +567,9 @@ where
         I::Item: Into<crate::witness::TraceSource<Val<SC>>>,
     {
         let pcs = self.config.pcs();
+        let is_zk = self.config.is_zk();
+        let min_log_degree = self.config.min_log_degree();
+        let max_log_degree = self.config.max_log_degree();
         let mut active = Vec::with_capacity(self.circuits.len());
         let mut active_indices = Vec::new();
         let mut log_degrees = Vec::new();
@@ -570,6 +588,18 @@ where
                 active.push(false);
                 return None;
             }
+            let log_degree = log2_strict_usize(height);
+            if is_zk {
+                assert!(
+                    log_degree >= min_log_degree,
+                    "circuit {ci}: trace height {height} (2^{log_degree}) is below v6-zk minimum height {} (2^{min_log_degree})",
+                    1usize << min_log_degree,
+                );
+                assert!(
+                    log_degree <= max_log_degree,
+                    "circuit {ci}: trace log_degree {log_degree} exceeds v6-zk max_log_degree {max_log_degree}",
+                );
+            }
             if circuit.preprocessed_height != 0 {
                 assert_eq!(
                     height, circuit.preprocessed_height,
@@ -578,7 +608,7 @@ where
             }
             active.push(true);
             active_indices.push(ci);
-            log_degrees.push(log2_strict_usize(height));
+            log_degrees.push(log_degree);
             let slot_widths: Vec<usize> = circuit
                 .graph
                 .lookups
@@ -626,6 +656,7 @@ where
         mut acc: SC::Challenge,
     ) -> Proof<SC> {
         let pcs = self.config.pcs();
+        let is_zk = self.config.is_zk();
         let Stage1 {
             active,
             active_indices,
@@ -634,6 +665,8 @@ where
             stage_1_trace_data,
             lookups: active_lookups,
         } = stage_1;
+        let num_active = active_indices.len();
+        let use_zk_acc_mask = is_zk && num_active > 1;
         // Canonical index -> active position (None = inactive).
         let mut active_pos: Vec<Option<usize>> = vec![None; active.len()];
         for (pos, &ci) in active_indices.iter().enumerate() {
@@ -772,12 +805,63 @@ where
                 // Cost: "Stage 2 commit" — LDE + Merkle for flattened extension traces.
                 // FFT work: Σ w2_i · D · (B+1) · n_i · log₂(n_i).
                 let _g = tracing::info_span!("stark/stage2_commit").entered();
-                let evaluations = stage_2_traces.into_iter().map(|trace| {
-                    let degree = trace.height();
-                    let trace_domain = pcs.natural_domain_for_degree(degree);
-                    (trace_domain, flatten_to_base(trace))
-                });
-                let (commitment, data) = pcs.commit(evaluations.collect());
+                let mut stage_2_traces = stage_2_traces;
+                let mut intermediate_accumulators = intermediate_accumulators;
+                let evaluations: Vec<_> = if use_zk_acc_mask {
+                    let ext_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
+                    // Move boundary injection to row 0 (X = 1) so every active
+                    // circuit shares the common point X = 1 with the boundary
+                    // mask matrix `U`.
+                    let mut prev_true = acc;
+                    for (trace, &true_acc) in
+                        stage_2_traces.iter_mut().zip(&intermediate_accumulators)
+                    {
+                        let delta_true = true_acc - prev_true;
+                        crate::lookup::apply_first_row_delta_shift(trace, delta_true);
+                        prev_true = true_acc;
+                    }
+                    // Blind interior accumulators `0..num_active - 1` with fresh
+                    // CSPRNG extension masks `mu_p`, leaving the final accumulator
+                    // exact (`0` for single proofs, shard residual for batches).
+                    let mask_cols = (num_active - 1) * ext_d;
+                    let mu_base = self.config.sample_zk_base_randomness(mask_cols);
+                    for p in 0..(num_active - 1) {
+                        let mu =
+                            SC::Challenge::from_basis_coefficients_fn(|c| mu_base[p * ext_d + c]);
+                        intermediate_accumulators[p] += mu;
+                    }
+                    let mut evals: Vec<_> = stage_2_traces
+                        .into_iter()
+                        .map(|trace| {
+                            let degree = trace.height();
+                            let trace_domain = pcs.natural_domain_for_degree(degree);
+                            (trace_domain, flatten_to_base(trace))
+                        })
+                        .collect();
+                    let min_height = 1usize << log_degrees.iter().copied().min().unwrap();
+                    let mut mask_values = Vec::with_capacity(min_height * mask_cols);
+                    mask_values.extend_from_slice(&mu_base);
+                    if min_height > 1 {
+                        mask_values.extend(
+                            self.config
+                                .sample_zk_base_randomness((min_height - 1) * mask_cols),
+                        );
+                    }
+                    let mask_mat = RowMajorMatrix::new(mask_values, mask_cols);
+                    let min_domain = pcs.natural_domain_for_degree(min_height);
+                    evals.push((min_domain, mask_mat));
+                    evals
+                } else {
+                    stage_2_traces
+                        .into_iter()
+                        .map(|trace| {
+                            let degree = trace.height();
+                            let trace_domain = pcs.natural_domain_for_degree(degree);
+                            (trace_domain, flatten_to_base(trace))
+                        })
+                        .collect()
+                };
+                let (commitment, data) = pcs.commit(evaluations);
                 drop(_g);
                 (commitment, data, intermediate_accumulators)
             };
@@ -801,6 +885,7 @@ where
         debug_assert_eq!(intermediate_accumulators.len(), active_indices.len());
         debug_assert_eq!(log_degrees.len(), active_indices.len());
         let mut quotient_inputs = Vec::with_capacity(active_indices.len());
+        let zk_shift = usize::from(is_zk);
         for (pos, ((&ci, log_degree), next_acc)) in active_indices
             .iter()
             .zip(log_degrees.iter())
@@ -808,11 +893,11 @@ where
             .enumerate()
         {
             let circuit = &self.circuits[ci];
-            let quotient_degree = circuit.quotient_degree();
+            let quotient_degree = circuit.quotient_degree_for(is_zk);
             let log_quotient_degree = log2_strict_usize(quotient_degree);
             let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
-            let quotient_domain =
-                trace_domain.create_disjoint_domain(1 << (log_degree + log_quotient_degree));
+            let quotient_domain = trace_domain
+                .create_disjoint_domain(1 << (log_degree + zk_shift + log_quotient_degree));
             // The four lookup publics (β, γ, acc, next_acc) as flat base
             // coordinates, in the layout the synthesized constraints read.
             let mut lookup_publics: Vec<Val<SC>> = Vec::new();
@@ -837,6 +922,12 @@ where
                 stage_1: (&stage_1_trace_data, pos),
                 stage_2: (&stage_2_trace_data, pos),
                 constraint_count: circuit.constraint_count(),
+                zk_boundary_mask: use_zk_acc_mask.then_some(crate::config::ZkBoundaryMask {
+                    data: &stage_2_trace_data,
+                    matrix_index: num_active,
+                    active_pos: pos,
+                    num_active,
+                }),
             });
             acc = *next_acc;
         }
@@ -851,12 +942,11 @@ where
                 .into_iter()
                 .map(|input| {
                     let circuit = input.circuit;
-                    let quotient_degree = circuit.quotient_degree();
+                    let quotient_degree = circuit.quotient_degree_for(is_zk);
 
                     // compute the quotient values which are elements of the extension field and flatten it to the base field
-                    let quotient_values = self
-                        .config
-                        .accelerated_quotient_values(
+                    let quotient_values = if input.zk_boundary_mask.is_none() {
+                        self.config.accelerated_quotient_values(
                             circuit,
                             &input.lookup_publics,
                             input.trace_domain,
@@ -867,39 +957,61 @@ where
                             constraint_challenge,
                             input.constraint_count,
                         )
-                        .unwrap_or_else(|| {
-                            let preprocessed_trace_on_quotient_domain =
-                                input.preprocessed.map(|(data, idx)| {
-                                    pcs.get_evaluations_on_domain(data, idx, input.quotient_domain)
-                                });
-                            let stage_1_trace_on_quotient_domain = pcs.get_evaluations_on_domain(
-                                input.stage_1.0,
-                                input.stage_1.1,
-                                input.quotient_domain,
-                            );
-                            let stage_2_trace_on_quotient_domain = pcs.get_evaluations_on_domain(
-                                input.stage_2.0,
-                                input.stage_2.1,
-                                input.quotient_domain,
-                            );
-                            quotient_values::<SC>(
-                                circuit,
-                                &input.lookup_publics,
-                                input.trace_domain,
-                                input.quotient_domain,
-                                &preprocessed_trace_on_quotient_domain,
-                                &stage_1_trace_on_quotient_domain,
-                                &stage_2_trace_on_quotient_domain,
-                                constraint_challenge,
-                                input.constraint_count,
+                    } else {
+                        None
+                    }
+                    .unwrap_or_else(|| {
+                        let preprocessed_trace_on_quotient_domain =
+                            input.preprocessed.map(|(data, idx)| {
+                                pcs.get_evaluations_on_domain(data, idx, input.quotient_domain)
+                            });
+                        let stage_1_trace_on_quotient_domain = pcs.get_evaluations_on_domain(
+                            input.stage_1.0,
+                            input.stage_1.1,
+                            input.quotient_domain,
+                        );
+                        let stage_2_trace_on_quotient_domain = pcs.get_evaluations_on_domain(
+                            input.stage_2.0,
+                            input.stage_2.1,
+                            input.quotient_domain,
+                        );
+                        let mask_evals_owned = input.zk_boundary_mask.map(|mask| {
+                            (
+                                pcs.get_evaluations_on_domain(
+                                    mask.data,
+                                    mask.matrix_index,
+                                    input.quotient_domain,
+                                ),
+                                mask.active_pos,
+                                mask.num_active,
                             )
                         });
+                        let mask_ref = mask_evals_owned
+                            .as_ref()
+                            .map(|(evals, active_pos, n_active)| (evals, *active_pos, *n_active));
+                        quotient_values::<SC>(
+                            circuit,
+                            &input.lookup_publics,
+                            input.trace_domain,
+                            input.quotient_domain,
+                            &preprocessed_trace_on_quotient_domain,
+                            &stage_1_trace_on_quotient_domain,
+                            &stage_2_trace_on_quotient_domain,
+                            mask_ref,
+                            constraint_challenge,
+                            input.constraint_count,
+                        )
+                    });
                     let quotient_flat =
                         flatten_to_base::<Val<SC>, _>(RowMajorMatrix::new_col(quotient_values));
                     (input.quotient_domain, quotient_flat, quotient_degree)
                 })
                 .collect();
-            pcs.commit_quotient(quotient_ldes)
+            if is_zk {
+                self.config.commit_quotient_zk(quotient_ldes)
+            } else {
+                pcs.commit_quotient(quotient_ldes)
+            }
         };
         challenger.observe_commitment(quotient_commit.clone());
         drop(_g);
@@ -928,6 +1040,16 @@ where
             });
             round2_openings.push(vec![zeta, zeta_next]);
             // One wide matrix per circuit holds all its quotient slices.
+            round3_openings.push(vec![zeta]);
+        }
+        // In multi-circuit `v6-zk`, open the committed accumulator boundary mask
+        // matrix `U` (matrix `#num_active` in `stage_2_trace`) at `zeta`.
+        if use_zk_acc_mask {
+            round2_openings.push(vec![zeta]);
+        }
+        // In `v6-zk`, open the `W_R`-column randomizer polynomial `R(X)`
+        // (matrix `#num_active` in `quotient_chunks`) at `zeta`.
+        if is_zk {
             round3_openings.push(vec![zeta]);
         }
         // The preprocessed commitment is built once over ALL preprocessed
@@ -1014,6 +1136,7 @@ pub(crate) fn quotient_values<SC>(
     preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_, SC>>,
     stage_1_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
     stage_2_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
+    mask_on_quotient_domain: Option<(&EvaluationsOnDomain<'_, SC>, usize, usize)>,
     alpha: SC::Challenge,
     constraint_count: usize,
 ) -> Vec<SC::Challenge>
@@ -1026,15 +1149,19 @@ where
     let stage_2_width = circuit.stage_2_width;
     let preprocessed_width = circuit.preprocessed_width;
     let mut sels = trace_domain.selectors_on_coset(quotient_domain);
-    // The logUp wrap constraint consumes the last-row selector ADDITIVELY,
-    // so its normalization matters — but the selector multiplies Δ, which
-    // is constant across the domain, so the normalization constant
-    // 1/(n·g) is absorbed into Δ once per circuit instead of rescaling
-    // the selector vectors (p3's unnormalized L_last has value n·g at the
-    // last row; see the selector-normalization pin test).
+    // The logUp wrap constraint consumes the boundary selector ADDITIVELY, so
+    // its normalization matters:
+    // - Non-ZK / 1-circuit ZK: `is_last_row` at `g^{-1}` has value `n·g`, so
+    //   `inj_norm = 1/(n·g)`.
+    // - Multi-circuit ZK (`mask_on_quotient_domain.is_some()`): `is_first_row`
+    //   at `1` has value `n`, so `inj_norm = 1/n`.
     let n_val = Val::<SC>::from_usize(trace_domain.size());
     let g = Val::<SC>::two_adic_generator(log2_strict_usize(trace_domain.size()));
-    let inj_norm = (n_val * g).inverse();
+    let inj_norm = if mask_on_quotient_domain.is_some() {
+        n_val.inverse()
+    } else {
+        (n_val * g).inverse()
+    };
 
     let qdb = log2_strict_usize(quotient_domain.size()) - log2_strict_usize(trace_domain.size());
     let next_step = 1 << qdb;
@@ -1090,15 +1217,20 @@ where
         .map(|&c| PackedVal::<SC>::from(c))
         .collect();
 
-    // Δ/(n·g) per coordinate, broadcast: the logUp boundary injection with
-    // the last-row selector's normalization constant pre-absorbed.
-    let delta_scaled: Vec<PackedVal<SC>> = (0..ext_d)
+    // Unmasked constant `delta_scaled` (non-ZK / 1-circuit ZK) or unscaled
+    // `delta_tilde` (multi-circuit ZK with `U` mask subtracted per pack).
+    let delta_base: Vec<PackedVal<SC>> = (0..ext_d)
         .map(|k| {
-            PackedVal::<SC>::from(
-                (lookup_publics[3 * ext_d + k] - lookup_publics[2 * ext_d + k]) * inj_norm,
-            )
+            let diff = lookup_publics[3 * ext_d + k] - lookup_publics[2 * ext_d + k];
+            if mask_on_quotient_domain.is_some() {
+                PackedVal::<SC>::from(diff)
+            } else {
+                PackedVal::<SC>::from(diff * inj_norm)
+            }
         })
         .collect();
+    let inj_norm_packed = PackedVal::<SC>::from(inj_norm);
+    let mask_width = mask_on_quotient_domain.map_or(0, |(_, _, n_active)| (n_active - 1) * ext_d);
 
     let ext_params = crate::system::extension_params::<SC>();
 
@@ -1157,6 +1289,8 @@ where
             main_next: vec![PackedVal::<SC>::ZERO; main_next_len],
             s2_cur: vec![PackedVal::<SC>::ZERO; stage_2_width],
             s2_next: vec![PackedVal::<SC>::ZERO; s2_next_len],
+            mask_cur: vec![PackedVal::<SC>::ZERO; mask_width],
+            delta_eff: vec![PackedVal::<SC>::ZERO; if mask_width > 0 { ext_d } else { 0 }],
             buf: Vec::with_capacity(node_count),
             accs: vec![PackedVal::<SC>::ZERO; accs_len],
         },
@@ -1170,8 +1304,10 @@ where
                     preprocessed_on_quotient_domain,
                     stage_1_on_quotient_domain,
                     stage_2_on_quotient_domain,
+                    mask_on_quotient_domain,
                     &publics_packed,
-                    &delta_scaled,
+                    &delta_base,
+                    inj_norm_packed,
                     &alpha_table,
                     next_step,
                     i_start,
@@ -1200,6 +1336,8 @@ struct QuotientScratch<P> {
     main_next: Vec<P>,
     s2_cur: Vec<P>,
     s2_next: Vec<P>,
+    mask_cur: Vec<P>,
+    delta_eff: Vec<P>,
     buf: Vec<P>,
     accs: Vec<P>,
 }
@@ -1212,8 +1350,10 @@ fn eval_quotient_pack<SC>(
     preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_, SC>>,
     stage_1_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
     stage_2_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
+    mask_on_quotient_domain: Option<(&EvaluationsOnDomain<'_, SC>, usize, usize)>,
     publics_packed: &[PackedVal<SC>],
-    delta_scaled: &[PackedVal<SC>],
+    delta_base: &[PackedVal<SC>],
+    inj_norm_packed: PackedVal<SC>,
     alpha_table: &AlphaTable<Val<SC>>,
     next_step: usize,
     i_start: usize,
@@ -1261,6 +1401,28 @@ fn eval_quotient_pack<SC>(
         &mut scratch.s2_next,
     );
 
+    let (logup_selector, delta_scaled): (PackedVal<SC>, &[PackedVal<SC>]) =
+        if let Some((mask_evals, active_pos, num_active)) = mask_on_quotient_domain {
+            PackedVal::<SC>::fill_packed_row(mask_evals, i_start, &mut scratch.mask_cur);
+            for (k, (&d_tilde, dst)) in delta_base
+                .iter()
+                .zip(scratch.delta_eff.iter_mut())
+                .enumerate()
+            {
+                let mut val = d_tilde;
+                if active_pos + 1 < num_active {
+                    val -= scratch.mask_cur[active_pos * ext_degree + k];
+                }
+                if active_pos > 0 {
+                    val += scratch.mask_cur[(active_pos - 1) * ext_degree + k];
+                }
+                *dst = val * inj_norm_packed;
+            }
+            (is_first_row, &scratch.delta_eff)
+        } else {
+            (is_last_row, delta_base)
+        };
+
     let view = VarValues {
         preprocessed: [&scratch.prep_cur, &scratch.prep_next],
         main: [&scratch.main_cur, &scratch.main_next],
@@ -1285,7 +1447,7 @@ fn eval_quotient_pack<SC>(
                 &scratch.s2_next,
                 publics_packed,
                 delta_scaled,
-                is_last_row,
+                logup_selector,
                 ext_modulus,
                 ext_degree,
                 circuit.lookup_group_size,
@@ -1313,7 +1475,7 @@ fn eval_quotient_pack<SC>(
                 &scratch.s2_next,
                 publics_packed,
                 delta_scaled,
-                is_last_row,
+                logup_selector,
                 ext_modulus,
                 ext_degree,
                 circuit.lookup_group_size,
@@ -1347,7 +1509,7 @@ fn eval_quotient_pack<SC>(
                 &scratch.s2_next,
                 publics_packed,
                 delta_scaled,
-                is_last_row,
+                logup_selector,
                 ext_modulus,
                 ext_degree,
                 circuit.lookup_group_size,

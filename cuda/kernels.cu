@@ -19,6 +19,20 @@
 #include <new>
 #include "ntt.cuh"
 
+namespace multi_stark_cuda {
+
+enum class Blake3DomainMode : uint32_t {
+    Plain = 0,
+    V6 = 1,
+    V6Zk = 2,
+};
+
+struct Blake3SaltSeed {
+    uint32_t words[8];
+};
+
+} // namespace multi_stark_cuda
+
 namespace {
 
 using namespace multi_stark_cuda;
@@ -29,7 +43,20 @@ constexpr uint32_t BLAKE3_CHUNK_START = 1U << 0;
 constexpr uint32_t BLAKE3_CHUNK_END = 1U << 1;
 constexpr uint32_t BLAKE3_PARENT = 1U << 2;
 constexpr uint32_t BLAKE3_ROOT = 1U << 3;
+constexpr uint32_t BLAKE3_KEYED_HASH = 1U << 4;
 constexpr uint32_t BLAKE3_DERIVE_KEY_MATERIAL = 1U << 6;
+
+inline Blake3SaltSeed load_salt_seed_host(const uint8_t* seed_bytes) {
+    Blake3SaltSeed seed{};
+    for (unsigned int i = 0; i < 8; ++i) {
+        seed.words[i] =
+            static_cast<uint32_t>(seed_bytes[4 * i]) |
+            (static_cast<uint32_t>(seed_bytes[4 * i + 1]) << 8) |
+            (static_cast<uint32_t>(seed_bytes[4 * i + 2]) << 16) |
+            (static_cast<uint32_t>(seed_bytes[4 * i + 3]) << 24);
+    }
+    return seed;
+}
 // All work currently uses CUDA's per-thread default stream. Stream-ordered
 // allocation preserves the same dependency order while avoiding cudaFree's
 // device-wide synchronization on thousands of short-lived PCS buffers.
@@ -85,9 +112,49 @@ __device__ __constant__ uint32_t BLAKE3_V6_COMPRESS_CV[8] = {
     0xCC4D7633U, 0xF8492FECU, 0x5704B1FDU, 0x2D69A6B5U,
     0xA871EBB5U, 0x6439610DU, 0x89E86BE6U, 0x02E22A34U,
 };
+// Precomputed BLAKE3 derive_key context keys for Protocol v6-zk Merkle hashing
+// (pinned against Rust's `Blake3Domain::ZkMerkleLeaf` and
+// `Blake3Domain::ZkMerkleCompress`).
+// Context "multi-stark/v6-zk/merkle/leaf":
+__device__ __constant__ uint32_t BLAKE3_V6ZK_LEAF_CV[8] = {
+    0x8A663924U, 0x051A410EU, 0xB5929C7AU, 0x52E6E08CU,
+    0x51D3B0FAU, 0x1D1687C6U, 0x472E9E06U, 0x5A324ECAU,
+};
+// Context "multi-stark/v6-zk/merkle/compress":
+__device__ __constant__ uint32_t BLAKE3_V6ZK_COMPRESS_CV[8] = {
+    0x6E9B081EU, 0xBAEEB5DAU, 0x18652A0DU, 0xA2D1B4E1U,
+    0x9E40FB01U, 0xE905254DU, 0x451628D5U, 0x3D606842U,
+};
 __device__ __constant__ unsigned int BLAKE3_PERMUTATION[16] = {
     2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8,
 };
+
+__device__ __forceinline__ const uint32_t* blake3_leaf_cv(
+    Blake3DomainMode domain) {
+    if (domain == Blake3DomainMode::V6) {
+        return BLAKE3_V6_LEAF_CV;
+    }
+    if (domain == Blake3DomainMode::V6Zk) {
+        return BLAKE3_V6ZK_LEAF_CV;
+    }
+    return BLAKE3_IV;
+}
+
+__device__ __forceinline__ const uint32_t* blake3_compress_cv(
+    Blake3DomainMode domain) {
+    if (domain == Blake3DomainMode::V6) {
+        return BLAKE3_V6_COMPRESS_CV;
+    }
+    if (domain == Blake3DomainMode::V6Zk) {
+        return BLAKE3_V6ZK_COMPRESS_CV;
+    }
+    return BLAKE3_IV;
+}
+
+__device__ __forceinline__ uint32_t blake3_domain_flags(
+    Blake3DomainMode domain) {
+    return domain == Blake3DomainMode::Plain ? 0U : BLAKE3_DERIVE_KEY_MATERIAL;
+}
 
 __device__ __forceinline__ uint32_t rotate_right(uint32_t value,
                                                   unsigned int count) {
@@ -173,12 +240,13 @@ __device__ __forceinline__ uint32_t load_u32_le(const uint8_t* bytes,
 
 __device__ __forceinline__ void blake3_chunk(
     const uint8_t* bytes, size_t length, uint64_t chunk_counter, bool root,
-    uint32_t output[8], bool domain_v6 = false) {
+    uint32_t output[8], Blake3DomainMode domain = Blake3DomainMode::Plain) {
     uint32_t chaining_value[8];
-    const uint32_t domain_flags = domain_v6 ? BLAKE3_DERIVE_KEY_MATERIAL : 0U;
+    const uint32_t domain_flags = blake3_domain_flags(domain);
+    const uint32_t* cv = blake3_leaf_cv(domain);
 #pragma unroll
     for (unsigned int i = 0; i < 8; ++i) {
-        chaining_value[i] = domain_v6 ? BLAKE3_V6_LEAF_CV[i] : BLAKE3_IV[i];
+        chaining_value[i] = cv[i];
     }
     const size_t blocks = length == 0 ? 1 : (length + 63) / 64;
     for (size_t block_index = 0; block_index < blocks; ++block_index) {
@@ -218,10 +286,9 @@ __device__ __forceinline__ void blake3_chunk(
     }
 }
 
-__device__ __forceinline__ void blake3_parent(const uint32_t left[8],
-                                               const uint32_t right[8],
-                                               bool root, uint32_t output[8],
-                                               bool domain_v6 = false) {
+__device__ __forceinline__ void blake3_parent(
+    const uint32_t left[8], const uint32_t right[8], bool root,
+    uint32_t output[8], Blake3DomainMode domain = Blake3DomainMode::Plain) {
     uint32_t block[16];
 #pragma unroll
     for (unsigned int i = 0; i < 8; ++i) {
@@ -230,9 +297,8 @@ __device__ __forceinline__ void blake3_parent(const uint32_t left[8],
     }
     uint32_t compressed[16];
     const uint32_t flags = BLAKE3_PARENT | (root ? BLAKE3_ROOT : 0U) |
-                           (domain_v6 ? BLAKE3_DERIVE_KEY_MATERIAL : 0U);
-    blake3_compress(domain_v6 ? BLAKE3_V6_LEAF_CV : BLAKE3_IV, block, 0, 64,
-                    flags, compressed);
+                           blake3_domain_flags(domain);
+    blake3_compress(blake3_leaf_cv(domain), block, 0, 64, flags, compressed);
 #pragma unroll
     for (unsigned int i = 0; i < 8; ++i) {
         output[i] = compressed[i];
@@ -241,7 +307,7 @@ __device__ __forceinline__ void blake3_parent(const uint32_t left[8],
 
 __device__ __forceinline__ void blake3_hash_digest_pair(
     const uint8_t* left, const uint8_t* right, uint8_t* digest,
-    bool domain_v6 = false) {
+    Blake3DomainMode domain = Blake3DomainMode::Plain) {
     uint32_t block[16];
 #pragma unroll
     for (unsigned int word = 0; word < 8; ++word) {
@@ -251,9 +317,9 @@ __device__ __forceinline__ void blake3_hash_digest_pair(
     }
     uint32_t compressed[16];
     const uint32_t flags = BLAKE3_CHUNK_START | BLAKE3_CHUNK_END | BLAKE3_ROOT |
-                           (domain_v6 ? BLAKE3_DERIVE_KEY_MATERIAL : 0U);
-    blake3_compress(domain_v6 ? BLAKE3_V6_COMPRESS_CV : BLAKE3_IV, block, 0, 64,
-                    flags, compressed);
+                           blake3_domain_flags(domain);
+    blake3_compress(blake3_compress_cv(domain), block, 0, 64, flags,
+                    compressed);
 #pragma unroll
     for (unsigned int word = 0; word < 8; ++word) {
         const uint32_t value = compressed[word];
@@ -262,6 +328,32 @@ __device__ __forceinline__ void blake3_hash_digest_pair(
         digest[word * 4 + 2] = static_cast<uint8_t>(value >> 16);
         digest[word * 4 + 3] = static_cast<uint8_t>(value >> 24);
     }
+}
+
+// On-the-fly single-block keyed BLAKE3-CTR leaf salt derivation for Protocol
+// v6-zk: `BLAKE3_keyed(salt_seed, height_u64_le || row_index_u64_le)[0..16]`.
+// Matches `crate::p3_adapter::zk::derive_leaf_salt` byte-for-byte with zero
+// persistent VRAM salt storage.
+__device__ __forceinline__ void blake3_derive_leaf_salt(
+    const uint32_t seed_words[8], uint64_t height, uint64_t row_index,
+    uint64_t out_salt[2]) {
+    uint32_t block[16];
+    block[0] = static_cast<uint32_t>(height);
+    block[1] = static_cast<uint32_t>(height >> 32);
+    block[2] = static_cast<uint32_t>(row_index);
+    block[3] = static_cast<uint32_t>(row_index >> 32);
+#pragma unroll
+    for (unsigned int i = 4; i < 16; ++i) {
+        block[i] = 0U;
+    }
+    uint32_t compressed[16];
+    const uint32_t flags = BLAKE3_KEYED_HASH | BLAKE3_CHUNK_START |
+                           BLAKE3_CHUNK_END | BLAKE3_ROOT;
+    blake3_compress(seed_words, block, 0, 16, flags, compressed);
+    out_salt[0] = static_cast<uint64_t>(compressed[0]) |
+                  (static_cast<uint64_t>(compressed[1]) << 32);
+    out_salt[1] = static_cast<uint64_t>(compressed[2]) |
+                  (static_cast<uint64_t>(compressed[3]) << 32);
 }
 
 unsigned int blocks_for(size_t work_items) {
@@ -1822,13 +1914,13 @@ __global__ void blake3_hash_short_rows_kernel(uint8_t* digests,
                                               const uint8_t* messages,
                                               size_t message_bytes,
                                               size_t message_count,
-                                              bool domain_v6) {
+                                              Blake3DomainMode domain) {
     const size_t grid_stride = static_cast<size_t>(blockDim.x) * gridDim.x;
     for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
          index < message_count; index += grid_stride) {
         uint32_t output[8];
         blake3_chunk(messages + index * message_bytes, message_bytes, 0, true,
-                     output, domain_v6);
+                     output, domain);
         uint8_t* digest = digests + index * 32;
 #pragma unroll
         for (unsigned int word = 0; word < 8; ++word) {
@@ -1849,7 +1941,7 @@ __global__ void blake3_hash_rows_kernel(uint8_t* digests,
                                         const uint8_t* messages,
                                         size_t message_bytes,
                                         size_t message_count,
-                                        bool domain_v6) {
+                                        Blake3DomainMode domain) {
     __shared__ uint32_t chunk_values[THREADS / 32][32][8];
     const unsigned int lane = threadIdx.x & 31U;
     const unsigned int warp_in_block = threadIdx.x >> 5;
@@ -1872,7 +1964,7 @@ __global__ void blake3_hash_rows_kernel(uint8_t* digests,
                     : 0;
             uint32_t chunk_output[8];
             blake3_chunk(message + chunk_offset, chunk_length, lane,
-                         chunks == 1, chunk_output, domain_v6);
+                         chunks == 1, chunk_output, domain);
 #pragma unroll
             for (unsigned int word = 0; word < 8; ++word) {
                 chunk_values[warp_in_block][lane][word] = chunk_output[word];
@@ -1889,7 +1981,7 @@ __global__ void blake3_hash_rows_kernel(uint8_t* digests,
                     uint32_t parent[8];
                     blake3_parent(chunk_values[warp_in_block][index],
                                   chunk_values[warp_in_block][index + 1],
-                                  root_level, parent, domain_v6);
+                                  root_level, parent, domain);
 #pragma unroll
                     for (unsigned int word = 0; word < 8; ++word) {
                         chunk_values[warp_in_block][next_count][word] = parent[word];
@@ -1923,7 +2015,7 @@ __global__ void blake3_hash_rows_kernel(uint8_t* digests,
 
 __global__ void blake3_hash_digest_pairs_kernel(
     uint8_t* digests, const uint8_t* left, const uint8_t* right,
-    size_t count, bool interleaved, bool domain_v6) {
+    size_t count, bool interleaved, Blake3DomainMode domain) {
     const size_t grid_stride = static_cast<size_t>(blockDim.x) * gridDim.x;
     for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x +
                         threadIdx.x;
@@ -1933,17 +2025,18 @@ __global__ void blake3_hash_digest_pairs_kernel(
         const uint8_t* right_digest =
             right + (interleaved ? 2 * index + 1 : index) * 32;
         blake3_hash_digest_pair(left_digest, right_digest,
-                                digests + index * 32, domain_v6);
+                                digests + index * 32, domain);
     }
 }
 
-cudaError_t launch_blake3_rows(uint8_t* digests, const uint8_t* messages,
-                               size_t message_bytes, size_t message_count,
-                               bool domain_v6 = false) {
+cudaError_t launch_blake3_rows(
+    uint8_t* digests, const uint8_t* messages, size_t message_bytes,
+    size_t message_count,
+    Blake3DomainMode domain = Blake3DomainMode::Plain) {
     if (message_bytes <= BLAKE3_CHUNK_BYTES) {
         blake3_hash_short_rows_kernel<<<blocks_for(message_count), THREADS, 0,
                                        cudaStreamPerThread>>>(
-            digests, messages, message_bytes, message_count, domain_v6);
+            digests, messages, message_bytes, message_count, domain);
         return cudaGetLastError();
     }
     constexpr unsigned int WARPS_PER_BLOCK = THREADS / 32;
@@ -1952,18 +2045,16 @@ cudaError_t launch_blake3_rows(uint8_t* digests, const uint8_t* messages,
     const unsigned int blocks = static_cast<unsigned int>(
         required < MAX_BLOCKS ? required : MAX_BLOCKS);
     blake3_hash_rows_kernel<<<blocks, THREADS, 0, cudaStreamPerThread>>>(
-        digests, messages, message_bytes, message_count, domain_v6);
+        digests, messages, message_bytes, message_count, domain);
     return cudaGetLastError();
 }
 
-cudaError_t launch_blake3_digest_pairs(uint8_t* digests,
-                                       const uint8_t* left,
-                                       const uint8_t* right, size_t count,
-                                       bool interleaved,
-                                       bool domain_v6 = false) {
+cudaError_t launch_blake3_digest_pairs(
+    uint8_t* digests, const uint8_t* left, const uint8_t* right, size_t count,
+    bool interleaved, Blake3DomainMode domain = Blake3DomainMode::Plain) {
     blake3_hash_digest_pairs_kernel<<<blocks_for(count), THREADS, 0,
                                       cudaStreamPerThread>>>(
-        digests, left, right, count, interleaved, domain_v6);
+        digests, left, right, count, interleaved, domain);
     return cudaGetLastError();
 }
 
@@ -1980,10 +2071,45 @@ __global__ void gather_resident_lde_group(
     }
 }
 
-cudaError_t hash_resident_lde_group(uint8_t* digests,
-                                     const void* const* handles,
-                                     size_t handle_count, size_t height,
-                                     bool domain_v6 = false) {
+__global__ void gather_resident_lde_group_strided(
+    uint64_t* output, const uint64_t* const* columns, const size_t* strides,
+    size_t row_start, size_t rows, size_t width, size_t output_stride) {
+    const size_t count = rows * width;
+    const size_t grid_stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         index < count; index += grid_stride) {
+        const size_t column = index % width;
+        const size_t local_row = index / width;
+        const size_t row = row_start + local_row;
+        output[local_row * output_stride + column] =
+            columns[column][row * strides[column]];
+    }
+}
+
+__global__ void fill_leaf_salts_kernel(
+    uint64_t* output, size_t output_stride, size_t salt_col_offset,
+    uint64_t height, size_t row_start, size_t rows, Blake3SaltSeed seed) {
+    const size_t grid_stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t local_row =
+             static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         local_row < rows; local_row += grid_stride) {
+        uint64_t salt[2];
+        blake3_derive_leaf_salt(seed.words, height,
+                                static_cast<uint64_t>(row_start + local_row),
+                                salt);
+        uint64_t* dst = output + local_row * output_stride + salt_col_offset;
+        dst[0] = salt[0];
+        dst[1] = salt[1];
+    }
+}
+
+cudaError_t hash_resident_lde_group(
+    uint8_t* digests, const void* const* handles, size_t handle_count,
+    size_t height, Blake3DomainMode domain = Blake3DomainMode::Plain,
+    const uint8_t* salt_seed = nullptr) {
+    const bool salted = salt_seed != nullptr;
+    const size_t salt_words = salted ? 2 : 0;
+    const size_t max_words = (32 * 1024) / sizeof(uint64_t) - salt_words;
     size_t total_width = 0;
     for (size_t index = 0; index < handle_count; ++index) {
         const ResidentLde* lde = static_cast<const ResidentLde*>(handles[index]);
@@ -1994,15 +2120,20 @@ cudaError_t hash_resident_lde_group(uint8_t* digests,
             total_width += lde->width;
         }
     }
-    if (total_width == 0 || total_width > (32 * 1024) / sizeof(uint64_t) ||
-        !product_fits(height, total_width)) {
+    if (total_width == 0 || total_width > max_words) {
+        return cudaErrorInvalidValue;
+    }
+    const size_t output_stride = total_width + salt_words;
+    if (!product_fits(height, output_stride)) {
         return cudaErrorInvalidValue;
     }
 
     constexpr size_t ROW_STAGING_BYTES = size_t(32) << 20;
-    const size_t row_bytes = total_width * sizeof(uint64_t);
+    const size_t row_bytes = output_stride * sizeof(uint64_t);
     const size_t rows_per_chunk =
         (ROW_STAGING_BYTES / row_bytes) > 0 ? (ROW_STAGING_BYTES / row_bytes) : 1;
+    const Blake3SaltSeed seed_words =
+        salted ? load_salt_seed_host(salt_seed) : Blake3SaltSeed{};
     const uint64_t** host_columns =
         new (std::nothrow) const uint64_t*[total_width];
     size_t* host_strides = new (std::nothrow) size_t[total_width];
@@ -2043,7 +2174,7 @@ cudaError_t hash_resident_lde_group(uint8_t* digests,
     DeviceBuffer combined_rows;
     if (status == cudaSuccess) {
         status = combined_rows.allocate(
-            (height < rows_per_chunk ? height : rows_per_chunk) * total_width);
+            (height < rows_per_chunk ? height : rows_per_chunk) * output_stride);
     }
     for (size_t row_start = 0; status == cudaSuccess && row_start < height;
          row_start += rows_per_chunk) {
@@ -2051,18 +2182,35 @@ cudaError_t hash_resident_lde_group(uint8_t* digests,
             (height - row_start < rows_per_chunk) ? height - row_start
                                                    : rows_per_chunk;
         const size_t count = rows * total_width;
-        gather_resident_lde_group<<<blocks_for(count), THREADS, 0,
-                                    cudaStreamPerThread>>>(
-            combined_rows.get(),
-            reinterpret_cast<const uint64_t* const*>(device_columns.get()),
-            reinterpret_cast<const size_t*>(device_strides.get()), row_start,
-            rows, total_width);
-        status = cudaGetLastError();
+        if (salted) {
+            gather_resident_lde_group_strided<<<blocks_for(count), THREADS, 0,
+                                                cudaStreamPerThread>>>(
+                combined_rows.get(),
+                reinterpret_cast<const uint64_t* const*>(device_columns.get()),
+                reinterpret_cast<const size_t*>(device_strides.get()), row_start,
+                rows, total_width, output_stride);
+            status = cudaGetLastError();
+            if (status == cudaSuccess) {
+                fill_leaf_salts_kernel<<<blocks_for(rows), THREADS, 0,
+                                         cudaStreamPerThread>>>(
+                    combined_rows.get(), output_stride, total_width,
+                    static_cast<uint64_t>(height), row_start, rows, seed_words);
+                status = cudaGetLastError();
+            }
+        } else {
+            gather_resident_lde_group<<<blocks_for(count), THREADS, 0,
+                                        cudaStreamPerThread>>>(
+                combined_rows.get(),
+                reinterpret_cast<const uint64_t* const*>(device_columns.get()),
+                reinterpret_cast<const size_t*>(device_strides.get()), row_start,
+                rows, total_width);
+            status = cudaGetLastError();
+        }
         if (status == cudaSuccess) {
             status = launch_blake3_rows(
                 digests + row_start * 32,
                 reinterpret_cast<const uint8_t*>(combined_rows.get()), row_bytes,
-                rows, domain_v6);
+                rows, domain);
         }
     }
     return status;
@@ -2072,7 +2220,8 @@ cudaError_t hash_partitioned_lde_group(
     uint8_t* digests, const void* const* handles,
     const uint64_t* const* host_values, const size_t* widths,
     const size_t* heights, size_t matrix_count, size_t height,
-    bool domain_v6 = false) {
+    Blake3DomainMode domain = Blake3DomainMode::Plain,
+    const uint8_t* salt_seed = nullptr) {
     bool has_host = false;
     bool has_resident = false;
     size_t total_width = 0;
@@ -2089,11 +2238,16 @@ cudaError_t hash_partitioned_lde_group(
     }
     if (!has_host) {
         return hash_resident_lde_group(digests, handles, matrix_count, height,
-                                       domain_v6);
+                                       domain, salt_seed);
     }
-    if (!has_resident || total_width == 0 ||
-        total_width > (32 * 1024) / sizeof(uint64_t) ||
-        !product_fits(height, total_width)) {
+    const bool salted = salt_seed != nullptr;
+    const size_t salt_words = salted ? 2 : 0;
+    const size_t max_words = (32 * 1024) / sizeof(uint64_t) - salt_words;
+    if (!has_resident || total_width == 0 || total_width > max_words) {
+        return cudaErrorInvalidValue;
+    }
+    const size_t output_stride = total_width + salt_words;
+    if (!product_fits(height, output_stride)) {
         return cudaErrorInvalidValue;
     }
 
@@ -2145,9 +2299,11 @@ cudaError_t hash_partitioned_lde_group(
     DeviceBuffer device_strides;
     DeviceBuffer combined_rows;
     constexpr size_t ROW_STAGING_BYTES = size_t(32) << 20;
-    const size_t row_bytes = total_width * sizeof(uint64_t);
+    const size_t row_bytes = output_stride * sizeof(uint64_t);
     const size_t rows_per_chunk =
         (ROW_STAGING_BYTES / row_bytes) > 0 ? (ROW_STAGING_BYTES / row_bytes) : 1;
+    const Blake3SaltSeed seed_words =
+        salted ? load_salt_seed_host(salt_seed) : Blake3SaltSeed{};
     if (status == cudaSuccess) {
         status = device_columns.allocate(total_width);
     }
@@ -2156,7 +2312,7 @@ cudaError_t hash_partitioned_lde_group(
     }
     if (status == cudaSuccess) {
         status = combined_rows.allocate(
-            (height < rows_per_chunk ? height : rows_per_chunk) * total_width);
+            (height < rows_per_chunk ? height : rows_per_chunk) * output_stride);
     }
     if (status == cudaSuccess) {
         status = cudaMemcpy(device_columns.get(), host_columns,
@@ -2173,18 +2329,35 @@ cudaError_t hash_partitioned_lde_group(
             (height - row_start < rows_per_chunk) ? height - row_start
                                                    : rows_per_chunk;
         const size_t count = rows * total_width;
-        gather_resident_lde_group<<<blocks_for(count), THREADS, 0,
-                                    cudaStreamPerThread>>>(
-            combined_rows.get(),
-            reinterpret_cast<const uint64_t* const*>(device_columns.get()),
-            reinterpret_cast<const size_t*>(device_strides.get()), row_start,
-            rows, total_width);
-        status = cudaGetLastError();
+        if (salted) {
+            gather_resident_lde_group_strided<<<blocks_for(count), THREADS, 0,
+                                                cudaStreamPerThread>>>(
+                combined_rows.get(),
+                reinterpret_cast<const uint64_t* const*>(device_columns.get()),
+                reinterpret_cast<const size_t*>(device_strides.get()), row_start,
+                rows, total_width, output_stride);
+            status = cudaGetLastError();
+            if (status == cudaSuccess) {
+                fill_leaf_salts_kernel<<<blocks_for(rows), THREADS, 0,
+                                         cudaStreamPerThread>>>(
+                    combined_rows.get(), output_stride, total_width,
+                    static_cast<uint64_t>(height), row_start, rows, seed_words);
+                status = cudaGetLastError();
+            }
+        } else {
+            gather_resident_lde_group<<<blocks_for(count), THREADS, 0,
+                                        cudaStreamPerThread>>>(
+                combined_rows.get(),
+                reinterpret_cast<const uint64_t* const*>(device_columns.get()),
+                reinterpret_cast<const size_t*>(device_strides.get()), row_start,
+                rows, total_width);
+            status = cudaGetLastError();
+        }
         if (status == cudaSuccess) {
             status = launch_blake3_rows(
                 digests + row_start * 32,
                 reinterpret_cast<const uint8_t*>(combined_rows.get()), row_bytes,
-                rows, domain_v6);
+                rows, domain);
         }
     }
     if (status == cudaSuccess) {
@@ -4208,7 +4381,7 @@ extern "C" int multi_stark_cuda_goldilocks_ops(
 namespace {
 int blake3_hash_rows_impl(
     int device_id, uint8_t* digests, const uint8_t* messages,
-    size_t message_bytes, size_t message_count, bool domain_v6) {
+    size_t message_bytes, size_t message_count, Blake3DomainMode domain) {
     if (digests == nullptr || messages == nullptr || message_count == 0 ||
         message_bytes == 0 || message_bytes > 32 * 1024 ||
         !product_fits(message_bytes, message_count) ||
@@ -4236,7 +4409,7 @@ int blake3_hash_rows_impl(
         status = launch_blake3_rows(
             reinterpret_cast<uint8_t*>(device_digests.get()),
             reinterpret_cast<const uint8_t*>(device_messages.get()),
-            message_bytes, message_count, domain_v6);
+            message_bytes, message_count, domain);
     }
     if (status == cudaSuccess) {
         status = cudaMemcpy(digests, device_digests.get(), output_bytes,
@@ -4250,14 +4423,14 @@ extern "C" int multi_stark_cuda_blake3_hash_rows(
     int device_id, uint8_t* digests, const uint8_t* messages,
     size_t message_bytes, size_t message_count) {
     return blake3_hash_rows_impl(device_id, digests, messages, message_bytes,
-                                 message_count, false);
+                                 message_count, Blake3DomainMode::Plain);
 }
 
 extern "C" int multi_stark_cuda_blake3_hash_rows_v6(
     int device_id, uint8_t* digests, const uint8_t* messages,
     size_t message_bytes, size_t message_count) {
     return blake3_hash_rows_impl(device_id, digests, messages, message_bytes,
-                                 message_count, true);
+                                 message_count, Blake3DomainMode::V6);
 }
 
 extern "C" int multi_stark_cuda_blake3_merkle_root(
@@ -4601,12 +4774,13 @@ int mixed_merkle_create_hybrid_impl(
     const size_t* widths, const size_t* heights, size_t matrix_count,
     const uint8_t* const* host_digest_groups,
     const size_t* host_digest_heights, size_t host_digest_group_count,
-    bool domain_v6) {
+    Blake3DomainMode domain, const uint8_t* salt_seed = nullptr) {
     if (handle == nullptr || root == nullptr ||
         matrix_count == 0 || lde_handles == nullptr || host_values == nullptr ||
         widths == nullptr || heights == nullptr ||
         (host_digest_group_count != 0 &&
-         (host_digest_groups == nullptr || host_digest_heights == nullptr))) {
+         (host_digest_groups == nullptr || host_digest_heights == nullptr)) ||
+        (domain == Blake3DomainMode::V6Zk && salt_seed == nullptr)) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
     size_t max_height = 0;
@@ -4689,7 +4863,7 @@ int mixed_merkle_create_hybrid_impl(
         }
         return hash_partitioned_lde_group(output, lde_handles, host_values,
                                           widths, heights, matrix_count, height,
-                                          domain_v6);
+                                          domain, salt_seed);
     };
     if (status == cudaSuccess) {
         status = hash_group(tree->digests, max_height);
@@ -4703,7 +4877,7 @@ int mixed_merkle_create_hybrid_impl(
         count /= 2;
         uint8_t* next = tree->digests + offset;
         status = launch_blake3_digest_pairs(next, current, current, count,
-                                            true, domain_v6);
+                                            true, domain);
 
         bool inject = false;
         for (size_t index = 0; index < matrix_count; ++index) {
@@ -4717,7 +4891,7 @@ int mixed_merkle_create_hybrid_impl(
             status = launch_blake3_digest_pairs(
                 next, next,
                 reinterpret_cast<const uint8_t*>(injected_digests.get()),
-                count, false, domain_v6);
+                count, false, domain);
         }
     }
     if (status == cudaSuccess) {
@@ -4736,10 +4910,11 @@ int hash_hybrid_height_group_impl(
     int device_id, uint8_t* host_digests, const void* const* lde_handles,
     const uint64_t* const* host_values, const size_t* widths,
     const size_t* heights, size_t matrix_count, size_t height,
-    bool domain_v6) {
+    Blake3DomainMode domain, const uint8_t* salt_seed = nullptr) {
     if (device_id < 0 || host_digests == nullptr || lde_handles == nullptr ||
         host_values == nullptr || widths == nullptr || heights == nullptr ||
-        matrix_count == 0 || !is_power_of_two(height) || height > SIZE_MAX / 4) {
+        matrix_count == 0 || !is_power_of_two(height) || height > SIZE_MAX / 4 ||
+        (domain == Blake3DomainMode::V6Zk && salt_seed == nullptr)) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
     bool has_resident = false;
@@ -4766,7 +4941,8 @@ int hash_hybrid_height_group_impl(
     if (status == cudaSuccess) {
         status = hash_partitioned_lde_group(
             reinterpret_cast<uint8_t*>(device_digests.get()), lde_handles,
-            host_values, widths, heights, matrix_count, height, domain_v6);
+            host_values, widths, heights, matrix_count, height, domain,
+            salt_seed);
     }
     if (status == cudaSuccess) {
         status = cudaMemcpy(host_digests, device_digests.get(), height * 32,
@@ -4777,8 +4953,10 @@ int hash_hybrid_height_group_impl(
 
 int mixed_merkle_create_from_ldes_impl(
     int device_id, void** handle, uint8_t* root,
-    const void* const* lde_handles, size_t lde_count, bool domain_v6) {
-    if (lde_handles == nullptr || lde_count == 0) {
+    const void* const* lde_handles, size_t lde_count, Blake3DomainMode domain,
+    const uint8_t* salt_seed = nullptr) {
+    if (lde_handles == nullptr || lde_count == 0 ||
+        (domain == Blake3DomainMode::V6Zk && salt_seed == nullptr)) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
     const uint64_t** host_values =
@@ -4805,7 +4983,7 @@ int mixed_merkle_create_from_ldes_impl(
     }
     const int status = mixed_merkle_create_hybrid_impl(
         device_id, handle, root, lde_handles, host_values, widths, heights,
-        lde_count, nullptr, nullptr, 0, domain_v6);
+        lde_count, nullptr, nullptr, 0, domain, salt_seed);
     delete[] host_values;
     delete[] widths;
     delete[] heights;
@@ -4814,8 +4992,10 @@ int mixed_merkle_create_from_ldes_impl(
 
 int fri_merkle_create_impl(
     int device_id, void** handle, uint8_t* root, const void* codeword_handle,
-    size_t arity, bool domain_v6) {
-    if (!codeword_handle || !is_power_of_two(arity)) {
+    size_t arity, Blake3DomainMode domain,
+    const uint8_t* salt_seed = nullptr) {
+    if (!codeword_handle || !is_power_of_two(arity) ||
+        (domain == Blake3DomainMode::V6Zk && salt_seed == nullptr)) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
     const auto* codeword = static_cast<const ResidentLde*>(codeword_handle);
@@ -4829,7 +5009,7 @@ int fri_merkle_create_impl(
     view.width = codeword->width * arity;
     const void* views[1] = {&view};
     const int status = mixed_merkle_create_from_ldes_impl(
-        device_id, handle, root, views, 1, domain_v6);
+        device_id, handle, root, views, 1, domain, salt_seed);
     view.values = nullptr;
     return status;
 }
@@ -4844,7 +5024,7 @@ extern "C" int multi_stark_cuda_mixed_merkle_create_hybrid(
     return mixed_merkle_create_hybrid_impl(
         device_id, handle, root, lde_handles, host_values, widths, heights,
         matrix_count, host_digest_groups, host_digest_heights,
-        host_digest_group_count, false);
+        host_digest_group_count, Blake3DomainMode::Plain);
 }
 
 extern "C" int multi_stark_cuda_mixed_merkle_create_hybrid_v6(
@@ -4856,7 +5036,20 @@ extern "C" int multi_stark_cuda_mixed_merkle_create_hybrid_v6(
     return mixed_merkle_create_hybrid_impl(
         device_id, handle, root, lde_handles, host_values, widths, heights,
         matrix_count, host_digest_groups, host_digest_heights,
-        host_digest_group_count, true);
+        host_digest_group_count, Blake3DomainMode::V6);
+}
+
+extern "C" int multi_stark_cuda_mixed_merkle_create_hybrid_v6zk(
+    int device_id, void** handle, uint8_t* root,
+    const void* const* lde_handles, const uint64_t* const* host_values,
+    const size_t* widths, const size_t* heights, size_t matrix_count,
+    const uint8_t* const* host_digest_groups,
+    const size_t* host_digest_heights, size_t host_digest_group_count,
+    const uint8_t* salt_seed) {
+    return mixed_merkle_create_hybrid_impl(
+        device_id, handle, root, lde_handles, host_values, widths, heights,
+        matrix_count, host_digest_groups, host_digest_heights,
+        host_digest_group_count, Blake3DomainMode::V6Zk, salt_seed);
 }
 
 extern "C" int multi_stark_cuda_hash_hybrid_height_group(
@@ -4865,7 +5058,7 @@ extern "C" int multi_stark_cuda_hash_hybrid_height_group(
     const size_t* heights, size_t matrix_count, size_t height) {
     return hash_hybrid_height_group_impl(
         device_id, host_digests, lde_handles, host_values, widths, heights,
-        matrix_count, height, false);
+        matrix_count, height, Blake3DomainMode::Plain);
 }
 
 extern "C" int multi_stark_cuda_hash_hybrid_height_group_v6(
@@ -4874,35 +5067,62 @@ extern "C" int multi_stark_cuda_hash_hybrid_height_group_v6(
     const size_t* heights, size_t matrix_count, size_t height) {
     return hash_hybrid_height_group_impl(
         device_id, host_digests, lde_handles, host_values, widths, heights,
-        matrix_count, height, true);
+        matrix_count, height, Blake3DomainMode::V6);
+}
+
+extern "C" int multi_stark_cuda_hash_hybrid_height_group_v6zk(
+    int device_id, uint8_t* host_digests, const void* const* lde_handles,
+    const uint64_t* const* host_values, const size_t* widths,
+    const size_t* heights, size_t matrix_count, size_t height,
+    const uint8_t* salt_seed) {
+    return hash_hybrid_height_group_impl(
+        device_id, host_digests, lde_handles, host_values, widths, heights,
+        matrix_count, height, Blake3DomainMode::V6Zk, salt_seed);
 }
 
 extern "C" int multi_stark_cuda_mixed_merkle_create_from_ldes(
     int device_id, void** handle, uint8_t* root,
     const void* const* lde_handles, size_t lde_count) {
     return mixed_merkle_create_from_ldes_impl(
-        device_id, handle, root, lde_handles, lde_count, false);
+        device_id, handle, root, lde_handles, lde_count,
+        Blake3DomainMode::Plain);
 }
 
 extern "C" int multi_stark_cuda_mixed_merkle_create_from_ldes_v6(
     int device_id, void** handle, uint8_t* root,
     const void* const* lde_handles, size_t lde_count) {
     return mixed_merkle_create_from_ldes_impl(
-        device_id, handle, root, lde_handles, lde_count, true);
+        device_id, handle, root, lde_handles, lde_count, Blake3DomainMode::V6);
+}
+
+extern "C" int multi_stark_cuda_mixed_merkle_create_from_ldes_v6zk(
+    int device_id, void** handle, uint8_t* root,
+    const void* const* lde_handles, size_t lde_count,
+    const uint8_t* salt_seed) {
+    return mixed_merkle_create_from_ldes_impl(
+        device_id, handle, root, lde_handles, lde_count,
+        Blake3DomainMode::V6Zk, salt_seed);
 }
 
 extern "C" int multi_stark_cuda_fri_merkle_create(
     int device_id, void** handle, uint8_t* root, const void* codeword_handle,
     size_t arity) {
     return fri_merkle_create_impl(device_id, handle, root, codeword_handle,
-                                  arity, false);
+                                  arity, Blake3DomainMode::Plain);
 }
 
 extern "C" int multi_stark_cuda_fri_merkle_create_v6(
     int device_id, void** handle, uint8_t* root, const void* codeword_handle,
     size_t arity) {
     return fri_merkle_create_impl(device_id, handle, root, codeword_handle,
-                                  arity, true);
+                                  arity, Blake3DomainMode::V6);
+}
+
+extern "C" int multi_stark_cuda_fri_merkle_create_v6zk(
+    int device_id, void** handle, uint8_t* root, const void* codeword_handle,
+    size_t arity, const uint8_t* salt_seed) {
+    return fri_merkle_create_impl(device_id, handle, root, codeword_handle,
+                                  arity, Blake3DomainMode::V6Zk, salt_seed);
 }
 
 extern "C" int multi_stark_cuda_mixed_merkle_create_from_host_matrices(

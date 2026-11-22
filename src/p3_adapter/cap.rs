@@ -14,7 +14,7 @@ use p3_field::{ExtensionField, Field, TwoAdicField, coset::TwoAdicMultiplicative
 use p3_fri::verifier::FriError;
 use p3_fri::{CommitmentWithOpeningPoints, FriParameters, FriProof};
 use p3_matrix::Dimensions;
-use p3_merkle_tree::{MerkleTreeError, PrunedMerklePaths};
+use p3_merkle_tree::MerkleTreeError;
 use p3_symmetric::MerkleCap;
 use p3_util::{log2_ceil_usize, log2_strict_usize};
 
@@ -70,14 +70,17 @@ pub trait CapValidatingMmcs<T: Send + Sync + Clone>: Mmcs<T> {
         commit: &Self::Commitment,
         log_max_height: usize,
     ) -> Result<(), Self::Error>;
+
+    /// Constructs an empty multi-batch proof used solely to delegate cap-length
+    /// validation through `ExtensionMmcs::verify_multi_batch`.
+    fn empty_multi_proof() -> Self::MultiProof;
 }
 
 impl<F, EF, InnerMmcs> CapValidatingMmcs<EF> for ExtensionMmcs<F, EF, InnerMmcs>
 where
     F: Field,
     EF: ExtensionField<F>,
-    InnerMmcs:
-        CapValidatingMmcs<F, MultiProof = PrunedMerklePaths<u8, 32>, Error = MerkleTreeError>,
+    InnerMmcs: CapValidatingMmcs<F, Error = MerkleTreeError>,
 {
     fn validate_commitment_cap_for_log_height(
         &self,
@@ -92,9 +95,7 @@ where
             .and_then(|shift| 1usize.checked_shl(shift))
             .ok_or(MerkleTreeError::CapMismatch)?;
         let empty_rows: &[Vec<&[EF]>] = &[];
-        let empty_proof = PrunedMerklePaths {
-            sibling_hashes: Vec::new(),
-        };
+        let empty_proof = InnerMmcs::empty_multi_proof();
         self.verify_multi_batch(
             commit,
             &[Dimensions { width: 1, height }],
@@ -102,6 +103,10 @@ where
             empty_rows,
             &empty_proof,
         )
+    }
+
+    fn empty_multi_proof() -> Self::MultiProof {
+        InnerMmcs::empty_multi_proof()
     }
 }
 

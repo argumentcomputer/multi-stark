@@ -328,6 +328,7 @@ impl<SC: ProofConfig> System<SC> {
             stage_2_opened_values,
         } = proof;
         let pcs = self.config.pcs();
+        let is_zk = self.config.is_zk();
         // Canonical index of each active circuit; every per-circuit sequence
         // in the proof is indexed by position in this list.
         let active_indices: Vec<usize> = active
@@ -335,6 +336,8 @@ impl<SC: ProofConfig> System<SC> {
             .enumerate()
             .filter_map(|(i, &a)| a.then_some(i))
             .collect();
+        let num_active = active_indices.len();
+        let use_zk_acc_mask = is_zk && num_active > 1;
 
         // observe stage_2 commitment
         challenger.observe_commitment(commitments.stage_2_trace.clone());
@@ -394,6 +397,22 @@ impl<SC: ProofConfig> System<SC> {
             quotient_chunks_evaluations.push((
                 trace_domain,
                 vec![(zeta, quotient_opened_values[pos][0].clone())],
+            ));
+        }
+        if use_zk_acc_mask {
+            let min_log_degree = log_degrees.iter().copied().min().expect("num_active > 0");
+            let min_domain = pcs.natural_domain_for_degree(1 << min_log_degree);
+            stage_2_trace_evaluations.push((
+                min_domain,
+                vec![(zeta, stage_2_opened_values[num_active][0].clone())],
+            ));
+        }
+        if is_zk {
+            let max_log_degree = log_degrees.iter().copied().max().expect("num_active > 0");
+            let max_domain = pcs.natural_domain_for_degree(1 << max_log_degree);
+            quotient_chunks_evaluations.push((
+                max_domain,
+                vec![(zeta, quotient_opened_values[num_active][0].clone())],
             ));
         }
         // The preprocessed commitment covers ALL preprocessed matrices, in
@@ -485,12 +504,18 @@ impl<SC: ProofConfig> System<SC> {
             let next_acc = intermediate_accumulators[pos];
             let trace_domain = pcs.natural_domain_for_degree(degree);
             let sels = trace_domain.selectors_at_point(zeta);
-            // The logUp boundary injection absorbs the last-row selector's
-            // normalization constant into Δ (mirroring the prover): p3's
-            // unnormalized L_last has value n·g at the last row.
+            // The logUp boundary injection absorbs the selector's normalization
+            // constant into Δ (mirroring the prover):
+            // - Non-ZK / 1-circuit ZK: `is_last_row` has value `n·g` at `g^{-1}`.
+            // - Multi-circuit ZK (`use_zk_acc_mask`): `is_first_row` has value
+            //   `n` at `1`, and subtracts `U_p(ζ) - U_{p-1}(ζ)`.
             let n_val = Val::<SC>::from_usize(degree);
             let g = Val::<SC>::two_adic_generator(usize::from(log_degrees[pos]));
-            let inj_norm = SC::Challenge::from((n_val * g).inverse());
+            let inj_norm = if use_zk_acc_mask {
+                SC::Challenge::from(n_val.inverse())
+            } else {
+                SC::Challenge::from((n_val * g).inverse())
+            };
 
             // The four lookup publics (β, γ, acc, next_acc) as base
             // coordinates embedded into the challenge field.
@@ -540,9 +565,31 @@ impl<SC: ProofConfig> System<SC> {
             let mut buf = Vec::new();
             circuit.graph.sweep(&view, &mut buf);
             let mut constraint_values = circuit.graph.constraint_values(&buf);
-            let delta_scaled: Vec<SC::Challenge> = (0..extension_d)
-                .map(|k| (publics[3 * extension_d + k] - publics[2 * extension_d + k]) * inj_norm)
-                .collect();
+            let (logup_selector, delta_scaled): (SC::Challenge, Vec<SC::Challenge>) =
+                if use_zk_acc_mask {
+                    let mask_row = &stage_2_opened_values[num_active][0];
+                    let scaled = (0..extension_d)
+                        .map(|k| {
+                            let mut val =
+                                publics[3 * extension_d + k] - publics[2 * extension_d + k];
+                            if pos + 1 < num_active {
+                                val -= mask_row[pos * extension_d + k];
+                            }
+                            if pos > 0 {
+                                val += mask_row[(pos - 1) * extension_d + k];
+                            }
+                            val * inj_norm
+                        })
+                        .collect();
+                    (view.is_first_row, scaled)
+                } else {
+                    let scaled = (0..extension_d)
+                        .map(|k| {
+                            (publics[3 * extension_d + k] - publics[2 * extension_d + k]) * inj_norm
+                        })
+                        .collect();
+                    (view.is_last_row, scaled)
+                };
             crate::lookup::logup_constraint_values(
                 &circuit.graph.lookups,
                 &buf,
@@ -550,9 +597,7 @@ impl<SC: ProofConfig> System<SC> {
                 view.stage2[1],
                 &publics,
                 &delta_scaled,
-                // p3's (unnormalized) last-row selector; the normalization
-                // constant is pre-absorbed into `delta_scaled`.
-                view.is_last_row,
+                logup_selector,
                 crate::system::extension_params::<SC>().modulus,
                 extension_d,
                 circuit.lookup_group_size,
@@ -570,7 +615,12 @@ impl<SC: ProofConfig> System<SC> {
             // `Q(ζ) = Σᵢ ζ^{i·n}·cᵢ(ζ)`, with each slice's value read from
             // the wide quotient matrix opened at ζ.
             let quotient_row = &quotient_opened_values[pos][0];
-            debug_assert_eq!(quotient_row.len(), quotient_degree * extension_d);
+            let expected_slices = if is_zk {
+                2 * quotient_degree
+            } else {
+                quotient_degree
+            };
+            debug_assert_eq!(quotient_row.len(), expected_slices * extension_d);
             let zeta_pow_n = zeta.exp_power_of_2(log2_strict_usize(degree));
             let quotient = quotient_row
                 .chunks_exact(extension_d)
@@ -619,6 +669,9 @@ impl<SC: ProofConfig> System<SC> {
             stage_2_opened_values,
             ..
         } = proof;
+        let is_zk = self.config.is_zk();
+        let zk_shift = usize::from(is_zk);
+        let extension_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
         let num_circuits = self.circuits.len();
         crate::ensure!(
             num_circuits > 0,
@@ -626,6 +679,16 @@ impl<SC: ProofConfig> System<SC> {
             num_circuits,
             "system has no circuits"
         );
+        if is_zk {
+            crate::ensure!(
+                self.config.zk_randomizer_width() >= crate::p3_adapter::zk::ZK_RANDOMIZER_WIDTH
+                    && self.config.log_blowup() >= 1,
+                VerificationError::InvalidSystem;
+                randomizer_width = self.config.zk_randomizer_width(),
+                log_blowup = self.config.log_blowup(),
+                "invalid v6-zk randomizer width or log_blowup"
+            );
+        }
         ensure_eq!(
             active.len(),
             num_circuits,
@@ -681,7 +744,7 @@ impl<SC: ProofConfig> System<SC> {
                     && max_prep_height.is_power_of_two()
                     && self.config.validate_commitment_cap(
                         commit,
-                        log2_strict_usize(max_prep_height) + self.config.log_blowup(),
+                        log2_strict_usize(max_prep_height) + zk_shift + self.config.log_blowup(),
                     ),
                 VerificationError::InvalidSystem;
                 max_prep_height,
@@ -738,6 +801,8 @@ impl<SC: ProofConfig> System<SC> {
                 }
             }
         }
+        let use_zk_acc_mask = is_zk && num_active > 1;
+        let expected_stage_2_mats = num_active + usize::from(use_zk_acc_mask);
         ensure_eq!(
             stage_1_opened_values.len(),
             num_active,
@@ -748,12 +813,30 @@ impl<SC: ProofConfig> System<SC> {
         );
         ensure_eq!(
             stage_2_opened_values.len(),
-            num_active,
+            expected_stage_2_mats,
             VerificationError::InvalidProofShape;
             actual = stage_2_opened_values.len(),
-            expected = num_active,
+            expected = expected_stage_2_mats,
             "unexpected number of stage-2 matrices"
         );
+        if use_zk_acc_mask {
+            ensure_eq!(
+                stage_2_opened_values[num_active].len(),
+                1,
+                VerificationError::InvalidProofShape;
+                actual = stage_2_opened_values[num_active].len(),
+                expected = 1,
+                "unexpected number of ZK boundary mask openings"
+            );
+            ensure_eq!(
+                stage_2_opened_values[num_active][0].len(),
+                (num_active - 1) * extension_d,
+                VerificationError::InvalidProofShape;
+                actual = stage_2_opened_values[num_active][0].len(),
+                expected = (num_active - 1) * extension_d,
+                "unexpected ZK boundary mask opening width"
+            );
+        }
         for (pos, &ci) in active_indices.iter().enumerate() {
             let circuit = &self.circuits[ci];
             let preprocessed_i = self.preprocessed_indices[ci];
@@ -859,7 +942,26 @@ impl<SC: ProofConfig> System<SC> {
                     "trace height does not match preprocessed height"
                 );
             }
-            let quotient_degree = circuit.quotient_degree();
+            let quotient_degree = circuit.quotient_degree_for(is_zk);
+            crate::ensure!(
+                quotient_degree <= self.config.max_quotient_degree(),
+                VerificationError::InvalidSystem;
+                circuit = ci,
+                quotient_degree,
+                max_quotient_degree = self.config.max_quotient_degree(),
+                "circuit quotient degree exceeds PCS blowup budget"
+            );
+            if is_zk {
+                crate::ensure!(
+                    usize::from(*log_degree) >= self.config.min_log_degree(),
+                    VerificationError::InvalidProofShape;
+                    circuit = ci,
+                    active_position = pos,
+                    log_degree = *log_degree,
+                    min_log_degree = self.config.min_log_degree(),
+                    "trace height is below v6-zk minimum height floor"
+                );
+            }
             // The claimed log degree must be small enough that the quotient
             // domain can still be committed and opened by the PCS. This also
             // guards the `1 << log_degree` shifts used during verification
@@ -867,7 +969,7 @@ impl<SC: ProofConfig> System<SC> {
             crate::ensure!(
                 usize::from(*log_degree) <= self.config.max_log_degree()
                     && usize::from(*log_degree) < usize::BITS as usize
-                    && usize::from(*log_degree) + log2_strict_usize(quotient_degree)
+                    && usize::from(*log_degree) + zk_shift + log2_strict_usize(quotient_degree)
                         <= self.config.max_log_quotient_domain(),
                 VerificationError::InvalidProofShape;
                 circuit = ci,
@@ -888,6 +990,7 @@ impl<SC: ProofConfig> System<SC> {
             .map(usize::from)
             .max()
             .expect("num_active > 0")
+            + zk_shift
             + self.config.log_blowup();
         crate::ensure!(
             self.config
@@ -910,18 +1013,24 @@ impl<SC: ProofConfig> System<SC> {
             max_log_lde_height,
             "quotient commitment cap root count mismatch"
         );
-        // One wide quotient matrix per active circuit, holding all its
-        // coefficient slices, opened at the single point ζ.
+        // One wide quotient matrix per active circuit (holding `q` slices in
+        // non-ZK or `2 * q_zk` blinded slices in `v6-zk`), plus one `W_R`-column
+        // randomizer polynomial `R(X)` in `v6-zk`, all opened at ζ.
+        let expected_quotient_mats = num_active + usize::from(is_zk);
         ensure_eq!(
             quotient_opened_values.len(),
-            num_active,
+            expected_quotient_mats,
             VerificationError::InvalidProofShape;
             actual = quotient_opened_values.len(),
-            expected = num_active,
+            expected = expected_quotient_mats,
             "unexpected number of quotient matrices"
         );
-        let extension_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
         for (pos, quotient_degree) in quotient_degrees.iter().enumerate() {
+            let expected_slices = if is_zk {
+                2 * quotient_degree
+            } else {
+                *quotient_degree
+            };
             ensure_eq!(
                 quotient_opened_values[pos].len(),
                 1,
@@ -936,15 +1045,33 @@ impl<SC: ProofConfig> System<SC> {
             );
             ensure_eq!(
                 quotient_opened_values[pos][0].len(),
-                quotient_degree * extension_d,
+                expected_slices * extension_d,
                 VerificationError::InvalidProofShape;
                 circuit = active_indices[pos],
                 active_position = pos,
                 actual = quotient_opened_values[pos][0].len(),
-                expected = quotient_degree * extension_d,
+                expected = expected_slices * extension_d,
                 quotient_degree = *quotient_degree,
                 extension_degree = extension_d,
                 "unexpected quotient opening width"
+            );
+        }
+        if is_zk {
+            ensure_eq!(
+                quotient_opened_values[num_active].len(),
+                1,
+                VerificationError::InvalidProofShape;
+                actual = quotient_opened_values[num_active].len(),
+                expected = 1,
+                "unexpected number of ZK randomizer openings"
+            );
+            ensure_eq!(
+                quotient_opened_values[num_active][0].len(),
+                self.config.zk_randomizer_width(),
+                VerificationError::InvalidProofShape;
+                actual = quotient_opened_values[num_active][0].len(),
+                expected = self.config.zk_randomizer_width(),
+                "unexpected ZK randomizer opening width"
             );
         }
         ensure_eq!(

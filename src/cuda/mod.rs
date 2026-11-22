@@ -5,6 +5,10 @@
 //! lookup traces, quotient evaluations, and FRI codewords on the selected GPU.
 //! All public protocol types and serialized proofs remain unchanged.
 
+#[doc(hidden)]
+pub mod hiding_mmcs;
+#[doc(hidden)]
+pub mod hiding_pcs;
 pub(crate) mod mmcs;
 mod offload;
 #[doc(hidden)]
@@ -3374,6 +3378,288 @@ impl CudaMixedMerkleTree {
         }
     }
 
+    /// Hashes a single hybrid height group under Protocol `v6-zk` (`ZkMerkleLeaf`)
+    /// with on-the-fly BLAKE3-CTR leaf salts derived from `salt_seed`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn hash_hybrid_height_group_v6zk(
+        device_id: i32,
+        ldes: &[Option<&CudaLde>],
+        host_matrices: &[Option<&RowMajorMatrix<Goldilocks>>],
+        salt_seed: &[u8; 32],
+    ) -> Vec<[u8; 32]> {
+        assert!(device_id >= 0, "CUDA device id must be non-negative");
+        assert_eq!(ldes.len(), host_matrices.len());
+        assert!(!ldes.is_empty(), "hybrid height group is empty");
+        assert!(
+            ldes.iter().flatten().all(|lde| lde.device_id == device_id),
+            "hybrid height group spans CUDA devices"
+        );
+        assert!(
+            ldes.iter()
+                .zip(host_matrices)
+                .all(|(lde, matrix)| lde.is_some() ^ matrix.is_some()),
+            "every hybrid height-group matrix must have exactly one storage backend"
+        );
+        let heights = ldes
+            .iter()
+            .zip(host_matrices)
+            .map(|(lde, matrix)| lde.map_or_else(|| matrix.unwrap().height(), CudaLde::height))
+            .collect::<Vec<_>>();
+        let height = heights[0];
+        assert!(
+            heights.iter().all(|&candidate| candidate == height),
+            "hybrid height group contains unequal heights"
+        );
+        let handles = ldes
+            .iter()
+            .map(|lde| lde.map_or(core::ptr::null(), CudaLde::raw_handle))
+            .collect::<Vec<_>>();
+        let host_values = host_matrices
+            .iter()
+            .map(|matrix| matrix.map_or(core::ptr::null(), |matrix| matrix.values.as_ptr().cast()))
+            .collect::<Vec<_>>();
+        let widths = ldes
+            .iter()
+            .zip(host_matrices)
+            .map(|(lde, matrix)| lde.map_or_else(|| matrix.unwrap().width(), CudaLde::width))
+            .collect::<Vec<_>>();
+        let mut digests = vec![[0u8; 32]; height];
+        // SAFETY: every pointer is backed by a matrix, CUDA handle, or stack
+        // salt seed borrowed for this synchronous call.
+        let status = unsafe {
+            multi_stark_cuda_hash_hybrid_height_group_v6zk(
+                device_id,
+                digests.as_mut_ptr().cast(),
+                handles.as_ptr(),
+                host_values.as_ptr(),
+                widths.as_ptr(),
+                heights.as_ptr(),
+                handles.len(),
+                height,
+                salt_seed.as_ptr(),
+            )
+        };
+        check_cuda(status, "hybrid CUDA v6-zk height-group hashing");
+        digests
+    }
+
+    /// Builds a salted `v6-zk` mixed-height tree directly from resident CUDA LDEs.
+    #[must_use]
+    pub(crate) fn from_ldes_v6zk(device_id: i32, ldes: &[CudaLde], salt_seed: &[u8; 32]) -> Self {
+        assert!(device_id >= 0, "CUDA device id must be non-negative");
+        assert!(!ldes.is_empty(), "mixed Merkle tree has no resident LDEs");
+        assert!(
+            ldes.iter().all(|lde| lde.device_id == device_id),
+            "resident LDEs belong to different CUDA devices"
+        );
+        let handles: Vec<*const c_void> = ldes
+            .iter()
+            .map(|lde| lde.handle.as_ptr().cast_const())
+            .collect();
+        let mut handle = core::ptr::null_mut();
+        let mut root = [0u8; 32];
+        // SAFETY: all handles and `salt_seed` remain live for the synchronous call.
+        let status = unsafe {
+            multi_stark_cuda_mixed_merkle_create_from_ldes_v6zk(
+                device_id,
+                &mut handle,
+                root.as_mut_ptr(),
+                handles.as_ptr(),
+                handles.len(),
+                salt_seed.as_ptr(),
+            )
+        };
+        if status != 0 {
+            let dimensions: Vec<(usize, usize)> =
+                ldes.iter().map(|lde| (lde.height(), lde.width())).collect();
+            check_cuda(
+                status,
+                &format!(
+                    "resident LDE v6-zk Merkle tree creation over (height, width) {dimensions:?}"
+                ),
+            );
+        }
+        Self {
+            device_id,
+            handle: NonNull::new(handle).expect("CUDA returned a null mixed Merkle handle"),
+            root,
+            row_count: ldes.iter().map(CudaLde::height).max().unwrap(),
+        }
+    }
+
+    /// Builds a salted `v6-zk` mixed-height tree from resident CUDA LDEs, host
+    /// matrices, and pre-hashed salted height groups.
+    #[must_use]
+    pub(crate) fn from_hybrid_v6zk(
+        device_id: i32,
+        ldes: &[Option<&CudaLde>],
+        host_matrices: &[Option<&RowMajorMatrix<Goldilocks>>],
+        deferred_dimensions: &[Option<Dimensions>],
+        host_digest_groups: &[(usize, Vec<[u8; 32]>)],
+        salt_seed: &[u8; 32],
+    ) -> Self {
+        assert!(device_id >= 0, "CUDA device id must be non-negative");
+        assert_eq!(ldes.len(), host_matrices.len());
+        assert_eq!(ldes.len(), deferred_dimensions.len());
+        assert!(!ldes.is_empty(), "mixed Merkle tree has no LDE groups");
+        assert!(
+            ldes.iter().flatten().all(|lde| lde.device_id == device_id),
+            "resident LDEs belong to different CUDA devices"
+        );
+        for (height, digests) in host_digest_groups {
+            assert!(
+                height.is_power_of_two(),
+                "host digest height is not a power of two"
+            );
+            assert_eq!(
+                *height,
+                digests.len(),
+                "host digest group has the wrong height"
+            );
+        }
+        assert!(
+            ldes.iter().zip(host_matrices).zip(deferred_dimensions).all(
+                |((lde, matrix), deferred)| {
+                    let sources = usize::from(lde.is_some())
+                        + usize::from(matrix.is_some())
+                        + usize::from(deferred.is_some());
+                    sources == 1
+                        && deferred.is_none_or(|dimensions| {
+                            host_digest_groups
+                                .iter()
+                                .any(|(height, _)| *height == dimensions.height)
+                        })
+                }
+            ),
+            "every hybrid matrix needs one source, and deferred matrices need pre-hashed rows"
+        );
+        let handles: Vec<*const c_void> = ldes
+            .iter()
+            .map(|lde| lde.map_or(core::ptr::null(), |lde| lde.handle.as_ptr().cast_const()))
+            .collect();
+        let host_values = host_matrices
+            .iter()
+            .map(|matrix| {
+                matrix.map_or(core::ptr::null(), |matrix| {
+                    matrix.values.as_ptr().cast::<u64>()
+                })
+            })
+            .collect::<Vec<_>>();
+        let widths = ldes
+            .iter()
+            .zip(host_matrices)
+            .zip(deferred_dimensions)
+            .map(|((lde, matrix), deferred)| {
+                lde.map_or_else(
+                    || matrix.map_or_else(|| deferred.unwrap().width, Matrix::width),
+                    CudaLde::width,
+                )
+            })
+            .collect::<Vec<_>>();
+        let heights: Vec<usize> = ldes
+            .iter()
+            .zip(host_matrices)
+            .zip(deferred_dimensions)
+            .map(|((lde, matrix), deferred)| {
+                lde.map_or_else(
+                    || matrix.map_or_else(|| deferred.unwrap().height, Matrix::height),
+                    CudaLde::height,
+                )
+            })
+            .collect();
+        let host_digest_pointers: Vec<*const u8> = host_digest_groups
+            .iter()
+            .map(|(_, digests)| digests.as_ptr().cast())
+            .collect();
+        let host_digest_heights: Vec<usize> = host_digest_groups
+            .iter()
+            .map(|(height, _)| *height)
+            .collect();
+        let mut handle = core::ptr::null_mut();
+        let mut root = [0u8; 32];
+        // SAFETY: all resident handles, host buffers, and `salt_seed` remain live
+        // for this synchronous call.
+        let status = unsafe {
+            multi_stark_cuda_mixed_merkle_create_hybrid_v6zk(
+                device_id,
+                &mut handle,
+                root.as_mut_ptr(),
+                handles.as_ptr(),
+                host_values.as_ptr(),
+                widths.as_ptr(),
+                heights.as_ptr(),
+                ldes.len(),
+                host_digest_pointers.as_ptr(),
+                host_digest_heights.as_ptr(),
+                host_digest_groups.len(),
+                salt_seed.as_ptr(),
+            )
+        };
+        if status != 0 {
+            let dims: Vec<Option<(usize, usize)>> = ldes
+                .iter()
+                .zip(host_matrices)
+                .zip(deferred_dimensions)
+                .map(|((lde, host), deferred)| {
+                    lde.map(|l| (l.height(), l.width()))
+                        .or_else(|| host.map(|m| (m.height(), m.width())))
+                        .or_else(|| deferred.map(|d| (d.height, d.width)))
+                })
+                .collect();
+            check_cuda(
+                status,
+                &format!(
+                    "hybrid v6-zk Merkle tree creation over (height, width) {dims:?}, host digest groups at heights {:?}",
+                    host_digest_groups
+                        .iter()
+                        .map(|(h, _)| *h)
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+        let row_count = heights.into_iter().max().unwrap();
+        Self {
+            device_id,
+            handle: NonNull::new(handle).expect("CUDA returned a null mixed Merkle handle"),
+            root,
+            row_count,
+        }
+    }
+
+    /// Builds a salted `v6-zk` FRI commit-phase Merkle tree from a resident
+    /// extension-field codeword.
+    #[must_use]
+    pub(crate) fn from_fri_codeword_v6zk(
+        codeword: &CudaLde,
+        arity: usize,
+        salt_seed: &[u8; 32],
+    ) -> Self {
+        assert!(codeword.width == 2 || codeword.width == 3);
+        assert!(arity.is_power_of_two());
+        assert_eq!(codeword.height % arity, 0);
+        let mut handle = core::ptr::null_mut();
+        let mut root = [0u8; 32];
+        // SAFETY: `codeword` handle and `salt_seed` remain live for this synchronous call.
+        let status = unsafe {
+            multi_stark_cuda_fri_merkle_create_v6zk(
+                codeword.device_id,
+                &mut handle,
+                root.as_mut_ptr(),
+                codeword.raw_handle(),
+                arity,
+                salt_seed.as_ptr(),
+            )
+        };
+        check_cuda(status, "resident CUDA v6-zk FRI Merkle tree creation");
+        Self {
+            device_id: codeword.device_id,
+            handle: NonNull::new(handle).expect("CUDA returned a null FRI Merkle handle"),
+            root,
+            row_count: codeword.height / arity,
+        }
+    }
+
     /// Builds a mixed-height tree by uploading each host matrix directly,
     /// without constructing a concatenated host-side row buffer.
     #[cfg(test)]
@@ -4065,6 +4351,48 @@ unsafe extern "C" {
         root: *mut u8,
         codeword: *const c_void,
         arity: usize,
+    ) -> i32;
+    fn multi_stark_cuda_mixed_merkle_create_from_ldes_v6zk(
+        device_id: i32,
+        handle: *mut *mut c_void,
+        root: *mut u8,
+        lde_handles: *const *const c_void,
+        lde_count: usize,
+        salt_seed: *const u8,
+    ) -> i32;
+    fn multi_stark_cuda_mixed_merkle_create_hybrid_v6zk(
+        device_id: i32,
+        handle: *mut *mut c_void,
+        root: *mut u8,
+        lde_handles: *const *const c_void,
+        host_values: *const *const u64,
+        widths: *const usize,
+        heights: *const usize,
+        matrix_count: usize,
+        host_digest_groups: *const *const u8,
+        host_digest_heights: *const usize,
+        host_digest_group_count: usize,
+        salt_seed: *const u8,
+    ) -> i32;
+    #[cfg(test)]
+    fn multi_stark_cuda_hash_hybrid_height_group_v6zk(
+        device_id: i32,
+        host_digests: *mut u8,
+        lde_handles: *const *const c_void,
+        host_values: *const *const u64,
+        widths: *const usize,
+        heights: *const usize,
+        matrix_count: usize,
+        height: usize,
+        salt_seed: *const u8,
+    ) -> i32;
+    fn multi_stark_cuda_fri_merkle_create_v6zk(
+        device_id: i32,
+        handle: *mut *mut c_void,
+        root: *mut u8,
+        codeword: *const c_void,
+        arity: usize,
+        salt_seed: *const u8,
     ) -> i32;
 
     fn multi_stark_cuda_quotient_values_ext3(

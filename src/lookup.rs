@@ -127,6 +127,25 @@ pub fn logup_constraint_count(num_lookups: usize, group_size: usize, d: usize) -
     lookup_groups(num_lookups, group_size) * d
 }
 
+/// Shifts row `0` of a stage-2 accumulator trace by `+delta` so that the
+/// cyclic LogUp boundary injection moves cleanly from `is_last_row`
+/// (`X = g_N^{-1}`) to `is_first_row` (`X = 1`), where every active circuit
+/// subgroup shares the common point `X = 1` for multi-circuit `v6-zk`
+/// accumulator boundary blinding.
+#[inline]
+pub(crate) fn apply_first_row_delta_shift<EF: Field>(
+    stage_2_trace: &mut RowMajorMatrix<EF>,
+    delta: EF,
+) {
+    let width = stage_2_trace.width();
+    if width == 0 || stage_2_trace.height() == 0 {
+        return;
+    }
+    for elem in &mut stage_2_trace.values[..width] {
+        *elem += delta;
+    }
+}
+
 /// Coordinate product reduced modulo `modulus`, schoolbook. Generic-degree
 /// fallback; the hot D=2 binomial and D=3 cubic trinomial paths use [`mul2`]
 /// and [`mul3_trinomial`].
