@@ -655,6 +655,26 @@ impl<SC: ProofConfig> System<SC> {
             num_preprocessed,
             "preprocessed commitment does not match configured circuits"
         );
+        if let Some(commit) = &self.preprocessed_commit {
+            let max_prep_height = self
+                .circuits
+                .iter()
+                .zip(&self.preprocessed_indices)
+                .filter_map(|(circuit, idx)| idx.map(|_| circuit.preprocessed_height))
+                .max()
+                .unwrap_or(0);
+            crate::ensure!(
+                max_prep_height > 0
+                    && max_prep_height.is_power_of_two()
+                    && self.config.validate_commitment_cap(
+                        commit,
+                        log2_strict_usize(max_prep_height) + self.config.log_blowup(),
+                    ),
+                VerificationError::InvalidSystem;
+                max_prep_height,
+                "preprocessed commitment cap root count mismatch"
+            );
+        }
         // Stage 0 round: the preprocessed commitment is built once over ALL
         // preprocessed traces at system construction, so its round carries one
         // entry per preprocessed matrix. Inactive matrices need one full-width
@@ -844,6 +864,36 @@ impl<SC: ProofConfig> System<SC> {
             );
             quotient_degrees.push(quotient_degree);
         }
+        // Validate exact Merkle cap root counts before any commitment enters
+        // the Fiat-Shamir transcript.
+        let max_log_lde_height = log_degrees
+            .iter()
+            .copied()
+            .map(usize::from)
+            .max()
+            .expect("num_active > 0")
+            + self.config.log_blowup();
+        crate::ensure!(
+            self.config
+                .validate_commitment_cap(&proof.commitments.stage_1_trace, max_log_lde_height),
+            VerificationError::InvalidProofShape;
+            max_log_lde_height,
+            "stage-1 commitment cap root count mismatch"
+        );
+        crate::ensure!(
+            self.config
+                .validate_commitment_cap(&proof.commitments.stage_2_trace, max_log_lde_height),
+            VerificationError::InvalidProofShape;
+            max_log_lde_height,
+            "stage-2 commitment cap root count mismatch"
+        );
+        crate::ensure!(
+            self.config
+                .validate_commitment_cap(&proof.commitments.quotient_chunks, max_log_lde_height),
+            VerificationError::InvalidProofShape;
+            max_log_lde_height,
+            "quotient commitment cap root count mismatch"
+        );
         // One wide quotient matrix per active circuit, holding all its
         // coefficient slices, opened at the single point ζ.
         ensure_eq!(

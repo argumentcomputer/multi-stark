@@ -438,6 +438,15 @@ impl ProofConfig for GoldilocksBlake3Config {
         self.log_blowup
     }
 
+    fn validate_commitment_cap(
+        &self,
+        commit: &crate::config::Com<Self>,
+        max_log_lde_height: usize,
+    ) -> bool {
+        crate::p3_adapter::cap::expected_merkle_cap_roots(self.cap_height, max_log_lde_height)
+            == Some(commit.num_roots())
+    }
+
     #[cfg(feature = "cuda")]
     fn commit_main(
         &self,
@@ -1533,7 +1542,7 @@ fn new_mmcs(cap_height: usize, #[cfg(feature = "cuda")] device_id: i32) -> Mmcs 
     #[cfg(feature = "cuda")]
     {
         let cpu = CpuMmcs::new(field_hash, compress, cap_height);
-        crate::cuda::mmcs::CudaMmcs::with_device(cpu, device_id)
+        crate::cuda::mmcs::CudaMmcs::with_device(cpu, cap_height, device_id)
     }
 }
 

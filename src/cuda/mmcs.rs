@@ -10,6 +10,9 @@ use super::{
     CudaLde, CudaMixedMerkleTree, mixed_lde_open_row, mixed_lde_open_row_at_height,
     mixed_lde_open_rows, mixed_lde_open_rows_at_height,
 };
+use crate::p3_adapter::cap::{
+    CapValidatingMmcs, verify_merkle_cap_len, verify_merkle_cap_len_for_log_height,
+};
 use crate::types::Blake3CompressionFunction;
 use p3_blake3::Blake3;
 use p3_symmetric::SerializingHasher;
@@ -488,6 +491,7 @@ fn hybrid_open_rows<M: Matrix<Goldilocks>>(
 #[derive(Clone, Debug)]
 pub struct CudaMmcs {
     cpu: CpuMmcs,
+    cap_height: usize,
     device_id: i32,
 }
 
@@ -496,9 +500,17 @@ impl CudaMmcs {
     /// it launches, allocation it makes and buffer it stages through belongs
     /// to that device, so several of these in one process can each own a
     /// device of their own.
-    pub(crate) fn with_device(cpu: CpuMmcs, device_id: i32) -> Self {
+    pub(crate) fn with_device(cpu: CpuMmcs, cap_height: usize, device_id: i32) -> Self {
         assert!(device_id >= 0, "CUDA device id must be non-negative");
-        Self { cpu, device_id }
+        Self {
+            cpu,
+            cap_height,
+            device_id,
+        }
+    }
+
+    pub const fn cap_height(&self) -> usize {
+        self.cap_height
     }
 }
 
@@ -1413,6 +1425,7 @@ impl Mmcs<Goldilocks> for CudaMmcs {
         index: usize,
         batch_opening: BatchOpeningRef<'_, Goldilocks, Self>,
     ) -> Result<(), Self::Error> {
+        verify_merkle_cap_len(self.cap_height(), commit, dimensions)?;
         self.cpu.verify_batch(
             commit,
             dimensions,
@@ -1468,8 +1481,19 @@ impl Mmcs<Goldilocks> for CudaMmcs {
         opened_values: &[Vec<R>],
         proof: &Self::MultiProof,
     ) -> Result<(), Self::Error> {
+        verify_merkle_cap_len(self.cap_height(), commit, dimensions)?;
         self.cpu
             .verify_multi_batch(commit, dimensions, indices, opened_values, proof)
+    }
+}
+
+impl CapValidatingMmcs<Goldilocks> for CudaMmcs {
+    fn validate_commitment_cap_for_log_height(
+        &self,
+        commit: &Self::Commitment,
+        log_max_height: usize,
+    ) -> Result<(), Self::Error> {
+        verify_merkle_cap_len_for_log_height(self.cap_height(), commit, log_max_height)
     }
 }
 
@@ -1543,7 +1567,7 @@ mod tests {
             .iter()
             .map(|&i| cpu.open_batch(i, &expected_data))
             .collect();
-        let mmcs = CudaMmcs::with_device(cpu, 0);
+        let mmcs = CudaMmcs::with_device(cpu, 0, 0);
         let ldes = matrices
             .iter()
             .map(|m| CudaLde::from_row_major_matrix(mmcs.device_id, m))
@@ -1567,7 +1591,7 @@ mod tests {
         let (expected_commitment, expected_data) = cpu.commit(matrices.clone());
         let expected_opening = cpu.open_batch(5, &expected_data);
 
-        let mmcs = CudaMmcs::with_device(cpu, 0);
+        let mmcs = CudaMmcs::with_device(cpu, 0, 0);
         let resident = vec![
             Some(CudaLde::from_row_major_matrix(mmcs.device_id, &matrices[0])),
             None,
