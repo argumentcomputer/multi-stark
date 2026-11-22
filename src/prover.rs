@@ -330,6 +330,122 @@ where
     // FRI-based config is two-adic anyway.
     Val<SC>: TwoAdicField + Ord,
 {
+    /// Builds the stage-two traces and intermediate accumulators on the host,
+    /// one circuit at a time. A materialized witness is dropped as soon as its
+    /// stage-two trace is built; a shape-only witness streams directly from the
+    /// committed stage-one trace (via [`ProofConfig::committed_trace`], falling
+    /// back to [`Pcs::get_evaluations_on_domain`] only when `committed_trace`
+    /// returns `None`) into [`crate::lookup::stage_2_trace_from_trace`] without
+    /// ever materializing full [`LookupValues`] in memory. Circuits only
+    /// interact through the accumulator chain, which is carried between
+    /// iterations, so the traces equal those of a single pass over every
+    /// circuit.
+    #[allow(clippy::too_many_arguments)]
+    fn host_lookup_traces(
+        &self,
+        key: &ProverKey<SC>,
+        data: &PcsData<SC>,
+        active_indices: &[usize],
+        log_degrees: &[usize],
+        lookups: Vec<LookupValues<Val<SC>>>,
+        group_sizes: &[usize],
+        lookup_argument_challenge: SC::Challenge,
+        fingerprint_challenge: SC::Challenge,
+        mut acc: SC::Challenge,
+    ) -> (Vec<RowMajorMatrix<SC::Challenge>>, Vec<SC::Challenge>) {
+        let pcs = self.config.pcs();
+        let mut traces = Vec::with_capacity(lookups.len());
+        let mut intermediate_accumulators = Vec::with_capacity(lookups.len());
+        for (position, values) in lookups.into_iter().enumerate() {
+            if values.is_materialized() {
+                let values = [values];
+                let group_size = &group_sizes[position..=position];
+                let (circuit_traces, accumulators) = self
+                    .config
+                    .accelerated_lookup_traces(
+                        &values,
+                        group_size,
+                        lookup_argument_challenge,
+                        fingerprint_challenge,
+                        acc,
+                    )
+                    .unwrap_or_else(|| {
+                        LookupValues::stage_2_traces(
+                            &values,
+                            group_size,
+                            lookup_argument_challenge,
+                            &fingerprint_challenge,
+                            acc,
+                        )
+                    });
+                drop(values);
+                acc = *accumulators.last().expect("one accumulator per circuit");
+                traces.extend(circuit_traces);
+                intermediate_accumulators.extend(accumulators);
+            } else {
+                drop(values);
+                let circuit_index = active_indices[position];
+                let circuit = &self.circuits[circuit_index];
+                let degree = 1 << log_degrees[position];
+                let (trace, delta) = if circuit.graph.lookups.is_empty() {
+                    (
+                        RowMajorMatrix::new(
+                            vec![<SC::Challenge as Algebra<SC::Challenge>>::ZERO; degree],
+                            1,
+                        ),
+                        <SC::Challenge as Algebra<SC::Challenge>>::ZERO,
+                    )
+                } else {
+                    let _g = tracing::info_span!("stark/materialize_lookups", position).entered();
+                    let main_trace = self
+                        .config
+                        .committed_trace(data, position, degree)
+                        .unwrap_or_else(|| {
+                            let trace_domain = pcs.natural_domain_for_degree(degree);
+                            pcs.get_evaluations_on_domain(data, position, trace_domain)
+                                .to_row_major_matrix()
+                        });
+                    // A system built without its fixed matrices reads each one
+                    // back from the preprocessed commitment when it is needed.
+                    let owned_prep;
+                    let prep_ref = if circuit.graph.lookup_prefix_uses_preprocessed() {
+                        if let Some(pp) = circuit.preprocessed.as_ref() {
+                            Some(pp)
+                        } else {
+                            let (prep_data, prep_idx) = key
+                                .preprocessed_data
+                                .as_ref()
+                                .zip(self.preprocessed_indices[circuit_index])
+                                .expect("circuit lookup expressions require preprocessed trace");
+                            owned_prep = self
+                                .config
+                                .committed_trace(prep_data, prep_idx, degree)
+                                .unwrap_or_else(|| {
+                                    let trace_domain = pcs.natural_domain_for_degree(degree);
+                                    pcs.get_evaluations_on_domain(prep_data, prep_idx, trace_domain)
+                                        .to_row_major_matrix()
+                                });
+                            Some(&owned_prep)
+                        }
+                    } else {
+                        None
+                    };
+                    crate::lookup::stage_2_trace_from_trace(
+                        circuit,
+                        &main_trace,
+                        prep_ref,
+                        lookup_argument_challenge,
+                        &fingerprint_challenge,
+                    )
+                };
+                acc += delta;
+                traces.push(trace);
+                intermediate_accumulators.push(acc);
+            }
+        }
+        (traces, intermediate_accumulators)
+    }
+
     /// Generates a STARK proof for the system with a single claim.
     ///
     /// This is a convenience wrapper around [`Self::prove_multiple_claims`].
@@ -702,104 +818,24 @@ where
             fingerprint_challenge,
             acc,
         );
+        drop(lookup_inputs);
         let (stage_2_trace_commit, stage_2_trace_data, intermediate_accumulators) =
             if let Some(result) = accelerated_lookup_commit {
                 drop(active_lookups);
                 drop(_g);
                 result
             } else {
-                let any_unmaterialized = active_lookups.iter().any(|l| !l.is_materialized());
-                let (stage_2_traces, intermediate_accumulators) = if any_unmaterialized {
-                    let mut traces = Vec::with_capacity(active_indices.len());
-                    let mut intermediates = Vec::with_capacity(active_indices.len());
-                    let mut running = acc;
-                    for ((pos, &ci), (lookup_values, &log_degree)) in active_indices
-                        .iter()
-                        .enumerate()
-                        .zip(active_lookups.iter().zip(&log_degrees))
-                    {
-                        let circuit = &self.circuits[ci];
-                        let (trace, delta) = if lookup_values.is_materialized() {
-                            lookup_values.stage_2_trace(
-                                circuit.lookup_group_size,
-                                lookup_argument_challenge,
-                                &fingerprint_challenge,
-                            )
-                        } else if circuit.graph.lookups.is_empty() {
-                            (
-                                RowMajorMatrix::new(
-                                    vec![
-                                        <SC::Challenge as Algebra<SC::Challenge>>::ZERO;
-                                        1 << log_degree
-                                    ],
-                                    1,
-                                ),
-                                <SC::Challenge as Algebra<SC::Challenge>>::ZERO,
-                            )
-                        } else {
-                            let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
-                            let main_trace = pcs
-                                .get_evaluations_on_domain(&stage_1_trace_data, pos, trace_domain)
-                                .to_row_major_matrix();
-                            let owned_prep;
-                            let prep_ref = if circuit.graph.lookup_prefix_uses_preprocessed() {
-                                if let Some(pp) = circuit.preprocessed.as_ref() {
-                                    Some(pp)
-                                } else {
-                                    let (prep_data, prep_idx) = key
-                                        .preprocessed_data
-                                        .as_ref()
-                                        .zip(self.preprocessed_indices[ci])
-                                        .expect(
-                                            "circuit lookup expressions require preprocessed trace",
-                                        );
-                                    owned_prep = pcs
-                                        .get_evaluations_on_domain(
-                                            prep_data,
-                                            prep_idx,
-                                            trace_domain,
-                                        )
-                                        .to_row_major_matrix();
-                                    Some(&owned_prep)
-                                }
-                            } else {
-                                None
-                            };
-                            crate::lookup::stage_2_trace_from_trace(
-                                circuit,
-                                &main_trace,
-                                prep_ref,
-                                lookup_argument_challenge,
-                                &fingerprint_challenge,
-                            )
-                        };
-                        running += delta;
-                        intermediates.push(running);
-                        traces.push(trace);
-                    }
-                    (traces, intermediates)
-                } else {
-                    self.config
-                        .accelerated_lookup_traces(
-                            &active_lookups,
-                            &group_sizes,
-                            lookup_argument_challenge,
-                            fingerprint_challenge,
-                            acc,
-                        )
-                        .unwrap_or_else(|| {
-                            LookupValues::stage_2_traces(
-                                &active_lookups,
-                                &group_sizes,
-                                lookup_argument_challenge,
-                                &fingerprint_challenge,
-                                acc,
-                            )
-                        })
-                };
-                // The lookup witness can be as large as the traces themselves; free it
-                // now instead of holding it through the commit/quotient/FRI stages.
-                drop(active_lookups);
+                let (stage_2_traces, intermediate_accumulators) = self.host_lookup_traces(
+                    key,
+                    &stage_1_trace_data,
+                    &active_indices,
+                    &log_degrees,
+                    active_lookups,
+                    &group_sizes,
+                    lookup_argument_challenge,
+                    fingerprint_challenge,
+                    acc,
+                );
                 drop(_g);
 
                 // Cost: "Stage 2 commit" — LDE + Merkle for flattened extension traces.

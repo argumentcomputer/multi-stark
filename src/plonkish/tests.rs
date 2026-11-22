@@ -404,3 +404,49 @@ fn plonkish_public_count_and_foreign_assignment_are_checked() {
         Err(WitnessError::ForeignAssignment)
     ));
 }
+
+#[test]
+fn shape_only_lookups_read_fixed_matrices_from_the_commitment() {
+    let f = Val::from_u32;
+    let mut builder = CircuitBuilder::<Val>::new();
+    let a = builder.public_input("a");
+    let b = builder.input("b");
+    let sum = builder.add(a, b);
+    let product = builder.mul(a, b);
+    builder.expose_public(sum);
+    let table = builder.fixed_table(
+        "tuples",
+        vec![vec![f(1), f(2), f(2), f(3)], vec![f(2), f(3), f(6), f(5)]],
+    );
+    builder.lookup(table, &[a, b, product, sum]);
+    let compiled = builder.finish().lower_to_multi_stark(f(17)).unwrap();
+    let mut witness = compiled.witness();
+    witness.set(a, f(2)).unwrap();
+    witness.set(b, f(3)).unwrap();
+    let assignment = witness.generate().unwrap();
+    let publics = assignment.public_values().to_vec();
+    let traces = compiled.traces(&assignment).unwrap();
+    let claims = compiled.claims(&publics).unwrap();
+    let refs: Vec<_> = claims.iter().map(Vec::as_slice).collect();
+
+    let (system, key) = System::new(config(), compiled.circuit_inputs());
+    let expected = system.prove_multiple_claims(
+        &key,
+        &refs,
+        SystemWitness::from_stage_1(traces.clone(), &system),
+    );
+
+    let (lean, lean_key) = System::new_without_preprocessed(config(), compiled.circuit_inputs());
+    assert!(lean.circuits.iter().all(|c| c.preprocessed.is_none()));
+    let lookups = traces
+        .iter()
+        .zip(&lean.circuits)
+        .map(|(trace, circuit)| {
+            let widths: Vec<_> = circuit.graph.lookups.iter().map(|l| l.args.len()).collect();
+            crate::lookup::LookupValues::shape_only(trace.height(), &widths)
+        })
+        .collect();
+    let actual = lean.prove_multiple_claims(&lean_key, &refs, SystemWitness { traces, lookups });
+    assert_eq!(expected.to_bytes().unwrap(), actual.to_bytes().unwrap());
+    lean.verify_multiple_claims(&refs, &actual).unwrap();
+}

@@ -607,6 +607,20 @@ impl<M> HidingSpillableMmcsData<M> {
         }
     }
 
+    pub(crate) fn clone_in_memory_original_trace(&self, idx: usize) -> Option<RowMajorMatrix<Val>> {
+        match &self.0 {
+            HidingSpillableMmcsDataInner::InMemory {
+                retained_traces, ..
+            } => {
+                let guard = retained_traces
+                    .lock()
+                    .expect("retained_traces lock poisoned");
+                guard.get(idx).and_then(Option::as_ref).cloned()
+            }
+            HidingSpillableMmcsDataInner::Spilled { .. } => None,
+        }
+    }
+
     pub(crate) fn release_original_traces(&self) {
         match &self.0 {
             HidingSpillableMmcsDataInner::InMemory {

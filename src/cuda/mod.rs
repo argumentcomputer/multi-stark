@@ -53,7 +53,9 @@ impl Default for CudaDft {
     }
 }
 
-pub(crate) fn configured_device() -> i32 {
+/// The device a prover uses when none is requested:
+/// `MULTI_STARK_CUDA_DEVICE`, otherwise zero.
+pub fn configured_device() -> i32 {
     std::env::var("MULTI_STARK_CUDA_DEVICE").map_or(0, |value| {
         value
             .parse()
@@ -359,6 +361,7 @@ unsafe extern "C" {
         writer: unsafe extern "C" fn(*mut c_void, i32, *mut u64, usize, usize) -> i32,
         destroy: unsafe extern "C" fn(*mut c_void),
     ) -> i32;
+    fn multi_stark_cuda_lde_has_device_trace(handle: *const c_void) -> bool;
     fn multi_stark_cuda_lde_has_generator(handle: *const c_void) -> bool;
     fn multi_stark_cuda_lde_generator_context(handle: *const c_void) -> *mut c_void;
 }
@@ -376,6 +379,11 @@ unsafe impl Send for CudaLde {}
 unsafe impl Sync for CudaLde {}
 
 impl CudaLde {
+    /// Whether the original trace is still resident on the device.
+    pub(crate) fn has_device_trace(&self) -> bool {
+        unsafe { multi_stark_cuda_lde_has_device_trace(self.raw_handle()) }
+    }
+
     pub(crate) fn has_generator(&self) -> bool {
         unsafe { multi_stark_cuda_lde_has_generator(self.raw_handle()) }
     }
@@ -383,14 +391,32 @@ impl CudaLde {
     /// Frees what the trace generator, if any, caches on this device. The
     /// generator stays attached and keeps serving tiles from the host.
     pub(crate) fn release_generator_device(&self) {
-        let context = unsafe { multi_stark_cuda_lde_generator_context(self.raw_handle()) };
-        if context.is_null() {
-            return;
+        if let Some(generator) = self.generator() {
+            generator.release_device(self.device_id);
         }
+    }
+
+    /// Device bytes regenerating this LDE's trace may allocate: its
+    /// generator's releasable state, whether or not it is resident now, since
+    /// admission can release it before the regeneration runs, plus one write
+    /// workspace. Zero while the trace is on the device or without a
+    /// generator.
+    pub(crate) fn regeneration_bytes(&self) -> usize {
+        if self.has_device_trace() {
+            return 0;
+        }
+        self.generator().map_or(0, |generator| {
+            generator
+                .device_state_bytes()
+                .saturating_add(generator.device_workspace_bytes())
+        })
+    }
+
+    fn generator(&self) -> Option<&Generator> {
+        let context = unsafe { multi_stark_cuda_lde_generator_context(self.raw_handle()) };
         // SAFETY: the handle owns the boxed generator until it is destroyed,
         // and the box holds exactly the `Generator` the LDE was created with.
-        let generator = unsafe { &*context.cast::<Generator>() };
-        generator.release_device(self.device_id);
+        (!context.is_null()).then(|| unsafe { &*context.cast::<Generator>() })
     }
 
     pub(crate) const fn raw_handle(&self) -> *const c_void {
@@ -979,6 +1005,7 @@ pub(crate) fn lookup_graph_lde_memory_upper_bound(
     graph: &ConstraintGraph<Goldilocks>,
     height: usize,
     main_width: usize,
+    preprocessed_width: usize,
     group_size: usize,
     log_blowup: usize,
     ext_degree: usize,
@@ -1023,12 +1050,13 @@ pub(crate) fn lookup_graph_lde_memory_upper_bound(
     } else {
         0
     };
-    // Some stage-1 policies retain the original trace in pinned host memory.
-    // Charge one bounded staging chunk even when this particular LDE still
-    // owns a device trace, keeping admission safe across both representations.
+    // Some commitment policies retain the original preprocessed and stage-1
+    // traces only in host memory. Charge one bounded staging chunk for each
+    // even when the LDE still owns a device trace, keeping admission safe
+    // across both representations.
     let trace_chunk_bytes = chunk_rows
         .saturating_add(1)
-        .saturating_mul(main_width)
+        .saturating_mul(main_width.saturating_add(preprocessed_width))
         .saturating_mul(size_of::<Goldilocks>());
     Some((
         output_bytes,
@@ -2444,7 +2472,7 @@ pub(crate) fn lookup_lde_resident_partitioned(
 pub(crate) fn lookup_graph_lde_resident(
     dft: &CudaDft,
     graph: &ConstraintGraph<Goldilocks>,
-    preprocessed: Option<&CudaLde>,
+    preprocessed: Option<(&CudaLde, Option<&RowMajorMatrix<Goldilocks>>)>,
     main: &CudaLde,
     height: usize,
     group_size: usize,
@@ -2468,6 +2496,10 @@ pub(crate) fn lookup_graph_lde_resident(
         added_bits = log_blowup
     )
     .entered();
+    if let Some((lde, Some(host))) = preprocessed {
+        assert_eq!(host.height(), height, "preprocessed host trace height");
+        assert_eq!(host.width(), lde.width, "preprocessed host trace width");
+    }
     let (nodes, slot_count, lookups, args) = encode_lookup_nodes(graph)?;
     let num_lookups = lookups.len();
     let groups = num_lookups.div_ceil(group_size.max(1));
@@ -2480,7 +2512,10 @@ pub(crate) fn lookup_graph_lde_resident(
     );
     let mut tail = vec![Goldilocks::ZERO; 2 * ext_degree];
     let mut handle = core::ptr::null_mut();
-    let preprocessed_ptr = preprocessed.map_or(core::ptr::null(), CudaLde::raw_handle);
+    let preprocessed_ptr = preprocessed.map_or(core::ptr::null(), |(lde, _)| lde.raw_handle());
+    let preprocessed_host_ptr = preprocessed
+        .and_then(|(_, host)| host)
+        .map_or(core::ptr::null(), |host| host.values.as_ptr().cast());
     let status = match ext_degree {
         2 => unsafe {
             multi_stark_cuda_lookup_graph_lde(
@@ -2495,6 +2530,7 @@ pub(crate) fn lookup_graph_lde_resident(
                 args.as_ptr(),
                 args.len(),
                 preprocessed_ptr,
+                preprocessed_host_ptr,
                 main.raw_handle(),
                 group_size.max(1),
                 beta.as_ptr().cast(),
@@ -2517,6 +2553,7 @@ pub(crate) fn lookup_graph_lde_resident(
                 args.as_ptr(),
                 args.len(),
                 preprocessed_ptr,
+                preprocessed_host_ptr,
                 main.raw_handle(),
                 group_size.max(1),
                 beta.as_ptr().cast(),
@@ -2747,6 +2784,60 @@ impl TwoAdicSubgroupDft<Goldilocks> for CudaDft {
 #[inline]
 fn raw_u64(value: Goldilocks) -> u64 {
     value.as_canonical_u64()
+}
+
+/// The most stage-one LDEs a commitment builds concurrently, each on its own
+/// Rayon worker stream. The bound keeps pageable upload staging within the
+/// driver's reliable concurrency range while retaining substantial overlap;
+/// it also bounds how many trace writers run at once.
+pub const MAX_CONCURRENT_LDES: usize = 16;
+
+/// Maps `items` in order with at most `concurrency` calls in flight, each on
+/// a Rayon worker. A call starts as soon as any earlier one finishes rather
+/// than with a fixed wave, so one long transform, or one long host upload,
+/// no longer holds back the calls behind it while the device idles. A
+/// panicking call stops the others from taking further items before the
+/// panic propagates. Without the `parallel` feature the calls run serially.
+pub(crate) fn bounded_parallel_map<T: Sync, R: Send>(
+    items: &[T],
+    concurrency: usize,
+    transform: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct StopOnPanic<'a>(&'a AtomicBool);
+        impl Drop for StopOnPanic<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    self.0.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        let next = AtomicUsize::new(0);
+        let stop = AtomicBool::new(false);
+        let mut results: Vec<(usize, R)> = (0..concurrency.clamp(1, items.len().max(1)))
+            .into_par_iter()
+            .flat_map_iter(|_| {
+                let _guard = StopOnPanic(&stop);
+                let mut done = Vec::new();
+                while !stop.load(Ordering::Relaxed) {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(item) = items.get(index) else { break };
+                    done.push((index, transform(item)));
+                }
+                done
+            })
+            .collect();
+        results.sort_unstable_by_key(|&(index, _)| index);
+        results.into_iter().map(|(_, result)| result).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let _ = concurrency;
+        items.iter().map(transform).collect()
+    }
 }
 
 pub(crate) fn device_memory_info(device_id: i32) -> (usize, usize) {
@@ -3886,6 +3977,14 @@ unsafe extern "C" {
     ) -> i32;
 
     #[cfg(test)]
+    fn multi_stark_cuda_copy_to_device(
+        device_id: i32,
+        output: *mut u64,
+        input: *const u64,
+        words: usize,
+    ) -> i32;
+
+    #[cfg(test)]
     fn multi_stark_cuda_lde_copy_row(
         device_id: i32,
         handle: *const c_void,
@@ -4115,6 +4214,7 @@ unsafe extern "C" {
         lookup_args: *const u32,
         lookup_arg_count: usize,
         preprocessed_handle: *const c_void,
+        preprocessed_host: *const u64,
         main_handle: *const c_void,
         group_size: usize,
         beta: *const u64,
@@ -4561,6 +4661,7 @@ unsafe extern "C" {
         lookup_args: *const u32,
         lookup_arg_count: usize,
         preprocessed_handle: *const c_void,
+        preprocessed_host: *const u64,
         main_handle: *const c_void,
         group_size: usize,
         beta: *const u64,
@@ -4652,7 +4753,46 @@ mod tests {
     use p3_symmetric::CryptographicHasher;
     use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
+    mod lookup_graph;
     mod quotient;
+    mod witness;
+
+    #[test]
+    fn bounded_parallel_map_keeps_order_and_bounds_calls_in_flight() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let items: Vec<usize> = (0..200).collect();
+        for concurrency in [1, 3, 16, 400] {
+            let (running, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+            let mapped = bounded_parallel_map(&items, concurrency, |&item| {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_micros(200));
+                running.fetch_sub(1, Ordering::SeqCst);
+                item * 2
+            });
+            assert_eq!(mapped, items.iter().map(|i| i * 2).collect::<Vec<_>>());
+            assert!(peak.load(Ordering::SeqCst) <= concurrency);
+        }
+        assert!(bounded_parallel_map(&[] as &[usize], 4, |&i| i).is_empty());
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn bounded_parallel_map_stops_taking_items_after_a_panic() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let items: Vec<usize> = (0..10_000).collect();
+        let calls = AtomicUsize::new(0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bounded_parallel_map(&items, 4, |&item| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_micros(50));
+                assert_ne!(item, 10, "injected");
+                item
+            })
+        }));
+        assert!(result.is_err());
+        assert!(calls.load(Ordering::SeqCst) < 100);
+    }
 
     #[test]
     fn device_coset_selectors_match_cpu() {

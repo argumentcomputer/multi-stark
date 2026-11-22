@@ -239,6 +239,52 @@ impl CudaMmcsData<RowMajorMatrix<Goldilocks>> {
         }
     }
 
+    /// Device bytes the graph lookup over matrix `index` may allocate to
+    /// regenerate its trace; see [`CudaLde::regeneration_bytes`]. A spilled
+    /// hybrid LDE keeps its generator and counts too.
+    pub(crate) fn regeneration_bytes(&self, index: usize) -> usize {
+        let lde = match self {
+            Self::Cuda { resident, .. } => resident.get(index),
+            Self::Hybrid { resident, .. } => resident.get(index).and_then(Option::as_ref),
+            Self::Cpu(_) => None,
+        };
+        lde.map_or(0, CudaLde::regeneration_bytes)
+    }
+
+    /// The resident LDE together with a retained host copy of its trace, if
+    /// any, for readers that take the original trace without attaching it to
+    /// the LDE. Unlike [`Self::resident_with_trace`] this never mutates the
+    /// LDE, so it is safe on data shared across concurrent proofs, such as a
+    /// preprocessed commitment. Returns `None` unless the trace is available
+    /// on the device or as that host copy.
+    pub(crate) fn resident_with_host_trace(
+        &self,
+        index: usize,
+    ) -> Option<(&CudaLde, Option<&RowMajorMatrix<Goldilocks>>)> {
+        let (lde, host) = match self {
+            Self::Cuda {
+                resident,
+                retained_traces,
+                ..
+            } => (
+                resident.get(index)?,
+                retained_traces
+                    .get()
+                    .and_then(|retained| retained.get(index)),
+            ),
+            Self::Hybrid {
+                resident,
+                retained_traces,
+                ..
+            } => (
+                resident.get(index)?.as_ref()?,
+                retained_traces.get(index)?.as_ref(),
+            ),
+            Self::Cpu(_) => return None,
+        };
+        (lde.has_device_trace() || host.is_some()).then_some((lde, host))
+    }
+
     pub(crate) fn resident_with_trace(&self, index: usize) -> Option<&CudaLde> {
         match self {
             Self::Cuda {
@@ -503,6 +549,29 @@ pub struct CudaMmcs {
     device_id: i32,
 }
 
+/// The trace a committed LDE extends: the bit-reversed LDE over `gK` starts
+/// with the bit-reversed evaluations on `gH`, which interpolate the trace
+/// polynomial back onto `H`. Computed on the host, so a device under memory
+/// pressure is not asked for transform workspace.
+fn trace_from_lde(
+    lde: &RowMajorMatrix<Goldilocks>,
+    log_blowup: usize,
+) -> RowMajorMatrix<Goldilocks> {
+    use p3_dft::TwoAdicSubgroupDft;
+    use p3_field::Field;
+    use p3_matrix::bitrev::BitReversibleMatrix;
+    let degree = lde.height() >> log_blowup;
+    let evaluations = lde
+        .split_rows(degree)
+        .0
+        .as_cow()
+        .bit_reverse_rows()
+        .to_row_major_matrix();
+    let dft = p3_dft::Radix2DitParallel::<Goldilocks>::default();
+    let coefficients = dft.coset_idft_batch(evaluations, Goldilocks::GENERATOR);
+    dft.dft_batch(coefficients).to_row_major_matrix()
+}
+
 impl CudaMmcs {
     /// Creates a legacy `v5` plain BLAKE3 CUDA MMCS (bit-identical to stock
     /// `p3_blake3::Blake3`).
@@ -522,6 +591,62 @@ impl CudaMmcs {
             DomainCompressionFunction::new(DomainBlake3::new(Blake3Domain::MerkleCompress));
         let cpu = CpuMmcs::new(field_hash, compress, cap_height);
         Self::with_device_and_domain(cpu, cap_height, Blake3Domain::MerkleLeaf, device_id)
+    }
+
+    /// The stage-one trace of committed matrix `index`, for evaluating the
+    /// lookups a shape-only witness omitted: the retained host trace when
+    /// the commitment kept one, otherwise rebuilt from the committed LDE,
+    /// read back from the device if necessary. Only that matrix is read and
+    /// nothing is cached in `data`.
+    pub(crate) fn committed_trace(
+        &self,
+        data: &CudaMmcsData<RowMajorMatrix<Goldilocks>>,
+        index: usize,
+        log_blowup: usize,
+    ) -> RowMajorMatrix<Goldilocks> {
+        match data {
+            CudaMmcsData::Cpu(data) => {
+                trace_from_lde(self.cpu.get_matrices(data)[index], log_blowup)
+            }
+            CudaMmcsData::Hybrid {
+                resident,
+                resident_active,
+                committed_matrices,
+                deferred_matrices,
+                retained_traces,
+                ..
+            } => {
+                if let Some(trace) = &retained_traces[index] {
+                    return trace.clone();
+                }
+                if let Some(lde) = committed_matrices[index].get() {
+                    return trace_from_lde(lde, log_blowup);
+                }
+                if let Some(lde) = resident[index].as_ref()
+                    && resident_active[index].load(std::sync::atomic::Ordering::Acquire)
+                {
+                    return trace_from_lde(&lde.to_row_major_matrix(), log_blowup);
+                }
+                trace_from_lde(
+                    hybrid_matrix(committed_matrices, deferred_matrices, index),
+                    log_blowup,
+                )
+            }
+            CudaMmcsData::Cuda {
+                resident,
+                committed_matrices,
+                retained_traces,
+                ..
+            } => {
+                if let Some(trace) = retained_traces.get().and_then(|traces| traces.get(index)) {
+                    return trace.clone();
+                }
+                if let Some(ldes) = committed_matrices.get() {
+                    return trace_from_lde(&ldes[index], log_blowup);
+                }
+                trace_from_lde(&resident[index].to_row_major_matrix(), log_blowup)
+            }
+        }
     }
 
     /// A commitment scheme resident on the given CUDA device. Every kernel
@@ -1602,7 +1727,6 @@ impl CapValidatingMmcs<Goldilocks> for CudaMmcs {
     ) -> Result<(), Self::Error> {
         verify_merkle_cap_len_for_log_height(self.cap_height(), commit, log_max_height)
     }
-
     fn empty_multi_proof() -> Self::MultiProof {
         p3_merkle_tree::PrunedMerklePaths {
             sibling_hashes: Vec::new(),
@@ -1680,7 +1804,7 @@ mod tests {
             .iter()
             .map(|&i| cpu.open_batch(i, &expected_data))
             .collect();
-        let mmcs = CudaMmcs::with_device(cpu, 0);
+        let mmcs = CudaMmcs::with_device(cpu, 0, 0);
         let ldes = matrices
             .iter()
             .map(|m| CudaLde::from_row_major_matrix(mmcs.device_id, m))
@@ -1704,7 +1828,7 @@ mod tests {
         let (expected_commitment, expected_data) = cpu.commit(matrices.clone());
         let expected_opening = cpu.open_batch(5, &expected_data);
 
-        let mmcs = CudaMmcs::with_device(cpu, 0);
+        let mmcs = CudaMmcs::with_device(cpu, 0, 0);
         let resident = vec![
             Some(CudaLde::from_row_major_matrix(mmcs.device_id, &matrices[0])),
             None,

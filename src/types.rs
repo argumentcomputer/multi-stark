@@ -640,12 +640,19 @@ where
                 .get(input.stage_1.1)
                 .expect("stage-1 matrix index out of bounds")
                 .width;
+            let preprocessed_width = input.preprocessed.map_or(0, |(data, matrix)| {
+                mmcs.matrix_dimensions(data)
+                    .get(matrix)
+                    .expect("preprocessed matrix index out of bounds")
+                    .width
+            });
             let graph_memory = (num_lookups != 0)
                 .then(|| {
                     crate::cuda::lookup_graph_lde_memory_upper_bound(
                         &input.circuit.graph,
                         height,
                         main_width,
+                        preprocessed_width,
                         group_size,
                         log_blowup,
                         ext_degree,
@@ -701,9 +708,11 @@ where
     let gamma = <EF as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&fingerprint_challenge);
     let lookup_pool =
         std::sync::Arc::new(cuda_host_pool("lookup-rows", cuda_lookup_worker_count()));
-    let evaluate = |input: &CudaLookupJob<'_>, graph_path: bool, cooperative: bool| {
-        let (height, num_lookups, multiplicities, args, arg_offsets) =
-            input.lookup_values.cuda_parts();
+    let evaluate = |input: &CudaLookupJob<'_>,
+                    values: &crate::lookup::LookupValues<Val>,
+                    graph_path: bool,
+                    cooperative: bool| {
+        let (height, num_lookups, multiplicities, args, arg_offsets) = values.cuda_parts();
         let group_size = input.circuit.lookup_group_size.max(1);
         let main = graph_path.then(|| {
             input
@@ -714,8 +723,9 @@ where
         });
         let result = if let Some(main) = main {
             let preprocessed = input.preprocessed.map(|(data, index)| {
-                data.resident(index)
-                    .expect("lookup graph admission requires a resident preprocessed LDE")
+                data.resident_with_host_trace(index).expect(
+                    "lookup graph admission requires a trace-backed resident preprocessed LDE",
+                )
             });
             crate::cuda::lookup_graph_lde_resident(
                 dft,
@@ -747,7 +757,7 @@ where
                 log_blowup,
                 move |rows| {
                     pool.install(|| {
-                        input.lookup_values.cuda_stage_2_deltas::<EF>(
+                        values.cuda_stage_2_deltas::<EF>(
                             rows,
                             group_size,
                             lookup_challenge,
@@ -772,9 +782,12 @@ where
                 log_blowup,
             ))
         };
+        // SAFETY: evaluation is synchronous and complete, while the retained
+        // matrix remains owned by the prover data. A generator's device cache
+        // stays: admission releases it under memory pressure, and later lookups
+        // over the same record would otherwise rebuild it.
         if let Some(main) = main {
             unsafe { main.release_trace() };
-            main.release_generator_device();
         }
         result
     };
@@ -782,16 +795,25 @@ where
     for (index, output_bytes, direct_temporary_bytes, graph_temporary_bytes, _) in lookup_jobs {
         let job_started = std::time::Instant::now();
         let input = &inputs[index];
+        // The graph kernel reads the stage-1 trace through `resident_with_trace`,
+        // which also serves spilled LDEs that regenerate from a generator or a
+        // retained host trace, and the preprocessed trace through
+        // `resident_with_host_trace`. Admit it under the same predicates so the
+        // budget matches the kernel that runs.
         let admits_graph = || {
             graph_temporary_bytes.is_some()
                 && input.stage_1.0.has_resident_with_trace(input.stage_1.1)
                 && input
                     .preprocessed
-                    .is_none_or(|(data, matrix)| data.resident(matrix).is_some())
+                    .is_none_or(|(data, matrix)| data.resident_with_host_trace(matrix).is_some())
         };
+        // A graph lookup over a trace no longer on the device regenerates it,
+        // which can re-upload generator state that admission released.
         let target_for = |graph_path: bool| {
             let temporary_bytes = if graph_path {
-                graph_temporary_bytes.unwrap()
+                graph_temporary_bytes
+                    .unwrap()
+                    .saturating_add(input.stage_1.0.regeneration_bytes(input.stage_1.1))
             } else {
                 direct_temporary_bytes
             };
@@ -820,9 +842,6 @@ where
         if free_bytes < target {
             return None;
         }
-        if !graph_path && !input.lookup_values.is_materialized() {
-            return None;
-        }
         if crate::cuda::memory_diagnostics_enabled() {
             eprintln!(
                 "[multi-stark/cuda] lookup job {index}: graph={graph_path} output={output_bytes} temporary={temporary_bytes} target={target} free={free_bytes}"
@@ -833,7 +852,31 @@ where
             && output_bytes >= (8usize << 30)
             && num_lookups >= 64
             && arg_offsets.last().copied().unwrap_or(0) >= 256;
-        results[index] = Some(evaluate(&inputs[index], graph_path, cooperative)?);
+        // The direct paths read lookup values on the host. A shape-only witness
+        // gets them from the committed stage-one trace here. Circuits with zero
+        // lookups build an all-zero LDE without reading any lookup values, so
+        // skip trace rebuild when `num_lookups == 0`.
+        let materialized = (!graph_path
+            && num_lookups != 0
+            && !input.lookup_values.is_materialized())
+        .then(|| {
+            let _g = tracing::info_span!("cuda/materialize_lookups", index).entered();
+            let trace = mmcs.committed_trace(input.stage_1.0, input.stage_1.1, log_blowup);
+            // A system built without its fixed matrices reads each one back
+            // from the preprocessed commitment when it is needed.
+            let fixed = (input.circuit.preprocessed.is_none()
+                && input.circuit.graph.lookup_prefix_uses_preprocessed())
+            .then_some(input.preprocessed)
+            .flatten()
+            .map(|(data, matrix)| mmcs.committed_trace(data, matrix, log_blowup));
+            crate::system::compute_lookup_values_with_fixed(
+                input.circuit,
+                &trace,
+                input.circuit.preprocessed.as_ref().or(fixed.as_ref()),
+            )
+        });
+        let values = materialized.as_ref().unwrap_or(input.lookup_values);
+        results[index] = Some(evaluate(input, values, graph_path, cooperative)?);
         if crate::cuda::memory_diagnostics_enabled() {
             eprintln!(
                 "[multi-stark/cuda] lookup job {index} complete: {:.3}s",
@@ -1088,6 +1131,59 @@ impl ProofConfig for GoldilocksBlake3Config {
             == Some(commit.num_roots())
     }
 
+    /// The stage-one or preprocessed trace at `index` of `data`, on its trace
+    /// domain of size `degree`. Delegates directly to
+    /// [`crate::cuda::mmcs::CudaMmcs::committed_trace`] so only matrix `index`
+    /// is read (or cloned from retained host traces) without calling
+    /// `get_matrices`, which would spill all deferred GPU LDEs back to host
+    /// RAM.
+    #[cfg(feature = "cuda")]
+    fn committed_trace(
+        &self,
+        data: &crate::config::PcsData<Self>,
+        index: usize,
+        degree: usize,
+    ) -> Option<RowMajorMatrix<Val>> {
+        use p3_matrix::Matrix;
+        let trace = self.pcs.mmcs.committed_trace(data, index, self.log_blowup);
+        assert_eq!(trace.height(), degree);
+        Some(trace)
+    }
+
+    /// The stage-one or preprocessed trace at `index` of `data`, on its trace
+    /// domain of size `degree`. Returns the retained 1× original trace without
+    /// running any DFT when available; otherwise interpolates from the `gH`
+    /// coset prefix of the committed LDE.
+    #[cfg(not(feature = "cuda"))]
+    fn committed_trace(
+        &self,
+        data: &crate::config::PcsData<Self>,
+        index: usize,
+        degree: usize,
+    ) -> Option<RowMajorMatrix<Val>> {
+        use crate::traits::{EvaluationDomain as _, Pcs as _};
+        use p3_dft::TwoAdicSubgroupDft;
+        if let Some(spilled) = data.spilled_original_trace(index) {
+            let trace = spilled.read_all();
+            assert_eq!(trace.height(), degree);
+            return Some(trace);
+        }
+        if let Some(trace) = data.clone_in_memory_original_trace(index) {
+            assert_eq!(trace.height(), degree);
+            return Some(trace);
+        }
+        let coset = self
+            .pcs
+            .natural_domain_for_degree(degree)
+            .create_disjoint_domain(degree);
+        let evaluations = self
+            .pcs
+            .get_evaluations_on_domain(data, index, coset)
+            .to_row_major_matrix();
+        let dft = Radix2DitParallel::<Val>::default();
+        let coefficients = dft.coset_idft_batch(evaluations, coset.first_point());
+        Some(dft.dft_batch(coefficients).to_row_major_matrix())
+    }
     #[cfg(feature = "cuda")]
     fn commit_main(
         &self,
@@ -1219,11 +1315,9 @@ impl ProofConfig for GoldilocksBlake3Config {
                 } else if let Some(owned) = s1_data.take_in_memory_original_trace(s1_idx) {
                     TraceBacking::Owned(owned)
                 } else {
-                    let trace_domain = self.pcs.natural_domain_for_degree(height);
                     TraceBacking::Owned(
-                        self.pcs
-                            .get_evaluations_on_domain(s1_data, s1_idx, trace_domain)
-                            .to_row_major_matrix(),
+                        self.committed_trace(s1_data, s1_idx, height)
+                            .expect("GoldilocksBlake3Config always rebuilds committed traces"),
                     )
                 };
 
@@ -1234,11 +1328,10 @@ impl ProofConfig for GoldilocksBlake3Config {
                         if let Some(spilled) = prep_data.spilled_original_trace(prep_idx) {
                             Some(TraceBacking::Spilled(spilled))
                         } else {
-                            let trace_domain = self.pcs.natural_domain_for_degree(height);
                             Some(TraceBacking::Owned(
-                                self.pcs
-                                    .get_evaluations_on_domain(prep_data, prep_idx, trace_domain)
-                                    .to_row_major_matrix(),
+                                self.committed_trace(prep_data, prep_idx, height).expect(
+                                    "GoldilocksBlake3Config always rebuilds committed traces",
+                                ),
                             ))
                         }
                     } else {
@@ -1959,6 +2052,54 @@ where
     ) -> bool {
         crate::p3_adapter::cap::expected_merkle_cap_roots(self.cap_height, max_log_lde_height)
             == Some(commit.num_roots())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn committed_trace(
+        &self,
+        data: &crate::config::PcsData<Self>,
+        index: usize,
+        degree: usize,
+    ) -> Option<RowMajorMatrix<Val>> {
+        use p3_matrix::Matrix;
+        let trace = self
+            .pcs
+            .inner()
+            .mmcs
+            .committed_trace(data, index, self.log_blowup);
+        assert_eq!(trace.height(), degree);
+        Some(trace)
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn committed_trace(
+        &self,
+        data: &crate::config::PcsData<Self>,
+        index: usize,
+        degree: usize,
+    ) -> Option<RowMajorMatrix<Val>> {
+        use crate::traits::{EvaluationDomain as _, Pcs as _};
+        use p3_dft::TwoAdicSubgroupDft;
+        if let Some(spilled) = data.spilled_original_trace(index) {
+            let trace = spilled.read_all();
+            assert_eq!(trace.height(), degree);
+            return Some(trace);
+        }
+        if let Some(trace) = data.clone_in_memory_original_trace(index) {
+            assert_eq!(trace.height(), degree);
+            return Some(trace);
+        }
+        let coset = self
+            .pcs
+            .natural_domain_for_degree(degree)
+            .create_disjoint_domain(degree);
+        let evaluations = self
+            .pcs
+            .get_evaluations_on_domain(data, index, coset)
+            .to_row_major_matrix();
+        let dft = Radix2DitParallel::<Val>::default();
+        let coefficients = dft.coset_idft_batch(evaluations, coset.first_point());
+        Some(dft.dft_batch(coefficients).to_row_major_matrix())
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -2773,6 +2914,50 @@ where
     ) -> bool {
         crate::p3_adapter::cap::expected_merkle_cap_roots(self.cap_height, max_log_lde_height)
             == Some(commit.num_roots())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn committed_trace(
+        &self,
+        data: &crate::config::PcsData<Self>,
+        index: usize,
+        degree: usize,
+    ) -> Option<RowMajorMatrix<Val>> {
+        use crate::traits::Pcs as _;
+        use p3_matrix::Matrix;
+        let trace_domain = self.pcs.natural_domain_for_degree(degree);
+        let trace = self
+            .pcs
+            .get_evaluations_on_domain(data, index, trace_domain)
+            .to_row_major_matrix();
+        assert_eq!(trace.height(), degree);
+        Some(trace)
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn committed_trace(
+        &self,
+        data: &crate::config::PcsData<Self>,
+        index: usize,
+        degree: usize,
+    ) -> Option<RowMajorMatrix<Val>> {
+        use crate::traits::Pcs as _;
+        if let Some(spilled) = data.spilled_original_trace(index) {
+            let trace = spilled.read_all();
+            assert_eq!(trace.height(), degree);
+            return Some(trace);
+        }
+        if let Some(trace) = data.clone_in_memory_original_trace(index) {
+            assert_eq!(trace.height(), degree);
+            return Some(trace);
+        }
+        let trace_domain = self.pcs.natural_domain_for_degree(degree);
+        let trace = self
+            .pcs
+            .get_evaluations_on_domain(data, index, trace_domain)
+            .to_row_major_matrix();
+        assert_eq!(trace.height(), degree);
+        Some(trace)
     }
 
     #[cfg(not(feature = "cuda"))]
