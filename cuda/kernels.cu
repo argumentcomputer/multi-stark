@@ -1193,12 +1193,13 @@ __global__ void add_scaled_t(Ext* output,const Ext* input,size_t count,Ext scale
 }
 
 template <typename Ext>
-__global__ void lookup_messages_t(Ext* conjugates,uint64_t* norms,const uint64_t* args,
-    const size_t* arg_offsets,size_t height,size_t num_lookups,size_t args_width,
+__global__ void lookup_messages_t(Ext* conjugates,uint64_t* norms,const uint64_t* multiplicities,
+    const uint64_t* args,const size_t* arg_offsets,size_t height,size_t num_lookups,size_t args_width,
     Ext beta,Ext gamma,uint64_t ext_w){
     using Ops = ExtOps<Ext>;
     const size_t count=height*num_lookups;
     for(size_t index=static_cast<size_t>(blockIdx.x)*blockDim.x+threadIdx.x;index<count;index+=static_cast<size_t>(gridDim.x)*blockDim.x){
+        if(canonicalize(multiplicities[index])==0){conjugates[index]=Ops::zero();norms[index]=1;continue;}
         const size_t row=index/num_lookups,lookup=index%num_lookups;Ext fingerprint=Ops::zero();
         for(size_t j=arg_offsets[lookup+1];j>arg_offsets[lookup];--j)
             fingerprint=Ops::add_base(Ops::mul(fingerprint,gamma,ext_w),args[row*args_width+j-1]);
@@ -1242,15 +1243,18 @@ __global__ void lookup_messages_graph_t(
                 case 6:v=goldilocks_add(a,b);break;
                 case 7:v=goldilocks_sub(a,b);break;
                 case 8:v=goldilocks_mul(a,b);break;
-                case 9:v=a==0?0:GOLDILOCKS_P-canonicalize(a);break;
+                case 9:{const uint64_t ca=canonicalize(a);v=ca==0?0:GOLDILOCKS_P-ca;break;}
             }values[n.out*tile+lane]=v;
             while(next_lookup<lookup_count&&lookups[next_lookup].emit_after==i){
-                const ConstraintLookup l=lookups[next_lookup++];Ext fingerprint=Ops::zero();
+                const ConstraintLookup l=lookups[next_lookup++];const size_t index=local_row*lookup_count+l.output;
+                const uint64_t mult=values[l.multiplicity*tile+lane];
+                multiplicities[index]=mult;
+                if(canonicalize(mult)==0){conjugates[index]=Ops::zero();norms[index]=1;continue;}
+                Ext fingerprint=Ops::zero();
                 for(size_t k=l.arg_count;k>0;--k)
                     fingerprint=Ops::add_base(Ops::mul(fingerprint,gamma,ext_w),values[lookup_args[l.arg_start+k-1]*tile+lane]);
-                const Ext message=Ops::add(beta,fingerprint);const size_t index=local_row*lookup_count+l.output;
+                const Ext message=Ops::add(beta,fingerprint);
                 Ops::adjugate_and_norm(message,ext_w,conjugates[index],norms[index]);
-                multiplicities[index]=values[l.multiplicity*tile+lane];
             }
         }
     }
@@ -1519,7 +1523,7 @@ __global__ void evaluate_constraint_graph(
                 case 6: result = goldilocks_add(left, right); break;
                 case 7: result = goldilocks_sub(left, right); break;
                 case 8: result = goldilocks_mul(left, right); break;
-                case 9: result = left == 0 ? 0 : GOLDILOCKS_P - canonicalize(left); break;
+                case 9: { const uint64_t cl = canonicalize(left); result = cl == 0 ? 0 : GOLDILOCKS_P - cl; break; }
             }
             values[node.out * tile + lane] = result;
         }
@@ -1625,7 +1629,7 @@ __global__ void evaluate_quotient_t(
                 case 6: v = goldilocks_add(a,b); break;
                 case 7: v = goldilocks_sub(a,b); break;
                 case 8: v = goldilocks_mul(a,b); break;
-                case 9: v = a == 0 ? 0 : GOLDILOCKS_P - canonicalize(a); break;
+                case 9: { const uint64_t ca = canonicalize(a); v = ca == 0 ? 0 : GOLDILOCKS_P - ca; break; }
             }
             values[n.out * tile + lane] = v;
         }
@@ -3516,7 +3520,7 @@ int lookup_trace_impl(int device_id,uint64_t* output,uint64_t* total,
     if(status==cudaSuccess)status=cudaMemcpyAsync(dm,multiplicities,height*num_lookups*sizeof(uint64_t),cudaMemcpyHostToDevice,0);
     if(status==cudaSuccess&&args_width)status=cudaMemcpyAsync(da,args,height*args_width*sizeof(uint64_t),cudaMemcpyHostToDevice,0);
     if(status==cudaSuccess)status=cudaMemcpyAsync(offsets,arg_offsets,(num_lookups+1)*sizeof(size_t),cudaMemcpyHostToDevice,0);
-    if(status==cudaSuccess){lookup_messages_t<Ext><<<blocks_for(message_count),THREADS>>>(conjugates,norms,da,offsets,height,num_lookups,args_width,ExtOps<Ext>::load(beta),ExtOps<Ext>::load(gamma),ext_w);status=cudaGetLastError();}
+    if(status==cudaSuccess){lookup_messages_t<Ext><<<blocks_for(message_count),THREADS>>>(conjugates,norms,dm,da,offsets,height,num_lookups,args_width,ExtOps<Ext>::load(beta),ExtOps<Ext>::load(gamma),ext_w);status=cudaGetLastError();}
     if(status==cudaSuccess)status=batch_inverse_norms(norm_inverses,norms,message_count);
     if(status==cudaSuccess){lookup_group_deltas_batched_t<Ext><<<blocks_for(count),THREADS>>>(deltas,dm,conjugates,norm_inverses,height,num_lookups,group_size);status=cudaGetLastError();}
     if(status==cudaSuccess)status=exclusive_scan_ext_t<Ext>(scan,deltas,count);
@@ -3654,7 +3658,7 @@ int lookup_lde_impl(int device_id,void** output_handle,uint64_t* total,
         const size_t messages=rows*num_lookups;
         status=cudaMemcpy(dm,multiplicities+row_start*num_lookups,messages*sizeof(uint64_t),cudaMemcpyHostToDevice);
         if(status==cudaSuccess&&args_width)status=cudaMemcpy(da,args+row_start*args_width,rows*args_width*sizeof(uint64_t),cudaMemcpyHostToDevice);
-        if(status==cudaSuccess){lookup_messages_t<Ext><<<blocks_for(messages),THREADS>>>(conjugates,norms,da,offsets,rows,num_lookups,args_width,beta_ext,gamma_ext,ext_w);status=cudaGetLastError();}
+        if(status==cudaSuccess){lookup_messages_t<Ext><<<blocks_for(messages),THREADS>>>(conjugates,norms,dm,da,offsets,rows,num_lookups,args_width,beta_ext,gamma_ext,ext_w);status=cudaGetLastError();}
         if(status==cudaSuccess)status=batch_inverse_norms(norm_inverses,norms,messages);
         if(status==cudaSuccess){lookup_group_deltas_batched_t<Ext><<<blocks_for(rows*slots),THREADS>>>(deltas+row_start*slots,dm,conjugates,norm_inverses,rows,num_lookups,group_size);status=cudaGetLastError();}
     }
@@ -3784,8 +3788,8 @@ int lookup_lde_gpu_rows_partitioned_impl(
     if (status == cudaSuccess) {
         lookup_messages_t<Ext><<<blocks_for(messages), THREADS>>>(
             reinterpret_cast<Ext*>(pending->conjugates), pending->norms,
-            pending->args, pending->arg_offsets, rows, pending->num_lookups,
-            pending->args_width, ExtOps<Ext>::load(beta),
+            pending->multiplicities, pending->args, pending->arg_offsets, rows,
+            pending->num_lookups, pending->args_width, ExtOps<Ext>::load(beta),
             ExtOps<Ext>::load(gamma), ext_w);
         status = cudaGetLastError();
     }

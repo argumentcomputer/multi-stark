@@ -48,6 +48,7 @@ use super::{
     CudaFriWorkspace, CudaInterpolationTasks, CudaLde, CudaMixedMerkleTree, CudaReducedOpening,
     CudaReductionTasks,
 };
+use crate::p3_adapter::cap::{CapValidatingMmcs, validate_fri_commitment_caps};
 use crate::p3_adapter::fri_batching::{
     FriBatching, FriBatchingSchedule, pack_ext_weights, verify_fri_with_batching,
 };
@@ -686,8 +687,8 @@ impl<Val, Dft, InputMmcs, FriMmcs, Challenge, Challenger> Pcs<Challenge, Challen
 where
     Val: TwoAdicField + PrimeField64,
     Dft: TwoAdicSubgroupDft<Val> + CudaPcsDft<Val> + Sync,
-    InputMmcs: Mmcs<Val, MultiProof: Sync, Error: Sync> + CudaCommitMmcs<Val>,
-    FriMmcs: Mmcs<Challenge> + CudaFriMmcs<Val, Challenge>,
+    InputMmcs: CapValidatingMmcs<Val, MultiProof: Sync, Error: Sync> + CudaCommitMmcs<Val>,
+    FriMmcs: CapValidatingMmcs<Challenge> + CudaFriMmcs<Val, Challenge>,
     Challenge: ExtensionField<Val>,
     Challenger:
         FieldChallenger<Val> + CanObserve<FriMmcs::Commitment> + GrindingChallenger<Witness = Val>,
@@ -2392,6 +2393,12 @@ where
         proof: &Self::Proof,
         challenger: &mut Challenger,
     ) -> Result<(), Self::Error> {
+        validate_fri_commitment_caps(
+            &self.fri,
+            proof,
+            &commitments_with_opening_points,
+            &self.mmcs,
+        )?;
         // Write all evaluations to challenger.
         // Need to ensure to do this in the same order as the prover.
         for (_, round) in &commitments_with_opening_points {

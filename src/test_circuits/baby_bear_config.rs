@@ -221,6 +221,17 @@ impl ProofConfig for BabyBearPoseidon2Config {
     fn log_blowup(&self) -> usize {
         self.log_blowup
     }
+
+    fn validate_commitment_cap(
+        &self,
+        commit: &crate::config::Com<Self>,
+        max_log_lde_height: usize,
+    ) -> bool {
+        crate::p3_adapter::cap::expected_merkle_cap_roots(
+            self.pcs.commitment_parameters().cap_height,
+            max_log_lde_height,
+        ) == Some(commit.num_roots())
+    }
 }
 
 /// A minimal AIR: enforces `a * b == c` per row, with a self-canceling

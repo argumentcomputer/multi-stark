@@ -51,6 +51,10 @@ use p3_util::{log2_ceil_usize, log2_strict_usize, reverse_slice_index_bits};
 use tracing::debug_span;
 
 use super::blake3_simd;
+use super::cap::{
+    CapValidatingMmcs, validate_fri_commitment_caps, verify_merkle_cap_len,
+    verify_merkle_cap_len_for_log_height,
+};
 use super::domain_blake3::{Blake3Domain, DomainBlake3};
 use super::fri_batching::{
     FriBatching, FriBatchingSchedule, pack_ext_weights, verify_fri_with_batching,
@@ -1352,6 +1356,7 @@ impl Mmcs<Val> for SpillableMmcs {
         index: usize,
         batch_opening: BatchOpeningRef<'_, Val, Self>,
     ) -> Result<(), Self::Error> {
+        verify_merkle_cap_len(self.cap_height(), commit, dimensions)?;
         let (opened_values, opening_proof) = batch_opening.unpack();
         self.cpu.verify_batch(
             commit,
@@ -1384,8 +1389,19 @@ impl Mmcs<Val> for SpillableMmcs {
         opened_values: &[Vec<R>],
         proof: &Self::MultiProof,
     ) -> Result<(), Self::Error> {
+        verify_merkle_cap_len(self.cap_height(), commit, dimensions)?;
         self.cpu
             .verify_multi_batch(commit, dimensions, indices, opened_values, proof)
+    }
+}
+
+impl CapValidatingMmcs<Val> for SpillableMmcs {
+    fn validate_commitment_cap_for_log_height(
+        &self,
+        commit: &Self::Commitment,
+        log_max_height: usize,
+    ) -> Result<(), Self::Error> {
+        verify_merkle_cap_len_for_log_height(self.cap_height(), commit, log_max_height)
     }
 }
 
@@ -1586,7 +1602,7 @@ impl<EF, Dft, FriMmcs, Challenger> Pcs<EF, Challenger> for SpillableTwoAdicFriPc
 where
     EF: ExtensionField<Val> + ExtensionOf<Val>,
     Dft: TwoAdicSubgroupDft<Val>,
-    FriMmcs: Mmcs<EF>,
+    FriMmcs: CapValidatingMmcs<EF>,
     Challenger:
         FieldChallenger<Val> + CanObserve<FriMmcs::Commitment> + GrindingChallenger<Witness = Val>,
 {
@@ -1887,6 +1903,9 @@ where
             for (mat_idx, (points_for_mat, openings_for_mat)) in
                 points.iter().zip(openings_for_round).enumerate()
             {
+                if points_for_mat.is_empty() || openings_for_mat.is_empty() {
+                    continue;
+                }
                 let dim = dims[mat_idx];
                 let log_height = log2_strict_usize(dim.height);
                 let _guard = debug_span!("reduce matrix quotient", dims = %dim).entered();
@@ -1924,10 +1943,6 @@ where
                     };
                     let inv_denom = inv_denoms.get(&point).unwrap().as_slice();
                     point_params.push((opening_weight, reduced_val, inv_denom));
-                }
-
-                if point_params.is_empty() {
-                    continue;
                 }
 
                 match &data.0 {
@@ -2007,6 +2022,12 @@ where
         proof: &Self::Proof,
         challenger: &mut Challenger,
     ) -> Result<(), Self::Error> {
+        validate_fri_commitment_caps(
+            &self.fri,
+            proof,
+            &commitments_with_opening_points,
+            &self.mmcs,
+        )?;
         for (_, round) in &commitments_with_opening_points {
             for (_, mat) in round {
                 for (_, point) in mat {
@@ -2794,6 +2815,94 @@ mod tests {
                     got_invs, expected_invs,
                     "cubic trinomial norm-trick inverse mismatch at 2^{log_size}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn verify_batch_and_multi_batch_reject_wrong_cap_root_count() {
+        use p3_merkle_tree::{MerkleTreeError, PrunedMerklePaths};
+
+        let mut rng = SmallRng::seed_from_u64(1337);
+        let mat = RowMajorMatrix::new(
+            (0..32 * 4).map(|_| Goldilocks::new(rng.random())).collect(),
+            4,
+        );
+        let dims = [Dimensions {
+            width: 4,
+            height: 32,
+        }];
+
+        for v6 in [false, true] {
+            for cap_height in [0usize, 1] {
+                let (_, mmcs) = make_mmcs(cap_height, v6);
+                let (commit, data) = mmcs.commit(vec![mat.clone()]);
+                let single = mmcs.open_batch(7, &data);
+                let (multi_vals, multi_proof) = mmcs.open_multi_batch(&[3, 7, 19], &data);
+
+                mmcs.verify_batch(
+                    &commit,
+                    &dims,
+                    7,
+                    BatchOpeningRef::new(&single.opened_values, &single.opening_proof),
+                )
+                .unwrap();
+                mmcs.verify_multi_batch(&commit, &dims, &[3, 7, 19], &multi_vals, &multi_proof)
+                    .unwrap();
+
+                let mut inflated_roots = commit.roots().to_vec();
+                inflated_roots.extend_from_slice(commit.roots());
+                let inflated = MerkleCap::new(inflated_roots);
+                assert!(matches!(
+                    mmcs.verify_batch(
+                        &inflated,
+                        &dims,
+                        7,
+                        BatchOpeningRef::new(&single.opened_values, &single.opening_proof),
+                    ),
+                    Err(MerkleTreeError::CapMismatch)
+                ));
+                assert!(matches!(
+                    mmcs.verify_multi_batch(
+                        &inflated,
+                        &dims,
+                        &[3, 7, 19],
+                        &multi_vals,
+                        &multi_proof,
+                    ),
+                    Err(MerkleTreeError::CapMismatch)
+                ));
+                let empty_rows: &[Vec<&[Val]>] = &[];
+                let empty_proof = PrunedMerklePaths {
+                    sibling_hashes: Vec::new(),
+                };
+                assert!(matches!(
+                    mmcs.verify_multi_batch(&inflated, &dims, &[], empty_rows, &empty_proof),
+                    Err(MerkleTreeError::CapMismatch)
+                ));
+
+                if cap_height > 0 {
+                    let truncated = MerkleCap::new(vec![commit.roots()[0]]);
+                    assert!(matches!(
+                        mmcs.verify_batch(
+                            &truncated,
+                            &dims,
+                            7,
+                            BatchOpeningRef::new(&single.opened_values, &single.opening_proof),
+                        ),
+                        Err(MerkleTreeError::CapMismatch)
+                    ));
+                    assert!(matches!(
+                        mmcs.verify_multi_batch(
+                            &truncated,
+                            &dims,
+                            &[3, 7, 19],
+                            &multi_vals,
+                            &multi_proof,
+                        ),
+                        Err(MerkleTreeError::CapMismatch)
+                    ));
+                }
             }
         }
     }

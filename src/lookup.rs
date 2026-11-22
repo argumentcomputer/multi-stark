@@ -1409,13 +1409,17 @@ impl LookupValues<p3_goldilocks::Goldilocks> {
         let messages = (message_start..message_end)
             .into_par_iter()
             .map(|index| {
-                let row = index / self.num_lookups;
-                let lookup = index % self.num_lookups;
-                lookup_challenge
-                    + fingerprint(
-                        fingerprint_challenge,
-                        self.args_at(row, lookup).iter().copied(),
-                    )
+                if self.multiplicities[index].is_zero() {
+                    <EF as Algebra<EF>>::ONE
+                } else {
+                    let row = index / self.num_lookups;
+                    let lookup = index % self.num_lookups;
+                    lookup_challenge
+                        + fingerprint(
+                            fingerprint_challenge,
+                            self.args_at(row, lookup).iter().copied(),
+                        )
+                }
             })
             .collect::<Vec<_>>();
         let inverses = crate::traits::batch_inverse(&messages);

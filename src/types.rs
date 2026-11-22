@@ -1079,6 +1079,15 @@ impl ProofConfig for GoldilocksBlake3Config {
         self.log_blowup
     }
 
+    fn validate_commitment_cap(
+        &self,
+        commit: &crate::config::Com<Self>,
+        max_log_lde_height: usize,
+    ) -> bool {
+        crate::p3_adapter::cap::expected_merkle_cap_roots(self.cap_height, max_log_lde_height)
+            == Some(commit.num_roots())
+    }
+
     #[cfg(feature = "cuda")]
     fn commit_main(
         &self,
@@ -1934,6 +1943,15 @@ where
 
     fn log_blowup(&self) -> usize {
         self.log_blowup
+    }
+
+    fn validate_commitment_cap(
+        &self,
+        commit: &crate::config::Com<Self>,
+        max_log_lde_height: usize,
+    ) -> bool {
+        crate::p3_adapter::cap::expected_merkle_cap_roots(self.cap_height, max_log_lde_height)
+            == Some(commit.num_roots())
     }
 
     #[cfg(not(feature = "cuda"))]

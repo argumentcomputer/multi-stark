@@ -4,6 +4,7 @@
 mod air;
 #[cfg(not(feature = "cuda"))]
 pub(crate) mod blake3_simd;
+pub mod cap;
 pub mod challenger;
 pub mod domain;
 pub mod domain_blake3;

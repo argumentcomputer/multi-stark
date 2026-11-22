@@ -28,6 +28,7 @@
 use std::collections::BTreeMap;
 use std::iter;
 
+use super::cap::{CapValidatingMmcs, validate_fri_commitment_caps};
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
 use p3_commit::Mmcs;
 use p3_field::coset::TwoAdicMultiplicativeCoset;
@@ -203,8 +204,8 @@ pub fn verify_fri_with_batching<Folding, Val, Challenge, InputMmcs, FriMmcs, Cha
 where
     Val: TwoAdicField,
     Challenge: ExtensionField<Val>,
-    InputMmcs: Mmcs<Val>,
-    FriMmcs: Mmcs<Challenge>,
+    InputMmcs: CapValidatingMmcs<Val>,
+    FriMmcs: CapValidatingMmcs<Challenge>,
     Challenger: FieldChallenger<Val> + GrindingChallenger + CanObserve<FriMmcs::Commitment>,
     Folding: FriFoldingStrategy<
             Val,
@@ -213,6 +214,7 @@ where
             InputProof = Vec<BatchMultiOpening<Val, InputMmcs>>,
         >,
 {
+    validate_fri_commitment_caps(params, proof, commitments_with_opening_points, input_mmcs)?;
     match batching {
         FriBatching::Horner => verifier::verify_fri(
             folding,
@@ -259,8 +261,8 @@ pub(crate) fn verify_fri_with_batching_inner<
 where
     Val: TwoAdicField,
     Challenge: ExtensionField<Val>,
-    InputMmcs: Mmcs<Val>,
-    FriMmcs: Mmcs<Challenge>,
+    InputMmcs: CapValidatingMmcs<Val>,
+    FriMmcs: CapValidatingMmcs<Challenge>,
     Challenger: FieldChallenger<Val> + GrindingChallenger + CanObserve<FriMmcs::Commitment>,
     Folding: FriFoldingStrategy<
             Val,
@@ -269,9 +271,7 @@ where
             InputProof = Vec<BatchMultiOpening<Val, InputMmcs>>,
         >,
 {
-    if params.num_queries == 0 {
-        return Err(FriError::ZeroQueries);
-    }
+    validate_fri_commitment_caps(params, proof, commitments_with_opening_points, input_mmcs)?;
 
     // Derive max_width and max_openings_per_height from the authenticated
     // opening structure before sampling batching challenges.

@@ -71,6 +71,7 @@ use crate::{ensure, ensure_eq};
 use crate::traits::{Algebra, Field, Transcript, TwoAdicField};
 use bincode::error::{DecodeError, EncodeError};
 use bincode::serde::{decode_from_slice, encode_to_vec};
+use p3_util::log2_strict_usize;
 use serde::{Deserialize, Serialize};
 
 /// What a shard publishes after round one: everything about it that the
@@ -331,11 +332,51 @@ impl<SC: StarkGenericConfig> System<SC> {
         preamble: &BatchPreamble<SC>,
     ) -> Result<(), VerificationError<PcsError<SC>>> {
         ensure!(
+            !self.circuits.is_empty(),
+            VerificationError::InvalidSystem;
+            "system has no circuits"
+        );
+        let num_preprocessed = self
+            .preprocessed_indices
+            .iter()
+            .map(|i| usize::from(i.is_some()))
+            .sum::<usize>();
+        ensure_eq!(
+            self.preprocessed_commit.is_none(),
+            num_preprocessed == 0,
+            VerificationError::InvalidSystem;
+            commitment_present = self.preprocessed_commit.is_some(),
+            num_preprocessed,
+            "preprocessed commitment does not match configured circuits"
+        );
+        if let Some(commit) = &self.preprocessed_commit {
+            let max_prep_height = self
+                .circuits
+                .iter()
+                .zip(&self.preprocessed_indices)
+                .filter_map(|(circuit, idx)| idx.map(|_| circuit.preprocessed_height))
+                .max()
+                .unwrap_or(0);
+            ensure!(
+                max_prep_height > 0
+                    && max_prep_height.is_power_of_two()
+                    && self.config.validate_commitment_cap(
+                        commit,
+                        log2_strict_usize(max_prep_height) + self.config.log_blowup(),
+                    ),
+                VerificationError::InvalidSystem;
+                max_prep_height,
+                "preprocessed commitment cap root count mismatch"
+            );
+        }
+        ensure!(
             !preamble.headers.is_empty(),
             VerificationError::BatchShapeMismatch;
             "batch preamble has no shard headers"
         );
         let max_log_degree = self.config.max_log_degree();
+        let max_log_quotient_domain = self.config.max_log_quotient_domain();
+        let log_blowup = self.config.log_blowup();
         for (idx, header) in preamble.headers.iter().enumerate() {
             ensure!(
                 header.active.len() == self.circuits.len(),
@@ -345,25 +386,66 @@ impl<SC: StarkGenericConfig> System<SC> {
                 got = header.active.len(),
                 "batch preamble header activation bitmap length mismatch"
             );
-            let active_count = header.active.iter().filter(|&&a| a).count();
+            let active_indices: Vec<usize> = header
+                .active
+                .iter()
+                .enumerate()
+                .filter_map(|(ci, &is_active)| is_active.then_some(ci))
+                .collect();
             ensure!(
-                active_count > 0 && header.log_degrees.len() == active_count,
+                !active_indices.is_empty() && header.log_degrees.len() == active_indices.len(),
                 VerificationError::BatchShapeMismatch;
                 shard = idx,
-                active_count,
+                active_count = active_indices.len(),
                 log_degrees_len = header.log_degrees.len(),
                 "batch preamble header log_degrees count mismatch"
             );
-            for &log_degree in &header.log_degrees {
+            for (&ci, &log_degree) in active_indices.iter().zip(&header.log_degrees) {
+                let circuit = &self.circuits[ci];
+                if circuit.preprocessed_height != 0 {
+                    ensure_eq!(
+                        1usize.checked_shl(u32::from(log_degree)),
+                        Some(circuit.preprocessed_height),
+                        VerificationError::BatchShapeMismatch;
+                        shard = idx,
+                        circuit = ci,
+                        log_degree,
+                        expected_height = circuit.preprocessed_height,
+                        "batch preamble header trace height does not match preprocessed height"
+                    );
+                }
+                let quotient_degree = circuit.quotient_degree();
                 ensure!(
-                    usize::from(log_degree) <= max_log_degree,
+                    usize::from(log_degree) <= max_log_degree
+                        && usize::from(log_degree) < usize::BITS as usize
+                        && usize::from(log_degree) + log2_strict_usize(quotient_degree)
+                            <= max_log_quotient_domain,
                     VerificationError::BatchShapeMismatch;
                     shard = idx,
+                    circuit = ci,
                     log_degree,
+                    quotient_degree,
                     max_log_degree,
-                    "batch preamble header log_degree exceeds max_log_degree"
+                    max_log_quotient_domain,
+                    "batch preamble header trace or quotient domain exceeds supported size"
                 );
             }
+            let max_log_lde_height = header
+                .log_degrees
+                .iter()
+                .copied()
+                .map(usize::from)
+                .max()
+                .expect("active_indices is non-empty")
+                + log_blowup;
+            ensure!(
+                self.config
+                    .validate_commitment_cap(&header.stage_1_trace, max_log_lde_height),
+                VerificationError::BatchShapeMismatch;
+                shard = idx,
+                max_log_lde_height,
+                "batch preamble header stage-1 commitment cap root count mismatch"
+            );
         }
         Ok(())
     }
@@ -1033,6 +1115,313 @@ mod tests {
         batch.proofs[0].intermediate_accumulators[last] +=
             <ExtVal as p3_field::PrimeCharacteristicRing>::ONE;
         assert!(system.verify_batch(&batch).is_err());
+    }
+
+    fn pack_le_u64s(words: [u64; 4]) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for (i, word) in words.into_iter().enumerate() {
+            out[i * 8..(i + 1) * 8].copy_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    fn single_circuit_quad_system(
+        cap_height: usize,
+    ) -> (
+        System<GoldilocksBlake3Config>,
+        ProverKey<GoldilocksBlake3Config>,
+    ) {
+        use crate::expr::Expr;
+        use crate::system::CircuitInputs;
+
+        let cfg = GoldilocksBlake3Config::new(
+            CommitmentParameters {
+                log_blowup: 1,
+                cap_height,
+            },
+            FriParameters {
+                log_final_poly_len: 0,
+                max_log_arity: 1,
+                num_queries: 16,
+                commit_proof_of_work_bits: 0,
+                query_proof_of_work_bits: 0,
+            },
+        );
+        let a = Expr::main(0);
+        let b = Expr::main(1);
+        System::new(
+            cfg,
+            [CircuitInputs {
+                main_width: 2,
+                preprocessed: None,
+                constraints: vec![a.clone() * a - b],
+                ext_constraints: vec![],
+                lookups: vec![],
+                lookup_group_size: 1,
+            }],
+        )
+    }
+
+    fn quad_trace(log_degree: usize) -> RowMajorMatrix<Val> {
+        let rows = 1usize << log_degree;
+        let mut vals = Vec::with_capacity(rows * 2);
+        for i in 0..rows {
+            let x = Val::from_usize(i + 1);
+            vals.push(x);
+            vals.push(x * x);
+        }
+        RowMajorMatrix::new(vals, 2)
+    }
+
+    #[test]
+    fn rejects_verify_batch_shard_merkle_cap_forgery() {
+        use p3_symmetric::MerkleCap;
+
+        let (system, key) = single_circuit_quad_system(0);
+        let shards = vec![
+            ShardInput {
+                witness: SystemWitness::from_stage_1(vec![quad_trace(5)], &system),
+                claims: vec![],
+            },
+            ShardInput {
+                witness: SystemWitness::from_stage_1(vec![quad_trace(5)], &system),
+                claims: vec![],
+            },
+        ];
+        let messages_a = vec![
+            BatchMessage {
+                args: vec![Val::from_u64(7)],
+                multiplicity: Val::from_u64(1),
+            },
+            BatchMessage {
+                args: vec![Val::from_u64(999)],
+                multiplicity: Val::from_u64(0),
+            },
+        ];
+        let batch_a = system.prove_batch(&key, shards, messages_a);
+        assert!(
+            system
+                .verify_batch_shard(&batch_a.preamble, 0, &batch_a.proofs[0])
+                .is_ok()
+        );
+
+        let r1 = batch_a.preamble.headers[1].stage_1_trace.roots()[0];
+        let r_fake = pack_le_u64s([1, 5, 0, 2]);
+        let mut preamble_b = batch_a.preamble.clone();
+        preamble_b.headers[1].stage_1_trace = MerkleCap::new(vec![r1, r_fake]);
+        preamble_b.headers[1].log_degrees = vec![7];
+        preamble_b.headers[1].claims = vec![vec![Val::from_u64(999)]];
+        preamble_b.messages = vec![];
+
+        let (_, beta_a, gamma_a) = system.batch_challenger(&batch_a.preamble);
+        let (_, beta_b, gamma_b) = system.batch_challenger(&preamble_b);
+        assert_eq!((beta_a, gamma_a), (beta_b, gamma_b));
+
+        assert!(matches!(
+            system.verify_batch_shard(&preamble_b, 0, &batch_a.proofs[0]),
+            Err(VerificationError::BatchShapeMismatch)
+        ));
+    }
+
+    #[test]
+    fn rejects_verify_batch_merkle_cap_preamble_forgery() {
+        use p3_symmetric::MerkleCap;
+
+        let (system, key) = single_circuit_quad_system(0);
+        let shards = vec![
+            ShardInput {
+                witness: SystemWitness::from_stage_1(vec![quad_trace(5)], &system),
+                claims: vec![],
+            },
+            ShardInput {
+                witness: SystemWitness::from_stage_1(vec![quad_trace(5)], &system),
+                claims: vec![],
+            },
+        ];
+        let messages_a = vec![
+            BatchMessage {
+                args: vec![Val::from_u64(5)],
+                multiplicity: Val::from_u64(0),
+            },
+            BatchMessage {
+                args: vec![Val::from_u64(0)],
+                multiplicity: Val::from_u64(0),
+            },
+        ];
+        let batch_a = system.prove_batch(&key, shards, messages_a);
+        system.verify_batch(&batch_a).unwrap();
+
+        let r1 = batch_a.preamble.headers[1].stage_1_trace.roots()[0];
+        let forged_cap = MerkleCap::new(vec![r1, pack_le_u64s([1, 5, 0, 2])]);
+        let mut batch_b = batch_a.clone();
+        batch_b.preamble.headers[1].stage_1_trace = forged_cap.clone();
+        batch_b.proofs[1].commitments.stage_1_trace = forged_cap;
+        batch_b.preamble.messages = vec![BatchMessage {
+            args: vec![],
+            multiplicity: Val::from_u64(0),
+        }];
+
+        let (_, beta_a, gamma_a) = system.batch_challenger(&batch_a.preamble);
+        let (_, beta_b, gamma_b) = system.batch_challenger(&batch_b.preamble);
+        assert_eq!((beta_a, gamma_a), (beta_b, gamma_b));
+
+        assert!(matches!(
+            system.verify_batch(&batch_b),
+            Err(VerificationError::BatchShapeMismatch)
+        ));
+        assert!(matches!(
+            system.verify_shape(&batch_b.proofs[1]),
+            Err(VerificationError::InvalidProofShape)
+        ));
+    }
+
+    #[test]
+    fn rejects_merkle_cap_grinding_and_truncation() {
+        use p3_fri::verifier::FriError;
+        use p3_merkle_tree::MerkleTreeError;
+        use p3_symmetric::MerkleCap;
+
+        let (system, key) = single_circuit_quad_system(0);
+        let proof = system.prove_multiple_claims(
+            &key,
+            &[],
+            SystemWitness::from_stage_1(vec![quad_trace(4)], &system),
+        );
+        system.verify_multiple_claims(&[], &proof).unwrap();
+
+        let inflate = |cap: &MerkleCap<Val, [u8; 32]>| {
+            let mut roots = cap.roots().to_vec();
+            roots.push([0xA5; 32]);
+            MerkleCap::new(roots)
+        };
+
+        let mut bad_s1 = proof.clone();
+        bad_s1.commitments.stage_1_trace = inflate(&proof.commitments.stage_1_trace);
+        assert!(matches!(
+            system.verify_multiple_claims(&[], &bad_s1),
+            Err(VerificationError::InvalidProofShape)
+        ));
+
+        let mut bad_s2 = proof.clone();
+        bad_s2.commitments.stage_2_trace = inflate(&proof.commitments.stage_2_trace);
+        assert!(matches!(
+            system.verify_multiple_claims(&[], &bad_s2),
+            Err(VerificationError::InvalidProofShape)
+        ));
+
+        let mut bad_q = proof.clone();
+        bad_q.commitments.quotient_chunks = inflate(&proof.commitments.quotient_chunks);
+        assert!(matches!(
+            system.verify_multiple_claims(&[], &bad_q),
+            Err(VerificationError::InvalidProofShape)
+        ));
+
+        let mut bad_fri = proof.clone();
+        bad_fri.opening_proof.commit_phase_commits[0] =
+            inflate(&proof.opening_proof.commit_phase_commits[0]);
+        assert!(matches!(
+            system.verify_multiple_claims(&[], &bad_fri),
+            Err(VerificationError::InvalidOpeningArgument(
+                FriError::CommitPhaseMmcsError(MerkleTreeError::CapMismatch)
+            ))
+        ));
+
+        let zero_cap: MerkleCap<Val, [u8; 32]> = decode_from_slice(
+            &encode_to_vec(Vec::<[u8; 32]>::new(), bincode::config::standard()).unwrap(),
+            bincode::config::standard(),
+        )
+        .unwrap()
+        .0;
+        let r0 = proof.commitments.stage_1_trace.roots()[0];
+        let three_cap: MerkleCap<Val, [u8; 32]> = decode_from_slice(
+            &encode_to_vec(vec![r0, [1u8; 32], [2u8; 32]], bincode::config::standard()).unwrap(),
+            bincode::config::standard(),
+        )
+        .unwrap()
+        .0;
+        for weird_cap in [zero_cap, three_cap] {
+            let mut p1 = proof.clone();
+            p1.commitments.stage_1_trace = weird_cap.clone();
+            assert!(matches!(
+                system.verify_multiple_claims(&[], &p1),
+                Err(VerificationError::InvalidProofShape)
+            ));
+            let mut pf = proof.clone();
+            pf.opening_proof.commit_phase_commits[0] = weird_cap;
+            assert!(matches!(
+                system.verify_multiple_claims(&[], &pf),
+                Err(VerificationError::InvalidOpeningArgument(
+                    FriError::CommitPhaseMmcsError(MerkleTreeError::CapMismatch)
+                ))
+            ));
+        }
+
+        #[cfg(not(feature = "cuda"))]
+        {
+            let (sys1, key1) = single_circuit_quad_system(1);
+            let proof1 = sys1.prove_multiple_claims(
+                &key1,
+                &[],
+                SystemWitness::from_stage_1(vec![quad_trace(4)], &sys1),
+            );
+            sys1.verify_multiple_claims(&[], &proof1).unwrap();
+            assert_eq!(proof1.commitments.stage_1_trace.num_roots(), 2);
+
+            let trunc_s1 = MerkleCap::new(vec![proof1.commitments.stage_1_trace.roots()[0]]);
+            let mut p_trunc = proof1.clone();
+            p_trunc.commitments.stage_1_trace = trunc_s1;
+            assert!(matches!(
+                sys1.verify_multiple_claims(&[], &p_trunc),
+                Err(VerificationError::InvalidProofShape)
+            ));
+
+            let fri_roots = proof1.opening_proof.commit_phase_commits[0]
+                .roots()
+                .to_vec();
+            let mut p_fri_trunc = proof1.clone();
+            p_fri_trunc.opening_proof.commit_phase_commits[0] = MerkleCap::new(vec![fri_roots[0]]);
+            assert!(matches!(
+                sys1.verify_multiple_claims(&[], &p_fri_trunc),
+                Err(VerificationError::InvalidOpeningArgument(
+                    FriError::CommitPhaseMmcsError(MerkleTreeError::CapMismatch)
+                ))
+            ));
+
+            let mut p_fri_infl = proof1;
+            p_fri_infl.opening_proof.commit_phase_commits[0] =
+                MerkleCap::new(vec![fri_roots[0], fri_roots[1], [0x11; 32], [0x22; 32]]);
+            assert!(matches!(
+                sys1.verify_multiple_claims(&[], &p_fri_infl),
+                Err(VerificationError::InvalidOpeningArgument(
+                    FriError::CommitPhaseMmcsError(MerkleTreeError::CapMismatch)
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_non_target_shard_preamble_dimensions() {
+        let (system, key) = byte_system(config());
+        let batch = system.prove_batch(&key, two_shards(&system), vec![]);
+        let _ = system
+            .verify_batch_shard(&batch.preamble, 0, &batch.proofs[0])
+            .unwrap();
+
+        let mut bad_prep = batch.preamble.clone();
+        bad_prep.headers[1].active[0] = true;
+        bad_prep.headers[1].log_degrees.insert(0, 4);
+        assert!(matches!(
+            system.verify_batch_shard(&bad_prep, 0, &batch.proofs[0]),
+            Err(VerificationError::BatchShapeMismatch)
+        ));
+
+        let mut bad_deg = batch.preamble;
+        bad_deg.headers[1].log_degrees[0] =
+            u8::try_from(system.config.max_log_degree() + 1).unwrap();
+        assert!(matches!(
+            system.verify_batch_shard(&bad_deg, 0, &batch.proofs[0]),
+            Err(VerificationError::BatchShapeMismatch)
+        ));
     }
 
     type ExtVal = <GoldilocksBlake3Config as StarkGenericConfig>::Challenge;

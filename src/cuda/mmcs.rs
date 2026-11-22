@@ -10,6 +10,9 @@ use super::{
     CudaLde, CudaMixedMerkleTree, mixed_lde_open_row, mixed_lde_open_row_at_height,
     mixed_lde_open_rows, mixed_lde_open_rows_at_height,
 };
+use crate::p3_adapter::cap::{
+    CapValidatingMmcs, verify_merkle_cap_len, verify_merkle_cap_len_for_log_height,
+};
 use crate::p3_adapter::domain_blake3::{Blake3Domain, DomainBlake3};
 use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
 
@@ -495,6 +498,7 @@ fn hybrid_open_rows<M: Matrix<Goldilocks>>(
 #[derive(Clone, Debug)]
 pub struct CudaMmcs {
     cpu: CpuMmcs,
+    cap_height: usize,
     leaf_domain: Blake3Domain,
     device_id: i32,
 }
@@ -506,7 +510,7 @@ impl CudaMmcs {
         let field_hash = SerializingHasher::new(DomainBlake3::new(Blake3Domain::Plain));
         let compress = DomainCompressionFunction::new(DomainBlake3::new(Blake3Domain::Plain));
         let cpu = CpuMmcs::new(field_hash, compress, cap_height);
-        Self::with_device_and_domain(cpu, Blake3Domain::Plain, device_id)
+        Self::with_device_and_domain(cpu, cap_height, Blake3Domain::Plain, device_id)
     }
 
     /// Creates a protocol `v6` domain-separated BLAKE3 CUDA MMCS separating
@@ -517,7 +521,7 @@ impl CudaMmcs {
         let compress =
             DomainCompressionFunction::new(DomainBlake3::new(Blake3Domain::MerkleCompress));
         let cpu = CpuMmcs::new(field_hash, compress, cap_height);
-        Self::with_device_and_domain(cpu, Blake3Domain::MerkleLeaf, device_id)
+        Self::with_device_and_domain(cpu, cap_height, Blake3Domain::MerkleLeaf, device_id)
     }
 
     /// A commitment scheme resident on the given CUDA device. Every kernel
@@ -526,6 +530,7 @@ impl CudaMmcs {
     /// device of their own.
     pub(crate) fn with_device_and_domain(
         cpu: CpuMmcs,
+        cap_height: usize,
         leaf_domain: Blake3Domain,
         device_id: i32,
     ) -> Self {
@@ -536,6 +541,7 @@ impl CudaMmcs {
         );
         Self {
             cpu,
+            cap_height,
             leaf_domain,
             device_id,
         }
@@ -543,7 +549,12 @@ impl CudaMmcs {
 
     #[cfg(test)]
     pub(crate) fn with_device(cpu: CpuMmcs, device_id: i32) -> Self {
-        Self::with_device_and_domain(cpu, Blake3Domain::Plain, device_id)
+        Self::with_device_and_domain(cpu, 0, Blake3Domain::Plain, device_id)
+    }
+
+    #[inline]
+    pub const fn cap_height(&self) -> usize {
+        self.cap_height
     }
 
     #[inline]
@@ -1197,6 +1208,37 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
         Self::Commitment,
         Self::ProverData<RowMajorMatrix<Goldilocks>>,
     ) {
+        // Mirror `commit_cuda_resident`: height groups exceeding the 4096-column
+        // (32 KiB) device BLAKE3 leaf-hash limit must be hashed on the host.
+        let wide_heights = host_hashed_heights(ldes.iter().map(|lde| Dimensions {
+            width: lde.width(),
+            height: lde.height(),
+        }));
+        if !wide_heights.is_empty() {
+            let mut resident: Vec<Option<CudaLde>> = Vec::with_capacity(ldes.len());
+            let mut host: Vec<Option<RowMajorMatrix<Goldilocks>>> = Vec::with_capacity(ldes.len());
+            for lde in ldes {
+                if wide_heights.contains(&lde.height()) {
+                    host.push(Some(lde.to_row_major_matrix()));
+                    resident.push(None);
+                } else {
+                    host.push(None);
+                    resident.push(Some(lde));
+                }
+            }
+            let deferred: Vec<DeferredMatrix<RowMajorMatrix<Goldilocks>>> =
+                (0..resident.len()).map(|_| None).collect();
+            let deferred_dimensions = vec![None; resident.len()];
+            let digests = hash_host_only_height_groups(
+                &host,
+                &resident.iter().map(Option::as_ref).collect::<Vec<_>>(),
+                &deferred_dimensions,
+                &std::collections::BTreeSet::new(),
+                self.leaf_domain,
+            );
+            let retained = (0..resident.len()).map(|_| None).collect();
+            return self.commit_cuda_hybrid(resident, host, deferred, retained, digests);
+        }
         let matrix_count = ldes.len();
         self.commit_cuda_hybrid(
             ldes.into_iter().map(Some).collect(),
@@ -1490,6 +1532,7 @@ impl Mmcs<Goldilocks> for CudaMmcs {
         index: usize,
         batch_opening: BatchOpeningRef<'_, Goldilocks, Self>,
     ) -> Result<(), Self::Error> {
+        verify_merkle_cap_len(self.cap_height(), commit, dimensions)?;
         self.cpu.verify_batch(
             commit,
             dimensions,
@@ -1545,8 +1588,19 @@ impl Mmcs<Goldilocks> for CudaMmcs {
         opened_values: &[Vec<R>],
         proof: &Self::MultiProof,
     ) -> Result<(), Self::Error> {
+        verify_merkle_cap_len(self.cap_height(), commit, dimensions)?;
         self.cpu
             .verify_multi_batch(commit, dimensions, indices, opened_values, proof)
+    }
+}
+
+impl CapValidatingMmcs<Goldilocks> for CudaMmcs {
+    fn validate_commitment_cap_for_log_height(
+        &self,
+        commit: &Self::Commitment,
+        log_max_height: usize,
+    ) -> Result<(), Self::Error> {
+        verify_merkle_cap_len_for_log_height(self.cap_height(), commit, log_max_height)
     }
 }
 

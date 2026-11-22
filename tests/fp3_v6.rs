@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use multi_stark::batch::{BatchMessage, BatchProof, Retention, ShardInput};
+use multi_stark::config::ProofConfig;
 use multi_stark::expr::{Expr, ExtExpr, RowOffset};
 use multi_stark::lookup::Lookup;
 use multi_stark::p3_adapter::fri_batching::FriBatching;
@@ -23,6 +24,7 @@ use multi_stark::types::{
 };
 use multi_stark::witness::{PreparedWitness, TraceSource};
 use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField64};
+use p3_matrix::Matrix;
 use p3_matrix::dense::RowMajorMatrix;
 
 #[cfg(not(feature = "cuda"))]
@@ -1169,5 +1171,357 @@ fn bench_fp2_vs_fp3_cpu() {
                 labels[i], p_min, p_med, v_min, v_med, sizes[i]
             );
         }
+    }
+}
+
+fn pack_le_u64s(words: [u64; 4]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (i, word) in words.into_iter().enumerate() {
+        out[i * 8..(i + 1) * 8].copy_from_slice(&word.to_le_bytes());
+    }
+    out
+}
+
+fn quad_v6_system(
+    cap_height: usize,
+) -> (
+    System<GoldilocksBlake3V6Config>,
+    multi_stark::system::ProverKey<GoldilocksBlake3V6Config>,
+) {
+    let cfg = GoldilocksBlake3V6Config::new_with_batching(
+        CommitmentParameters {
+            log_blowup: 2,
+            cap_height,
+        },
+        FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 16,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        },
+        FriBatching::Tensor,
+    );
+    let a = Expr::main(0);
+    let b = Expr::main(1);
+    System::new(
+        cfg,
+        [CircuitInputs {
+            main_width: 2,
+            preprocessed: None,
+            constraints: vec![a.clone() * a - b],
+            ext_constraints: vec![],
+            lookups: vec![],
+            lookup_group_size: 1,
+        }],
+    )
+}
+
+fn quad_trace_v6(log_degree: usize) -> RowMajorMatrix<Val> {
+    let rows = 1usize << log_degree;
+    let mut vals = Vec::with_capacity(rows * 2);
+    for i in 0..rows {
+        let x = Val::from_usize(i + 1);
+        vals.push(x);
+        vals.push(x * x);
+    }
+    RowMajorMatrix::new(vals, 2)
+}
+
+#[test]
+fn v6_fp3_rejects_merkle_cap_forgery_and_grinding() {
+    use multi_stark::verifier::VerificationError;
+    use p3_fri::verifier::FriError;
+    use p3_merkle_tree::MerkleTreeError;
+    use p3_symmetric::MerkleCap;
+
+    // #240 #1A: verify_batch_shard forgery via 2-root non-target MerkleCap.
+    let (system, key) = quad_v6_system(0);
+    let shards = vec![
+        ShardInput {
+            witness: SystemWitness::from_stage_1(vec![quad_trace_v6(5)], &system),
+            claims: vec![],
+        },
+        ShardInput {
+            witness: SystemWitness::from_stage_1(vec![quad_trace_v6(5)], &system),
+            claims: vec![],
+        },
+    ];
+    let messages_a = vec![
+        BatchMessage {
+            args: vec![Val::from_u64(7)],
+            multiplicity: Val::from_u64(1),
+        },
+        BatchMessage {
+            args: vec![Val::from_u64(999)],
+            multiplicity: Val::from_u64(0),
+        },
+    ];
+    let batch_a = system.prove_batch(&key, shards, messages_a);
+    let _ = system
+        .verify_batch_shard(&batch_a.preamble, 0, &batch_a.proofs[0])
+        .unwrap();
+
+    let r1 = batch_a.preamble.headers[1].stage_1_trace.roots()[0];
+    let mut preamble_b = batch_a.preamble.clone();
+    preamble_b.headers[1].stage_1_trace = MerkleCap::new(vec![r1, pack_le_u64s([1, 5, 0, 2])]);
+    preamble_b.headers[1].log_degrees = vec![7];
+    preamble_b.headers[1].claims = vec![vec![Val::from_u64(999)]];
+    preamble_b.messages = vec![];
+
+    let (_, beta_a, gamma_a) = system.batch_challenger(&batch_a.preamble);
+    let (_, beta_b, gamma_b) = system.batch_challenger(&preamble_b);
+    assert_eq!((beta_a, gamma_a), (beta_b, gamma_b));
+    assert!(matches!(
+        system.verify_batch_shard(&preamble_b, 0, &batch_a.proofs[0]),
+        Err(VerificationError::BatchShapeMismatch)
+    ));
+
+    // #240 #1B: full verify_batch preamble/message forgery.
+    let shards_b = vec![
+        ShardInput {
+            witness: SystemWitness::from_stage_1(vec![quad_trace_v6(5)], &system),
+            claims: vec![],
+        },
+        ShardInput {
+            witness: SystemWitness::from_stage_1(vec![quad_trace_v6(5)], &system),
+            claims: vec![],
+        },
+    ];
+    let messages_b = vec![
+        BatchMessage {
+            args: vec![Val::from_u64(5)],
+            multiplicity: Val::from_u64(0),
+        },
+        BatchMessage {
+            args: vec![Val::from_u64(0)],
+            multiplicity: Val::from_u64(0),
+        },
+    ];
+    let batch_full_a = system.prove_batch(&key, shards_b, messages_b);
+    system.verify_batch(&batch_full_a).unwrap();
+
+    let r1_full = batch_full_a.preamble.headers[1].stage_1_trace.roots()[0];
+    let forged_cap = MerkleCap::new(vec![r1_full, pack_le_u64s([1, 5, 0, 2])]);
+    let mut batch_full_b = batch_full_a.clone();
+    batch_full_b.preamble.headers[1].stage_1_trace = forged_cap.clone();
+    batch_full_b.proofs[1].commitments.stage_1_trace = forged_cap;
+    batch_full_b.preamble.messages = vec![BatchMessage {
+        args: vec![],
+        multiplicity: Val::from_u64(0),
+    }];
+    let (_, ba, ga) = system.batch_challenger(&batch_full_a.preamble);
+    let (_, bb, gb) = system.batch_challenger(&batch_full_b.preamble);
+    assert_eq!((ba, ga), (bb, gb));
+    assert!(matches!(
+        system.verify_batch(&batch_full_b),
+        Err(VerificationError::BatchShapeMismatch)
+    ));
+
+    // #240 #1C: single-proof extra/truncated cap roots on stage-1, stage-2, quotient, and FRI.
+    let proof = system.prove_multiple_claims(
+        &key,
+        &[],
+        SystemWitness::from_stage_1(vec![quad_trace_v6(4)], &system),
+    );
+    system.verify_multiple_claims(&[], &proof).unwrap();
+
+    let inflate = |cap: &MerkleCap<Val, [u8; 32]>| {
+        let mut roots = cap.roots().to_vec();
+        roots.push([0x5A; 32]);
+        MerkleCap::new(roots)
+    };
+    let mut p_s1 = proof.clone();
+    p_s1.commitments.stage_1_trace = inflate(&proof.commitments.stage_1_trace);
+    assert!(matches!(
+        system.verify_multiple_claims(&[], &p_s1),
+        Err(VerificationError::InvalidProofShape)
+    ));
+
+    let mut p_s2 = proof.clone();
+    p_s2.commitments.stage_2_trace = inflate(&proof.commitments.stage_2_trace);
+    assert!(matches!(
+        system.verify_multiple_claims(&[], &p_s2),
+        Err(VerificationError::InvalidProofShape)
+    ));
+
+    let mut p_q = proof.clone();
+    p_q.commitments.quotient_chunks = inflate(&proof.commitments.quotient_chunks);
+    assert!(matches!(
+        system.verify_multiple_claims(&[], &p_q),
+        Err(VerificationError::InvalidProofShape)
+    ));
+
+    let mut p_fri = proof;
+    p_fri.opening_proof.commit_phase_commits[0] =
+        inflate(&p_fri.opening_proof.commit_phase_commits[0]);
+    assert!(matches!(
+        system.verify_multiple_claims(&[], &p_fri),
+        Err(VerificationError::InvalidOpeningArgument(
+            FriError::CommitPhaseMmcsError(MerkleTreeError::CapMismatch)
+        ))
+    ));
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        let (sys1, key1) = quad_v6_system(1);
+        let proof1 = sys1.prove_multiple_claims(
+            &key1,
+            &[],
+            SystemWitness::from_stage_1(vec![quad_trace_v6(4)], &sys1),
+        );
+        sys1.verify_multiple_claims(&[], &proof1).unwrap();
+        let fri_roots = proof1.opening_proof.commit_phase_commits[0]
+            .roots()
+            .to_vec();
+        let mut trunc = proof1;
+        trunc.opening_proof.commit_phase_commits[0] = MerkleCap::new(vec![fri_roots[0]]);
+        assert!(matches!(
+            sys1.verify_multiple_claims(&[], &trunc),
+            Err(VerificationError::InvalidOpeningArgument(
+                FriError::CommitPhaseMmcsError(MerkleTreeError::CapMismatch)
+            ))
+        ));
+    }
+}
+
+#[test]
+fn v6_fp3_rejects_preprocessed_malleability_and_bad_preamble_dimensions() {
+    use multi_stark::verifier::VerificationError;
+
+    // M24(b): num_preprocessed == 0 must reject `Some(vec![])` to prevent proof malleability.
+    let (system, key) = quad_v6_system(0);
+    let proof = system.prove_multiple_claims(
+        &key,
+        &[],
+        SystemWitness::from_stage_1(vec![quad_trace_v6(4)], &system),
+    );
+    assert!(proof.preprocessed_opened_values.is_none());
+    system.verify_multiple_claims(&[], &proof).unwrap();
+
+    let mut malleable = proof;
+    malleable.preprocessed_opened_values = Some(vec![]);
+    assert!(matches!(
+        system.verify_multiple_claims(&[], &malleable),
+        Err(VerificationError::InvalidProofShape)
+    ));
+    let encoded = malleable.to_bytes().unwrap();
+    let decoded = Proof::<GoldilocksBlake3V6Config>::from_bytes(&encoded).unwrap();
+    assert!(matches!(
+        system.verify_multiple_claims(&[], &decoded),
+        Err(VerificationError::InvalidProofShape)
+    ));
+
+    // M24(c): verify_preamble_headers must enforce preprocessed_height and
+    // max_log_quotient_domain for non-target shards in verify_batch_shard.
+    let comm = CommitmentParameters {
+        log_blowup: 2,
+        cap_height: 0,
+    };
+    let fri = FriParameters {
+        log_final_poly_len: 0,
+        max_log_arity: 1,
+        num_queries: 16,
+        commit_proof_of_work_bits: 0,
+        query_proof_of_work_bits: 0,
+    };
+    let inputs = u32_add_system_inputs(4);
+    let (sys_prep, key_prep) = System::new(
+        GoldilocksBlake3V6Config::new_with_batching(comm, fri, FriBatching::Tensor),
+        inputs,
+    );
+    let (traces, claims) = u32_add_witness(32);
+    let byte_table = traces[0].clone();
+    let add_half = |start: usize, end: usize| {
+        RowMajorMatrix::new(traces[1].values[start * 14..end * 14].to_vec(), 14)
+    };
+    let shards = vec![
+        ShardInput {
+            witness: SystemWitness::from_stage_1(vec![byte_table, add_half(0, 16)], &sys_prep),
+            claims: claims.clone(),
+        },
+        ShardInput {
+            witness: SystemWitness::from_stage_1(
+                vec![RowMajorMatrix::new(vec![], 1), add_half(16, 32)],
+                &sys_prep,
+            ),
+            claims: vec![],
+        },
+    ];
+    let batch = sys_prep.prove_batch(&key_prep, shards, vec![]);
+    let _ = sys_prep
+        .verify_batch_shard(&batch.preamble, 0, &batch.proofs[0])
+        .unwrap();
+
+    // Non-target shard 1 claims wrong preprocessed height for circuit 0 (256-row byte table).
+    let mut bad_prep = batch.preamble.clone();
+    bad_prep.headers[1].active[0] = true;
+    bad_prep.headers[1].log_degrees.insert(0, 4);
+    assert!(matches!(
+        sys_prep.verify_batch_shard(&bad_prep, 0, &batch.proofs[0]),
+        Err(VerificationError::BatchShapeMismatch)
+    ));
+
+    // Non-target shard 1 satisfies `log_degree <= max_log_degree` yet violates
+    // `log_degree + log2(quotient_degree) <= max_log_quotient_domain` (u32_add has
+    // lookup_group_size = 4 => quotient_degree >= 2).
+    assert!(sys_prep.circuits[1].quotient_degree() >= 2);
+    let mut bad_quot = batch.preamble;
+    bad_quot.headers[1].log_degrees[0] =
+        u8::try_from(sys_prep.config.max_log_quotient_domain()).unwrap();
+    assert!(usize::from(bad_quot.headers[1].log_degrees[0]) <= sys_prep.config.max_log_degree());
+    assert!(matches!(
+        sys_prep.verify_batch_shard(&bad_quot, 0, &batch.proofs[0]),
+        Err(VerificationError::BatchShapeMismatch)
+    ));
+}
+
+/// L9(d): Exercise LDE heights strictly above 1024 (`512 << 2 = 2048 > 1024`)
+/// so CUDA resident/streamed FRI `_ext3` kernels are covered on GPU as well as
+/// CPU `v6` `F_p^3` (both `Tensor` and `Horner` batching).
+#[test]
+fn v6_fp3_large_lde_above_1024_rows_roundtrip() {
+    let comm = CommitmentParameters {
+        log_blowup: 2,
+        cap_height: 0,
+    };
+    let fri = FriParameters {
+        log_final_poly_len: 1,
+        max_log_arity: 2,
+        num_queries: 24,
+        commit_proof_of_work_bits: 0,
+        query_proof_of_work_bits: 0,
+    };
+    let inputs = u32_add_system_inputs(4);
+    let (traces, claims) = u32_add_witness(512);
+    let claim_refs: Vec<&[Val]> = claims.iter().map(Vec::as_slice).collect();
+    assert_eq!(traces[1].height(), 512);
+    assert!(traces[1].height() << comm.log_blowup > 1024);
+
+    for batching in [FriBatching::Tensor, FriBatching::Horner] {
+        let (system, key) = System::new(
+            GoldilocksBlake3V6Config::new_with_batching(comm, fri, batching),
+            inputs.clone(),
+        );
+        let proof = system.prove_multiple_claims(
+            &key,
+            &claim_refs,
+            SystemWitness::from_stage_1(traces.clone(), &system),
+        );
+        system.verify_multiple_claims(&claim_refs, &proof).unwrap();
+
+        let bytes = proof.to_bytes().unwrap();
+        let decoded = Proof::<GoldilocksBlake3V6Config>::from_bytes(&bytes).unwrap();
+        system
+            .verify_multiple_claims(&claim_refs, &decoded)
+            .unwrap();
+
+        let mut tampered = decoded;
+        tampered.stage_1_opened_values[1][0][0] += ExtVal3::ONE;
+        assert!(
+            system
+                .verify_multiple_claims(&claim_refs, &tampered)
+                .is_err()
+        );
     }
 }

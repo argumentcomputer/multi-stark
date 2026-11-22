@@ -176,6 +176,17 @@ pub trait ProofConfig {
     /// evaluations.
     fn log_blowup(&self) -> usize;
 
+    /// Validate that `commit` has the exact expected structure (e.g. exact
+    /// Merkle cap root count) for a commitment whose tallest committed LDE has
+    /// height `2^max_log_lde_height`.
+    ///
+    /// Called by the verifier before observing any commitment into the
+    /// Fiat-Shamir transcript so variable-length caps cannot collide with
+    /// subsequent transcript fields or enable free challenge grinding.
+    fn validate_commitment_cap(&self, _commit: &Com<Self>, _max_log_lde_height: usize) -> bool {
+        true
+    }
+
     /// Commit deterministic main-trace sources.
     fn commit_main(
         &self,
