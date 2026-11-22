@@ -254,3 +254,33 @@ fn zero_batch_claim_and_message_denominators_are_rejected() {
     batch.preamble.messages.clear();
     system.verify_batch(&batch).unwrap();
 }
+
+#[test]
+fn inactive_preprocessed_domain_zeta_is_rejected() {
+    let make_case = |zeta: Val| {
+        let (mut system, mut proof) = scripted_proof(Val::from_u8(7), zeta);
+        let (mut other, _) = scripted_proof(Val::from_u8(7), Val::TWO);
+        let mut inactive = other.circuits.pop().unwrap();
+        inactive.preprocessed_width = 1;
+        inactive.preprocessed_height = 8;
+        system.circuits.push(inactive);
+        system.preprocessed_indices.push(Some(0));
+        system.preprocessed_commit = Some(());
+        proof.active.push(false);
+        proof.preprocessed_opened_values =
+            Some(vec![vec![vec![<ExtVal as Algebra<ExtVal>>::ZERO]]]);
+        (system, proof)
+    };
+
+    // `g_8` is outside the active 4-row domain, but lies inside the inactive
+    // 8-row preprocessed domain -> must be rejected with `InvalidChallenge`.
+    let (system_bad, proof_bad) = make_case(Val::two_adic_generator(3));
+    assert!(matches!(
+        system_bad.verify_multiple_claims(&[], &proof_bad),
+        Err(VerificationError::InvalidChallenge)
+    ));
+
+    // `zeta = 2` is outside both domains -> accepted.
+    let (system_ok, proof_ok) = make_case(Val::TWO);
+    system_ok.verify_multiple_claims(&[], &proof_ok).unwrap();
+}
