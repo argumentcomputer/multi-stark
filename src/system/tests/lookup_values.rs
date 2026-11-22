@@ -87,15 +87,7 @@ fn fixture<F: Field>(height: usize, fixed: bool) -> (Circuit<F>, RowMajorMatrix<
         ],
         ..Default::default()
     };
-    let graph = compile(
-        &spec,
-        &ExtensionParams {
-            degree: 1,
-            w: F::ONE,
-            karatsuba: false,
-        },
-    )
-    .unwrap();
+    let graph = compile(&spec, &ExtensionParams::base()).unwrap();
     let circuit = Circuit {
         graph,
         main_width: 2,

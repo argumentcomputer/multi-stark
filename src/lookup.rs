@@ -46,7 +46,7 @@
 //! stack.
 
 use crate::eval::VarValues;
-use crate::traits::{Algebra, ExtensionOf, Field};
+use crate::traits::{Algebra, ExtensionModulus, ExtensionOf, Field};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 
@@ -127,23 +127,40 @@ pub fn logup_constraint_count(num_lookups: usize, group_size: usize, d: usize) -
     lookup_groups(num_lookups, group_size) * d
 }
 
-/// Coordinate product in the binomial extension `X^d = w`, schoolbook:
-/// `out[k] = Σ_{i+j=k} a_i·b_j + w · Σ_{i+j=k+d} a_i·b_j`. Generic-degree
-/// fallback; the hot D=2 path uses [`mul2`].
-fn coord_mul<F: Field, A: Algebra<F> + Copy>(a: &[A], b: &[A], w: F) -> Vec<A> {
+/// Coordinate product reduced modulo `modulus`, schoolbook. Generic-degree
+/// fallback; the hot D=2 binomial and D=3 cubic trinomial paths use [`mul2`]
+/// and [`mul3_trinomial`].
+fn coord_mul<F: Field, A: Algebra<F> + Copy>(
+    a: &[A],
+    b: &[A],
+    modulus: ExtensionModulus<F>,
+) -> Vec<A> {
     let d = a.len();
-    let mut out = vec![A::ZERO; d];
-    for i in 0..d {
-        for j in 0..d {
-            let prod = a[i] * b[j];
-            if i + j < d {
-                out[i + j] += prod;
-            } else {
-                out[i + j - d] += prod * w;
+    match modulus {
+        ExtensionModulus::Base => {
+            debug_assert_eq!(d, 1);
+            vec![a[0] * b[0]]
+        }
+        ExtensionModulus::Binomial { w } => {
+            let mut out = vec![A::ZERO; d];
+            for i in 0..d {
+                for j in 0..d {
+                    let prod = a[i] * b[j];
+                    if i + j < d {
+                        out[i + j] += prod;
+                    } else {
+                        out[i + j - d] += prod * w;
+                    }
+                }
             }
+            out
+        }
+        ExtensionModulus::CubicTrinomial => {
+            debug_assert_eq!(d, 3);
+            let (c0, c1, c2) = mul3_trinomial((a[0], a[1], a[2]), (b[0], b[1], b[2]));
+            vec![c0, c1, c2]
         }
     }
-    out
 }
 
 /// Degree-2 coordinate product `X² = w`, Karatsuba (3 multiplications,
@@ -154,6 +171,19 @@ fn mul2<F: Field, A: Algebra<F> + Copy>(a: (A, A), b: (A, A), w: F) -> (A, A) {
     let v1 = a.1 * b.1;
     let cross = (a.0 + a.1) * (b.0 + b.1) - v0 - v1;
     (v0 + v1 * w, cross)
+}
+
+/// Degree-3 cubic trinomial coordinate product `X³ = X + 1`, Karatsuba
+/// (6 multiplications, 0 constant multiplications): allocation-free.
+#[inline]
+fn mul3_trinomial<F: Field, A: Algebra<F> + Copy>(a: (A, A, A), b: (A, A, A)) -> (A, A, A) {
+    let v0 = a.0 * b.0;
+    let v1 = a.1 * b.1;
+    let v2 = a.2 * b.2;
+    let m01 = (a.0 + a.1) * (b.0 + b.1) - v0 - v1;
+    let m02 = (a.0 + a.2) * (b.0 + b.2) - v0 - v2;
+    let m12 = (a.1 + a.2) * (b.1 + b.2) - v1 - v2;
+    (v0 + m12, m01 + m12 + v2, m02 + v1 + v2)
 }
 
 /// Directly evaluates the logUp constraint values at one evaluation context,
@@ -186,7 +216,7 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
     publics: &[A],
     delta_scaled: &[A],
     is_last_row: A,
-    w: F,
+    modulus: ExtensionModulus<F>,
     d: usize,
     group_size: usize,
     out: &mut Vec<A>,
@@ -199,7 +229,7 @@ pub fn logup_constraint_values<F: Field, A: Algebra<F> + Copy>(
         publics,
         delta_scaled,
         is_last_row,
-        w,
+        modulus,
         d,
         group_size,
         |val| out.push(val),
@@ -219,7 +249,7 @@ pub(crate) fn for_each_logup_constraint_value<F: Field, A: Algebra<F> + Copy>(
     publics: &[A],
     delta_scaled: &[A],
     is_last_row: A,
-    w: F,
+    modulus: ExtensionModulus<F>,
     d: usize,
     group_size: usize,
     mut emit: impl FnMut(A),
@@ -267,11 +297,11 @@ pub(crate) fn for_each_logup_constraint_value<F: Field, A: Algebra<F> + Copy>(
         }
         return;
     }
-    // Allocation-free Karatsuba fast path for the reference degree-2
+    // Allocation-free Karatsuba fast path for the degree-2 binomial
     // extension; this runs per point-packet on the prover's quotient
     // domain, so it must not touch the heap. Group products use
     // prefix/suffix arrays so each Π_{j'≠j} costs one multiplication.
-    if d == 2 {
+    if let (2, ExtensionModulus::Binomial { w }) = (d, modulus) {
         let nv = |id: crate::graph::NodeId| node_vals[id.index()];
         let beta = (publics[0], publics[1]);
         let gamma = (publics[2], publics[3]);
@@ -356,6 +386,102 @@ pub(crate) fn for_each_logup_constraint_value<F: Field, A: Algebra<F> + Copy>(
         return;
     }
 
+    // Allocation-free Karatsuba fast path for the degree-3 cubic trinomial
+    // extension `X^3 - X - 1` (6 base muls per extension mul, 0 const muls).
+    if let (3, ExtensionModulus::CubicTrinomial) = (d, modulus) {
+        let nv = |id: crate::graph::NodeId| node_vals[id.index()];
+        let beta = (publics[0], publics[1], publics[2]);
+        let gamma = (publics[3], publics[4], publics[5]);
+        let inj = (
+            is_last_row * delta_scaled[0],
+            is_last_row * delta_scaled[1],
+            is_last_row * delta_scaled[2],
+        );
+
+        if lookups.is_empty() {
+            emit(stage2_next[0] - stage2[0] + inj.0);
+            emit(stage2_next[1] - stage2[1] + inj.1);
+            emit(stage2_next[2] - stage2[2] + inj.2);
+            return;
+        }
+
+        let last_group = lookups.len().div_ceil(group_size) - 1;
+        for (g, chunk) in lookups.chunks(group_size).enumerate() {
+            let source = (stage2[3 * g], stage2[3 * g + 1], stage2[3 * g + 2]);
+            let target = if g < last_group {
+                (stage2[3 * g + 3], stage2[3 * g + 4], stage2[3 * g + 5])
+            } else {
+                (
+                    stage2_next[0] + inj.0,
+                    stage2_next[1] + inj.1,
+                    stage2_next[2] + inj.2,
+                )
+            };
+
+            let mut msgs = [(A::ZERO, A::ZERO, A::ZERO); MAX_LOOKUP_GROUP];
+            let s_len = chunk.len();
+            for (j, lookup) in chunk.iter().enumerate() {
+                let mut f = (A::ZERO, A::ZERO, A::ZERO);
+                for &arg in lookup.args.iter().rev() {
+                    f = mul3_trinomial(f, gamma);
+                    f.0 += nv(arg);
+                }
+                msgs[j] = (f.0 + beta.0, f.1 + beta.1, f.2 + beta.2);
+            }
+
+            if s_len == 1 {
+                let diff = (
+                    target.0 - source.0,
+                    target.1 - source.1,
+                    target.2 - source.2,
+                );
+                let c = mul3_trinomial(msgs[0], diff);
+                let mv = nv(chunk[0].multiplicity);
+                emit(c.0 - mv);
+                emit(c.1);
+                emit(c.2);
+                continue;
+            }
+
+            let one = (A::ONE, A::ZERO, A::ZERO);
+            let mut prefix = [one; MAX_LOOKUP_GROUP + 1];
+            prefix[1] = msgs[0];
+            for j in 1..s_len {
+                prefix[j + 1] = mul3_trinomial(prefix[j], msgs[j]);
+            }
+            let mut suffix = [one; MAX_LOOKUP_GROUP + 1];
+            suffix[s_len - 1] = msgs[s_len - 1];
+            for j in (0..s_len - 1).rev() {
+                suffix[j] = mul3_trinomial(msgs[j], suffix[j + 1]);
+            }
+
+            let diff = (
+                target.0 - source.0,
+                target.1 - source.1,
+                target.2 - source.2,
+            );
+            let c = mul3_trinomial(prefix[s_len], diff);
+            let mut rhs = (A::ZERO, A::ZERO, A::ZERO);
+            for (j, lookup) in chunk.iter().enumerate() {
+                let others = if j == 0 {
+                    suffix[1]
+                } else if j == s_len - 1 {
+                    prefix[s_len - 1]
+                } else {
+                    mul3_trinomial(prefix[j], suffix[j + 1])
+                };
+                let mv = nv(lookup.multiplicity);
+                rhs.0 += others.0 * mv;
+                rhs.1 += others.1 * mv;
+                rhs.2 += others.2 * mv;
+            }
+            emit(c.0 - rhs.0);
+            emit(c.1 - rhs.1);
+            emit(c.2 - rhs.2);
+        }
+        return;
+    }
+
     let beta = &publics[..d];
     let gamma = &publics[d..2 * d];
     // The boundary injection: Δ arrives with the normalization constant
@@ -390,7 +516,7 @@ pub(crate) fn for_each_logup_constraint_value<F: Field, A: Algebra<F> + Copy>(
             .map(|lookup| {
                 let mut fingerprint = vec![A::ZERO; d];
                 for &arg in lookup.args.iter().rev() {
-                    fingerprint = coord_mul(&fingerprint, gamma, w);
+                    fingerprint = coord_mul(&fingerprint, gamma, modulus);
                     fingerprint[0] += node_vals[arg.index()];
                 }
                 for (m, &b) in fingerprint.iter_mut().zip(beta) {
@@ -405,16 +531,16 @@ pub(crate) fn for_each_logup_constraint_value<F: Field, A: Algebra<F> + Copy>(
         let mut prefix: Vec<Vec<A>> = vec![one.clone()];
         for m in &messages {
             let last = prefix.last().unwrap();
-            prefix.push(coord_mul(last, m, w));
+            prefix.push(coord_mul(last, m, modulus));
         }
         let mut suffix: Vec<Vec<A>> = vec![one.clone(); messages.len() + 1];
         for j in (0..messages.len()).rev() {
-            suffix[j] = coord_mul(&messages[j], &suffix[j + 1], w);
+            suffix[j] = coord_mul(&messages[j], &suffix[j + 1], modulus);
         }
 
-        let mut constraint = coord_mul(&prefix[messages.len()], &target, w);
+        let mut constraint = coord_mul(&prefix[messages.len()], &target, modulus);
         for (j, lookup) in chunk.iter().enumerate() {
-            let others = coord_mul(&prefix[j], &suffix[j + 1], w);
+            let others = coord_mul(&prefix[j], &suffix[j + 1], modulus);
             let mv = node_vals[lookup.multiplicity.index()];
             for (c, &o) in constraint.iter_mut().zip(&others) {
                 *c -= o * mv;
@@ -1611,8 +1737,12 @@ mod tests {
         use crate::eval::{VarValues, eval_expr, eval_ext_expr};
         use crate::graph::ExtensionParams;
 
-        let params = crate::system::extension_params::<GoldilocksBlake3Config>();
-        let w = params.w;
+        let ext_cases = [
+            ExtensionParams::base(),
+            crate::system::extension_params::<GoldilocksBlake3Config>(),
+            ExtensionParams::cubic_trinomial(true),
+            ExtensionParams::binomial(4, Val::from_u64(11), false),
+        ];
 
         // Lookups with assorted shapes: multi-arg with a product, single
         // arg, and the degenerate empty-args case.
@@ -1631,11 +1761,12 @@ mod tests {
                 args: vec![],
             },
         ];
-        // Both native and quadratic fields, empty lookups, uneven groups,
-        // and the maximum stack-array width.
-        for (d, group_size, count) in [1, params.degree].into_iter().flat_map(|d| {
-            (1..=MAX_LOOKUP_GROUP).flat_map(move |g| [0, 3, 9].map(|count| (d, g, count)))
+        // Native, quadratic binomial, cubic trinomial, and degree-4 generic
+        // fields; empty lookups, uneven groups, and the maximum stack width.
+        for (ext_params, group_size, count) in ext_cases.into_iter().flat_map(|ep| {
+            (1..=MAX_LOOKUP_GROUP).flat_map(move |g| [0, 3, 9].map(|count| (ep, g, count)))
         }) {
+            let d = ext_params.degree;
             let lookups: Vec<_> = lookups.iter().cycle().take(count).cloned().collect();
             let synthesized = synthesize_lookups(&lookups, d, group_size);
 
@@ -1674,7 +1805,7 @@ mod tests {
 
             let ref_params = ExtensionParams {
                 degree: d,
-                w,
+                modulus: ext_params.modulus,
                 karatsuba: false,
             };
             let mut reference: Vec<Val> = vec![];
@@ -1713,7 +1844,7 @@ mod tests {
                 &publics,
                 &delta,
                 isl,
-                w,
+                ext_params.modulus,
                 d,
                 group_size,
                 &mut direct,
@@ -1723,7 +1854,11 @@ mod tests {
                 direct.len(),
                 logup_constraint_count(lookups.len(), group_size, d)
             );
-            assert_eq!(direct, reference, "group_size={group_size}");
+            assert_eq!(
+                direct, reference,
+                "d={d}, modulus={:?}, group_size={group_size}",
+                ext_params.modulus
+            );
         }
     }
 

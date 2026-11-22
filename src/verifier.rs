@@ -540,7 +540,7 @@ impl<SC: ProofConfig> System<SC> {
                 // p3's (unnormalized) last-row selector; the normalization
                 // constant is pre-absorbed into `delta_scaled`.
                 view.is_last_row,
-                crate::system::extension_params::<SC>().w,
+                crate::system::extension_params::<SC>().modulus,
                 extension_d,
                 circuit.lookup_group_size,
                 &mut constraint_values,

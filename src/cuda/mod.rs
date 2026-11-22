@@ -3541,11 +3541,7 @@ mod tests {
         };
         let graph = compile(
             &spec,
-            &ExtensionParams {
-                degree: 2,
-                w: Goldilocks::from_u64(7),
-                karatsuba: true,
-            },
+            &ExtensionParams::binomial(2, Goldilocks::from_u64(7), true),
         )
         .unwrap();
         let height = 8;

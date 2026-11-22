@@ -1986,7 +1986,11 @@ fn goldilocks_quadratic_inverse_denominators(z: ExtVal, coset: &[Val]) -> Vec<Ex
     let z0 = coords[0];
     let z1 = coords[1];
     let neg_z1 = -z1;
-    let w = <ExtVal as crate::traits::ExtensionOf<Val>>::W;
+    let crate::traits::ExtensionModulus::Binomial { w } =
+        <ExtVal as crate::traits::ExtensionOf<Val>>::MODULUS
+    else {
+        unreachable!("ExtVal is a binomial quadratic extension")
+    };
     let w_z1_sq = w * z1 * z1;
 
     let pw = PackedVal::WIDTH;

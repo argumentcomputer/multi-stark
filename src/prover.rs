@@ -1057,6 +1057,15 @@ where
             })
             .collect();
         AlphaTable::Degree2(pairs)
+    } else if ext_d == 3 {
+        let triples: Vec<[Val<SC>; 3]> = alpha_powers
+            .iter()
+            .map(|x| {
+                let coords = x.as_basis_coefficients_slice();
+                [coords[0], coords[1], coords[2]]
+            })
+            .collect();
+        AlphaTable::Degree3(triples)
     } else {
         let decomposed: Vec<Vec<Val<SC>>> = (0..ext_d)
             .map(|i| {
@@ -1129,7 +1138,7 @@ where
         ext_d.min(stage_2_width)
     };
     let node_count = circuit.graph.nodes.len();
-    let accs_len = if ext_d == 2 { 0 } else { ext_d };
+    let accs_len = if ext_d == 2 || ext_d == 3 { 0 } else { ext_d };
 
     const PACKS_PER_CHUNK: usize = 16;
     let chunk_rows = PACKS_PER_CHUNK * width;
@@ -1161,7 +1170,7 @@ where
                     &alpha_table,
                     next_step,
                     i_start,
-                    ext_params.w,
+                    ext_params.modulus,
                     ext_params.degree,
                     constraint_count,
                     scratch,
@@ -1175,6 +1184,7 @@ where
 
 enum AlphaTable<F> {
     Degree2(Vec<[F; 2]>),
+    Degree3(Vec<[F; 3]>),
     Generic(Vec<Vec<F>>),
 }
 
@@ -1202,7 +1212,7 @@ fn eval_quotient_pack<SC>(
     alpha_table: &AlphaTable<Val<SC>>,
     next_step: usize,
     i_start: usize,
-    ext_w: Val<SC>,
+    ext_modulus: crate::traits::ExtensionModulus<Val<SC>>,
     ext_degree: usize,
     constraint_count: usize,
     scratch: &mut QuotientScratch<PackedVal<SC>>,
@@ -1271,7 +1281,7 @@ fn eval_quotient_pack<SC>(
                 publics_packed,
                 delta_scaled,
                 is_last_row,
-                ext_w,
+                ext_modulus,
                 ext_degree,
                 circuit.lookup_group_size,
                 |val| {
@@ -1284,6 +1294,37 @@ fn eval_quotient_pack<SC>(
             debug_assert_eq!(idx, constraint_count);
             PackedChallenge::<SC>::from_basis_coefficients_fn(|coeff_idx| {
                 if coeff_idx == 0 { acc0 } else { acc1 }
+            })
+        }
+        AlphaTable::Degree3(alpha_triples) => {
+            let (mut acc0, mut acc1, mut acc2) = circuit
+                .graph
+                .fold_constraints_d3(&scratch.buf, alpha_triples);
+            let mut idx = circuit.graph.zeros.len();
+            crate::lookup::for_each_logup_constraint_value(
+                &circuit.graph.lookups,
+                &scratch.buf,
+                &scratch.s2_cur,
+                &scratch.s2_next,
+                publics_packed,
+                delta_scaled,
+                is_last_row,
+                ext_modulus,
+                ext_degree,
+                circuit.lookup_group_size,
+                |val| {
+                    let triple = alpha_triples[idx];
+                    acc0 += val * triple[0];
+                    acc1 += val * triple[1];
+                    acc2 += val * triple[2];
+                    idx += 1;
+                },
+            );
+            debug_assert_eq!(idx, constraint_count);
+            PackedChallenge::<SC>::from_basis_coefficients_fn(|coeff_idx| match coeff_idx {
+                0 => acc0,
+                1 => acc1,
+                _ => acc2,
             })
         }
         AlphaTable::Generic(decomposed_alpha_powers) => {
@@ -1302,7 +1343,7 @@ fn eval_quotient_pack<SC>(
                 publics_packed,
                 delta_scaled,
                 is_last_row,
-                ext_w,
+                ext_modulus,
                 ext_degree,
                 circuit.lookup_group_size,
                 |val| {

@@ -5,7 +5,7 @@
 //! trees also get a direct recursive evaluator, used as the reference in
 //! tests (with genuine extension-field arithmetic for `ExtExpr`).
 
-use crate::traits::{Algebra, Field};
+use crate::traits::{Algebra, ExtensionModulus, Field};
 
 use crate::expr::{ColRef, Expr, ExtExpr, RowOffset, Source};
 use crate::graph::{ConstraintGraph, ExtensionParams, Node, NodeId};
@@ -142,6 +142,47 @@ impl<F: Field> ConstraintGraph<F> {
         (acc0, acc1)
     }
 
+    /// Folds the user-constraint roots (`self.zeros`) with interleaved degree-3
+    /// alpha-power triples `[c0, c1, c2]` directly off the sweep buffer,
+    /// avoiding any intermediate `constraint_values` allocation.
+    #[inline]
+    pub fn fold_constraints_d3<W: Algebra<F>>(
+        &self,
+        buf: &[W],
+        alpha_triples: &[[F; 3]],
+    ) -> (W, W, W) {
+        debug_assert!(alpha_triples.len() >= self.zeros.len());
+        let mut a0 = W::ZERO;
+        let mut a1 = W::ZERO;
+        let mut b0 = W::ZERO;
+        let mut b1 = W::ZERO;
+        let mut c0 = W::ZERO;
+        let mut c1 = W::ZERO;
+
+        let (z_chunks, z_rem) = self.zeros.as_chunks::<2>();
+        let (p_chunks, p_rem) = alpha_triples[..self.zeros.len()].as_chunks::<2>();
+        for (zc, pc) in z_chunks.iter().zip(p_chunks) {
+            let v0 = buf[zc[0].index()];
+            let v1 = buf[zc[1].index()];
+            a0 += v0 * pc[0][0];
+            b0 += v0 * pc[0][1];
+            c0 += v0 * pc[0][2];
+            a1 += v1 * pc[1][0];
+            b1 += v1 * pc[1][1];
+            c1 += v1 * pc[1][2];
+        }
+        let mut acc0 = a0 + a1;
+        let mut acc1 = b0 + b1;
+        let mut acc2 = c0 + c1;
+        for (z, p) in z_rem.iter().zip(p_rem) {
+            let v = buf[z.index()];
+            acc0 += v * p[0];
+            acc1 += v * p[1];
+            acc2 += v * p[2];
+        }
+        (acc0, acc1, acc2)
+    }
+
     /// Folds the user-constraint roots (`self.zeros`) with decomposed alpha
     /// powers into `acc` (one accumulator per basis coordinate), avoiding any
     /// intermediate `constraint_values` allocation.
@@ -198,8 +239,8 @@ pub fn eval_expr<F: Field>(expr: &Expr<F>, values: &VarValues<'_, F>) -> F {
 
 /// Reference evaluation of a frontend extension expression, in genuine
 /// extension-field arithmetic: coordinates as `Vec<F>` of length D,
-/// products reduced mod `X^D − W` (schoolbook — deliberately independent
-/// of the compiled Karatsuba path).
+/// products reduced modulo `params.modulus` (schoolbook — deliberately
+/// independent of the compiled Karatsuba path).
 pub fn eval_ext_expr<F: Field>(
     expr: &ExtExpr<F>,
     values: &VarValues<'_, F>,
@@ -233,18 +274,35 @@ pub fn eval_ext_expr<F: Field>(
         ExtExpr::Mul(a, b) => {
             let a = eval_ext_expr(a, values, params);
             let b = eval_ext_expr(b, values, params);
-            let mut out = vec![F::ZERO; d];
-            for i in 0..d {
-                for j in 0..d {
-                    let term = a[i] * b[j];
-                    if i + j < d {
-                        out[i + j] += term;
-                    } else {
-                        out[i + j - d] += params.w * term;
+            match params.modulus {
+                ExtensionModulus::Base => {
+                    assert_eq!(d, 1);
+                    vec![a[0] * b[0]]
+                }
+                ExtensionModulus::Binomial { w } => {
+                    let mut out = vec![F::ZERO; d];
+                    for i in 0..d {
+                        for j in 0..d {
+                            let term = a[i] * b[j];
+                            if i + j < d {
+                                out[i + j] += term;
+                            } else {
+                                out[i + j - d] += w * term;
+                            }
+                        }
                     }
+                    out
+                }
+                ExtensionModulus::CubicTrinomial => {
+                    assert_eq!(d, 3);
+                    let t0 = a[0] * b[0];
+                    let t1 = a[0] * b[1] + a[1] * b[0];
+                    let t2 = a[0] * b[2] + a[1] * b[1] + a[2] * b[0];
+                    let t3 = a[1] * b[2] + a[2] * b[1];
+                    let t4 = a[2] * b[2];
+                    vec![t0 + t3, t1 + t3 + t4, t2 + t4]
                 }
             }
-            out
         }
     }
 }

@@ -9,7 +9,7 @@
 //! ([`crate::lookup::logup_constraint_values`]), folding their values after
 //! the user roots.
 
-use crate::traits::{ExtensionOf, Field};
+use crate::traits::Field;
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 
@@ -505,15 +505,9 @@ pub fn compute_lookup_values_range<F: Field>(
     builder.finish()
 }
 
-/// The binomial extension parameters of the challenge field, read off
-/// the `ExtensionOf` constants (`X^D = W`; `W` is unused when `D = 1`).
+/// The extension parameters of the challenge field, read off [`ExtensionOf`].
 pub fn extension_params<SC: ProofConfig>() -> ExtensionParams<Val<SC>> {
-    let d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
-    ExtensionParams {
-        degree: d,
-        w: <SC::Challenge as ExtensionOf<Val<SC>>>::W,
-        karatsuba: d == 2,
-    }
+    ExtensionParams::for_extension::<SC::Challenge>()
 }
 
 #[cfg(test)]

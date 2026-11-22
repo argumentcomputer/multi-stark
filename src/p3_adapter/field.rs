@@ -299,7 +299,43 @@ macro_rules! impl_extension_via_p3 {
 
         impl $crate::traits::ExtensionOf<$base> for $ext {
             const D: usize = $d;
-            const W: $base = <$base as p3_field::extension::BinomiallyExtendable<$d>>::W;
+            const MODULUS: $crate::traits::ExtensionModulus<$base> =
+                $crate::traits::ExtensionModulus::Binomial {
+                    w: <$base as p3_field::extension::BinomiallyExtendable<$d>>::W,
+                };
+            type ExtPacking = $crate::p3_adapter::field::P3ExtPacking<$base, $ext>;
+
+            #[inline]
+            fn as_basis_coefficients_slice(&self) -> &[$base] {
+                p3_field::BasedVectorSpace::<$base>::as_basis_coefficients_slice(self)
+            }
+
+            #[inline]
+            fn from_basis_coefficients_fn(f: impl FnMut(usize) -> $base) -> Self {
+                <$ext as p3_field::BasedVectorSpace<$base>>::from_basis_coefficients_fn(f)
+            }
+
+            #[inline]
+            fn flatten_vec_to_base(values: Vec<Self>) -> Vec<$base> {
+                <$ext as p3_field::BasedVectorSpace<$base>>::flatten_to_base(values)
+            }
+        }
+    };
+}
+
+/// Implement [`ExtensionOf`] (and the base-field [`Algebra`]) for a
+/// concrete p3 cubic trinomial extension `X^3 - X - 1` over a concrete base.
+macro_rules! impl_cubic_trinomial_extension_via_p3 {
+    ($base:ty, $ext:ty) => {
+        impl $crate::traits::Algebra<$base> for $ext {
+            const ZERO: Self = <$ext as p3_field::PrimeCharacteristicRing>::ZERO;
+            const ONE: Self = <$ext as p3_field::PrimeCharacteristicRing>::ONE;
+        }
+
+        impl $crate::traits::ExtensionOf<$base> for $ext {
+            const D: usize = 3;
+            const MODULUS: $crate::traits::ExtensionModulus<$base> =
+                $crate::traits::ExtensionModulus::CubicTrinomial;
             type ExtPacking = $crate::p3_adapter::field::P3ExtPacking<$base, $ext>;
 
             #[inline]
@@ -330,6 +366,11 @@ impl_extension_via_p3!(
     p3_goldilocks::Goldilocks,
     p3_field::extension::BinomialExtensionField<p3_goldilocks::Goldilocks, 2>,
     2
+);
+impl_field_via_p3!(p3_field::extension::CubicTrinomialExtensionField<p3_goldilocks::Goldilocks>);
+impl_cubic_trinomial_extension_via_p3!(
+    p3_goldilocks::Goldilocks,
+    p3_field::extension::CubicTrinomialExtensionField<p3_goldilocks::Goldilocks>
 );
 
 impl crate::traits::PrimeField for p3_goldilocks::Goldilocks {

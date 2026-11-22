@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use crate::traits::Field;
+use crate::traits::{ExtensionModulus, ExtensionOf, Field};
 
 use crate::expr::{CircuitSpec, ColRef, Expr, ExtExpr, RowOffset, Source};
 use crate::lookup::Lookup;
@@ -47,15 +47,62 @@ pub enum Node<F> {
     Neg(NodeId),
 }
 
-/// Binomial extension parameters: `X^degree = w`.
-#[derive(Copy, Clone, Debug)]
+/// Extension-field parameters controlling coordinate expansion of [`ExtExpr`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ExtensionParams<F> {
     pub degree: usize,
-    pub w: F,
-    /// Emit the 3-multiplication Karatsuba form for D=2 products
-    /// (matching native extension-multiplication cost). Schoolbook
-    /// otherwise; both are exposed so tests can cross-check them.
+    pub modulus: ExtensionModulus<F>,
+    /// Emit Karatsuba products for D=2 binomial (3 muls) and D=3 cubic
+    /// trinomial (6 muls, 0 constant muls). Schoolbook otherwise; both are
+    /// exposed so tests can cross-check them.
     pub karatsuba: bool,
+}
+
+impl<F> ExtensionParams<F> {
+    /// Degree-1 base-field extension parameters.
+    pub const fn base() -> Self {
+        Self {
+            degree: 1,
+            modulus: ExtensionModulus::Base,
+            karatsuba: false,
+        }
+    }
+
+    /// Binomial extension `X^degree - w`.
+    pub const fn binomial(degree: usize, w: F, karatsuba: bool) -> Self {
+        Self {
+            degree,
+            modulus: ExtensionModulus::Binomial { w },
+            karatsuba,
+        }
+    }
+
+    /// Cubic trinomial extension `X^3 - X - 1`.
+    pub const fn cubic_trinomial(karatsuba: bool) -> Self {
+        Self {
+            degree: 3,
+            modulus: ExtensionModulus::CubicTrinomial,
+            karatsuba,
+        }
+    }
+
+    /// Read extension parameters from an [`ExtensionOf`] implementation.
+    pub fn for_extension<EF: ExtensionOf<F>>() -> Self
+    where
+        F: Field,
+    {
+        let degree = EF::D;
+        let modulus = EF::MODULUS;
+        let karatsuba = matches!(
+            (degree, modulus),
+            (2, ExtensionModulus::Binomial { .. }) | (3, ExtensionModulus::CubicTrinomial)
+        );
+        Self {
+            degree,
+            modulus,
+            karatsuba,
+        }
+    }
 }
 
 /// A compiled constraint graph: the hash-consed DAG of expression nodes
@@ -474,54 +521,198 @@ impl<F: Field> Interner<F> {
         if self.is_scalar(b) {
             return a.iter().map(|&ak| self.mul(b[0], ak)).collect();
         }
-        if d == 2 && params.karatsuba {
-            // (a0 + a1 X)(b0 + b1 X) mod (X² − W), 3 multiplications:
-            //   c0 = a0 b0 + W · a1 b1
-            //   c1 = (a0 + a1)(b0 + b1) − a0 b0 − a1 b1
-            let p0 = self.mul(a[0], b[0]);
-            let p1 = self.mul(a[1], b[1]);
-            let sa = self.add(a[0], a[1]);
-            let sb = self.add(b[0], b[1]);
-            let s = self.mul(sa, sb);
-            let w = self.constant(params.w);
-            let wp1 = self.mul(w, p1);
-            let c0 = self.add(p0, wp1);
-            let t = self.sub(s, p0);
-            let c1 = self.sub(t, p1);
-            return vec![c0, c1];
-        }
-        // Schoolbook: c_k = Σ_{i+j=k} a_i b_j + W · Σ_{i+j=k+D} a_i b_j.
-        let w = self.constant(params.w);
-        (0..d)
-            .map(|k| {
-                let mut low: Option<NodeId> = None;
-                let mut high: Option<NodeId> = None;
-                for (i, &ai) in a.iter().enumerate() {
-                    for (j, &bj) in b.iter().enumerate() {
-                        if i + j == k {
-                            let term = self.mul(ai, bj);
-                            low = Some(match low {
-                                Some(acc) => self.add(acc, term),
-                                None => term,
-                            });
-                        } else if i + j == k + d {
-                            let term = self.mul(ai, bj);
-                            high = Some(match high {
-                                Some(acc) => self.add(acc, term),
-                                None => term,
-                            });
+        match params.modulus {
+            ExtensionModulus::Base => {
+                debug_assert_eq!(d, 1);
+                vec![self.mul(a[0], b[0])]
+            }
+            ExtensionModulus::CubicTrinomial => {
+                debug_assert_eq!(d, 3);
+                if params.karatsuba {
+                    // (a0 + a1 X + a2 X^2)(b0 + b1 X + b2 X^2) mod (X^3 - X - 1),
+                    // 6 multiplications, 0 constant multiplications:
+                    //   v0 = a0 b0, v1 = a1 b1, v2 = a2 b2
+                    //   m01 = (a0 + a1)(b0 + b1) - v0 - v1
+                    //   m02 = (a0 + a2)(b0 + b2) - v0 - v2
+                    //   m12 = (a1 + a2)(b1 + b2) - v1 - v2
+                    //   c0 = v0 + m12
+                    //   c1 = m01 + m12 + v2
+                    //   c2 = m02 + v1 + v2
+                    let v0 = self.mul(a[0], b[0]);
+                    let v1 = self.mul(a[1], b[1]);
+                    let v2 = self.mul(a[2], b[2]);
+
+                    let s01_a = self.add(a[0], a[1]);
+                    let s01_b = self.add(b[0], b[1]);
+                    let p01 = self.mul(s01_a, s01_b);
+                    let t01 = self.sub(p01, v0);
+                    let m01 = self.sub(t01, v1);
+
+                    let s02_a = self.add(a[0], a[2]);
+                    let s02_b = self.add(b[0], b[2]);
+                    let p02 = self.mul(s02_a, s02_b);
+                    let t02 = self.sub(p02, v0);
+                    let m02 = self.sub(t02, v2);
+
+                    let s12_a = self.add(a[1], a[2]);
+                    let s12_b = self.add(b[1], b[2]);
+                    let p12 = self.mul(s12_a, s12_b);
+                    let t12 = self.sub(p12, v1);
+                    let m12 = self.sub(t12, v2);
+
+                    let c0 = self.add(v0, m12);
+                    let c1_0 = self.add(m01, m12);
+                    let c1 = self.add(c1_0, v2);
+                    let c2_0 = self.add(m02, v1);
+                    let c2 = self.add(c2_0, v2);
+                    vec![c0, c1, c2]
+                } else {
+                    // Schoolbook mod (X^3 - X - 1): X^3 = X + 1, X^4 = X^2 + X.
+                    let t0 = self.mul(a[0], b[0]);
+                    let a0b1 = self.mul(a[0], b[1]);
+                    let a1b0 = self.mul(a[1], b[0]);
+                    let t1 = self.add(a0b1, a1b0);
+                    let a0b2 = self.mul(a[0], b[2]);
+                    let a1b1 = self.mul(a[1], b[1]);
+                    let a2b0 = self.mul(a[2], b[0]);
+                    let t2_0 = self.add(a0b2, a1b1);
+                    let t2 = self.add(t2_0, a2b0);
+                    let a1b2 = self.mul(a[1], b[2]);
+                    let a2b1 = self.mul(a[2], b[1]);
+                    let t3 = self.add(a1b2, a2b1);
+                    let t4 = self.mul(a[2], b[2]);
+
+                    let c0 = self.add(t0, t3);
+                    let c1_0 = self.add(t1, t3);
+                    let c1 = self.add(c1_0, t4);
+                    let c2 = self.add(t2, t4);
+                    vec![c0, c1, c2]
+                }
+            }
+            ExtensionModulus::Binomial { w: modulus_w } => {
+                if d == 2 && params.karatsuba {
+                    // (a0 + a1 X)(b0 + b1 X) mod (X² − W), 3 multiplications:
+                    //   c0 = a0 b0 + W · a1 b1
+                    //   c1 = (a0 + a1)(b0 + b1) − a0 b0 − a1 b1
+                    let p0 = self.mul(a[0], b[0]);
+                    let p1 = self.mul(a[1], b[1]);
+                    let sa = self.add(a[0], a[1]);
+                    let sb = self.add(b[0], b[1]);
+                    let s = self.mul(sa, sb);
+                    let w = self.constant(modulus_w);
+                    let wp1 = self.mul(w, p1);
+                    let c0 = self.add(p0, wp1);
+                    let t = self.sub(s, p0);
+                    let c1 = self.sub(t, p1);
+                    return vec![c0, c1];
+                }
+                // Schoolbook: c_k = Σ_{i+j=k} a_i b_j + W · Σ_{i+j=k+D} a_i b_j.
+                let w = self.constant(modulus_w);
+                (0..d)
+                    .map(|k| {
+                        let mut low: Option<NodeId> = None;
+                        let mut high: Option<NodeId> = None;
+                        for (i, &ai) in a.iter().enumerate() {
+                            for (j, &bj) in b.iter().enumerate() {
+                                if i + j == k {
+                                    let term = self.mul(ai, bj);
+                                    low = Some(match low {
+                                        Some(acc) => self.add(acc, term),
+                                        None => term,
+                                    });
+                                } else if i + j == k + d {
+                                    let term = self.mul(ai, bj);
+                                    high = Some(match high {
+                                        Some(acc) => self.add(acc, term),
+                                        None => term,
+                                    });
+                                }
+                            }
                         }
-                    }
-                }
-                let low = low.expect("k < d always has low terms");
-                match high {
-                    Some(high) => {
-                        let high = self.mul(w, high);
-                        self.add(low, high)
-                    }
-                    None => low,
-                }
-            })
-            .collect()
+                        let low = low.expect("k < d always has low terms");
+                        match high {
+                            Some(high) => {
+                                let high = self.mul(w, high);
+                                self.add(low, high)
+                            }
+                            None => low,
+                        }
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eval::{VarValues, eval_ext_expr};
+    use crate::traits::{Algebra, ExtensionOf};
+    use p3_field::extension::CubicTrinomialExtensionField;
+    use p3_goldilocks::Goldilocks;
+
+    #[test]
+    fn cubic_trinomial_graph_compilation_matches_reference_and_p3() {
+        type Ext3 = CubicTrinomialExtensionField<Goldilocks>;
+
+        let a = ExtExpr::Coords(vec![Expr::main(0), Expr::main(1), Expr::main(2)]);
+        let b = ExtExpr::Coords(vec![Expr::main(3), Expr::main(4), Expr::main(5)]);
+        let c = ExtExpr::Coords(vec![
+            Expr::main_next(0),
+            Expr::main_next(1),
+            Expr::main_next(2),
+        ]);
+        let expr = a * b + c * ExtExpr::from(Expr::main(3));
+
+        let spec = CircuitSpec {
+            main_width: 6,
+            preprocessed_width: 0,
+            stage2_width: 0,
+            num_publics: 0,
+            constraints: vec![],
+            ext_constraints: vec![expr.clone()],
+            lookups: vec![],
+        };
+        let karatsuba = compile(&spec, &ExtensionParams::cubic_trinomial(true)).unwrap();
+        let schoolbook = compile(&spec, &ExtensionParams::cubic_trinomial(false)).unwrap();
+
+        let main_cur: Vec<Goldilocks> = (1..=6u64)
+            .map(|i| Goldilocks::from_u64(i * 19 + 3))
+            .collect();
+        let main_next: Vec<Goldilocks> = (1..=6u64)
+            .map(|i| Goldilocks::from_u64(i * 31 + 7))
+            .collect();
+        let empty: [Goldilocks; 0] = [];
+        let view = VarValues {
+            preprocessed: [&empty, &empty],
+            main: [&main_cur, &main_next],
+            stage2: [&empty, &empty],
+            publics: &empty,
+            is_first_row: Goldilocks::ZERO,
+            is_last_row: Goldilocks::ZERO,
+            is_transition: Goldilocks::ONE,
+        };
+
+        let ref_vals = eval_ext_expr(&expr, &view, &ExtensionParams::cubic_trinomial(false));
+        let k_vals = karatsuba.evaluate_constraints(&view);
+        let s_vals = schoolbook.evaluate_constraints(&view);
+
+        // Compare against native Plonky3 CubicTrinomialExtensionField arithmetic.
+        let p3_a = Ext3::from_basis_coefficients_fn(|i| main_cur[i]);
+        let p3_b = Ext3::from_basis_coefficients_fn(|i| main_cur[3 + i]);
+        let p3_c = Ext3::from_basis_coefficients_fn(|i| main_next[i]);
+        let p3_res = p3_a * p3_b + p3_c * main_cur[3];
+        assert_eq!(ref_vals.as_slice(), p3_res.as_basis_coefficients_slice());
+
+        // `zeros` are canonicalized (sorted by node id), so compare as sorted sets.
+        let mut sorted_ref = ref_vals;
+        let mut sorted_k = k_vals;
+        let mut sorted_s = s_vals;
+        sorted_ref.sort();
+        sorted_k.sort();
+        sorted_s.sort();
+        assert_eq!(sorted_k, sorted_ref);
+        assert_eq!(sorted_s, sorted_ref);
     }
 }
