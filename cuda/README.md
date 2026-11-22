@@ -28,9 +28,14 @@ prover pipeline device-resident:
 
 Large traces can be retained in pinned host memory and uploaded in bounded
 windows when keeping every source matrix resident would exceed device memory.
-The spill policy reserves one quarter of reported device memory by default and
-uses `cudaMemGetInfo` at runtime instead of assuming a particular GPU size.
-This retains the exact CPU storage layout and proof bytes.
+Each phase admits its allocations against the free memory it measures at
+runtime (`cudaMemGetInfo` plus the allocation pool's unused pages, which the
+driver returns to new requests when it runs short) instead of assuming a
+particular GPU size. Memory allocated on the device by another thread while a
+phase runs is invisible to that measurement, so such an allocator holds a
+`multi_stark::cuda::DeviceMemoryReservation` of its size from before the
+phases it overlaps until its allocation is live. This retains the exact CPU
+storage layout and proof bytes.
 
 The ordinary `TwoAdicSubgroupDft` implementation remains available for direct
 host-matrix users and transfer-inclusive microbenchmarks.
