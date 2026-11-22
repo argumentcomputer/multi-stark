@@ -69,6 +69,9 @@ __device__ __forceinline__ uint64_t canonical_add(uint64_t a,uint64_t b){
     if(sum<a)return sum+GOLDILOCKS_EPSILON;
     return sum>=GOLDILOCKS_P?sum-GOLDILOCKS_P:sum;
 }
+__device__ __forceinline__ uint64_t canonical_sub(uint64_t a,uint64_t b){
+    return a>=b?a-b:GOLDILOCKS_P-(b-a);
+}
 __device__ __forceinline__ uint64_t canonical_mul(uint64_t a,uint64_t b){
     const uint64_t low=a*b,high=__umul64hi(a,b),high_high=high>>32;
     uint64_t reduced_low=low-high_high;

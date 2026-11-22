@@ -1396,11 +1396,12 @@ impl LookupValues<p3_goldilocks::Goldilocks> {
         group_size: usize,
         lookup_challenge: EF,
         fingerprint_challenge: &EF,
-    ) -> Vec<[p3_goldilocks::Goldilocks; 2]> {
+    ) -> Vec<p3_goldilocks::Goldilocks> {
         self.require_payload();
         assert!(rows.start <= rows.end && rows.end <= self.height);
         assert!(self.num_lookups != 0);
-        assert_eq!(<EF as ExtensionOf<p3_goldilocks::Goldilocks>>::D, 2);
+        let d = <EF as ExtensionOf<p3_goldilocks::Goldilocks>>::D;
+        assert!(d == 2 || d == 3, "CUDA supports extension degrees 2 and 3");
         let group_size = group_size.max(1);
         let slots = lookup_groups(self.num_lookups, group_size);
         let message_start = rows.start * self.num_lookups;
@@ -1419,24 +1420,23 @@ impl LookupValues<p3_goldilocks::Goldilocks> {
             .collect::<Vec<_>>();
         let inverses = crate::traits::batch_inverse(&messages);
         drop(messages);
-        (0..(rows.end - rows.start) * slots)
-            .into_par_iter()
-            .map(|index| {
-                let local_row = index / slots;
-                let slot = index % slots;
-                let begin = slot * group_size;
-                let end = (begin + group_size).min(self.num_lookups);
-                let row = rows.start + local_row;
-                let inverse_row = local_row * self.num_lookups;
-                let mut delta = <EF as Algebra<EF>>::ZERO;
-                for lookup in begin..end {
-                    let multiplicity = self.multiplicities[row * self.num_lookups + lookup];
-                    delta += EF::from(multiplicity) * inverses[inverse_row + lookup];
-                }
-                let coordinates = delta.as_basis_coefficients_slice();
-                [coordinates[0], coordinates[1]]
-            })
-            .collect()
+        let count = (rows.end - rows.start) * slots;
+        let mut flat = vec![p3_goldilocks::Goldilocks::ZERO; count * d];
+        flat.par_chunks_mut(d).enumerate().for_each(|(index, dst)| {
+            let local_row = index / slots;
+            let slot = index % slots;
+            let begin = slot * group_size;
+            let end = (begin + group_size).min(self.num_lookups);
+            let row = rows.start + local_row;
+            let inverse_row = local_row * self.num_lookups;
+            let mut delta = <EF as Algebra<EF>>::ZERO;
+            for lookup in begin..end {
+                let multiplicity = self.multiplicities[row * self.num_lookups + lookup];
+                delta += EF::from(multiplicity) * inverses[inverse_row + lookup];
+            }
+            dst.copy_from_slice(delta.as_basis_coefficients_slice());
+        });
+        flat
     }
 
     pub(crate) fn cuda_parts(

@@ -2,15 +2,16 @@
 
 use std::sync::{OnceLock, atomic::AtomicBool};
 
-use p3_commit::Pcs;
-use p3_field::Field;
+use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
+use p3_commit::{ExtensionMmcs, Pcs};
+use p3_field::{ExtensionField, Field, coset::TwoAdicMultiplicativeCoset};
 use p3_matrix::{Dimensions, dense::RowMajorMatrix};
 use p3_symmetric::MerkleCap;
 
-use super::mmcs::CudaMmcsData;
-use super::{CudaLde, CudaMixedMerkleTree, device_memory_info};
-use crate::config::{Com, Domain, PcsData};
-use crate::types::{GoldilocksBlake3Config as Config, InnerPcs as CudaPcs, Val};
+use super::mmcs::{CudaMmcs, CudaMmcsData};
+use super::pcs::CudaTwoAdicFriPcs;
+use super::{CudaDft, CudaLde, CudaMixedMerkleTree, device_memory_info};
+use crate::types::Val;
 use crate::witness::TraceSource;
 
 pub(crate) fn record_lde_spill(device: i32, bytes: usize) {
@@ -25,10 +26,16 @@ fn spill_lde(lde: &CudaLde) -> RowMajorMatrix<Val> {
     matrix
 }
 
-pub(crate) fn commit(
-    pcs: &CudaPcs,
-    evaluations: Vec<(Domain<Config>, TraceSource<Val>)>,
-) -> (Com<Config>, PcsData<Config>) {
+pub(crate) fn commit<EF, Ch>(
+    pcs: &CudaTwoAdicFriPcs<Val, CudaDft, CudaMmcs, ExtensionMmcs<Val, EF, CudaMmcs>>,
+    evaluations: Vec<(TwoAdicMultiplicativeCoset<Val>, TraceSource<Val>)>,
+) -> (MerkleCap<Val, [u8; 32]>, CudaMmcsData<RowMajorMatrix<Val>>)
+where
+    EF: ExtensionField<Val>,
+    Ch: FieldChallenger<Val>
+        + CanObserve<MerkleCap<Val, [u8; 32]>>
+        + GrindingChallenger<Witness = Val>,
+{
     if evaluations
         .iter()
         .all(|(_, m)| matches!(m, TraceSource::Host(_)))
@@ -38,7 +45,10 @@ pub(crate) fn commit(
             path = "host_pcs",
             "main commitment path"
         );
-        return <CudaPcs as Pcs<crate::types::ExtVal, crate::types::Challenger>>::commit(
+        return <CudaTwoAdicFriPcs<Val, CudaDft, CudaMmcs, ExtensionMmcs<Val, EF, CudaMmcs>> as Pcs<
+            EF,
+            Ch,
+        >>::commit(
             pcs,
             evaluations.into_iter().map(|(d, m)| (d, m.materialize())),
         );
@@ -172,9 +182,16 @@ pub(crate) fn commit(
         &resident_refs,
         &deferred,
         &std::collections::BTreeSet::new(),
+        pcs.mmcs.leaf_domain(),
     );
-    let tree =
-        CudaMixedMerkleTree::from_hybrid(device, &resident_refs, &host_refs, &deferred, &digests);
+    let tree = CudaMixedMerkleTree::from_hybrid_with_domain(
+        device,
+        &resident_refs,
+        &host_refs,
+        &deferred,
+        &digests,
+        pcs.mmcs.is_domain_v6(),
+    );
     let commitment = MerkleCap::new(vec![tree.root()]);
     let active = host.iter().map(|h| AtomicBool::new(h.is_none())).collect();
     let committed = host

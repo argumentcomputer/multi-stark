@@ -25,11 +25,9 @@ use p3_goldilocks::Goldilocks;
 use p3_matrix::Matrix;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
-#[cfg(feature = "cuda")]
-use p3_merkle_tree::MerkleTreeMmcs;
-#[cfg(any(feature = "cuda", test))]
+#[cfg(test)]
 use p3_symmetric::CompressionFunctionFromHasher;
-#[cfg(any(feature = "cuda", test))]
+#[cfg(test)]
 use p3_symmetric::SerializingHasher;
 
 #[cfg(feature = "cuda")]
@@ -194,8 +192,6 @@ mod grind_tests {
         }
     }
 }
-#[cfg(feature = "cuda")]
-type CpuMmcs = MerkleTreeMmcs<Val, u8, SerializingHasher<Blake3>, Blake3CompressionFunction, 2, 32>;
 #[cfg(not(feature = "cuda"))]
 pub type Mmcs = crate::p3_adapter::spill::SpillableMmcs;
 #[cfg(feature = "cuda")]
@@ -232,6 +228,639 @@ fn cuda_coset_selectors(
             .exp_power_of_2(trace_domain.log_size()),
         vanishing_step: Val::two_adic_generator(rate_bits),
     }
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_ext_params<EF: crate::traits::ExtensionOf<Val>>() -> (usize, Val) {
+    let ext_degree = EF::D;
+    assert!(
+        ext_degree == 2 || ext_degree == 3,
+        "CUDA backend supports Goldilocks extension degrees 2 and 3, got {ext_degree}"
+    );
+    let ext_w = match EF::MODULUS {
+        ExtensionModulus::Binomial { w } => w,
+        ExtensionModulus::CubicTrinomial => Val::ZERO,
+        ExtensionModulus::Base => panic!("CUDA backend requires an extension field"),
+    };
+    (ext_degree, ext_w)
+}
+
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn cuda_accelerated_quotient_values<EF>(
+    circuit: &crate::system::Circuit<Val>,
+    lookup_publics: &[Val],
+    trace_domain: Domain,
+    quotient_domain: Domain,
+    preprocessed: Option<(&ProverData, usize)>,
+    stage_1: (&ProverData, usize),
+    stage_2: (&ProverData, usize),
+    alpha: EF,
+    constraint_count: usize,
+) -> Option<Vec<EF>>
+where
+    EF: TwoAdicField + ExtensionField<Val> + crate::traits::ExtensionOf<Val>,
+{
+    if !crate::cuda::quotient_graph_supported(&circuit.graph) {
+        return None;
+    }
+    let main = stage_1.0.resident(stage_1.1)?;
+    let s2 = stage_2.0.resident(stage_2.1)?;
+    let prep = match preprocessed {
+        Some((data, index)) => Some(data.resident(index)?),
+        None => None,
+    };
+    let (ext_degree, ext_w) = cuda_ext_params::<EF>();
+    let qsize = quotient_domain.size();
+    let selectors = cuda_coset_selectors(trace_domain, quotient_domain);
+    let mut powers = Vec::with_capacity(constraint_count);
+    let mut power = <EF as PrimeCharacteristicRing>::ONE;
+    for _ in 0..constraint_count {
+        powers.push(power);
+        power *= alpha;
+    }
+    powers.reverse();
+    let mut alpha_flat = Vec::with_capacity(ext_degree * constraint_count);
+    for coordinate in 0..ext_degree {
+        alpha_flat.extend(
+            powers
+                .iter()
+                .map(|x| <EF as BasedVectorSpace<Val>>::as_basis_coefficients_slice(x)[coordinate]),
+        );
+    }
+    let n = Val::from_usize(trace_domain.size());
+    let g = Val::two_adic_generator(trace_domain.size().ilog2() as usize);
+    let norm = (n * g).inverse();
+    let delta: Vec<Val> = (0..ext_degree)
+        .map(|c| (lookup_publics[3 * ext_degree + c] - lookup_publics[2 * ext_degree + c]) * norm)
+        .collect();
+    let next_step = 1usize << (quotient_domain.size().ilog2() - trace_domain.size().ilog2());
+    let flat = crate::cuda::quotient_values_resident(
+        &circuit.graph,
+        prep,
+        main,
+        s2,
+        lookup_publics,
+        selectors,
+        &alpha_flat,
+        &delta,
+        ext_w,
+        ext_degree,
+        qsize,
+        next_step,
+        circuit.lookup_group_size,
+    );
+    Some(
+        flat.values
+            .chunks_exact(ext_degree)
+            .map(|coords| {
+                EF::from_basis_coefficients_slice(coords)
+                    .expect("CUDA quotient coordinate count mismatch")
+            })
+            .collect(),
+    )
+}
+
+#[cfg(feature = "cuda")]
+struct CudaQuotientJob<'a> {
+    circuit: &'a crate::system::Circuit<Val>,
+    lookup_publics: &'a [Val],
+    trace_domain: Domain,
+    quotient_domain: Domain,
+    preprocessed: Option<(&'a ProverData, usize)>,
+    stage_1: (&'a ProverData, usize),
+    stage_2: (&'a ProverData, usize),
+    constraint_count: usize,
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_accelerated_quotient_commit<EF>(
+    dft: &CudaDft,
+    mmcs: &Mmcs,
+    log_blowup: usize,
+    inputs: &[CudaQuotientJob<'_>],
+    alpha: EF,
+) -> Option<(Commitment, ProverData)>
+where
+    EF: TwoAdicField + ExtensionField<Val> + crate::traits::ExtensionOf<Val>,
+{
+    use crate::cuda::mmcs::CudaCommitMmcs;
+
+    if inputs
+        .iter()
+        .any(|input| !crate::cuda::quotient_graph_supported(&input.circuit.graph))
+    {
+        return None;
+    }
+    let (ext_degree, ext_w) = cuda_ext_params::<EF>();
+    let (_, total_device_bytes) = crate::cuda::device_memory_info(mmcs.cuda_device_id());
+    let matrix_width = |data: &ProverData, index: usize| {
+        let dimensions = mmcs.matrix_dimensions(data);
+        dimensions
+            .get(index)
+            .expect("matrix index out of bounds")
+            .width
+    };
+    let staging_bytes = |input: &CudaQuotientJob<'_>| {
+        let mut host_width = 0usize;
+        for (data, index) in [Some(input.stage_1), Some(input.stage_2), input.preprocessed]
+            .into_iter()
+            .flatten()
+        {
+            if !mmcs.is_matrix_cuda_resident(data, index) {
+                host_width = host_width.saturating_add(matrix_width(data, index));
+            }
+        }
+        if host_width == 0 {
+            return 0;
+        }
+        let row_bytes = host_width
+            .saturating_mul(2)
+            .saturating_mul(size_of::<Val>());
+        let per_buffer = input
+            .quotient_domain
+            .size()
+            .saturating_mul(row_bytes)
+            .min(512usize << 20);
+        2usize.saturating_mul(per_buffer)
+    };
+    let mut quotient_jobs = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let quotient_size = input.quotient_domain.size();
+            let quotient_degree = input.circuit.quotient_degree();
+            let trace_height = quotient_size / quotient_degree;
+            let lde_height = trace_height
+                .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
+                .unwrap_or(usize::MAX);
+            let (output_bytes, kernel_workspace) = crate::cuda::quotient_lde_memory_upper_bound(
+                &input.circuit.graph,
+                input.lookup_publics.len(),
+                input.constraint_count,
+                quotient_size,
+                quotient_degree,
+                log_blowup,
+                ext_degree,
+            );
+            let current_staging = staging_bytes(input);
+            let constant_bytes = quotient_degree.saturating_mul(size_of::<Val>());
+            let quotient_plan = dft.forward_plan(quotient_size, ext_degree);
+            let lde_plan = dft.forward_plan(lde_height, ext_degree * quotient_degree);
+            let kernel_workspace = kernel_workspace
+                .saturating_add(quotient_plan.scratch_bytes().max(lde_plan.scratch_bytes()));
+            (
+                index,
+                output_bytes,
+                kernel_workspace,
+                constant_bytes,
+                current_staging
+                    .saturating_add(kernel_workspace)
+                    .saturating_add(output_bytes)
+                    .saturating_add(constant_bytes),
+                lde_height,
+            )
+        })
+        .collect::<Vec<_>>();
+    quotient_jobs.sort_unstable_by_key(|&(index, _, _, _, peak, _)| {
+        let input = &inputs[index];
+        let ready = [Some(input.stage_1), Some(input.stage_2), input.preprocessed]
+            .into_iter()
+            .flatten()
+            .all(|(data, matrix)| mmcs.is_matrix_source_ready(data, matrix));
+        (!ready, core::cmp::Reverse(peak))
+    });
+    let accumulated_output = quotient_jobs
+        .iter()
+        .map(|&(_, output, _, _, _, _)| output)
+        .sum::<usize>();
+    let max_lde_height = quotient_jobs
+        .iter()
+        .map(|&(_, _, _, _, _, lde_height)| lde_height)
+        .max()
+        .unwrap_or(0);
+    if crate::cuda::memory_diagnostics_enabled() {
+        eprintln!(
+            "[multi-stark/cuda] quotient jobs={} output={}",
+            quotient_jobs.len(),
+            accumulated_output,
+        );
+    }
+
+    let mut ldes = (0..inputs.len()).map(|_| None).collect::<Vec<_>>();
+    for (index, output_bytes, kernel_workspace, constant_bytes, _, lde_height) in quotient_jobs {
+        let job_started = std::time::Instant::now();
+        let input = &inputs[index];
+        let current_staging = || staging_bytes(input);
+        let required = || {
+            current_staging()
+                .saturating_add(kernel_workspace)
+                .saturating_add(output_bytes)
+                .saturating_add(constant_bytes)
+                .saturating_add(total_device_bytes / 64)
+        };
+        let mut target = required();
+        mmcs.ensure_device_headroom(input.stage_1.0, target, Some(input.stage_1.1), "quotient");
+        target = required();
+        mmcs.ensure_device_headroom(input.stage_2.0, target, Some(input.stage_2.1), "quotient");
+        if let Some((data, matrix)) = input.preprocessed {
+            target = required();
+            mmcs.ensure_device_headroom(data, target, Some(matrix), "quotient");
+        }
+        target = required();
+        let free_bytes = crate::cuda::device_memory_info(mmcs.cuda_device_id()).0;
+        if crate::cuda::memory_diagnostics_enabled() {
+            eprintln!(
+                "[multi-stark/cuda] quotient job {index}: lde_height={lde_height} output={output_bytes} workspace={kernel_workspace} staging={} target={} free={free_bytes}",
+                current_staging(),
+                target
+            );
+        }
+        if free_bytes < target {
+            return None;
+        }
+        let lde = {
+            let quotient_size = input.quotient_domain.size();
+            let quotient_degree = input.circuit.quotient_degree();
+            let selectors = cuda_coset_selectors(input.trace_domain, input.quotient_domain);
+
+            let mut powers = Vec::with_capacity(input.constraint_count);
+            let mut power = <EF as PrimeCharacteristicRing>::ONE;
+            for _ in 0..input.constraint_count {
+                powers.push(power);
+                power *= alpha;
+            }
+            powers.reverse();
+            let mut alpha_flat = Vec::with_capacity(ext_degree * input.constraint_count);
+            for coordinate in 0..ext_degree {
+                alpha_flat.extend(powers.iter().map(|value| {
+                    <EF as BasedVectorSpace<Val>>::as_basis_coefficients_slice(value)[coordinate]
+                }));
+            }
+            let trace_size = input.trace_domain.size();
+            let n = Val::from_usize(trace_size);
+            let generator = Val::two_adic_generator(trace_size.ilog2() as usize);
+            let normalization = (n * generator).inverse();
+            let delta: Vec<Val> = (0..ext_degree)
+                .map(|c| {
+                    (input.lookup_publics[3 * ext_degree + c]
+                        - input.lookup_publics[2 * ext_degree + c])
+                        * normalization
+                })
+                .collect();
+            let next_step = quotient_size / trace_size;
+            let evaluate =
+                |main: crate::cuda::mmcs::CudaMatrixSource<'_>,
+                 stage2: crate::cuda::mmcs::CudaMatrixSource<'_>,
+                 preprocessed: Option<crate::cuda::mmcs::CudaMatrixSource<'_>>| {
+                    crate::cuda::quotient_lde_mixed(
+                        dft,
+                        &input.circuit.graph,
+                        preprocessed,
+                        main,
+                        stage2,
+                        input.lookup_publics,
+                        selectors,
+                        &alpha_flat,
+                        &delta,
+                        ext_w,
+                        ext_degree,
+                        quotient_size,
+                        next_step,
+                        input.circuit.lookup_group_size,
+                        quotient_degree,
+                        log_blowup,
+                    )
+                };
+            mmcs.with_matrix_source(input.stage_1.0, input.stage_1.1, |main| {
+                mmcs.with_matrix_source(input.stage_2.0, input.stage_2.1, |stage2| {
+                    match input.preprocessed {
+                        Some((data, index)) => {
+                            mmcs.with_matrix_source(data, index, |preprocessed| {
+                                evaluate(main, stage2, Some(preprocessed))
+                            })
+                        }
+                        None => evaluate(main, stage2, None),
+                    }
+                })
+            })
+        };
+        ldes[index] = Some(lde);
+        if crate::cuda::memory_diagnostics_enabled() {
+            eprintln!(
+                "[multi-stark/cuda] quotient job {index} complete: {:.3}s",
+                job_started.elapsed().as_secs_f64()
+            );
+        }
+    }
+    let tree_headroom = max_lde_height
+        .saturating_mul(96)
+        .saturating_add(total_device_bytes / 64);
+    if let Some(input) = inputs.first() {
+        mmcs.ensure_device_headroom(input.stage_1.0, tree_headroom, None, "quotient_tree");
+        mmcs.ensure_device_headroom(input.stage_2.0, tree_headroom, None, "quotient_tree");
+    }
+    if let Some((data, _)) = inputs.iter().find_map(|input| input.preprocessed) {
+        mmcs.ensure_device_headroom(data, tree_headroom, None, "quotient_tree");
+    }
+    if crate::cuda::device_memory_info(mmcs.cuda_device_id()).0 < tree_headroom {
+        return None;
+    }
+    Some(
+        mmcs.commit_cuda_spillable(
+            ldes.into_iter()
+                .map(|lde| lde.expect("quotient job did not run"))
+                .collect(),
+        ),
+    )
+}
+
+#[cfg(feature = "cuda")]
+struct CudaLookupJob<'a> {
+    circuit: &'a crate::system::Circuit<Val>,
+    lookup_values: &'a crate::lookup::LookupValues<Val>,
+    preprocessed: Option<(&'a ProverData, usize)>,
+    stage_1: (&'a ProverData, usize),
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_accelerated_lookup_commit<EF>(
+    dft: &CudaDft,
+    mmcs: &Mmcs,
+    log_blowup: usize,
+    inputs: &[CudaLookupJob<'_>],
+    lookup_challenge: EF,
+    fingerprint_challenge: EF,
+    mut accumulator: EF,
+) -> Option<(Commitment, ProverData, Vec<EF>)>
+where
+    EF: TwoAdicField + ExtensionField<Val> + crate::traits::ExtensionOf<Val>,
+{
+    use crate::cuda::mmcs::CudaCommitMmcs;
+
+    let (ext_degree, ext_w) = cuda_ext_params::<EF>();
+    let mut lookup_jobs = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let (height, num_lookups, _, _, arg_offsets) = input.lookup_values.cuda_parts();
+            let group_size = input.circuit.lookup_group_size.max(1);
+            let groups = num_lookups.div_ceil(group_size).max(1);
+            let extended_height = height
+                .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
+                .unwrap_or(usize::MAX);
+            let output_bytes = extended_height
+                .saturating_mul(ext_degree)
+                .saturating_mul(groups)
+                .saturating_mul(size_of::<Val>());
+            let direct_temporary_bytes = if num_lookups == 0 {
+                0
+            } else {
+                let args_width = *arg_offsets.last().expect("lookup offsets are empty");
+                let chunk_rows = height.min(1 << 16);
+                let messages = chunk_rows.saturating_mul(num_lookups);
+                messages
+                    // Multiplicity, adjugate (ext_degree words), norm, and inverse-norm arrays.
+                    .saturating_mul((ext_degree + 3) * size_of::<Val>())
+                    .saturating_add(
+                        chunk_rows
+                            .saturating_mul(args_width)
+                            .saturating_mul(size_of::<Val>()),
+                    )
+                    // Extension-field deltas before the exclusive scan.
+                    .saturating_add(
+                        height
+                            .saturating_mul(groups)
+                            .saturating_mul(ext_degree * size_of::<Val>()),
+                    )
+                    .saturating_add(arg_offsets.len().saturating_mul(size_of::<usize>()))
+            };
+            let main_width = mmcs
+                .matrix_dimensions(input.stage_1.0)
+                .get(input.stage_1.1)
+                .expect("stage-1 matrix index out of bounds")
+                .width;
+            let graph_memory = (num_lookups != 0)
+                .then(|| {
+                    crate::cuda::lookup_graph_lde_memory_upper_bound(
+                        &input.circuit.graph,
+                        height,
+                        main_width,
+                        group_size,
+                        log_blowup,
+                        ext_degree,
+                    )
+                })
+                .flatten();
+            let transform_bytes = if num_lookups == 0 {
+                0
+            } else {
+                let plan = dft.lde_plan(height, ext_degree * groups, log_blowup, Val::GENERATOR);
+                plan.scratch_bytes().saturating_add(plan.constant_bytes())
+            };
+            (
+                index,
+                output_bytes,
+                direct_temporary_bytes.saturating_add(transform_bytes),
+                graph_memory.map(|(_, temporary)| temporary.saturating_add(transform_bytes)),
+                extended_height,
+            )
+        })
+        .collect::<Vec<_>>();
+    lookup_jobs.sort_unstable_by_key(|&(index, output, direct, graph, _)| {
+        let temporary = if inputs[index]
+            .stage_1
+            .0
+            .has_resident_with_trace(inputs[index].stage_1.1)
+        {
+            graph.unwrap_or(direct)
+        } else {
+            direct
+        };
+        core::cmp::Reverse(output.saturating_add(temporary))
+    });
+    let accumulated_output = lookup_jobs
+        .iter()
+        .map(|&(_, output, _, _, _)| output)
+        .sum::<usize>();
+    let max_lde_height = lookup_jobs
+        .iter()
+        .map(|&(_, _, _, _, extended_height)| extended_height)
+        .max()
+        .unwrap_or(0);
+    let (_, total_device_bytes) = crate::cuda::device_memory_info(mmcs.cuda_device_id());
+    if crate::cuda::memory_diagnostics_enabled() {
+        eprintln!(
+            "[multi-stark/cuda] lookup jobs={} output={}",
+            lookup_jobs.len(),
+            accumulated_output,
+        );
+    }
+
+    let beta = <EF as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&lookup_challenge);
+    let gamma = <EF as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&fingerprint_challenge);
+    let lookup_pool =
+        std::sync::Arc::new(cuda_host_pool("lookup-rows", cuda_lookup_worker_count()));
+    let evaluate = |input: &CudaLookupJob<'_>, graph_path: bool, cooperative: bool| {
+        let (height, num_lookups, multiplicities, args, arg_offsets) =
+            input.lookup_values.cuda_parts();
+        let group_size = input.circuit.lookup_group_size.max(1);
+        let main = graph_path.then(|| {
+            input
+                .stage_1
+                .0
+                .resident_with_trace(input.stage_1.1)
+                .expect("lookup graph admission requires a trace-backed resident LDE")
+        });
+        let result = if let Some(main) = main {
+            let preprocessed = input.preprocessed.map(|(data, index)| {
+                data.resident(index)
+                    .expect("lookup graph admission requires a resident preprocessed LDE")
+            });
+            crate::cuda::lookup_graph_lde_resident(
+                dft,
+                &input.circuit.graph,
+                preprocessed,
+                main,
+                height,
+                group_size,
+                beta,
+                gamma,
+                ext_w,
+                ext_degree,
+                log_blowup,
+            )
+        } else if cooperative {
+            let pool = std::sync::Arc::clone(&lookup_pool);
+            Some(crate::cuda::lookup_lde_resident_partitioned(
+                dft,
+                multiplicities,
+                args,
+                arg_offsets,
+                height,
+                num_lookups,
+                group_size,
+                beta,
+                gamma,
+                ext_w,
+                ext_degree,
+                log_blowup,
+                move |rows| {
+                    pool.install(|| {
+                        input.lookup_values.cuda_stage_2_deltas::<EF>(
+                            rows,
+                            group_size,
+                            lookup_challenge,
+                            &fingerprint_challenge,
+                        )
+                    })
+                },
+            ))
+        } else {
+            Some(crate::cuda::lookup_lde_resident(
+                dft,
+                multiplicities,
+                args,
+                arg_offsets,
+                height,
+                num_lookups,
+                group_size,
+                beta,
+                gamma,
+                ext_w,
+                ext_degree,
+                log_blowup,
+            ))
+        };
+        if let Some(main) = main {
+            unsafe { main.release_trace() };
+            main.release_generator_device();
+        }
+        result
+    };
+    let mut results = (0..inputs.len()).map(|_| None).collect::<Vec<_>>();
+    for (index, output_bytes, direct_temporary_bytes, graph_temporary_bytes, _) in lookup_jobs {
+        let job_started = std::time::Instant::now();
+        let input = &inputs[index];
+        let admits_graph = || {
+            graph_temporary_bytes.is_some()
+                && input.stage_1.0.has_resident_with_trace(input.stage_1.1)
+                && input
+                    .preprocessed
+                    .is_none_or(|(data, matrix)| data.resident(matrix).is_some())
+        };
+        let target_for = |graph_path: bool| {
+            let temporary_bytes = if graph_path {
+                graph_temporary_bytes.unwrap()
+            } else {
+                direct_temporary_bytes
+            };
+            (
+                temporary_bytes,
+                output_bytes
+                    .saturating_add(temporary_bytes)
+                    .saturating_add(total_device_bytes / 64),
+            )
+        };
+        let mut graph_path = admits_graph();
+        let (mut temporary_bytes, mut target) = target_for(graph_path);
+        if target > total_device_bytes {
+            return None;
+        }
+        let mut free_bytes =
+            mmcs.ensure_device_headroom(input.stage_1.0, target, Some(input.stage_1.1), "lookup");
+        if free_bytes < target {
+            free_bytes = mmcs.ensure_device_headroom(input.stage_1.0, target, None, "lookup");
+            graph_path = admits_graph();
+            (temporary_bytes, target) = target_for(graph_path);
+            if free_bytes < target {
+                free_bytes = mmcs.ensure_device_headroom(input.stage_1.0, target, None, "lookup");
+            }
+        }
+        if free_bytes < target {
+            return None;
+        }
+        if !graph_path && !input.lookup_values.is_materialized() {
+            return None;
+        }
+        if crate::cuda::memory_diagnostics_enabled() {
+            eprintln!(
+                "[multi-stark/cuda] lookup job {index}: graph={graph_path} output={output_bytes} temporary={temporary_bytes} target={target} free={free_bytes}"
+            );
+        }
+        let (_, num_lookups, _, _, arg_offsets) = input.lookup_values.cuda_parts();
+        let cooperative = !graph_path
+            && output_bytes >= (8usize << 30)
+            && num_lookups >= 64
+            && arg_offsets.last().copied().unwrap_or(0) >= 256;
+        results[index] = Some(evaluate(&inputs[index], graph_path, cooperative)?);
+        if crate::cuda::memory_diagnostics_enabled() {
+            eprintln!(
+                "[multi-stark/cuda] lookup job {index} complete: {:.3}s",
+                job_started.elapsed().as_secs_f64()
+            );
+        }
+    }
+    let tree_headroom = max_lde_height
+        .saturating_mul(96)
+        .saturating_add(total_device_bytes / 64);
+    if let Some(input) = inputs.first() {
+        let free_bytes =
+            mmcs.ensure_device_headroom(input.stage_1.0, tree_headroom, None, "lookup_tree");
+        if free_bytes < tree_headroom {
+            return None;
+        }
+    }
+    let mut ldes = Vec::with_capacity(results.len());
+    let mut intermediates = Vec::with_capacity(inputs.len());
+    for result in results {
+        let (lde, total) = result.expect("lookup job did not run");
+        accumulator += EF::from_basis_coefficients_slice(&total)?;
+        intermediates.push(accumulator);
+        ldes.push(lde);
+    }
+    let (commitment, data) = mmcs.commit_cuda_spillable(ldes);
+    Some((commitment, data, intermediates))
 }
 
 #[cfg(feature = "cuda")]
@@ -458,7 +1087,7 @@ impl ProofConfig for GoldilocksBlake3Config {
             crate::witness::TraceSource<Val>,
         )>,
     ) -> (crate::config::Com<Self>, crate::config::PcsData<Self>) {
-        crate::cuda::witness::commit(&self.pcs, evaluations)
+        crate::cuda::witness::commit::<ExtVal, Challenger>(&self.pcs, evaluations)
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -762,62 +1391,16 @@ impl ProofConfig for GoldilocksBlake3Config {
         alpha: ExtVal,
         constraint_count: usize,
     ) -> Option<Vec<ExtVal>> {
-        if !crate::cuda::quotient_graph_supported(&circuit.graph) {
-            return None;
-        }
-        let main = stage_1.0.resident(stage_1.1)?;
-        let s2 = stage_2.0.resident(stage_2.1)?;
-        let prep = match preprocessed {
-            Some((data, index)) => Some(data.resident(index)?),
-            None => None,
-        };
-        let qsize = quotient_domain.size();
-        let selectors = cuda_coset_selectors(trace_domain, quotient_domain);
-        let mut powers = Vec::with_capacity(constraint_count);
-        let mut power = ExtVal::ONE;
-        for _ in 0..constraint_count {
-            powers.push(power);
-            power *= alpha;
-        }
-        powers.reverse();
-        let mut alpha_flat = Vec::with_capacity(2 * constraint_count);
-        for coordinate in 0..2 {
-            alpha_flat.extend(powers.iter().map(|x| {
-                <ExtVal as BasedVectorSpace<Val>>::as_basis_coefficients_slice(x)[coordinate]
-            }));
-        }
-        let n = Val::from_usize(trace_domain.size());
-        let g = Val::two_adic_generator(trace_domain.size().ilog2() as usize);
-        let norm = (n * g).inverse();
-        let delta = [
-            (lookup_publics[6] - lookup_publics[4]) * norm,
-            (lookup_publics[7] - lookup_publics[5]) * norm,
-        ];
-        let next_step = 1usize << (quotient_domain.size().ilog2() - trace_domain.size().ilog2());
-        let flat = crate::cuda::quotient_values_resident(
-            &circuit.graph,
-            prep,
-            main,
-            s2,
+        cuda_accelerated_quotient_values(
+            circuit,
             lookup_publics,
-            selectors,
-            &alpha_flat,
-            &delta,
-            crate::system::extension_params::<Self>().w,
-            qsize,
-            next_step,
-            circuit.lookup_group_size,
-        );
-        Some(
-            flat.values
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|coords| {
-                    ExtVal::from_basis_coefficients_slice(coords)
-                        .expect("CUDA quotient has two coordinates")
-                })
-                .collect(),
+            trace_domain,
+            quotient_domain,
+            preprocessed,
+            stage_1,
+            stage_2,
+            alpha,
+            constraint_count,
         )
     }
 
@@ -827,264 +1410,25 @@ impl ProofConfig for GoldilocksBlake3Config {
         inputs: &[crate::config::QuotientCommitInput<'_, Self>],
         alpha: ExtVal,
     ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
-        use crate::cuda::mmcs::CudaCommitMmcs;
-
-        // The fused path commits every circuit's quotient from one device
-        // batch, so one circuit without a device evaluation sends the whole
-        // batch through the per-circuit path.
-        if inputs
+        let jobs: Vec<CudaQuotientJob<'_>> = inputs
             .iter()
-            .any(|input| !crate::cuda::quotient_graph_supported(&input.circuit.graph))
-        {
-            return None;
-        }
-        let (_, total_device_bytes) =
-            crate::cuda::device_memory_info(self.pcs.mmcs.cuda_device_id());
-        let matrix_width = |data: &crate::config::PcsData<Self>, index: usize| {
-            let dimensions = self.pcs.mmcs.matrix_dimensions(data);
-            dimensions
-                .get(index)
-                .expect("matrix index out of bounds")
-                .width
-        };
-        let staging_bytes = |input: &crate::config::QuotientCommitInput<'_, Self>| {
-            let mut host_width = 0usize;
-            for (data, index) in [Some(input.stage_1), Some(input.stage_2), input.preprocessed]
-                .into_iter()
-                .flatten()
-            {
-                if !self.pcs.mmcs.is_matrix_cuda_resident(data, index) {
-                    host_width = host_width.saturating_add(matrix_width(data, index));
-                }
-            }
-            if host_width == 0 {
-                return 0;
-            }
-            let row_bytes = host_width
-                .saturating_mul(2)
-                .saturating_mul(size_of::<Val>());
-            let per_buffer = input
-                .quotient_domain
-                .size()
-                .saturating_mul(row_bytes)
-                .min(512usize << 20);
-            2usize.saturating_mul(per_buffer)
-        };
-        let mut quotient_jobs = inputs
-            .iter()
-            .enumerate()
-            .map(|(index, input)| {
-                let quotient_size = input.quotient_domain.size();
-                let quotient_degree = input.circuit.quotient_degree();
-                let trace_height = quotient_size / quotient_degree;
-                let lde_height = trace_height
-                    .checked_shl(u32::try_from(self.log_blowup).expect("LDE blowup exceeds u32"))
-                    .unwrap_or(usize::MAX);
-                let (output_bytes, kernel_workspace) = crate::cuda::quotient_lde_memory_upper_bound(
-                    &input.circuit.graph,
-                    input.lookup_publics.len(),
-                    input.constraint_count,
-                    quotient_size,
-                    quotient_degree,
-                    self.log_blowup,
-                );
-                let current_staging = staging_bytes(input);
-                let constant_bytes = quotient_degree.saturating_mul(size_of::<Val>());
-                let quotient_plan = self.pcs.dft.forward_plan(quotient_size, 2);
-                let lde_plan = self.pcs.dft.forward_plan(lde_height, 2 * quotient_degree);
-                let kernel_workspace = kernel_workspace
-                    .saturating_add(quotient_plan.scratch_bytes().max(lde_plan.scratch_bytes()));
-                (
-                    index,
-                    output_bytes,
-                    kernel_workspace,
-                    constant_bytes,
-                    current_staging
-                        .saturating_add(kernel_workspace)
-                        .saturating_add(output_bytes)
-                        .saturating_add(constant_bytes),
-                    lde_height,
-                )
+            .map(|input| CudaQuotientJob {
+                circuit: input.circuit,
+                lookup_publics: &input.lookup_publics,
+                trace_domain: input.trace_domain,
+                quotient_domain: input.quotient_domain,
+                preprocessed: input.preprocessed,
+                stage_1: input.stage_1,
+                stage_2: input.stage_2,
+                constraint_count: input.constraint_count,
             })
-            .collect::<Vec<_>>();
-        quotient_jobs.sort_unstable_by_key(|&(index, _, _, _, peak, _)| {
-            let input = &inputs[index];
-            let ready = [Some(input.stage_1), Some(input.stage_2), input.preprocessed]
-                .into_iter()
-                .flatten()
-                .all(|(data, matrix)| self.pcs.mmcs.is_matrix_source_ready(data, matrix));
-            (!ready, core::cmp::Reverse(peak))
-        });
-        let accumulated_output = quotient_jobs
-            .iter()
-            .map(|&(_, output, _, _, _, _)| output)
-            .sum::<usize>();
-        let max_lde_height = quotient_jobs
-            .iter()
-            .map(|&(_, _, _, _, _, lde_height)| lde_height)
-            .max()
-            .unwrap_or(0);
-        if crate::cuda::memory_diagnostics_enabled() {
-            eprintln!(
-                "[multi-stark/cuda] quotient jobs={} output={}",
-                quotient_jobs.len(),
-                accumulated_output,
-            );
-        }
-
-        let mut ldes = (0..inputs.len()).map(|_| None).collect::<Vec<_>>();
-        for (index, output_bytes, kernel_workspace, constant_bytes, _, lde_height) in quotient_jobs
-        {
-            let job_started = std::time::Instant::now();
-            let input = &inputs[index];
-            let current_staging = || staging_bytes(input);
-            let required = || {
-                current_staging()
-                    .saturating_add(kernel_workspace)
-                    .saturating_add(output_bytes)
-                    .saturating_add(constant_bytes)
-                    .saturating_add(total_device_bytes / 64)
-            };
-            let mut target = required();
-            self.pcs.mmcs.ensure_device_headroom(
-                input.stage_1.0,
-                target,
-                Some(input.stage_1.1),
-                "quotient",
-            );
-            target = required();
-            self.pcs.mmcs.ensure_device_headroom(
-                input.stage_2.0,
-                target,
-                Some(input.stage_2.1),
-                "quotient",
-            );
-            if let Some((data, matrix)) = input.preprocessed {
-                target = required();
-                self.pcs
-                    .mmcs
-                    .ensure_device_headroom(data, target, Some(matrix), "quotient");
-            }
-            target = required();
-            let free_bytes = crate::cuda::device_memory_info(self.pcs.mmcs.cuda_device_id()).0;
-            if crate::cuda::memory_diagnostics_enabled() {
-                eprintln!(
-                    "[multi-stark/cuda] quotient job {index}: lde_height={lde_height} output={output_bytes} workspace={kernel_workspace} staging={} target={} free={free_bytes}",
-                    current_staging(),
-                    target
-                );
-            }
-            if free_bytes < target {
-                return None;
-            }
-            let lde =
-                {
-                    let quotient_size = input.quotient_domain.size();
-                    let quotient_degree = input.circuit.quotient_degree();
-                    let selectors = cuda_coset_selectors(input.trace_domain, input.quotient_domain);
-
-                    let mut powers = Vec::with_capacity(input.constraint_count);
-                    let mut power = ExtVal::ONE;
-                    for _ in 0..input.constraint_count {
-                        powers.push(power);
-                        power *= alpha;
-                    }
-                    powers.reverse();
-                    let mut alpha_flat = Vec::with_capacity(2 * input.constraint_count);
-                    for coordinate in 0..2 {
-                        alpha_flat.extend(powers.iter().map(|value| {
-                            <ExtVal as BasedVectorSpace<Val>>::as_basis_coefficients_slice(value)
-                                [coordinate]
-                        }));
-                    }
-                    let trace_size = input.trace_domain.size();
-                    let n = Val::from_usize(trace_size);
-                    let generator = Val::two_adic_generator(trace_size.ilog2() as usize);
-                    let normalization = (n * generator).inverse();
-                    let delta = [
-                        (input.lookup_publics[6] - input.lookup_publics[4]) * normalization,
-                        (input.lookup_publics[7] - input.lookup_publics[5]) * normalization,
-                    ];
-                    let next_step = quotient_size / trace_size;
-                    let evaluate = |main: crate::cuda::mmcs::CudaMatrixSource<'_>,
-                                    stage2: crate::cuda::mmcs::CudaMatrixSource<'_>,
-                                    preprocessed: Option<
-                        crate::cuda::mmcs::CudaMatrixSource<'_>,
-                    >| {
-                        crate::cuda::quotient_lde_mixed(
-                            &self.pcs.dft,
-                            &input.circuit.graph,
-                            preprocessed,
-                            main,
-                            stage2,
-                            &input.lookup_publics,
-                            selectors,
-                            &alpha_flat,
-                            &delta,
-                            crate::system::extension_params::<Self>().w,
-                            quotient_size,
-                            next_step,
-                            input.circuit.lookup_group_size,
-                            quotient_degree,
-                            self.log_blowup,
-                        )
-                    };
-                    self.pcs
-                        .mmcs
-                        .with_matrix_source(input.stage_1.0, input.stage_1.1, |main| {
-                            self.pcs.mmcs.with_matrix_source(
-                                input.stage_2.0,
-                                input.stage_2.1,
-                                |stage2| match input.preprocessed {
-                                    Some((data, index)) => self.pcs.mmcs.with_matrix_source(
-                                        data,
-                                        index,
-                                        |preprocessed| evaluate(main, stage2, Some(preprocessed)),
-                                    ),
-                                    None => evaluate(main, stage2, None),
-                                },
-                            )
-                        })
-                };
-            ldes[index] = Some(lde);
-            if crate::cuda::memory_diagnostics_enabled() {
-                eprintln!(
-                    "[multi-stark/cuda] quotient job {index} complete: {:.3}s",
-                    job_started.elapsed().as_secs_f64()
-                );
-            }
-        }
-        let tree_headroom = max_lde_height
-            .saturating_mul(96)
-            .saturating_add(total_device_bytes / 64);
-        if let Some(input) = inputs.first() {
-            self.pcs.mmcs.ensure_device_headroom(
-                input.stage_1.0,
-                tree_headroom,
-                None,
-                "quotient_tree",
-            );
-            self.pcs.mmcs.ensure_device_headroom(
-                input.stage_2.0,
-                tree_headroom,
-                None,
-                "quotient_tree",
-            );
-        }
-        if let Some((data, _)) = inputs.iter().find_map(|input| input.preprocessed) {
-            self.pcs
-                .mmcs
-                .ensure_device_headroom(data, tree_headroom, None, "quotient_tree");
-        }
-        if crate::cuda::device_memory_info(self.pcs.mmcs.cuda_device_id()).0 < tree_headroom {
-            return None;
-        }
-        Some(
-            self.pcs.mmcs.commit_cuda_spillable(
-                ldes.into_iter()
-                    .map(|lde| lde.expect("quotient job did not run"))
-                    .collect(),
-            ),
+            .collect();
+        cuda_accelerated_quotient_commit(
+            &self.pcs.dft,
+            &self.pcs.mmcs,
+            self.log_blowup,
+            &jobs,
+            alpha,
         )
     }
 
@@ -1094,320 +1438,30 @@ impl ProofConfig for GoldilocksBlake3Config {
         inputs: &[crate::config::LookupCommitInput<'_, Self>],
         lookup_challenge: ExtVal,
         fingerprint_challenge: ExtVal,
-        mut accumulator: ExtVal,
+        accumulator: ExtVal,
     ) -> Option<(
         crate::config::Com<Self>,
         crate::config::PcsData<Self>,
         Vec<ExtVal>,
     )> {
-        use crate::cuda::mmcs::CudaCommitMmcs;
-
-        let mut lookup_jobs = inputs
+        let jobs: Vec<CudaLookupJob<'_>> = inputs
             .iter()
-            .enumerate()
-            .map(|(index, input)| {
-                let (height, num_lookups, _, _, arg_offsets) = input.lookup_values.cuda_parts();
-                let group_size = input.circuit.lookup_group_size.max(1);
-                let groups = num_lookups.div_ceil(group_size).max(1);
-                let extended_height = height
-                    .checked_shl(u32::try_from(self.log_blowup).expect("LDE blowup exceeds u32"))
-                    .unwrap_or(usize::MAX);
-                let output_bytes = extended_height
-                    .saturating_mul(2)
-                    .saturating_mul(groups)
-                    .saturating_mul(size_of::<Val>());
-                let direct_temporary_bytes = if num_lookups == 0 {
-                    0
-                } else {
-                    let args_width = *arg_offsets.last().expect("lookup offsets are empty");
-                    let chunk_rows = height.min(1 << 16);
-                    let messages = chunk_rows.saturating_mul(num_lookups);
-                    messages
-                        // Multiplicity, conjugate, norm, and inverse-norm arrays.
-                        .saturating_mul(5 * size_of::<Val>())
-                        .saturating_add(
-                            chunk_rows
-                                .saturating_mul(args_width)
-                                .saturating_mul(size_of::<Val>()),
-                        )
-                        // Extension-field deltas before the exclusive scan.
-                        .saturating_add(
-                            height
-                                .saturating_mul(groups)
-                                .saturating_mul(2 * size_of::<Val>()),
-                        )
-                        .saturating_add(arg_offsets.len().saturating_mul(size_of::<usize>()))
-                };
-                let main_width = self
-                    .pcs
-                    .mmcs
-                    .matrix_dimensions(input.stage_1.0)
-                    .get(input.stage_1.1)
-                    .expect("stage-1 matrix index out of bounds")
-                    .width;
-                let graph_memory = (num_lookups != 0)
-                    .then(|| {
-                        crate::cuda::lookup_graph_lde_memory_upper_bound(
-                            &input.circuit.graph,
-                            height,
-                            main_width,
-                            group_size,
-                            self.log_blowup,
-                        )
-                    })
-                    .flatten();
-                let transform_bytes = if num_lookups == 0 {
-                    0
-                } else {
-                    let plan =
-                        self.pcs
-                            .dft
-                            .lde_plan(height, 2 * groups, self.log_blowup, Val::GENERATOR);
-                    plan.scratch_bytes().saturating_add(plan.constant_bytes())
-                };
-                (
-                    index,
-                    output_bytes,
-                    direct_temporary_bytes.saturating_add(transform_bytes),
-                    graph_memory.map(|(_, temporary)| temporary.saturating_add(transform_bytes)),
-                    extended_height,
-                )
+            .map(|input| CudaLookupJob {
+                circuit: input.circuit,
+                lookup_values: input.lookup_values,
+                preprocessed: input.preprocessed,
+                stage_1: input.stage_1,
             })
-            .collect::<Vec<_>>();
-        // Permanent lookup LDEs accumulate until their MMCS commitment. Run
-        // the initially largest allocation first, while its trace is still
-        // resident, then allow that trace to become an eviction candidate for
-        // later jobs.
-        lookup_jobs.sort_unstable_by_key(|&(index, output, direct, graph, _)| {
-            let temporary = if inputs[index]
-                .stage_1
-                .0
-                .has_resident_with_trace(inputs[index].stage_1.1)
-            {
-                graph.unwrap_or(direct)
-            } else {
-                direct
-            };
-            core::cmp::Reverse(output.saturating_add(temporary))
-        });
-        let accumulated_output = lookup_jobs
-            .iter()
-            .map(|&(_, output, _, _, _)| output)
-            .sum::<usize>();
-        let max_lde_height = lookup_jobs
-            .iter()
-            .map(|&(_, _, _, _, extended_height)| extended_height)
-            .max()
-            .unwrap_or(0);
-        let (_, total_device_bytes) =
-            crate::cuda::device_memory_info(self.pcs.mmcs.cuda_device_id());
-        if crate::cuda::memory_diagnostics_enabled() {
-            eprintln!(
-                "[multi-stark/cuda] lookup jobs={} output={}",
-                lookup_jobs.len(),
-                accumulated_output,
-            );
-        }
-
-        let pair = |value: ExtVal| {
-            let coordinates = value.as_basis_coefficients_slice();
-            [coordinates[0], coordinates[1]]
-        };
-        let beta = pair(lookup_challenge);
-        let gamma = pair(fingerprint_challenge);
-        let extension_generator = ExtVal::from_basis_coefficients_slice(&[Val::ZERO, Val::ONE])?;
-        let ext_w = pair(extension_generator * extension_generator)[0];
-        let lookup_pool =
-            std::sync::Arc::new(cuda_host_pool("lookup-rows", cuda_lookup_worker_count()));
-        // `graph_path` is decided by admission below, which budgets the graph
-        // kernel from the same residency predicate; the kernel must not be
-        // re-chosen here or it can run under the other path's budget.
-        let evaluate = |input: &crate::config::LookupCommitInput<'_, Self>,
-                        graph_path: bool,
-                        cooperative: bool| {
-            let (height, num_lookups, multiplicities, args, arg_offsets) =
-                input.lookup_values.cuda_parts();
-            let group_size = input.circuit.lookup_group_size.max(1);
-            let main = graph_path.then(|| {
-                input
-                    .stage_1
-                    .0
-                    .resident_with_trace(input.stage_1.1)
-                    .expect("lookup graph admission requires a trace-backed resident LDE")
-            });
-            let result = if let Some(main) = main {
-                let preprocessed = input.preprocessed.map(|(data, index)| {
-                    data.resident(index)
-                        .expect("lookup graph admission requires a resident preprocessed LDE")
-                });
-                crate::cuda::lookup_graph_lde_resident(
-                    &self.pcs.dft,
-                    &input.circuit.graph,
-                    preprocessed,
-                    main,
-                    height,
-                    group_size,
-                    beta,
-                    gamma,
-                    ext_w,
-                    self.log_blowup,
-                )
-            } else if cooperative {
-                let pool = std::sync::Arc::clone(&lookup_pool);
-                Some(crate::cuda::lookup_lde_resident_partitioned(
-                    &self.pcs.dft,
-                    multiplicities,
-                    args,
-                    arg_offsets,
-                    height,
-                    num_lookups,
-                    group_size,
-                    beta,
-                    gamma,
-                    ext_w,
-                    self.log_blowup,
-                    move |rows| {
-                        pool.install(|| {
-                            input.lookup_values.cuda_stage_2_deltas::<ExtVal>(
-                                rows,
-                                group_size,
-                                lookup_challenge,
-                                &fingerprint_challenge,
-                            )
-                        })
-                    },
-                ))
-            } else {
-                Some(crate::cuda::lookup_lde_resident(
-                    &self.pcs.dft,
-                    multiplicities,
-                    args,
-                    arg_offsets,
-                    height,
-                    num_lookups,
-                    group_size,
-                    beta,
-                    gamma,
-                    ext_w,
-                    self.log_blowup,
-                ))
-            };
-            // SAFETY: evaluation is synchronous and complete, while the
-            // retained matrix remains owned by the prover data.
-            if let Some(main) = main {
-                unsafe { main.release_trace() };
-                main.release_generator_device();
-            }
-            result
-        };
-        let mut results = (0..inputs.len()).map(|_| None).collect::<Vec<_>>();
-        for (index, output_bytes, direct_temporary_bytes, graph_temporary_bytes, _) in lookup_jobs {
-            let job_started = std::time::Instant::now();
-            let input = &inputs[index];
-            // The graph kernel reads the trace through `resident_with_trace`,
-            // which also serves spilled LDEs that regenerate from a generator
-            // or a retained host trace. Admit it under the same predicate so
-            // the budget matches the kernel that runs.
-            let admits_graph = || {
-                graph_temporary_bytes.is_some()
-                    && input.stage_1.0.has_resident_with_trace(input.stage_1.1)
-                    && input
-                        .preprocessed
-                        .is_none_or(|(data, matrix)| data.resident(matrix).is_some())
-            };
-            let target_for = |graph_path: bool| {
-                let temporary_bytes = if graph_path {
-                    graph_temporary_bytes.unwrap()
-                } else {
-                    direct_temporary_bytes
-                };
-                (
-                    temporary_bytes,
-                    output_bytes
-                        .saturating_add(temporary_bytes)
-                        .saturating_add(total_device_bytes / 64),
-                )
-            };
-            let mut graph_path = admits_graph();
-            let (mut temporary_bytes, mut target) = target_for(graph_path);
-            if target > total_device_bytes {
-                return None;
-            }
-            let mut free_bytes = self.pcs.mmcs.ensure_device_headroom(
-                input.stage_1.0,
-                target,
-                Some(input.stage_1.1),
-                "lookup",
-            );
-            if free_bytes < target {
-                // This circuit alone does not fit beside its resident trace.
-                // Spill it as a last resort. If the spilled LDE can still
-                // regenerate its trace it stays on the graph path; otherwise
-                // re-budget for the direct lookup-values path, which remains
-                // protocol-identical.
-                free_bytes =
-                    self.pcs
-                        .mmcs
-                        .ensure_device_headroom(input.stage_1.0, target, None, "lookup");
-                graph_path = admits_graph();
-                (temporary_bytes, target) = target_for(graph_path);
-                if free_bytes < target {
-                    free_bytes = self.pcs.mmcs.ensure_device_headroom(
-                        input.stage_1.0,
-                        target,
-                        None,
-                        "lookup",
-                    );
-                }
-            }
-            if free_bytes < target {
-                return None;
-            }
-            if !graph_path && !input.lookup_values.is_materialized() {
-                return None;
-            }
-            if crate::cuda::memory_diagnostics_enabled() {
-                eprintln!(
-                    "[multi-stark/cuda] lookup job {index}: graph={graph_path} output={output_bytes} temporary={temporary_bytes} target={target} free={free_bytes}"
-                );
-            }
-            let (_, num_lookups, _, _, arg_offsets) = input.lookup_values.cuda_parts();
-            let cooperative = !graph_path
-                && output_bytes >= (8usize << 30)
-                && num_lookups >= 64
-                && arg_offsets.last().copied().unwrap_or(0) >= 256;
-            results[index] = Some(evaluate(&inputs[index], graph_path, cooperative)?);
-            if crate::cuda::memory_diagnostics_enabled() {
-                eprintln!(
-                    "[multi-stark/cuda] lookup job {index} complete: {:.3}s",
-                    job_started.elapsed().as_secs_f64()
-                );
-            }
-        }
-        let tree_headroom = max_lde_height
-            .saturating_mul(96)
-            .saturating_add(total_device_bytes / 64);
-        if let Some(input) = inputs.first() {
-            let free_bytes = self.pcs.mmcs.ensure_device_headroom(
-                input.stage_1.0,
-                tree_headroom,
-                None,
-                "lookup_tree",
-            );
-            if free_bytes < tree_headroom {
-                return None;
-            }
-        }
-        let mut ldes = Vec::with_capacity(results.len());
-        let mut intermediates = Vec::with_capacity(inputs.len());
-        for result in results {
-            let (lde, total) = result.expect("lookup job did not run");
-            accumulator += ExtVal::from_basis_coefficients_slice(&total)?;
-            intermediates.push(accumulator);
-            ldes.push(lde);
-        }
-        let (commitment, data) = self.pcs.mmcs.commit_cuda_spillable(ldes);
-        Some((commitment, data, intermediates))
+            .collect();
+        cuda_accelerated_lookup_commit(
+            &self.pcs.dft,
+            &self.pcs.mmcs,
+            self.log_blowup,
+            &jobs,
+            lookup_challenge,
+            fingerprint_challenge,
+            accumulator,
+        )
     }
 }
 
@@ -1441,7 +1495,7 @@ pub struct FriParameters {
     pub query_proof_of_work_bits: usize,
 }
 
-#[cfg(any(feature = "cuda", test))]
+#[cfg(test)]
 pub(crate) type Blake3CompressionFunction = CompressionFunctionFromHasher<Blake3, 2, 32>;
 
 #[cfg(feature = "cuda")]
@@ -1496,11 +1550,7 @@ fn new_mmcs(cap_height: usize, #[cfg(feature = "cuda")] device_id: i32) -> Mmcs 
     }
     #[cfg(feature = "cuda")]
     {
-        let byte_hash = Blake3;
-        let field_hash = SerializingHasher::new(byte_hash);
-        let compress = Blake3CompressionFunction::new(byte_hash);
-        let cpu = CpuMmcs::new(field_hash, compress, cap_height);
-        crate::cuda::mmcs::CudaMmcs::with_device(cpu, device_id)
+        crate::cuda::mmcs::CudaMmcs::new_plain(cap_height, device_id)
     }
 }
 
@@ -1739,7 +1789,8 @@ where
         #[cfg(feature = "cuda")]
         let pcs = {
             let dev = device_id.unwrap_or_else(crate::cuda::configured_device);
-            let val_mmcs = new_mmcs(commitment_parameters.cap_height, dev);
+            let val_mmcs =
+                crate::cuda::mmcs::CudaMmcs::new_v6(commitment_parameters.cap_height, dev);
             let ext_mmcs = ExtensionMmcs::new(val_mmcs.clone());
             let inner_parameters = InnerFriParameters {
                 log_blowup: commitment_parameters.log_blowup,
@@ -1751,11 +1802,10 @@ where
                 mmcs: ext_mmcs,
             };
             let pcs_dft = CudaDft::new(dev);
-            DomainMappedPcs::new(crate::cuda::pcs::CudaTwoAdicFriPcs::new(
-                pcs_dft,
-                val_mmcs,
-                inner_parameters,
-            ))
+            DomainMappedPcs::new(
+                crate::cuda::pcs::CudaTwoAdicFriPcs::new(pcs_dft, val_mmcs, inner_parameters)
+                    .with_batching(fri_batching),
+            )
         };
 
         let challenger_seed =
@@ -1796,10 +1846,15 @@ where
     /// both the PCS and the protocol challenger seed.
     pub fn with_fri_batching(self, fri_batching: FriBatching) -> Self {
         let spill = self.spill_dir().map(std::path::Path::to_path_buf);
-        let cfg = Self::new_with_batching(
+        #[cfg(feature = "cuda")]
+        let device = Some(self.pcs.inner().dft.device_id());
+        #[cfg(not(feature = "cuda"))]
+        let device = None;
+        let cfg = Self::with_device(
             self.commitment_parameters,
             self.fri_parameters,
             fri_batching,
+            device,
         );
         match spill {
             Some(dir) => cfg.with_disk_spill(dir),
@@ -2160,6 +2215,99 @@ where
         Some(
             self.pcs
                 .commit_spilled_ldes_prehashed(spilled_ldes, None, prehashed),
+        )
+    }
+
+    #[cfg(feature = "cuda")]
+    fn commit_main(
+        &self,
+        evaluations: Vec<(
+            crate::config::Domain<Self>,
+            crate::witness::TraceSource<Val>,
+        )>,
+    ) -> (crate::config::Com<Self>, crate::config::PcsData<Self>) {
+        let inner_evals = evaluations
+            .into_iter()
+            .map(|(domain, source)| (domain.into_inner(), source))
+            .collect();
+        crate::cuda::witness::commit::<EF, DomainChallenger<EF>>(self.pcs.inner(), inner_evals)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn accelerated_quotient_values(
+        &self,
+        circuit: &crate::system::Circuit<Val>,
+        lookup_publics: &[Val],
+        trace_domain: crate::config::Domain<Self>,
+        quotient_domain: crate::config::Domain<Self>,
+        preprocessed: Option<(&crate::config::PcsData<Self>, usize)>,
+        stage_1: (&crate::config::PcsData<Self>, usize),
+        stage_2: (&crate::config::PcsData<Self>, usize),
+        alpha: EF,
+        constraint_count: usize,
+    ) -> Option<Vec<EF>> {
+        cuda_accelerated_quotient_values(
+            circuit,
+            lookup_publics,
+            trace_domain.into_inner(),
+            quotient_domain.into_inner(),
+            preprocessed,
+            stage_1,
+            stage_2,
+            alpha,
+            constraint_count,
+        )
+    }
+
+    #[cfg(feature = "cuda")]
+    fn accelerated_quotient_commit(
+        &self,
+        inputs: &[crate::config::QuotientCommitInput<'_, Self>],
+        alpha: EF,
+    ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
+        let jobs: Vec<CudaQuotientJob<'_>> = inputs
+            .iter()
+            .map(|input| CudaQuotientJob {
+                circuit: input.circuit,
+                lookup_publics: &input.lookup_publics,
+                trace_domain: input.trace_domain.into_inner(),
+                quotient_domain: input.quotient_domain.into_inner(),
+                preprocessed: input.preprocessed,
+                stage_1: input.stage_1,
+                stage_2: input.stage_2,
+                constraint_count: input.constraint_count,
+            })
+            .collect();
+        let inner = self.pcs.inner();
+        cuda_accelerated_quotient_commit(&inner.dft, &inner.mmcs, self.log_blowup, &jobs, alpha)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn accelerated_lookup_commit(
+        &self,
+        inputs: &[crate::config::LookupCommitInput<'_, Self>],
+        lookup_challenge: EF,
+        fingerprint_challenge: EF,
+        accumulator: EF,
+    ) -> Option<crate::config::AcceleratedLookupCommitment<Self>> {
+        let jobs: Vec<CudaLookupJob<'_>> = inputs
+            .iter()
+            .map(|input| CudaLookupJob {
+                circuit: input.circuit,
+                lookup_values: input.lookup_values,
+                preprocessed: input.preprocessed,
+                stage_1: input.stage_1,
+            })
+            .collect();
+        let inner = self.pcs.inner();
+        cuda_accelerated_lookup_commit(
+            &inner.dft,
+            &inner.mmcs,
+            self.log_blowup,
+            &jobs,
+            lookup_challenge,
+            fingerprint_challenge,
+            accumulator,
         )
     }
 

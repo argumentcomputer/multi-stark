@@ -362,4 +362,122 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn cuda_v6_context_key_words_match_rust_constants() {
+        // Pinned constants shared with `cuda/kernels.cu` (`BLAKE3_V6_LEAF_CV`
+        // and `BLAKE3_V6_COMPRESS_CV`). If any context string ever changes,
+        // update both Rust and `cuda/kernels.cu` together.
+        assert_eq!(
+            Blake3Domain::MerkleLeaf.key_words(),
+            [
+                0x7704_2819,
+                0x5A1D_D04F,
+                0x2F8D_0BB8,
+                0x39D2_7832,
+                0x552A_30F6,
+                0x546C_9899,
+                0x8510_A8EF,
+                0x83EC_CD66,
+            ]
+        );
+        assert_eq!(
+            Blake3Domain::MerkleCompress.key_words(),
+            [
+                0xCC4D_7633,
+                0xF849_2FEC,
+                0x5704_B1FD,
+                0x2D69_A6B5,
+                0xA871_EBB5,
+                0x6439_610D,
+                0x89E8_6BE6,
+                0x02E2_2A34,
+            ]
+        );
+    }
+
+    #[test]
+    fn cuda_v6_blake3_and_ext3_vectors_match_rust() {
+        use crate::types::{ExtVal3, Val};
+        use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing, PrimeField64};
+
+        // Cross-checked directly against compiled `cuda/goldilocks.cuh` +
+        // `cuda/kernels.cu` (`ext3_mul`, `ext3_inverse`, `blake3_chunk`,
+        // `blake3_parent`, `blake3_hash_digest_pair`).
+        let va = ExtVal3::from_basis_coefficients_slice(&[
+            Val::from_u64(0x1234_5678_9abc_def0),
+            Val::from_u64(0xfedc_ba98_7654_3210),
+            Val::from_u64(0x0000_0001_0000_0002),
+        ])
+        .unwrap();
+        let vb = ExtVal3::from_basis_coefficients_slice(&[
+            Val::from_u64(0xffff_ffff_0000_0000),
+            Val::from_u64(0x1111_2222_3333_4444),
+            Val::from_u64(0xaaaa_5555_bbbb_6666),
+        ])
+        .unwrap();
+        let to_u64s = |x: ExtVal3| -> [u64; 3] {
+            let c: &[Val] = x.as_basis_coefficients_slice();
+            [
+                c[0].as_canonical_u64(),
+                c[1].as_canonical_u64(),
+                c[2].as_canonical_u64(),
+            ]
+        };
+        assert_eq!(
+            to_u64s(va * vb),
+            [
+                7_455_192_430_764_610_520,
+                13_204_415_317_809_093_084,
+                11_719_710_893_822_699_134,
+            ]
+        );
+        assert_eq!(
+            to_u64s(va.inverse()),
+            [
+                16_838_335_245_387_560_099,
+                15_220_258_529_103_284_997,
+                16_044_421_098_862_543_668,
+            ]
+        );
+
+        let to_hex =
+            |bytes: [u8; 32]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
+        for (len, expected_hex) in [
+            (
+                64usize,
+                "4059736d0564475319baa815a76396039b1922ce8b8c51985ec1489f48e4581a",
+            ),
+            (
+                512,
+                "58ec79936d612be378b23c2cfbb876f93179b825100d3ba77c2a8fd189deae51",
+            ),
+            (
+                1024,
+                "0f237b3cbe5c88760fcf0305435c2b6d762142697aa21133b6508af2bd228e9c",
+            ),
+            (
+                1025,
+                "1efbf193b24ebcabf1c230b0f7f2c30265d0a82272db4a19341767e688849358",
+            ),
+            (
+                4264,
+                "bb19b2a12d999d55cc3bb2caf75c085e201c6b387519dfa2cb25eec6b9b54136",
+            ),
+        ] {
+            let msg: Vec<u8> = (0..len)
+                .map(|i| u8::try_from((i * 37 + 13) & 0xff).unwrap())
+                .collect();
+            assert_eq!(
+                to_hex(Blake3Domain::MerkleLeaf.hash_bytes(&msg)),
+                expected_hex,
+                "v6 MerkleLeaf mismatch at len={len}"
+            );
+        }
+        let pair: Vec<u8> = (0..64u8).collect();
+        assert_eq!(
+            to_hex(Blake3Domain::MerkleCompress.hash_bytes(&pair)),
+            "8b14c7db6f612da11fa63c6fbec9783e35f74ab3dedf6f382fff8ace42e1b379"
+        );
+    }
 }

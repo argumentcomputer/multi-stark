@@ -919,6 +919,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "cuda"))]
     fn run_pcs_horner_parity_and_tensor_roundtrip<EF>()
     where
         EF: ExtensionField<Goldilocks> + crate::traits::ExtensionOf<Goldilocks>,
@@ -1209,6 +1210,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "cuda"))]
     #[test]
     fn fri_batching_horner_parity_and_tensor_fp2_and_fp3() {
         run_pcs_horner_parity_and_tensor_roundtrip::<crate::types::ExtVal2>();
