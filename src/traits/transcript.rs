@@ -32,5 +32,20 @@ pub trait Transcript {
     fn observe_field_slice(&mut self, xs: &[Self::F]);
     fn observe_challenge(&mut self, x: Self::Challenge);
     fn observe_commitment(&mut self, c: Self::Commitment);
+    /// Absorb a 32-byte digest into the transcript (used in protocol `v6` to
+    /// bind the canonical verifying-key / constraint-graph digest).
+    ///
+    /// Byte-oriented challengers override this to observe the 32 raw bytes
+    /// directly; algebraic challengers default to observing 16 little-endian
+    /// `u16` chunks as base-field elements.
+    fn observe_digest(&mut self, digest: [u8; 32])
+    where
+        Self::F: crate::traits::Field,
+    {
+        for &chunk in digest.as_chunks::<2>().0 {
+            let limb = u16::from_le_bytes(chunk);
+            self.observe_field(<Self::F as crate::traits::Field>::from_u16(limb));
+        }
+    }
     fn sample_challenge(&mut self) -> Self::Challenge;
 }

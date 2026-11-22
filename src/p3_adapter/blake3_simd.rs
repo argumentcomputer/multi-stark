@@ -14,12 +14,12 @@
 
 use core::mem::MaybeUninit;
 
-use p3_blake3::Blake3;
 use p3_field::PrimeField64;
 use p3_matrix::Matrix;
 use p3_maybe_rayon::prelude::*;
 use p3_symmetric::CryptographicHasher;
 
+use super::domain_blake3::{BLAKE3_IV as IV, Blake3Domain, DomainBlake3};
 use crate::types::Val;
 
 const BLOCK_LEN: usize = 64;
@@ -32,17 +32,6 @@ const CHUNK_START: u32 = 1 << 0;
 const CHUNK_END: u32 = 1 << 1;
 const PARENT: u32 = 1 << 2;
 const ROOT: u32 = 1 << 3;
-
-const IV: [u32; 8] = [
-    0x6A09_E667,
-    0xBB67_AE85,
-    0x3C6E_F372,
-    0xA54F_F53A,
-    0x510E_527F,
-    0x9B05_688C,
-    0x1F83_D9AB,
-    0x5BE0_CD19,
-];
 
 const MSG_SCHEDULE: [[usize; 16]; 7] = [
     [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
@@ -78,29 +67,30 @@ fn detect_backend() -> SimdBackend {
 }
 
 #[inline]
-fn compress_pair_scalar(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+fn compress_pair_scalar(left: &[u8; 32], right: &[u8; 32], domain: Blake3Domain) -> [u8; 32] {
     let mut block = [0u8; 64];
     block[..32].copy_from_slice(left);
     block[32..].copy_from_slice(right);
-    compress_64_root_scalar(&block)
+    compress_64_root_scalar(&block, domain)
 }
 
 #[inline]
-fn compress_64_root_scalar(block: &[u8; 64]) -> [u8; 32] {
+fn compress_64_root_scalar(block: &[u8; 64], domain: Blake3Domain) -> [u8; 32] {
     let mut msg = [0u32; 16];
     let (chunks, _) = block.as_chunks::<4>();
     for (w, &bytes) in msg.iter_mut().zip(chunks) {
         *w = u32::from_le_bytes(bytes);
     }
+    let key = domain.key_words();
     let mut state = [
-        IV[0],
-        IV[1],
-        IV[2],
-        IV[3],
-        IV[4],
-        IV[5],
-        IV[6],
-        IV[7],
+        key[0],
+        key[1],
+        key[2],
+        key[3],
+        key[4],
+        key[5],
+        key[6],
+        key[7],
         IV[0],
         IV[1],
         IV[2],
@@ -108,7 +98,7 @@ fn compress_64_root_scalar(block: &[u8; 64]) -> [u8; 32] {
         0,
         0,
         64,
-        CHUNK_START | CHUNK_END | ROOT,
+        CHUNK_START | CHUNK_END | ROOT | domain.domain_flags(),
     ];
     for schedule in &MSG_SCHEDULE {
         g_scalar(&mut state, 0, 4, 8, 12, msg[schedule[0]], msg[schedule[1]]);
@@ -195,8 +185,11 @@ fn compress_pairs_slice(
     prev_layer: &[[u8; 32]],
     out: &mut [MaybeUninit<[u8; 32]>],
     backend: SimdBackend,
+    domain: Blake3Domain,
 ) {
     debug_assert!(prev_layer.len() >= 2 * out.len());
+    let key = domain.key_words();
+    let domain_flags = domain.domain_flags();
     let mut i = 0;
     #[cfg(target_arch = "x86_64")]
     {
@@ -207,6 +200,8 @@ fn compress_pairs_slice(
                     avx512::compress_16_pairs(
                         &prev_layer[2 * i..2 * i + 32],
                         out[i..].as_mut_ptr().cast(),
+                        key,
+                        domain_flags,
                     );
                 }
                 i += 16;
@@ -217,6 +212,8 @@ fn compress_pairs_slice(
                     avx2::compress_8_pairs(
                         &prev_layer[2 * i..2 * i + 16],
                         out[i..].as_mut_ptr().cast(),
+                        key,
+                        domain_flags,
                     );
                 }
                 i += 8;
@@ -228,26 +225,33 @@ fn compress_pairs_slice(
                     avx2::compress_8_pairs(
                         &prev_layer[2 * i..2 * i + 16],
                         out[i..].as_mut_ptr().cast(),
+                        key,
+                        domain_flags,
                     );
                 }
                 i += 8;
             }
         }
     }
-    let _ = backend;
+    let _ = (backend, key, domain_flags);
     while i < out.len() {
         out[i].write(compress_pair_scalar(
             &prev_layer[2 * i],
             &prev_layer[2 * i + 1],
+            domain,
         ));
         i += 1;
     }
 }
 
 /// Compresses `out.len()` adjacent 32-byte digest pairs from `prev_layer`
-/// (`out[i] = BLAKE3(prev_layer[2*i] || prev_layer[2*i + 1])`) in parallel
-/// using multi-buffer SIMD BLAKE3.
-pub(crate) fn compress_pairs_uninit(prev_layer: &[[u8; 32]], out: &mut [MaybeUninit<[u8; 32]>]) {
+/// (`out[i] = BLAKE3_domain(prev_layer[2*i] || prev_layer[2*i + 1])`) in
+/// parallel using multi-buffer SIMD BLAKE3.
+pub(crate) fn compress_pairs_uninit(
+    prev_layer: &[[u8; 32]],
+    out: &mut [MaybeUninit<[u8; 32]>],
+    domain: Blake3Domain,
+) {
     assert!(prev_layer.len() >= 2 * out.len());
     if out.is_empty() {
         return;
@@ -256,13 +260,13 @@ pub(crate) fn compress_pairs_uninit(prev_layer: &[[u8; 32]], out: &mut [MaybeUni
     const PAR_THRESHOLD: usize = 128;
     const CHUNK_PAIRS: usize = 128;
     if out.len() < PAR_THRESHOLD {
-        compress_pairs_slice(prev_layer, out, backend);
+        compress_pairs_slice(prev_layer, out, backend, domain);
     } else {
         out.par_chunks_mut(CHUNK_PAIRS)
             .enumerate()
             .for_each(|(chunk_idx, dst)| {
                 let start = chunk_idx * CHUNK_PAIRS;
-                compress_pairs_slice(&prev_layer[2 * start..], dst, backend);
+                compress_pairs_slice(&prev_layer[2 * start..], dst, backend, domain);
             });
     }
 }
@@ -273,9 +277,12 @@ fn compress_and_inject_slice(
     rows_digests: &[[u8; 32]],
     out: &mut [MaybeUninit<[u8; 32]>],
     backend: SimdBackend,
+    domain: Blake3Domain,
 ) {
     debug_assert_eq!(rows_digests.len(), out.len());
     debug_assert!(prev_layer.len() >= 2 * out.len());
+    let key = domain.key_words();
+    let domain_flags = domain.domain_flags();
     let mut i = 0;
     #[cfg(target_arch = "x86_64")]
     {
@@ -287,6 +294,8 @@ fn compress_and_inject_slice(
                         &prev_layer[2 * i..2 * i + 32],
                         (&rows_digests[i..i + 16]).try_into().unwrap(),
                         out[i..].as_mut_ptr().cast(),
+                        key,
+                        domain_flags,
                     );
                 }
                 i += 16;
@@ -298,6 +307,8 @@ fn compress_and_inject_slice(
                         &prev_layer[2 * i..2 * i + 16],
                         (&rows_digests[i..i + 8]).try_into().unwrap(),
                         out[i..].as_mut_ptr().cast(),
+                        key,
+                        domain_flags,
                     );
                 }
                 i += 8;
@@ -310,26 +321,29 @@ fn compress_and_inject_slice(
                         &prev_layer[2 * i..2 * i + 16],
                         (&rows_digests[i..i + 8]).try_into().unwrap(),
                         out[i..].as_mut_ptr().cast(),
+                        key,
+                        domain_flags,
                     );
                 }
                 i += 8;
             }
         }
     }
-    let _ = backend;
+    let _ = (backend, key, domain_flags);
     while i < out.len() {
-        let parent = compress_pair_scalar(&prev_layer[2 * i], &prev_layer[2 * i + 1]);
-        out[i].write(compress_pair_scalar(&parent, &rows_digests[i]));
+        let parent = compress_pair_scalar(&prev_layer[2 * i], &prev_layer[2 * i + 1], domain);
+        out[i].write(compress_pair_scalar(&parent, &rows_digests[i], domain));
         i += 1;
     }
 }
 
 /// Fused binary compress + leaf-digest injection into uninitialized output:
-/// `out[i] = BLAKE3(BLAKE3(prev_layer[2*i] || prev_layer[2*i + 1]) || rows_digests[i])`.
+/// `out[i] = BLAKE3_d(BLAKE3_d(prev_layer[2*i] || prev_layer[2*i + 1]) || rows_digests[i])`.
 pub(crate) fn compress_and_inject_from_digests_uninit(
     prev_layer: &[[u8; 32]],
     rows_digests: &[[u8; 32]],
     out: &mut [MaybeUninit<[u8; 32]>],
+    domain: Blake3Domain,
 ) {
     assert_eq!(rows_digests.len(), out.len());
     assert!(prev_layer.len() >= 2 * out.len());
@@ -340,14 +354,20 @@ pub(crate) fn compress_and_inject_from_digests_uninit(
     const PAR_THRESHOLD: usize = 128;
     const CHUNK_PAIRS: usize = 256;
     if out.len() < PAR_THRESHOLD {
-        compress_and_inject_slice(prev_layer, rows_digests, out, backend);
+        compress_and_inject_slice(prev_layer, rows_digests, out, backend, domain);
     } else {
         out.par_chunks_mut(CHUNK_PAIRS)
             .zip(rows_digests.par_chunks(CHUNK_PAIRS))
             .enumerate()
             .for_each(|(chunk_idx, (dst, row_chunk))| {
                 let start = chunk_idx * CHUNK_PAIRS;
-                compress_and_inject_slice(&prev_layer[2 * start..], row_chunk, dst, backend);
+                compress_and_inject_slice(
+                    &prev_layer[2 * start..],
+                    row_chunk,
+                    dst,
+                    backend,
+                    domain,
+                );
             });
     }
 }
@@ -358,11 +378,14 @@ fn hash_raw_rows_slice(
     row_bytes: usize,
     out: &mut [MaybeUninit<[u8; 32]>],
     backend: SimdBackend,
+    domain: Blake3Domain,
 ) {
     debug_assert_eq!(raw.len(), out.len() * row_bytes);
     if out.is_empty() {
         return;
     }
+    let key = domain.key_words();
+    let domain_flags = domain.domain_flags();
     let mut i = 0;
     #[cfg(target_arch = "x86_64")]
     {
@@ -374,7 +397,13 @@ fn hash_raw_rows_slice(
                     // SAFETY: `avx512f` detected at runtime; each pointer has `row_bytes` readable bytes
                     // and `out[i..i+16]` has 16 writable slots.
                     unsafe {
-                        avx512::hash_16_fixed_len(&ptrs, row_bytes, out[i..].as_mut_ptr().cast());
+                        avx512::hash_16_fixed_len(
+                            &ptrs,
+                            row_bytes,
+                            out[i..].as_mut_ptr().cast(),
+                            key,
+                            domain_flags,
+                        );
                     }
                     i += 16;
                 }
@@ -383,7 +412,13 @@ fn hash_raw_rows_slice(
                         core::array::from_fn(|lane| raw[(i + lane) * row_bytes..].as_ptr());
                     // SAFETY: `avx512f` implies `avx2`; each pointer has `row_bytes` readable bytes.
                     unsafe {
-                        avx2::hash_8_fixed_len(&ptrs, row_bytes, out[i..].as_mut_ptr().cast());
+                        avx2::hash_8_fixed_len(
+                            &ptrs,
+                            row_bytes,
+                            out[i..].as_mut_ptr().cast(),
+                            key,
+                            domain_flags,
+                        );
                     }
                     i += 8;
                 }
@@ -393,15 +428,21 @@ fn hash_raw_rows_slice(
                         core::array::from_fn(|lane| raw[(i + lane) * row_bytes..].as_ptr());
                     // SAFETY: `avx2` detected at runtime; each pointer has `row_bytes` readable bytes.
                     unsafe {
-                        avx2::hash_8_fixed_len(&ptrs, row_bytes, out[i..].as_mut_ptr().cast());
+                        avx2::hash_8_fixed_len(
+                            &ptrs,
+                            row_bytes,
+                            out[i..].as_mut_ptr().cast(),
+                            key,
+                            domain_flags,
+                        );
                     }
                     i += 8;
                 }
             }
         }
     }
-    let _ = backend;
-    let hasher = Blake3;
+    let _ = (backend, key, domain_flags);
+    let hasher = DomainBlake3::new(domain);
     while i < out.len() {
         out[i].write(hasher.hash_slice(&raw[i * row_bytes..(i + 1) * row_bytes]));
         i += 1;
@@ -414,6 +455,7 @@ pub(crate) fn hash_raw_rows_uninit(
     raw: &[u8],
     row_bytes: usize,
     out: &mut [MaybeUninit<[u8; 32]>],
+    domain: Blake3Domain,
 ) {
     assert_eq!(raw.len(), out.len() * row_bytes);
     if out.is_empty() {
@@ -421,7 +463,7 @@ pub(crate) fn hash_raw_rows_uninit(
     }
     let backend = detect_backend();
     if row_bytes > MAX_MULTIBUF_ROW_BYTES {
-        let hasher = Blake3;
+        let hasher = DomainBlake3::new(domain);
         out.par_iter_mut().enumerate().for_each(|(row, digest)| {
             digest.write(hasher.hash_slice(&raw[row * row_bytes..(row + 1) * row_bytes]));
         });
@@ -431,7 +473,7 @@ pub(crate) fn hash_raw_rows_uninit(
         .clamp(16, 256)
         .next_multiple_of(16);
     if out.len() <= chunk_rows {
-        hash_raw_rows_slice(raw, row_bytes, out, backend);
+        hash_raw_rows_slice(raw, row_bytes, out, backend, domain);
     } else {
         out.par_chunks_mut(chunk_rows)
             .enumerate()
@@ -439,7 +481,7 @@ pub(crate) fn hash_raw_rows_uninit(
                 let start = chunk_idx * chunk_rows;
                 let byte_start = start * row_bytes;
                 let byte_end = (start + dst.len()) * row_bytes;
-                hash_raw_rows_slice(&raw[byte_start..byte_end], row_bytes, dst, backend);
+                hash_raw_rows_slice(&raw[byte_start..byte_end], row_bytes, dst, backend, domain);
             });
     }
 }
@@ -449,17 +491,18 @@ pub(crate) fn hash_raw_rows_uninit(
 pub(crate) fn hash_raw_multi_rows_uninit(
     blocks: &[(Vec<u8>, usize)],
     out: &mut [MaybeUninit<[u8; 32]>],
+    domain: Blake3Domain,
 ) {
     if out.is_empty() {
         return;
     }
     if let [(buf, row_bytes)] = blocks {
-        hash_raw_rows_uninit(buf, *row_bytes, out);
+        hash_raw_rows_uninit(buf, *row_bytes, out, domain);
         return;
     }
     let total_row_bytes: usize = blocks.iter().map(|(_, rb)| *rb).sum();
     if total_row_bytes > MAX_MULTIBUF_ROW_BYTES {
-        let hasher = Blake3;
+        let hasher = DomainBlake3::new(domain);
         out.par_iter_mut()
             .enumerate()
             .for_each(|(local_row, digest)| {
@@ -482,7 +525,7 @@ pub(crate) fn hash_raw_multi_rows_uninit(
         SimdBackend::Scalar => 1usize,
     };
     if batch == 1 {
-        let hasher = Blake3;
+        let hasher = DomainBlake3::new(domain);
         out.par_iter_mut()
             .enumerate()
             .for_each(|(local_row, digest)| {
@@ -522,6 +565,7 @@ pub(crate) fn hash_raw_multi_rows_uninit(
                     total_row_bytes,
                     &mut dst[offset..offset + take],
                     backend,
+                    domain,
                 );
                 offset += take;
             }
@@ -535,6 +579,7 @@ pub(crate) fn hash_matrix_rows_uninit<M: Matrix<Val>>(
     matrices: &[&M],
     start_row: usize,
     out: &mut [MaybeUninit<[u8; 32]>],
+    domain: Blake3Domain,
 ) {
     if out.is_empty() {
         return;
@@ -542,9 +587,10 @@ pub(crate) fn hash_matrix_rows_uninit<M: Matrix<Val>>(
     let total_width: usize = matrices.iter().map(|m| m.width()).sum();
     let total_row_bytes = total_width * size_of::<u64>();
     let backend = detect_backend();
+    let hasher = DomainBlake3::new(domain);
 
     if total_row_bytes == 0 {
-        let empty_digest = Blake3.hash_slice(&[]);
+        let empty_digest = hasher.hash_slice(&[]);
         for slot in out {
             slot.write(empty_digest);
         }
@@ -552,7 +598,6 @@ pub(crate) fn hash_matrix_rows_uninit<M: Matrix<Val>>(
     }
 
     if total_row_bytes > MAX_MULTIBUF_ROW_BYTES {
-        let hasher = Blake3;
         out.par_iter_mut().enumerate().for_each_init(
             || vec![0u8; total_row_bytes],
             |scratch, (local_row, digest)| {
@@ -585,6 +630,8 @@ pub(crate) fn hash_matrix_rows_uninit<M: Matrix<Val>>(
     // directly into a 1 KiB zero-padded stack block array with zero heap scratch.
     #[cfg(target_arch = "x86_64")]
     if total_row_bytes <= BLOCK_LEN && batch > 1 {
+        let key = domain.key_words();
+        let domain_flags = domain.domain_flags();
         let block_len_u32 = u32::try_from(total_row_bytes).unwrap();
         let chunk_rows = 256usize;
         let process_small = |chunk_start: usize, dst: &mut [MaybeUninit<[u8; 32]>]| {
@@ -610,6 +657,8 @@ pub(crate) fn hash_matrix_rows_uninit<M: Matrix<Val>>(
                             &blocks,
                             block_len_u32,
                             dst[offset..].as_mut_ptr().cast(),
+                            key,
+                            domain_flags,
                         );
                     }
                 } else {
@@ -619,13 +668,14 @@ pub(crate) fn hash_matrix_rows_uninit<M: Matrix<Val>>(
                             (&blocks[..8]).try_into().unwrap(),
                             block_len_u32,
                             dst[offset..].as_mut_ptr().cast(),
+                            key,
+                            domain_flags,
                         );
                     }
                 }
                 offset += batch;
             }
             if offset < dst.len() {
-                let hasher = Blake3;
                 let mut block = [0u8; BLOCK_LEN];
                 while offset < dst.len() {
                     let r = chunk_start + offset;
@@ -681,6 +731,7 @@ pub(crate) fn hash_matrix_rows_uninit<M: Matrix<Val>>(
                     total_row_bytes,
                     &mut dst[offset..offset + take],
                     backend,
+                    domain,
                 );
                 offset += take;
             }
@@ -712,10 +763,14 @@ unsafe fn as_uninit_slice(slice: &mut [[u8; 32]]) -> &mut [MaybeUninit<[u8; 32]>
 
 /// Safe wrapper over [`hash_raw_multi_rows_uninit`] writing into an existing
 /// initialized digest buffer.
-pub(crate) fn hash_raw_multi_rows(blocks: &[(Vec<u8>, usize)], out: &mut [[u8; 32]]) {
+pub(crate) fn hash_raw_multi_rows(
+    blocks: &[(Vec<u8>, usize)],
+    out: &mut [[u8; 32]],
+    domain: Blake3Domain,
+) {
     // SAFETY: `hash_raw_multi_rows_uninit` only writes initialized `[u8; 32]` values.
     let uninit = unsafe { as_uninit_slice(out) };
-    hash_raw_multi_rows_uninit(blocks, uninit);
+    hash_raw_multi_rows_uninit(blocks, uninit, domain);
 }
 
 /// Safe wrapper over [`hash_matrix_rows_uninit`] writing into an existing
@@ -724,10 +779,11 @@ pub(crate) fn hash_matrix_rows<M: Matrix<Val>>(
     matrices: &[&M],
     start_row: usize,
     out: &mut [[u8; 32]],
+    domain: Blake3Domain,
 ) {
     // SAFETY: `hash_matrix_rows_uninit` only writes initialized `[u8; 32]` values.
     let uninit = unsafe { as_uninit_slice(out) };
-    hash_matrix_rows_uninit(matrices, start_row, uninit);
+    hash_matrix_rows_uninit(matrices, start_row, uninit, domain);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -744,16 +800,16 @@ mod avx512 {
 
     #[target_feature(enable = "avx512f")]
     #[inline]
-    fn iv_vecs() -> [__m512i; 8] {
+    fn key_vecs(key: [u32; 8]) -> [__m512i; 8] {
         [
-            splat_u32(IV[0]),
-            splat_u32(IV[1]),
-            splat_u32(IV[2]),
-            splat_u32(IV[3]),
-            splat_u32(IV[4]),
-            splat_u32(IV[5]),
-            splat_u32(IV[6]),
-            splat_u32(IV[7]),
+            splat_u32(key[0]),
+            splat_u32(key[1]),
+            splat_u32(key[2]),
+            splat_u32(key[3]),
+            splat_u32(key[4]),
+            splat_u32(key[5]),
+            splat_u32(key[6]),
+            splat_u32(key[7]),
         ]
     }
 
@@ -914,6 +970,8 @@ mod avx512 {
         blocks: &[[u8; BLOCK_LEN]; 16],
         block_len: u32,
         out: *mut [u8; 32],
+        key: [u32; 8],
+        domain_flags: u32,
     ) {
         let mut rows = [_mm512_setzero_si512(); 16];
         // SAFETY: `blocks` holds 16 contiguous 64-byte arrays.
@@ -923,14 +981,25 @@ mod avx512 {
             }
         }
         let msg = transpose_16x16(&rows);
-        let mut cv = iv_vecs();
-        compress_block_16(&mut cv, &msg, block_len, 0, CHUNK_START | CHUNK_END | ROOT);
+        let mut cv = key_vecs(key);
+        compress_block_16(
+            &mut cv,
+            &msg,
+            block_len,
+            0,
+            CHUNK_START | CHUNK_END | ROOT | domain_flags,
+        );
         // SAFETY: caller guarantees `out` points to 16 writable slots.
         unsafe { unpack_cv_16(&cv, out) };
     }
 
     #[target_feature(enable = "avx512f")]
-    pub(super) unsafe fn compress_16_pairs(prev_32: &[[u8; 32]], out: *mut [u8; 32]) {
+    pub(super) unsafe fn compress_16_pairs(
+        prev_32: &[[u8; 32]],
+        out: *mut [u8; 32],
+        key: [u32; 8],
+        domain_flags: u32,
+    ) {
         debug_assert!(prev_32.len() >= 32);
         let mut rows = [_mm512_setzero_si512(); 16];
         let base = prev_32.as_ptr().cast::<u8>();
@@ -941,8 +1010,14 @@ mod avx512 {
             }
         }
         let msg = transpose_16x16(&rows);
-        let mut cv = iv_vecs();
-        compress_block_16(&mut cv, &msg, 64, 0, CHUNK_START | CHUNK_END | ROOT);
+        let mut cv = key_vecs(key);
+        compress_block_16(
+            &mut cv,
+            &msg,
+            64,
+            0,
+            CHUNK_START | CHUNK_END | ROOT | domain_flags,
+        );
         // SAFETY: caller guarantees `out` points to 16 writable slots.
         unsafe { unpack_cv_16(&cv, out) };
     }
@@ -952,6 +1027,8 @@ mod avx512 {
         prev_32: &[[u8; 32]],
         rows_digests: &[[u8; 32]; 16],
         out: *mut [u8; 32],
+        key: [u32; 8],
+        domain_flags: u32,
     ) {
         debug_assert!(prev_32.len() >= 32);
         let mut rows = [_mm512_setzero_si512(); 16];
@@ -963,8 +1040,14 @@ mod avx512 {
             }
         }
         let msg1 = transpose_16x16(&rows);
-        let mut parent_cv = iv_vecs();
-        compress_block_16(&mut parent_cv, &msg1, 64, 0, CHUNK_START | CHUNK_END | ROOT);
+        let mut parent_cv = key_vecs(key);
+        compress_block_16(
+            &mut parent_cv,
+            &msg1,
+            64,
+            0,
+            CHUNK_START | CHUNK_END | ROOT | domain_flags,
+        );
 
         let right_cv = load_16_digests_transposed(rows_digests);
         let msg2 = [
@@ -985,8 +1068,14 @@ mod avx512 {
             right_cv[6],
             right_cv[7],
         ];
-        let mut final_cv = iv_vecs();
-        compress_block_16(&mut final_cv, &msg2, 64, 0, CHUNK_START | CHUNK_END | ROOT);
+        let mut final_cv = key_vecs(key);
+        compress_block_16(
+            &mut final_cv,
+            &msg2,
+            64,
+            0,
+            CHUNK_START | CHUNK_END | ROOT | domain_flags,
+        );
         // SAFETY: caller guarantees `out` points to 16 writable slots.
         unsafe { unpack_cv_16(&final_cv, out) };
     }
@@ -999,8 +1088,10 @@ mod avx512 {
         chunk_len: usize,
         counter: u64,
         is_root: bool,
+        key: [u32; 8],
+        domain_flags: u32,
     ) -> [__m512i; 8] {
-        let mut cv = iv_vecs();
+        let mut cv = key_vecs(key);
         let num_blocks = chunk_len.div_ceil(BLOCK_LEN).max(1);
         for b in 0..num_blocks {
             let block_offset = chunk_offset + b * BLOCK_LEN;
@@ -1028,7 +1119,7 @@ mod avx512 {
                 }
             }
             let msg = transpose_16x16(&rows);
-            let mut flags = 0u32;
+            let mut flags = domain_flags;
             if b == 0 {
                 flags |= CHUNK_START;
             }
@@ -1055,13 +1146,19 @@ mod avx512 {
         left: &[__m512i; 8],
         right: &[__m512i; 8],
         is_root: bool,
+        key: [u32; 8],
+        domain_flags: u32,
     ) -> [__m512i; 8] {
         let msg = [
             left[0], left[1], left[2], left[3], left[4], left[5], left[6], left[7], right[0],
             right[1], right[2], right[3], right[4], right[5], right[6], right[7],
         ];
-        let mut cv = iv_vecs();
-        let flags = if is_root { PARENT | ROOT } else { PARENT };
+        let mut cv = key_vecs(key);
+        let flags = if is_root {
+            PARENT | ROOT | domain_flags
+        } else {
+            PARENT | domain_flags
+        };
         compress_block_16(&mut cv, &msg, 64, 0, flags);
         cv
     }
@@ -1071,12 +1168,14 @@ mod avx512 {
         ptrs: &[*const u8; 16],
         row_bytes: usize,
         out: *mut [u8; 32],
+        key: [u32; 8],
+        domain_flags: u32,
     ) {
         debug_assert!(row_bytes <= super::MAX_MULTIBUF_ROW_BYTES);
         if row_bytes <= CHUNK_LEN {
             // SAFETY: caller guarantees `ptrs` validity for `row_bytes` and `out` has 16 slots.
             unsafe {
-                let cv = hash_chunk_16(ptrs, 0, row_bytes, 0, true);
+                let cv = hash_chunk_16(ptrs, 0, row_bytes, 0, true, key, domain_flags);
                 unpack_cv_16(&cv, out);
             }
             return;
@@ -1096,13 +1195,16 @@ mod avx512 {
                     chunk_len,
                     u64::try_from(c).unwrap(),
                     false,
+                    key,
+                    domain_flags,
                 )
             };
             if c + 1 < num_chunks {
                 let mut total_chunks = c + 1;
                 while total_chunks & 1 == 0 {
                     stack_len -= 1;
-                    new_cv = compress_parent_16(&cv_stack[stack_len], &new_cv, false);
+                    new_cv =
+                        compress_parent_16(&cv_stack[stack_len], &new_cv, false, key, domain_flags);
                     total_chunks >>= 1;
                 }
                 cv_stack[stack_len] = new_cv;
@@ -1110,10 +1212,12 @@ mod avx512 {
             } else {
                 while stack_len > 1 {
                     stack_len -= 1;
-                    new_cv = compress_parent_16(&cv_stack[stack_len], &new_cv, false);
+                    new_cv =
+                        compress_parent_16(&cv_stack[stack_len], &new_cv, false, key, domain_flags);
                 }
                 stack_len -= 1;
-                let root_cv = compress_parent_16(&cv_stack[stack_len], &new_cv, true);
+                let root_cv =
+                    compress_parent_16(&cv_stack[stack_len], &new_cv, true, key, domain_flags);
                 // SAFETY: caller guarantees `out` has 16 writable slots.
                 unsafe { unpack_cv_16(&root_cv, out) };
             }
@@ -1135,16 +1239,16 @@ mod avx2 {
 
     #[target_feature(enable = "avx2")]
     #[inline]
-    fn iv_vecs() -> [__m256i; 8] {
+    fn key_vecs(key: [u32; 8]) -> [__m256i; 8] {
         [
-            splat_u32(IV[0]),
-            splat_u32(IV[1]),
-            splat_u32(IV[2]),
-            splat_u32(IV[3]),
-            splat_u32(IV[4]),
-            splat_u32(IV[5]),
-            splat_u32(IV[6]),
-            splat_u32(IV[7]),
+            splat_u32(key[0]),
+            splat_u32(key[1]),
+            splat_u32(key[2]),
+            splat_u32(key[3]),
+            splat_u32(key[4]),
+            splat_u32(key[5]),
+            splat_u32(key[6]),
+            splat_u32(key[7]),
         ]
     }
 
@@ -1297,6 +1401,8 @@ mod avx2 {
         blocks: &[[u8; BLOCK_LEN]; 8],
         block_len: u32,
         out: *mut [u8; 32],
+        key: [u32; 8],
+        domain_flags: u32,
     ) {
         let mut left = [_mm256_setzero_si256(); 8];
         let mut right = [_mm256_setzero_si256(); 8];
@@ -1314,14 +1420,25 @@ mod avx2 {
             lo[0], lo[1], lo[2], lo[3], lo[4], lo[5], lo[6], lo[7], hi[0], hi[1], hi[2], hi[3],
             hi[4], hi[5], hi[6], hi[7],
         ];
-        let mut cv = iv_vecs();
-        compress_block_8(&mut cv, &msg, block_len, 0, CHUNK_START | CHUNK_END | ROOT);
+        let mut cv = key_vecs(key);
+        compress_block_8(
+            &mut cv,
+            &msg,
+            block_len,
+            0,
+            CHUNK_START | CHUNK_END | ROOT | domain_flags,
+        );
         // SAFETY: caller guarantees `out` points to 8 writable slots.
         unsafe { unpack_cv_8(&cv, out) };
     }
 
     #[target_feature(enable = "avx2")]
-    pub(super) unsafe fn compress_8_pairs(prev_16: &[[u8; 32]], out: *mut [u8; 32]) {
+    pub(super) unsafe fn compress_8_pairs(
+        prev_16: &[[u8; 32]],
+        out: *mut [u8; 32],
+        key: [u32; 8],
+        domain_flags: u32,
+    ) {
         debug_assert!(prev_16.len() >= 16);
         let mut left = [_mm256_setzero_si256(); 8];
         let mut right = [_mm256_setzero_si256(); 8];
@@ -1338,8 +1455,14 @@ mod avx2 {
             lo[0], lo[1], lo[2], lo[3], lo[4], lo[5], lo[6], lo[7], hi[0], hi[1], hi[2], hi[3],
             hi[4], hi[5], hi[6], hi[7],
         ];
-        let mut cv = iv_vecs();
-        compress_block_8(&mut cv, &msg, 64, 0, CHUNK_START | CHUNK_END | ROOT);
+        let mut cv = key_vecs(key);
+        compress_block_8(
+            &mut cv,
+            &msg,
+            64,
+            0,
+            CHUNK_START | CHUNK_END | ROOT | domain_flags,
+        );
         // SAFETY: caller guarantees `out` points to 8 writable slots.
         unsafe { unpack_cv_8(&cv, out) };
     }
@@ -1349,6 +1472,8 @@ mod avx2 {
         prev_16: &[[u8; 32]],
         rows_digests: &[[u8; 32]; 8],
         out: *mut [u8; 32],
+        key: [u32; 8],
+        domain_flags: u32,
     ) {
         debug_assert!(prev_16.len() >= 16);
         let mut left = [_mm256_setzero_si256(); 8];
@@ -1368,8 +1493,14 @@ mod avx2 {
             lo[0], lo[1], lo[2], lo[3], lo[4], lo[5], lo[6], lo[7], hi[0], hi[1], hi[2], hi[3],
             hi[4], hi[5], hi[6], hi[7],
         ];
-        let mut parent_cv = iv_vecs();
-        compress_block_8(&mut parent_cv, &msg1, 64, 0, CHUNK_START | CHUNK_END | ROOT);
+        let mut parent_cv = key_vecs(key);
+        compress_block_8(
+            &mut parent_cv,
+            &msg1,
+            64,
+            0,
+            CHUNK_START | CHUNK_END | ROOT | domain_flags,
+        );
 
         let right_cv = transpose_8x8(&row_vecs);
         let msg2 = [
@@ -1390,8 +1521,14 @@ mod avx2 {
             right_cv[6],
             right_cv[7],
         ];
-        let mut final_cv = iv_vecs();
-        compress_block_8(&mut final_cv, &msg2, 64, 0, CHUNK_START | CHUNK_END | ROOT);
+        let mut final_cv = key_vecs(key);
+        compress_block_8(
+            &mut final_cv,
+            &msg2,
+            64,
+            0,
+            CHUNK_START | CHUNK_END | ROOT | domain_flags,
+        );
         // SAFETY: caller guarantees `out` points to 8 writable slots.
         unsafe { unpack_cv_8(&final_cv, out) };
     }
@@ -1404,8 +1541,10 @@ mod avx2 {
         chunk_len: usize,
         counter: u64,
         is_root: bool,
+        key: [u32; 8],
+        domain_flags: u32,
     ) -> [__m256i; 8] {
-        let mut cv = iv_vecs();
+        let mut cv = key_vecs(key);
         let num_blocks = chunk_len.div_ceil(BLOCK_LEN).max(1);
         for b in 0..num_blocks {
             let block_offset = chunk_offset + b * BLOCK_LEN;
@@ -1442,7 +1581,7 @@ mod avx2 {
                 lo[0], lo[1], lo[2], lo[3], lo[4], lo[5], lo[6], lo[7], hi[0], hi[1], hi[2], hi[3],
                 hi[4], hi[5], hi[6], hi[7],
             ];
-            let mut flags = 0u32;
+            let mut flags = domain_flags;
             if b == 0 {
                 flags |= CHUNK_START;
             }
@@ -1465,13 +1604,23 @@ mod avx2 {
 
     #[target_feature(enable = "avx2")]
     #[inline]
-    fn compress_parent_8(left: &[__m256i; 8], right: &[__m256i; 8], is_root: bool) -> [__m256i; 8] {
+    fn compress_parent_8(
+        left: &[__m256i; 8],
+        right: &[__m256i; 8],
+        is_root: bool,
+        key: [u32; 8],
+        domain_flags: u32,
+    ) -> [__m256i; 8] {
         let msg = [
             left[0], left[1], left[2], left[3], left[4], left[5], left[6], left[7], right[0],
             right[1], right[2], right[3], right[4], right[5], right[6], right[7],
         ];
-        let mut cv = iv_vecs();
-        let flags = if is_root { PARENT | ROOT } else { PARENT };
+        let mut cv = key_vecs(key);
+        let flags = if is_root {
+            PARENT | ROOT | domain_flags
+        } else {
+            PARENT | domain_flags
+        };
         compress_block_8(&mut cv, &msg, 64, 0, flags);
         cv
     }
@@ -1481,12 +1630,14 @@ mod avx2 {
         ptrs: &[*const u8; 8],
         row_bytes: usize,
         out: *mut [u8; 32],
+        key: [u32; 8],
+        domain_flags: u32,
     ) {
         debug_assert!(row_bytes <= super::MAX_MULTIBUF_ROW_BYTES);
         if row_bytes <= CHUNK_LEN {
             // SAFETY: caller guarantees `ptrs` validity for `row_bytes` and `out` has 8 slots.
             unsafe {
-                let cv = hash_chunk_8(ptrs, 0, row_bytes, 0, true);
+                let cv = hash_chunk_8(ptrs, 0, row_bytes, 0, true, key, domain_flags);
                 unpack_cv_8(&cv, out);
             }
             return;
@@ -1505,13 +1656,16 @@ mod avx2 {
                     chunk_len,
                     u64::try_from(c).unwrap(),
                     false,
+                    key,
+                    domain_flags,
                 )
             };
             if c + 1 < num_chunks {
                 let mut total_chunks = c + 1;
                 while total_chunks & 1 == 0 {
                     stack_len -= 1;
-                    new_cv = compress_parent_8(&cv_stack[stack_len], &new_cv, false);
+                    new_cv =
+                        compress_parent_8(&cv_stack[stack_len], &new_cv, false, key, domain_flags);
                     total_chunks >>= 1;
                 }
                 cv_stack[stack_len] = new_cv;
@@ -1519,10 +1673,12 @@ mod avx2 {
             } else {
                 while stack_len > 1 {
                     stack_len -= 1;
-                    new_cv = compress_parent_8(&cv_stack[stack_len], &new_cv, false);
+                    new_cv =
+                        compress_parent_8(&cv_stack[stack_len], &new_cv, false, key, domain_flags);
                 }
                 stack_len -= 1;
-                let root_cv = compress_parent_8(&cv_stack[stack_len], &new_cv, true);
+                let root_cv =
+                    compress_parent_8(&cv_stack[stack_len], &new_cv, true, key, domain_flags);
                 // SAFETY: caller guarantees `out` has 8 writable slots.
                 unsafe { unpack_cv_8(&root_cv, out) };
             }
@@ -1533,10 +1689,11 @@ mod avx2 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Blake3CompressionFunction;
     use p3_goldilocks::Goldilocks;
     use p3_matrix::dense::RowMajorMatrix;
-    use p3_symmetric::{PseudoCompressionFunction, SerializingHasher};
+    use p3_symmetric::{
+        CompressionFunctionFromHasher, PseudoCompressionFunction, SerializingHasher,
+    };
     use rand::rngs::SmallRng;
     use rand::{RngExt, SeedableRng};
 
@@ -1557,108 +1714,77 @@ mod tests {
     #[test]
     fn compress_pairs_matches_p3_blake3_all_backends() {
         let mut rng = SmallRng::seed_from_u64(0xB1A3_0001);
-        let ref_compress = Blake3CompressionFunction::new(Blake3);
-        for count in [
-            0usize, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 255, 256, 257, 600,
-        ] {
-            let prev: Vec<[u8; 32]> = (0..2 * count).map(|_| rng.random()).collect();
-            let expected: Vec<[u8; 32]> = (0..count)
-                .map(|i| ref_compress.compress([prev[2 * i], prev[2 * i + 1]]))
-                .collect();
+        for domain in [Blake3Domain::Plain, Blake3Domain::MerkleCompress] {
+            let ref_compress =
+                CompressionFunctionFromHasher::<_, 2, 32>::new(DomainBlake3::new(domain));
+            for count in [
+                0usize, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 255, 256, 257, 600,
+            ] {
+                let prev: Vec<[u8; 32]> = (0..2 * count).map(|_| rng.random()).collect();
+                let expected: Vec<[u8; 32]> = (0..count)
+                    .map(|i| ref_compress.compress([prev[2 * i], prev[2 * i + 1]]))
+                    .collect();
 
-            for backend in available_backends() {
-                // SAFETY: `compress_pairs_slice` initializes all `count` slots.
-                let got = unsafe {
+                for backend in available_backends() {
+                    // SAFETY: `compress_pairs_slice` initializes all `count` slots.
+                    let got = unsafe {
+                        alloc_and_fill_digests(count, count, |dst| {
+                            compress_pairs_slice(&prev, dst, backend, domain);
+                        })
+                    };
+                    assert_eq!(
+                        got, expected,
+                        "compress_pairs_slice mismatch for {backend:?} {domain:?} count={count}"
+                    );
+                }
+
+                // SAFETY: `compress_pairs_uninit` initializes all `count` slots.
+                let got_par = unsafe {
                     alloc_and_fill_digests(count, count, |dst| {
-                        compress_pairs_slice(&prev, dst, backend);
+                        compress_pairs_uninit(&prev, dst, domain);
                     })
                 };
                 assert_eq!(
-                    got, expected,
-                    "compress_pairs_slice mismatch for {backend:?} count={count}"
+                    got_par, expected,
+                    "compress_pairs mismatch {domain:?} count={count}"
                 );
             }
-
-            // SAFETY: `compress_pairs_uninit` initializes all `count` slots.
-            let got_par = unsafe {
-                alloc_and_fill_digests(count, count, |dst| {
-                    compress_pairs_uninit(&prev, dst);
-                })
-            };
-            assert_eq!(got_par, expected, "compress_pairs mismatch count={count}");
         }
     }
 
     #[test]
     fn compress_and_inject_matches_p3_blake3_all_backends() {
         let mut rng = SmallRng::seed_from_u64(0xB1A3_0002);
-        let ref_compress = Blake3CompressionFunction::new(Blake3);
-        for count in [0usize, 1, 7, 8, 9, 15, 16, 17, 128, 300] {
-            let prev: Vec<[u8; 32]> = (0..2 * count).map(|_| rng.random()).collect();
-            let rows: Vec<[u8; 32]> = (0..count).map(|_| rng.random()).collect();
-            let expected: Vec<[u8; 32]> = (0..count)
-                .map(|i| {
-                    let p = ref_compress.compress([prev[2 * i], prev[2 * i + 1]]);
-                    ref_compress.compress([p, rows[i]])
-                })
-                .collect();
-
-            for backend in available_backends() {
-                // SAFETY: `compress_and_inject_slice` initializes all `count` slots.
-                let got = unsafe {
-                    alloc_and_fill_digests(count, count, |dst| {
-                        compress_and_inject_slice(&prev, &rows, dst, backend);
+        for domain in [Blake3Domain::Plain, Blake3Domain::MerkleCompress] {
+            let ref_compress =
+                CompressionFunctionFromHasher::<_, 2, 32>::new(DomainBlake3::new(domain));
+            for count in [0usize, 1, 7, 8, 9, 15, 16, 17, 128, 300] {
+                let prev: Vec<[u8; 32]> = (0..2 * count).map(|_| rng.random()).collect();
+                let rows: Vec<[u8; 32]> = (0..count).map(|_| rng.random()).collect();
+                let expected: Vec<[u8; 32]> = (0..count)
+                    .map(|i| {
+                        let p = ref_compress.compress([prev[2 * i], prev[2 * i + 1]]);
+                        ref_compress.compress([p, rows[i]])
                     })
-                };
-                assert_eq!(
-                    got, expected,
-                    "compress_and_inject_slice mismatch for {backend:?} count={count}"
-                );
-            }
-
-            // SAFETY: `compress_and_inject_from_digests_uninit` initializes all `count` slots.
-            let got_par = unsafe {
-                alloc_and_fill_digests(count, count, |dst| {
-                    compress_and_inject_from_digests_uninit(&prev, &rows, dst);
-                })
-            };
-            assert_eq!(got_par, expected);
-        }
-    }
-
-    #[test]
-    fn hash_raw_rows_matches_p3_blake3_across_chunk_boundaries() {
-        let mut rng = SmallRng::seed_from_u64(0xB1A3_0003);
-        let ref_hasher = Blake3;
-        let lengths = [
-            0usize, 1, 7, 8, 32, 56, 63, 64, 65, 72, 128, 512, 960, 1016, 1024, 1025, 1032, 2048,
-            2056, 3072, 4096, 5120, 6144, 7168, 8192, 16384, 16392,
-        ];
-        for &row_bytes in &lengths {
-            for &num_rows in &[0usize, 1, 8, 16, 25] {
-                let mut raw = vec![0u8; num_rows * row_bytes];
-                rng.fill(&mut raw[..]);
-                let expected: Vec<[u8; 32]> = (0..num_rows)
-                    .map(|r| ref_hasher.hash_slice(&raw[r * row_bytes..(r + 1) * row_bytes]))
                     .collect();
 
                 for backend in available_backends() {
-                    // SAFETY: `hash_raw_rows_slice` initializes all `num_rows` slots.
+                    // SAFETY: `compress_and_inject_slice` initializes all `count` slots.
                     let got = unsafe {
-                        alloc_and_fill_digests(num_rows, num_rows, |dst| {
-                            hash_raw_rows_slice(&raw, row_bytes, dst, backend);
+                        alloc_and_fill_digests(count, count, |dst| {
+                            compress_and_inject_slice(&prev, &rows, dst, backend, domain);
                         })
                     };
                     assert_eq!(
                         got, expected,
-                        "hash_raw_rows_slice mismatch for {backend:?} row_bytes={row_bytes} num_rows={num_rows}"
+                        "compress_and_inject_slice mismatch for {backend:?} {domain:?} count={count}"
                     );
                 }
 
-                // SAFETY: `hash_raw_rows_uninit` initializes all `num_rows` slots.
+                // SAFETY: `compress_and_inject_from_digests_uninit` initializes all `count` slots.
                 let got_par = unsafe {
-                    alloc_and_fill_digests(num_rows, num_rows, |dst| {
-                        hash_raw_rows_uninit(&raw, row_bytes, dst);
+                    alloc_and_fill_digests(count, count, |dst| {
+                        compress_and_inject_from_digests_uninit(&prev, &rows, dst, domain);
                     })
                 };
                 assert_eq!(got_par, expected);
@@ -1667,9 +1793,50 @@ mod tests {
     }
 
     #[test]
+    fn hash_raw_rows_matches_p3_blake3_across_chunk_boundaries() {
+        let mut rng = SmallRng::seed_from_u64(0xB1A3_0003);
+        let lengths = [
+            0usize, 1, 7, 8, 32, 56, 63, 64, 65, 72, 128, 512, 960, 1016, 1024, 1025, 1032, 2048,
+            2056, 3072, 4096, 5120, 6144, 7168, 8192, 16384, 16392,
+        ];
+        for domain in [Blake3Domain::Plain, Blake3Domain::MerkleLeaf] {
+            let ref_hasher = DomainBlake3::new(domain);
+            for &row_bytes in &lengths {
+                for &num_rows in &[0usize, 1, 8, 16, 25] {
+                    let mut raw = vec![0u8; num_rows * row_bytes];
+                    rng.fill(&mut raw[..]);
+                    let expected: Vec<[u8; 32]> = (0..num_rows)
+                        .map(|r| ref_hasher.hash_slice(&raw[r * row_bytes..(r + 1) * row_bytes]))
+                        .collect();
+
+                    for backend in available_backends() {
+                        // SAFETY: `hash_raw_rows_slice` initializes all `num_rows` slots.
+                        let got = unsafe {
+                            alloc_and_fill_digests(num_rows, num_rows, |dst| {
+                                hash_raw_rows_slice(&raw, row_bytes, dst, backend, domain);
+                            })
+                        };
+                        assert_eq!(
+                            got, expected,
+                            "hash_raw_rows_slice mismatch for {backend:?} {domain:?} row_bytes={row_bytes} num_rows={num_rows}"
+                        );
+                    }
+
+                    // SAFETY: `hash_raw_rows_uninit` initializes all `num_rows` slots.
+                    let got_par = unsafe {
+                        alloc_and_fill_digests(num_rows, num_rows, |dst| {
+                            hash_raw_rows_uninit(&raw, row_bytes, dst, domain);
+                        })
+                    };
+                    assert_eq!(got_par, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn hash_matrix_rows_matches_serializing_hasher_including_non_canonical_values() {
         let mut rng = SmallRng::seed_from_u64(0xB1A3_0004);
-        let ref_hasher = SerializingHasher::new(Blake3);
         let height = 35usize;
         // Include non-canonical Goldilocks representations (>= ORDER_U64) to verify canonicalization.
         let m1 = RowMajorMatrix::new(
@@ -1690,26 +1857,29 @@ mod tests {
                 .collect(),
             130,
         );
-        let expected_single: Vec<[u8; 32]> = (0..height)
-            .map(|r| ref_hasher.hash_iter(m1.row_slice(r).unwrap().iter().copied()))
-            .collect();
-        let mut got_single = vec![[0u8; 32]; height];
-        hash_matrix_rows(&[&m1], 0, &mut got_single);
-        assert_eq!(got_single, expected_single);
+        for domain in [Blake3Domain::Plain, Blake3Domain::MerkleLeaf] {
+            let ref_hasher = SerializingHasher::new(DomainBlake3::new(domain));
+            let expected_single: Vec<[u8; 32]> = (0..height)
+                .map(|r| ref_hasher.hash_iter(m1.row_slice(r).unwrap().iter().copied()))
+                .collect();
+            let mut got_single = vec![[0u8; 32]; height];
+            hash_matrix_rows(&[&m1], 0, &mut got_single, domain);
+            assert_eq!(got_single, expected_single);
 
-        let expected_multi: Vec<[u8; 32]> = (0..height)
-            .map(|r| {
-                ref_hasher.hash_iter(
-                    m1.row_slice(r)
-                        .unwrap()
-                        .iter()
-                        .chain(m2.row_slice(r).unwrap().iter())
-                        .copied(),
-                )
-            })
-            .collect();
-        let mut got_multi = vec![[0u8; 32]; height];
-        hash_matrix_rows(&[&m1, &m2], 0, &mut got_multi);
-        assert_eq!(got_multi, expected_multi);
+            let expected_multi: Vec<[u8; 32]> = (0..height)
+                .map(|r| {
+                    ref_hasher.hash_iter(
+                        m1.row_slice(r)
+                            .unwrap()
+                            .iter()
+                            .chain(m2.row_slice(r).unwrap().iter())
+                            .copied(),
+                    )
+                })
+                .collect();
+            let mut got_multi = vec![[0u8; 32]; height];
+            hash_matrix_rows(&[&m1, &m2], 0, &mut got_multi, domain);
+            assert_eq!(got_multi, expected_multi);
+        }
     }
 }

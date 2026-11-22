@@ -236,7 +236,10 @@ impl<SC: StarkGenericConfig> BatchProof<SC> {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let (batch, _num_bytes) = decode_from_slice(bytes, Proof::<SC>::serde_config())?;
+        let (batch, num_bytes) = decode_from_slice(bytes, Proof::<SC>::serde_config())?;
+        if num_bytes != bytes.len() {
+            return Err(DecodeError::Other("trailing bytes after batch proof"));
+        }
         Ok(batch)
     }
 }
@@ -273,7 +276,9 @@ impl<SC: StarkGenericConfig> System<SC> {
         &self,
         preamble: &BatchPreamble<SC>,
     ) -> (SC::Challenger, SC::Challenge, SC::Challenge) {
-        let mut challenger = self.config.initialise_challenger();
+        let mut challenger = self
+            .config
+            .initialise_challenger_for_mode(crate::config::TranscriptMode::Batch);
         self.observe_shape(&mut challenger);
         if let Some(commit) = &self.preprocessed_commit {
             challenger.observe_commitment(commit.clone());
@@ -321,6 +326,48 @@ impl<SC: StarkGenericConfig> System<SC> {
         .expect("lookup challenge makes a batch message denominator zero")
     }
 
+    fn verify_preamble_headers(
+        &self,
+        preamble: &BatchPreamble<SC>,
+    ) -> Result<(), VerificationError<PcsError<SC>>> {
+        ensure!(
+            !preamble.headers.is_empty(),
+            VerificationError::BatchShapeMismatch;
+            "batch preamble has no shard headers"
+        );
+        let max_log_degree = self.config.max_log_degree();
+        for (idx, header) in preamble.headers.iter().enumerate() {
+            ensure!(
+                header.active.len() == self.circuits.len(),
+                VerificationError::BatchShapeMismatch;
+                shard = idx,
+                expected = self.circuits.len(),
+                got = header.active.len(),
+                "batch preamble header activation bitmap length mismatch"
+            );
+            let active_count = header.active.iter().filter(|&&a| a).count();
+            ensure!(
+                active_count > 0 && header.log_degrees.len() == active_count,
+                VerificationError::BatchShapeMismatch;
+                shard = idx,
+                active_count,
+                log_degrees_len = header.log_degrees.len(),
+                "batch preamble header log_degrees count mismatch"
+            );
+            for &log_degree in &header.log_degrees {
+                ensure!(
+                    usize::from(log_degree) <= max_log_degree,
+                    VerificationError::BatchShapeMismatch;
+                    shard = idx,
+                    log_degree,
+                    max_log_degree,
+                    "batch preamble header log_degree exceeds max_log_degree"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Verifies shard `shard` of a batch and returns its residual (final
     /// accumulator). The shard's header must describe `proof` exactly.
     pub fn verify_batch_shard(
@@ -333,6 +380,7 @@ impl<SC: StarkGenericConfig> System<SC> {
         Val<SC>: TwoAdicField + Ord,
         Com<SC>: PartialEq,
     {
+        self.verify_preamble_headers(preamble)?;
         let (challenger, lookup_argument_challenge, fingerprint_challenge) =
             self.batch_challenger(preamble);
         self.verify_batch_shard_from(
@@ -414,6 +462,7 @@ impl<SC: StarkGenericConfig> System<SC> {
             proof_count = proofs.len(),
             "invalid batch header/proof counts"
         );
+        self.verify_preamble_headers(preamble)?;
         let (challenger, lookup_argument_challenge, fingerprint_challenge) =
             self.batch_challenger(preamble);
         let mut total = try_messages_accumulator(

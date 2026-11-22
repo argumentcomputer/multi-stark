@@ -5,7 +5,7 @@
 //! [`crate::prover`] and [`crate::verifier`]; this module only provides a
 //! concrete, batteries-included instantiation.
 
-use crate::config::ProofConfig;
+use crate::config::{ProofConfig, ProtocolVersion, TranscriptMode};
 use p3_blake3::Blake3;
 use p3_challenger::{
     CanObserve, CanSample, CanSampleBits, FieldChallenger, GrindingChallenger, HashChallenger,
@@ -13,10 +13,11 @@ use p3_challenger::{
 };
 use p3_commit::{ExtensionMmcs, Pcs as PcsTrait};
 use p3_dft::Radix2DitParallel;
+#[cfg(feature = "cuda")]
 use p3_field::BasedVectorSpace;
 use p3_field::{
     ExtensionField, Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField,
-    extension::BinomialExtensionField,
+    extension::{BinomialExtensionField, CubicTrinomialExtensionField},
 };
 use p3_fri::FriParameters as InnerFriParameters;
 use p3_goldilocks::Goldilocks;
@@ -26,17 +27,28 @@ use p3_matrix::dense::RowMajorMatrix;
 use p3_maybe_rayon::prelude::*;
 #[cfg(feature = "cuda")]
 use p3_merkle_tree::MerkleTreeMmcs;
-use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
+#[cfg(any(feature = "cuda", test))]
+use p3_symmetric::CompressionFunctionFromHasher;
+#[cfg(any(feature = "cuda", test))]
+use p3_symmetric::SerializingHasher;
 
 #[cfg(feature = "cuda")]
 use crate::cuda::CudaDft;
 #[cfg(feature = "cuda")]
 use crate::cuda::pcs::CudaPcsDft;
+pub use crate::p3_adapter::challenger::DomainChallenger;
+pub use crate::p3_adapter::domain::{CosetDomain, DomainMappedPcs};
+pub use crate::p3_adapter::domain_blake3::{Blake3Domain, DomainBlake3};
+pub use crate::p3_adapter::fri_batching::FriBatching;
+use crate::traits::ExtensionModulus;
 
 pub type Val = Goldilocks;
 pub type PackedVal = <Val as Field>::Packing;
 pub type ExtVal = BinomialExtensionField<Val, 2>;
+pub type ExtVal2 = BinomialExtensionField<Val, 2>;
+pub type ExtVal3 = CubicTrinomialExtensionField<Val>;
 pub type PackedExtVal = <ExtVal as ExtensionField<Val>>::ExtensionPacking;
+pub type PackedExtVal3 = <ExtVal3 as ExtensionField<Val>>::ExtensionPacking;
 pub type Challenger =
     DeterministicPow<SerializingChallenger64<Val, HashChallenger<u8, Blake3, 32>>>;
 
@@ -620,7 +632,8 @@ impl ProofConfig for GoldilocksBlake3Config {
             let lde = self.pcs.compute_lde(domain, stage_2_base);
             if let Some(pack) = &mut spill_pack {
                 if height_counts.get(&lde.height()).copied() == Some(1) {
-                    let (spilled, digests) = pack.append_matrix_and_hash(&lde);
+                    let (spilled, digests) =
+                        pack.append_matrix_and_hash(&lde, self.pcs.leaf_domain());
                     spilled_ldes.push(spilled);
                     prehashed.push(Some(digests));
                 } else {
@@ -716,7 +729,7 @@ impl ProofConfig for GoldilocksBlake3Config {
             );
             let lde = lde_from_shifted_coefficients(dft, sliced, log_blowup);
             if height_counts.get(&lde.height()).copied() == Some(1) {
-                let (spilled, digests) = pack.append_matrix_and_hash(&lde);
+                let (spilled, digests) = pack.append_matrix_and_hash(&lde, self.pcs.leaf_domain());
                 spilled_ldes.push(spilled);
                 prehashed.push(Some(digests));
             } else {
@@ -733,54 +746,7 @@ impl ProofConfig for GoldilocksBlake3Config {
     }
 
     fn canonicalize_proof(proof: &mut crate::prover::Proof<Self>) {
-        fn canonical_base(value: &mut Val) {
-            *value = Val::from_u64(value.as_canonical_u64());
-        }
-
-        fn canonical_ext(value: &mut ExtVal) {
-            let coefficients: &[Val] = value.as_basis_coefficients_slice();
-            *value = ExtVal::from_basis_coefficients_slice(&[
-                Val::from_u64(coefficients[0].as_canonical_u64()),
-                Val::from_u64(coefficients[1].as_canonical_u64()),
-            ])
-            .expect("quadratic extension element");
-        }
-
-        fn canonical_opened(round: &mut p3_commit::OpenedValuesForRound<ExtVal>) {
-            for matrix in round {
-                for point in matrix {
-                    point.iter_mut().for_each(canonical_ext);
-                }
-            }
-        }
-
-        proof
-            .intermediate_accumulators
-            .iter_mut()
-            .for_each(canonical_ext);
-        canonical_opened(&mut proof.quotient_opened_values);
-        if let Some(round) = &mut proof.preprocessed_opened_values {
-            canonical_opened(round);
-        }
-        canonical_opened(&mut proof.stage_1_opened_values);
-        canonical_opened(&mut proof.stage_2_opened_values);
-
-        let fri = &mut proof.opening_proof;
-        fri.commit_pow_witnesses.iter_mut().for_each(canonical_base);
-        canonical_base(&mut fri.query_pow_witness);
-        fri.final_poly.iter_mut().for_each(canonical_ext);
-        for opening in &mut fri.input_openings {
-            for query in &mut opening.opened_values {
-                for row in query {
-                    row.iter_mut().for_each(canonical_base);
-                }
-            }
-        }
-        for step in &mut fri.commit_phase_openings {
-            for siblings in &mut step.sibling_values {
-                siblings.iter_mut().for_each(canonical_ext);
-            }
-        }
+        canonicalize_goldilocks_fri_proof::<Self, ExtVal, ExtMmcs>(proof);
     }
 
     #[cfg(feature = "cuda")]
@@ -1475,6 +1441,7 @@ pub struct FriParameters {
     pub query_proof_of_work_bits: usize,
 }
 
+#[cfg(any(feature = "cuda", test))]
 pub(crate) type Blake3CompressionFunction = CompressionFunctionFromHasher<Blake3, 2, 32>;
 
 #[cfg(feature = "cuda")]
@@ -1523,17 +1490,681 @@ type PcsDft = Dft;
 type PcsDft = CudaDft;
 
 fn new_mmcs(cap_height: usize, #[cfg(feature = "cuda")] device_id: i32) -> Mmcs {
-    let byte_hash = Blake3;
-    let field_hash = SerializingHasher::new(byte_hash);
-    let compress = Blake3CompressionFunction::new(byte_hash);
     #[cfg(not(feature = "cuda"))]
     {
-        crate::p3_adapter::spill::SpillableMmcs::new(field_hash, compress, cap_height)
+        crate::p3_adapter::spill::SpillableMmcs::new_plain(cap_height)
     }
     #[cfg(feature = "cuda")]
     {
+        let byte_hash = Blake3;
+        let field_hash = SerializingHasher::new(byte_hash);
+        let compress = Blake3CompressionFunction::new(byte_hash);
         let cpu = CpuMmcs::new(field_hash, compress, cap_height);
         crate::cuda::mmcs::CudaMmcs::with_device(cpu, device_id)
+    }
+}
+
+fn canonicalize_goldilocks_fri_proof<SC, EF, FriMmcs>(proof: &mut crate::prover::Proof<SC>)
+where
+    EF: ExtensionField<Val> + crate::traits::ExtensionOf<Val>,
+    FriMmcs: p3_commit::Mmcs<EF>,
+    SC: ProofConfig<Challenge = EF>,
+    SC::Pcs: crate::traits::Pcs<
+            F = Val,
+            Challenge = EF,
+            Proof = p3_fri::FriProof<EF, FriMmcs, Val, Vec<p3_fri::BatchMultiOpening<Val, Mmcs>>>,
+        >,
+{
+    fn canonical_base(value: &mut Val) {
+        *value = Val::from_u64(value.as_canonical_u64());
+    }
+
+    fn canonical_ext<EF: ExtensionField<Val> + crate::traits::ExtensionOf<Val>>(value: &mut EF) {
+        let coefficients: &[Val] =
+            <EF as crate::traits::ExtensionOf<Val>>::as_basis_coefficients_slice(value);
+        *value = <EF as crate::traits::ExtensionOf<Val>>::from_basis_coefficients_fn(|i| {
+            Val::from_u64(coefficients[i].as_canonical_u64())
+        });
+    }
+
+    fn canonical_opened<EF: ExtensionField<Val> + crate::traits::ExtensionOf<Val>>(
+        round: &mut p3_commit::OpenedValuesForRound<EF>,
+    ) {
+        for matrix in round {
+            for point in matrix {
+                point.iter_mut().for_each(canonical_ext::<EF>);
+            }
+        }
+    }
+
+    proof
+        .intermediate_accumulators
+        .iter_mut()
+        .for_each(canonical_ext::<EF>);
+    canonical_opened(&mut proof.quotient_opened_values);
+    if let Some(round) = &mut proof.preprocessed_opened_values {
+        canonical_opened(round);
+    }
+    canonical_opened(&mut proof.stage_1_opened_values);
+    canonical_opened(&mut proof.stage_2_opened_values);
+
+    let fri = &mut proof.opening_proof;
+    fri.commit_pow_witnesses.iter_mut().for_each(canonical_base);
+    canonical_base(&mut fri.query_pow_witness);
+    fri.final_poly.iter_mut().for_each(canonical_ext::<EF>);
+    for opening in &mut fri.input_openings {
+        for query in &mut opening.opened_values {
+            for row in query {
+                row.iter_mut().for_each(canonical_base);
+            }
+        }
+    }
+    for step in &mut fri.commit_phase_openings {
+        for siblings in &mut step.sibling_values {
+            siblings.iter_mut().for_each(canonical_ext::<EF>);
+        }
+    }
+}
+
+/// Extension MMCS for Protocol `v6` over any challenge extension `EF`.
+pub type V6ExtMmcs<EF> = ExtensionMmcs<Val, EF, Mmcs>;
+
+/// Inner PCS for Protocol `v6` over any challenge extension `EF` (CPU).
+#[cfg(not(feature = "cuda"))]
+pub type V6InnerPcs<EF> =
+    DomainMappedPcs<crate::p3_adapter::spill::SpillableTwoAdicFriPcs<PcsDft, V6ExtMmcs<EF>>>;
+/// Inner PCS for Protocol `v6` over any challenge extension `EF` (CUDA).
+#[cfg(feature = "cuda")]
+pub type V6InnerPcs<EF> =
+    DomainMappedPcs<crate::cuda::pcs::CudaTwoAdicFriPcs<Val, PcsDft, Mmcs, V6ExtMmcs<EF>>>;
+
+/// Protocol `v6` FRI PCS parameterized over any Goldilocks challenge extension
+/// `EF` (degree-3 cubic trinomial [`ExtVal3`] or degree-2 binomial [`ExtVal2`]).
+pub type V6Pcs<EF> = crate::p3_adapter::pcs::FriPcs<
+    Val,
+    EF,
+    DomainChallenger<EF>,
+    Dft,
+    Mmcs,
+    V6ExtMmcs<EF>,
+    V6InnerPcs<EF>,
+>;
+
+/// Protocol `v6` Goldilocks/BLAKE3 configuration over the degree-3 cubic
+/// trinomial extension $\mathbb{F}_{p^3} = \mathbb{F}_p[X]/(X^3 - X - 1)$
+/// (192-bit field, 128-bit conjectured / 100+ bit provable soundness with
+/// multilinear tensor FRI batching and domain-separated BLAKE3).
+pub type GoldilocksBlake3V6Config = GoldilocksV6Config<ExtVal3>;
+
+/// Protocol `v6` Goldilocks/BLAKE3 configuration over the degree-2 binomial
+/// extension $\mathbb{F}_{p^2} = \mathbb{F}_p[X]/(X^2 - 7)$ (same hardened `v6`
+/// transcript, VK digest, domain-separated BLAKE3, and tensor FRI batching as
+/// [`GoldilocksBlake3V6Config`], useful for apples-to-apples benchmarking).
+pub type GoldilocksBlake3V6Fp2Config = GoldilocksV6Config<ExtVal2>;
+
+/// Hardened Protocol `v6` [`ProofConfig`] parameterized by Goldilocks
+/// challenge extension `EF`.
+///
+/// Protocol `v6` cryptographic guarantees:
+/// - Zero-overhead BLAKE3 `derive_key` domain separation across Merkle leaves
+///   (`"multi-stark/v6/merkle/leaf"`), Merkle internal 2-to-1 compressions
+///   (`"multi-stark/v6/merkle/compress"`), single-proof transcripts
+///   (`"multi-stark/v6/transcript/single"`), batch-proof transcripts
+///   (`"multi-stark/v6/transcript/batch"`), and VK/constraint-graph digests
+///   (`"multi-stark/v6/vk"`).
+/// - Explicit extension degree, extension modulus, FRI batching mode, and full
+///   canonical VK/constraint-graph digest bound into the transcript.
+/// - Multilinear tensor FRI batching (`FriBatching::Tensor`, default) or
+///   Horner batching (`FriBatching::Horner`).
+pub struct GoldilocksV6Config<EF>
+where
+    EF: TwoAdicField + ExtensionField<Val> + crate::traits::ExtensionOf<Val>,
+{
+    pcs: V6Pcs<EF>,
+    challenger_seed: Vec<u8>,
+    max_log_degree: usize,
+    max_quotient_degree: usize,
+    log_blowup: usize,
+    cap_height: usize,
+    commitment_parameters: CommitmentParameters,
+    fri_parameters: FriParameters,
+    fri_batching: FriBatching,
+}
+
+fn build_v6_challenger_seed<EF: crate::traits::ExtensionOf<Val>>(
+    commitment_parameters: CommitmentParameters,
+    fri_parameters: FriParameters,
+    fri_batching: FriBatching,
+) -> Vec<u8> {
+    let modulus = EF::MODULUS;
+    let modulus_param = match modulus {
+        ExtensionModulus::Binomial { w } => w.as_canonical_u64(),
+        ExtensionModulus::Base | ExtensionModulus::CubicTrinomial => 0u64,
+    };
+    let mut seed = b"multi-stark/v6".to_vec();
+    let params = [
+        u64::try_from(EF::D).expect("extension degree exceeds u64"),
+        u64::from(modulus.tag()),
+        modulus_param,
+        fri_batching.tag(),
+        u64::try_from(commitment_parameters.log_blowup).expect("parameter exceeds u64"),
+        u64::try_from(commitment_parameters.cap_height).expect("parameter exceeds u64"),
+        u64::try_from(fri_parameters.log_final_poly_len).expect("parameter exceeds u64"),
+        u64::try_from(fri_parameters.max_log_arity).expect("parameter exceeds u64"),
+        u64::try_from(fri_parameters.num_queries).expect("parameter exceeds u64"),
+        u64::try_from(fri_parameters.commit_proof_of_work_bits).expect("parameter exceeds u64"),
+        u64::try_from(fri_parameters.query_proof_of_work_bits).expect("parameter exceeds u64"),
+    ];
+    for p in params {
+        seed.extend_from_slice(&p.to_le_bytes());
+    }
+    seed
+}
+
+impl<EF> GoldilocksV6Config<EF>
+where
+    EF: TwoAdicField + ExtensionField<Val> + crate::traits::ExtensionOf<Val>,
+{
+    /// Creates a Protocol `v6` configuration using multilinear tensor FRI
+    /// batching ([`FriBatching::Tensor`]) by default.
+    pub fn new(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Self {
+        Self::with_device(
+            commitment_parameters,
+            fri_parameters,
+            FriBatching::Tensor,
+            None,
+        )
+    }
+
+    /// Creates a Protocol `v6` configuration with an explicit [`FriBatching`]
+    /// strategy (`Tensor` or `Horner`).
+    pub fn new_with_batching(
+        commitment_parameters: CommitmentParameters,
+        fri_parameters: FriParameters,
+        fri_batching: FriBatching,
+    ) -> Self {
+        Self::with_device(commitment_parameters, fri_parameters, fri_batching, None)
+    }
+
+    /// Creates a Protocol `v6` configuration targeting an optional CUDA device.
+    pub fn with_device(
+        commitment_parameters: CommitmentParameters,
+        fri_parameters: FriParameters,
+        fri_batching: FriBatching,
+        device_id: Option<i32>,
+    ) -> Self {
+        #[cfg(feature = "cuda")]
+        {
+            assert_eq!(
+                commitment_parameters.cap_height, 0,
+                "the CUDA backend currently supports only cap_height = 0"
+            );
+            assert!(
+                fri_parameters.max_log_arity <= 1,
+                "the CUDA backend currently supports only binary FRI folds"
+            );
+            let _ = device_id;
+        }
+        #[cfg(not(feature = "cuda"))]
+        let pcs = {
+            assert!(
+                device_id.is_none_or(|device| device == 0),
+                "no CUDA backend to place a prover on device {device_id:?}"
+            );
+            let val_mmcs =
+                crate::p3_adapter::spill::SpillableMmcs::new_v6(commitment_parameters.cap_height);
+            let ext_mmcs = ExtensionMmcs::new(val_mmcs.clone());
+            let inner_parameters = InnerFriParameters {
+                log_blowup: commitment_parameters.log_blowup,
+                log_final_poly_len: fri_parameters.log_final_poly_len,
+                max_log_arity: fri_parameters.max_log_arity,
+                num_queries: fri_parameters.num_queries,
+                commit_proof_of_work_bits: fri_parameters.commit_proof_of_work_bits,
+                query_proof_of_work_bits: fri_parameters.query_proof_of_work_bits,
+                mmcs: ext_mmcs,
+            };
+            let mut inner = crate::p3_adapter::spill::SpillableTwoAdicFriPcs::new(
+                PcsDft::default(),
+                val_mmcs,
+                inner_parameters,
+            )
+            .with_batching(fri_batching);
+            if let Some(dir) = std::env::var_os("MULTI_STARK_SPILL_DIR")
+                && !dir.is_empty()
+            {
+                inner.set_spill_dir(Some(std::path::PathBuf::from(dir)));
+            }
+            DomainMappedPcs::new(inner)
+        };
+        #[cfg(feature = "cuda")]
+        let pcs = {
+            let dev = device_id.unwrap_or_else(crate::cuda::configured_device);
+            let val_mmcs = new_mmcs(commitment_parameters.cap_height, dev);
+            let ext_mmcs = ExtensionMmcs::new(val_mmcs.clone());
+            let inner_parameters = InnerFriParameters {
+                log_blowup: commitment_parameters.log_blowup,
+                log_final_poly_len: fri_parameters.log_final_poly_len,
+                max_log_arity: fri_parameters.max_log_arity,
+                num_queries: fri_parameters.num_queries,
+                commit_proof_of_work_bits: fri_parameters.commit_proof_of_work_bits,
+                query_proof_of_work_bits: fri_parameters.query_proof_of_work_bits,
+                mmcs: ext_mmcs,
+            };
+            let pcs_dft = CudaDft::new(dev);
+            DomainMappedPcs::new(crate::cuda::pcs::CudaTwoAdicFriPcs::new(
+                pcs_dft,
+                val_mmcs,
+                inner_parameters,
+            ))
+        };
+
+        let challenger_seed =
+            build_v6_challenger_seed::<EF>(commitment_parameters, fri_parameters, fri_batching);
+        let max_log_degree = Val::TWO_ADICITY - commitment_parameters.log_blowup;
+        let max_quotient_degree = 1 << commitment_parameters.log_blowup;
+        Self {
+            pcs: V6Pcs::new(pcs, commitment_parameters, fri_parameters),
+            challenger_seed,
+            max_log_degree,
+            max_quotient_degree,
+            log_blowup: commitment_parameters.log_blowup,
+            cap_height: commitment_parameters.cap_height,
+            commitment_parameters,
+            fri_parameters,
+            fri_batching,
+        }
+    }
+
+    /// Public protocol-domain seed used by the `v6` challenger.
+    pub fn challenger_seed(&self) -> &[u8] {
+        &self.challenger_seed
+    }
+
+    pub fn cap_height(&self) -> usize {
+        self.cap_height
+    }
+
+    pub fn fri_parameters(&self) -> FriParameters {
+        self.fri_parameters
+    }
+
+    pub fn fri_batching(&self) -> FriBatching {
+        self.fri_batching
+    }
+
+    /// Switches the FRI opening batching mode (`Horner` or `Tensor`), updating
+    /// both the PCS and the protocol challenger seed.
+    pub fn with_fri_batching(self, fri_batching: FriBatching) -> Self {
+        let spill = self.spill_dir().map(std::path::Path::to_path_buf);
+        let cfg = Self::new_with_batching(
+            self.commitment_parameters,
+            self.fri_parameters,
+            fri_batching,
+        );
+        match spill {
+            Some(dir) => cfg.with_disk_spill(dir),
+            None => cfg.without_disk_spill(),
+        }
+    }
+
+    /// Enables disk-backed spilling of committed LDE matrices on the CPU prover.
+    #[cfg_attr(feature = "cuda", allow(unused_mut))]
+    pub fn with_disk_spill(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        #[cfg(not(feature = "cuda"))]
+        self.pcs
+            .inner_mut()
+            .inner_mut()
+            .set_spill_dir(Some(dir.into()));
+        #[cfg(feature = "cuda")]
+        let _ = dir.into();
+        self
+    }
+
+    /// Disables disk spilling (forces in-memory LDE storage on CPU).
+    #[cfg_attr(feature = "cuda", allow(unused_mut))]
+    pub fn without_disk_spill(mut self) -> Self {
+        #[cfg(not(feature = "cuda"))]
+        self.pcs.inner_mut().inner_mut().set_spill_dir(None);
+        self
+    }
+
+    /// Returns the configured disk-spill directory, if enabled on the CPU backend.
+    pub fn spill_dir(&self) -> Option<&std::path::Path> {
+        #[cfg(not(feature = "cuda"))]
+        {
+            self.pcs.spill_dir()
+        }
+        #[cfg(feature = "cuda")]
+        {
+            None
+        }
+    }
+}
+
+impl<EF> ProofConfig for GoldilocksV6Config<EF>
+where
+    EF: TwoAdicField + ExtensionField<Val> + crate::traits::ExtensionOf<Val>,
+{
+    type Pcs = V6Pcs<EF>;
+    type Challenge = EF;
+    type Challenger = DomainChallenger<EF>;
+
+    fn pcs(&self) -> &Self::Pcs {
+        &self.pcs
+    }
+
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::V6
+    }
+
+    fn initialise_challenger(&self) -> Self::Challenger {
+        self.initialise_challenger_for_mode(TranscriptMode::Single)
+    }
+
+    fn initialise_challenger_for_mode(&self, mode: TranscriptMode) -> Self::Challenger {
+        let domain = match mode {
+            TranscriptMode::Single => Blake3Domain::TranscriptSingle,
+            TranscriptMode::Batch => Blake3Domain::TranscriptBatch,
+        };
+        DomainChallenger::from_domain(self.challenger_seed.clone(), domain)
+    }
+
+    fn max_log_degree(&self) -> usize {
+        self.max_log_degree
+    }
+
+    fn max_quotient_degree(&self) -> usize {
+        self.max_quotient_degree
+    }
+
+    fn log_blowup(&self) -> usize {
+        self.log_blowup
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn commit_preprocessed(
+        &self,
+        evaluations: &mut dyn Iterator<
+            Item = (crate::config::Domain<Self>, RowMajorMatrix<Val>, bool),
+        >,
+    ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
+        let mut inner_evals =
+            evaluations.map(|(domain, mat, retain_1x)| (domain.into_inner(), mat, retain_1x));
+        self.pcs.commit_streaming_with_originals(&mut inner_evals)
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn commit_main_streaming(
+        &self,
+        evaluations: &mut dyn Iterator<
+            Item = (
+                crate::config::Domain<Self>,
+                crate::witness::TraceSource<Val>,
+                bool,
+            ),
+        >,
+    ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
+        let mut inner_evals = evaluations.map(|(domain, trace, retain_1x)| {
+            (domain.into_inner(), trace.materialize(), retain_1x)
+        });
+        self.pcs.commit_streaming_with_originals(&mut inner_evals)
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn accelerated_lookup_commit(
+        &self,
+        inputs: &[crate::config::LookupCommitInput<'_, Self>],
+        lookup_challenge: EF,
+        fingerprint_challenge: EF,
+        mut accumulator: EF,
+    ) -> Option<crate::config::AcceleratedLookupCommitment<Self>> {
+        use crate::lookup::{
+            InMemoryChunk, OwnedWindowChunk, TraceRowChunk, stage_2_trace_chunked,
+        };
+        use crate::p3_adapter::spill::{SpillPackWriter, SpilledMatrix};
+        use crate::traits::{Pcs as _, flatten_to_base};
+
+        enum CpuRowChunk<'a> {
+            InMemory(InMemoryChunk<'a, Val>),
+            Spilled(OwnedWindowChunk<Val>),
+        }
+
+        impl TraceRowChunk<Val> for CpuRowChunk<'_> {
+            #[inline]
+            fn row_pair(&self, local_row: usize) -> (&[Val], &[Val]) {
+                match self {
+                    Self::InMemory(chunk) => chunk.row_pair(local_row),
+                    Self::Spilled(chunk) => chunk.row_pair(local_row),
+                }
+            }
+        }
+
+        enum TraceBacking<'a> {
+            Borrowed(&'a RowMajorMatrix<Val>),
+            Owned(RowMajorMatrix<Val>),
+            Spilled(SpilledMatrix),
+        }
+
+        impl TraceBacking<'_> {
+            fn load_chunk(&self, start: usize, len: usize) -> CpuRowChunk<'_> {
+                match self {
+                    Self::Borrowed(mat) => CpuRowChunk::InMemory(InMemoryChunk::new(mat, start)),
+                    Self::Owned(mat) => CpuRowChunk::InMemory(InMemoryChunk::new(mat, start)),
+                    Self::Spilled(spilled) => CpuRowChunk::Spilled(OwnedWindowChunk::new(
+                        spilled.read_window_with_wrap(start, len),
+                    )),
+                }
+            }
+        }
+
+        let spill_dir = self.spill_dir();
+        let any_unmaterialized = inputs
+            .iter()
+            .any(|input| !input.lookup_values.is_materialized());
+        if spill_dir.is_none() && !any_unmaterialized {
+            return None;
+        }
+
+        let mut spill_pack = spill_dir.map(SpillPackWriter::create);
+        let mut spilled_ldes =
+            Vec::with_capacity(if spill_dir.is_some() { inputs.len() } else { 0 });
+        let mut prehashed = Vec::with_capacity(if spill_dir.is_some() { inputs.len() } else { 0 });
+        let height_counts: std::collections::HashMap<usize, usize> = if spill_dir.is_some() {
+            let mut counts = std::collections::HashMap::new();
+            for input in inputs {
+                let lde_height = input.lookup_values.height() << self.log_blowup;
+                *counts.entry(lde_height).or_insert(0) += 1;
+            }
+            counts
+        } else {
+            std::collections::HashMap::new()
+        };
+        let mut in_memory_ldes =
+            Vec::with_capacity(if spill_dir.is_none() { inputs.len() } else { 0 });
+        let mut intermediates = Vec::with_capacity(inputs.len());
+        let leaf_domain = self.pcs.leaf_domain();
+
+        for input in inputs {
+            let circuit = input.circuit;
+            let height = input.lookup_values.height();
+            let (stage_2_ext, delta) = if input.lookup_values.is_materialized() {
+                input.lookup_values.stage_2_trace(
+                    circuit.lookup_group_size,
+                    lookup_challenge,
+                    &fingerprint_challenge,
+                )
+            } else if circuit.graph.lookups.is_empty() {
+                (
+                    RowMajorMatrix::new(vec![<EF as PrimeCharacteristicRing>::ZERO; height], 1),
+                    <EF as PrimeCharacteristicRing>::ZERO,
+                )
+            } else {
+                let (s1_data, s1_idx) = input.stage_1;
+                let main_backing = if let Some(spilled) = s1_data.spilled_original_trace(s1_idx) {
+                    TraceBacking::Spilled(spilled)
+                } else if let Some(owned) = s1_data.take_in_memory_original_trace(s1_idx) {
+                    TraceBacking::Owned(owned)
+                } else {
+                    let trace_domain = self.pcs.natural_domain_for_degree(height);
+                    TraceBacking::Owned(
+                        self.pcs
+                            .get_evaluations_on_domain(s1_data, s1_idx, trace_domain)
+                            .to_row_major_matrix(),
+                    )
+                };
+
+                let prep_backing = if circuit.graph.lookup_prefix_uses_preprocessed() {
+                    if let Some(pp) = circuit.preprocessed.as_ref() {
+                        Some(TraceBacking::Borrowed(pp))
+                    } else if let Some((prep_data, prep_idx)) = input.preprocessed {
+                        if let Some(spilled) = prep_data.spilled_original_trace(prep_idx) {
+                            Some(TraceBacking::Spilled(spilled))
+                        } else {
+                            let trace_domain = self.pcs.natural_domain_for_degree(height);
+                            Some(TraceBacking::Owned(
+                                self.pcs
+                                    .get_evaluations_on_domain(prep_data, prep_idx, trace_domain)
+                                    .to_row_major_matrix(),
+                            ))
+                        }
+                    } else {
+                        panic!(
+                            "circuit lookup expressions read preprocessed columns, but no preprocessed trace is available"
+                        );
+                    }
+                } else {
+                    None
+                };
+
+                stage_2_trace_chunked(
+                    circuit,
+                    height,
+                    lookup_challenge,
+                    &fingerprint_challenge,
+                    |start, len| main_backing.load_chunk(start, len),
+                    prep_backing
+                        .as_ref()
+                        .map(|prep| move |start, len| prep.load_chunk(start, len)),
+                )
+            };
+
+            accumulator += delta;
+            intermediates.push(accumulator);
+
+            let stage_2_base = flatten_to_base::<Val, EF>(stage_2_ext);
+            let domain = self.pcs.natural_domain_for_degree(stage_2_base.height());
+            let lde = self.pcs.compute_lde(domain.into_inner(), stage_2_base);
+            if let Some(pack) = &mut spill_pack {
+                if height_counts.get(&lde.height()).copied() == Some(1) {
+                    let (spilled, digests) = pack.append_matrix_and_hash(&lde, leaf_domain);
+                    spilled_ldes.push(spilled);
+                    prehashed.push(Some(digests));
+                } else {
+                    spilled_ldes.push(pack.append_matrix(&lde));
+                    prehashed.push(None);
+                }
+            } else {
+                in_memory_ldes.push(lde);
+            }
+        }
+
+        if let Some(first) = inputs.first() {
+            first.stage_1.0.release_original_traces();
+        }
+
+        let (commitment, data) = if let Some(mut pack) = spill_pack {
+            pack.flush();
+            self.pcs
+                .commit_spilled_ldes_prehashed(spilled_ldes, None, prehashed)
+        } else {
+            self.pcs.commit_in_memory_ldes(in_memory_ldes)
+        };
+        Some((commitment, data, intermediates))
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn accelerated_quotient_commit(
+        &self,
+        inputs: &[crate::config::QuotientCommitInput<'_, Self>],
+        alpha: EF,
+    ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
+        use crate::p3_adapter::pcs::{lde_from_shifted_coefficients, shifted_quotient_slices};
+        use crate::p3_adapter::spill::SpillPackWriter;
+        use crate::traits::{EvaluationDomain, Pcs as _, flatten_to_base};
+
+        let spill_dir = self.spill_dir()?;
+        let mut pack = SpillPackWriter::create(spill_dir);
+        let mut spilled_ldes = Vec::with_capacity(inputs.len());
+        let mut prehashed = Vec::with_capacity(inputs.len());
+        let dft = self.pcs.quotient_dft();
+        let log_blowup = self.log_blowup;
+        let leaf_domain = self.pcs.leaf_domain();
+        let mut height_counts = std::collections::HashMap::new();
+        for input in inputs {
+            let lde_height =
+                (input.quotient_domain.size() / input.circuit.quotient_degree()) << log_blowup;
+            *height_counts.entry(lde_height).or_insert(0) += 1;
+        }
+
+        for input in inputs {
+            let circuit = input.circuit;
+            let quotient_degree = circuit.quotient_degree();
+            let preprocessed_evals = input.preprocessed.map(|(data, idx)| {
+                self.pcs
+                    .get_evaluations_on_domain(data, idx, input.quotient_domain)
+            });
+            let stage_1_evals = self.pcs.get_evaluations_on_domain(
+                input.stage_1.0,
+                input.stage_1.1,
+                input.quotient_domain,
+            );
+            let stage_2_evals = self.pcs.get_evaluations_on_domain(
+                input.stage_2.0,
+                input.stage_2.1,
+                input.quotient_domain,
+            );
+            let q_vals = crate::prover::quotient_values::<Self>(
+                circuit,
+                &input.lookup_publics,
+                input.trace_domain,
+                input.quotient_domain,
+                &preprocessed_evals,
+                &stage_1_evals,
+                &stage_2_evals,
+                alpha,
+                input.constraint_count,
+            );
+            drop(preprocessed_evals);
+            drop(stage_1_evals);
+            drop(stage_2_evals);
+
+            let quotient_flat = flatten_to_base::<Val, EF>(RowMajorMatrix::new_col(q_vals));
+            let sliced = shifted_quotient_slices(
+                dft,
+                quotient_flat,
+                EvaluationDomain::first_point(&input.quotient_domain),
+                quotient_degree,
+            );
+            let lde = lde_from_shifted_coefficients(dft, sliced, log_blowup);
+            if height_counts.get(&lde.height()).copied() == Some(1) {
+                let (spilled, digests) = pack.append_matrix_and_hash(&lde, leaf_domain);
+                spilled_ldes.push(spilled);
+                prehashed.push(Some(digests));
+            } else {
+                spilled_ldes.push(pack.append_matrix(&lde));
+                prehashed.push(None);
+            }
+        }
+
+        pack.flush();
+        Some(
+            self.pcs
+                .commit_spilled_ldes_prehashed(spilled_ldes, None, prehashed),
+        )
+    }
+
+    fn canonicalize_proof(proof: &mut crate::prover::Proof<Self>) {
+        canonicalize_goldilocks_fri_proof::<Self, EF, V6ExtMmcs<EF>>(proof);
     }
 }
 

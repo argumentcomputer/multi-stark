@@ -243,7 +243,9 @@ impl<SC: ProofConfig> System<SC> {
         // observations as the prover, so any divergence (e.g. different
         // commitments) produces different challenges, making it infeasible for a
         // cheating prover to predict them.
-        let mut challenger = self.config.initialise_challenger();
+        let mut challenger = self
+            .config
+            .initialise_challenger_for_mode(crate::config::TranscriptMode::Single);
 
         // Bind the system shape into the transcript. The protocol parameters
         // are already bound via the challenger seed.
@@ -424,6 +426,17 @@ impl<SC: ProofConfig> System<SC> {
                             // the value itself feeds no constraint.
                             let domain = pcs
                                 .natural_domain_for_degree(self.circuits[ci].preprocessed_height);
+                            if !self.config.omit_inactive_preprocessed_openings() {
+                                let prep_log_degree =
+                                    log2_strict_usize(self.circuits[ci].preprocessed_height);
+                                let unshifted =
+                                    zeta * SC::Challenge::from(domain.first_point().inverse());
+                                crate::ensure!(
+                                    unshifted.exp_power_of_2(prep_log_degree)
+                                        != <SC::Challenge as Algebra<SC::Challenge>>::ONE,
+                                    VerificationError::InvalidChallenge
+                                );
+                            }
                             let preprocessed_opened_values =
                                 preprocessed_opened_values.as_ref().unwrap();
                             preprocessed_trace_evaluations.push((

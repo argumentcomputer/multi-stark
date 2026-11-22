@@ -9,17 +9,18 @@
 //! ([`crate::lookup::logup_constraint_values`]), folding their values after
 //! the user roots.
 
-use crate::traits::Field;
+use crate::traits::{ExtensionModulus, ExtensionOf, Field};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 
-use crate::config::{Com, PcsData, ProofConfig, Val};
+use crate::config::{Com, PcsData, ProofConfig, ProtocolVersion, Val};
 use crate::lookup::LookupValues;
 
 use crate::eval::VarValues;
-use crate::expr::{CircuitSpec, Expr, ExtExpr};
-use crate::graph::{ConstraintGraph, ExtensionParams, compile};
+use crate::expr::{CircuitSpec, Expr, ExtExpr, RowOffset, Source};
+use crate::graph::{ConstraintGraph, ExtensionParams, Node, compile};
 use crate::lookup::{Lookup, logup_constraint_count, logup_max_degree, num_publics, stage2_width};
+use crate::p3_adapter::domain_blake3::Blake3Domain;
 use crate::traits::{Pcs, Transcript};
 
 /// User-facing definition of one circuit: main-trace width, optional
@@ -129,14 +130,14 @@ impl<F: Field> Circuit<F> {
     }
 
     /// Returns `true` if any compiled node reads a column from `source` at `offset`.
-    pub fn uses_row(&self, source: crate::expr::Source, offset: crate::expr::RowOffset) -> bool {
+    pub fn uses_row(&self, source: Source, offset: RowOffset) -> bool {
         self.graph.uses_row(source, offset)
     }
 }
 
 /// A multi-circuit STARK system over compiled constraint circuits. Contains
-/// all circuits together with their shared preprocessed commitment and the
-/// protocol configuration.
+/// all circuits together with their shared preprocessed commitment, canonical
+/// verifying-key / constraint-graph digest, and the protocol configuration.
 pub struct System<SC: ProofConfig> {
     pub config: SC,
     pub circuits: Vec<Circuit<Val<SC>>>,
@@ -145,6 +146,11 @@ pub struct System<SC: ProofConfig> {
     /// Maps each circuit index to its position within the preprocessed
     /// commitment; `None` if that circuit has no preprocessed trace.
     pub preprocessed_indices: Vec<Option<usize>>,
+    /// Canonical BLAKE3 `derive_key("multi-stark/v6/vk")` digest committing to
+    /// the extension degree/modulus and every circuit's full constraint DAG,
+    /// lookup definitions, and metadata (independent of whether preprocessed
+    /// trace matrices are retained in RAM).
+    pub vk_digest: [u8; 32],
 }
 
 /// Prover-side data retained between system setup and proving.
@@ -154,9 +160,9 @@ pub struct ProverKey<SC: ProofConfig> {
 }
 
 impl<SC: ProofConfig> System<SC> {
-    pub fn opens_next_row(&self, circuit: usize, source: crate::expr::Source) -> bool {
+    pub fn opens_next_row(&self, circuit: usize, source: Source) -> bool {
         !self.config.omit_unused_next_row_openings()
-            || self.circuits[circuit].uses_row(source, crate::expr::RowOffset::Next)
+            || self.circuits[circuit].uses_row(source, RowOffset::Next)
     }
 
     /// Builds the system from per-circuit inputs.
@@ -290,22 +296,36 @@ impl<SC: ProofConfig> System<SC> {
         // Ensure all inputs are drained even if a custom backend stopped early.
         for _ in prep_iter {}
 
+        let vk_digest = compute_vk_digest::<Val<SC>, SC::Challenge>(&circuits);
         let system = Self {
             config,
             circuits,
             preprocessed_commit,
             preprocessed_indices,
+            vk_digest,
         };
         (system, ProverKey { preprocessed_data })
     }
 
-    /// Binds the system shape into the Fiat-Shamir transcript. The prover and
-    /// the verifier must call this identically, before observing any
-    /// commitment, so that transcripts of systems with different circuit
-    /// shapes never collide. The protocol parameters are bound separately,
-    /// via the challenger seed (see
-    /// [`ProofConfig::initialise_challenger`]).
+    /// Binds the system shape (and, under protocol `v6`, the extension
+    /// degree/modulus and canonical VK / constraint-graph digest) into the
+    /// Fiat-Shamir transcript. The prover and the verifier must call this
+    /// identically, before observing any commitment, so that transcripts of
+    /// systems with different constraint graphs or circuit shapes never
+    /// collide. The protocol parameters are bound separately via the
+    /// challenger seed (see [`ProofConfig::initialise_challenger_for_mode`]).
     pub fn observe_shape(&self, challenger: &mut SC::Challenger) {
+        if self.config.protocol_version() == ProtocolVersion::V6 {
+            challenger.observe_field(Val::<SC>::from_usize(
+                <SC::Challenge as ExtensionOf<Val<SC>>>::D,
+            ));
+            let modulus = <SC::Challenge as ExtensionOf<Val<SC>>>::MODULUS;
+            challenger.observe_field(Val::<SC>::from_u8(modulus.tag()));
+            if let ExtensionModulus::Binomial { w } = modulus {
+                challenger.observe_field(w);
+            }
+            challenger.observe_digest(self.vk_digest);
+        }
         let mut observe = |x: usize| challenger.observe_field(Val::<SC>::from_usize(x));
         observe(self.circuits.len());
         for circuit in &self.circuits {
@@ -320,6 +340,129 @@ impl<SC: ProofConfig> System<SC> {
             observe(circuit.lookup_group_size);
         }
     }
+}
+
+/// Computes the canonical protocol-`v6` verifying-key / constraint-graph digest
+/// under `BLAKE3_derive_key("multi-stark/v6/vk")`.
+///
+/// Commits to the extension degree, extension modulus, and every circuit's
+/// metadata, compiled DAG nodes (including canonical field constants), zero
+/// constraint roots, and lookup expressions. Intentionally excludes the
+/// in-memory `circuit.preprocessed` matrix so `System::new` and
+/// `System::new_without_preprocessed` produce identical digests (the
+/// preprocessed traces themselves are bound via `preprocessed_commit`).
+pub fn compute_vk_digest<F: Field, EF: ExtensionOf<F>>(circuits: &[Circuit<F>]) -> [u8; 32] {
+    let mut hasher = Blake3Domain::VerifyingKey.hasher();
+    let bincode_cfg = bincode::config::standard()
+        .with_little_endian()
+        .with_fixed_int_encoding();
+
+    let hash_u32 = |h: &mut blake3::Hasher, x: u32| {
+        h.update(&x.to_le_bytes());
+    };
+    let hash_u64 = |h: &mut blake3::Hasher, x: u64| {
+        h.update(&x.to_le_bytes());
+    };
+    let hash_usize = |h: &mut blake3::Hasher, x: usize| {
+        hash_u64(h, u64::try_from(x).expect("usize exceeds u64"));
+    };
+    let hash_field = |h: &mut blake3::Hasher, x: F| {
+        let bytes =
+            bincode::serde::encode_to_vec(x, bincode_cfg).expect("field serialization cannot fail");
+        h.update(&bytes);
+    };
+
+    hash_usize(&mut hasher, EF::D);
+    hasher.update(&[EF::MODULUS.tag()]);
+    if let ExtensionModulus::Binomial { w } = EF::MODULUS {
+        hash_field(&mut hasher, w);
+    }
+
+    hash_usize(&mut hasher, circuits.len());
+    for circuit in circuits {
+        hash_usize(&mut hasher, circuit.main_width);
+        hash_usize(&mut hasher, circuit.preprocessed_width);
+        hash_usize(&mut hasher, circuit.preprocessed_height);
+        hash_usize(&mut hasher, circuit.num_lookups);
+        hash_usize(&mut hasher, circuit.stage_2_width);
+        hash_usize(&mut hasher, circuit.num_publics);
+        hash_usize(&mut hasher, circuit.lookup_group_size);
+        hash_usize(&mut hasher, circuit.constraint_count);
+        hash_usize(&mut hasher, circuit.max_constraint_degree);
+        hash_usize(&mut hasher, circuit.graph.lookup_prefix_len);
+        hash_u32(&mut hasher, circuit.graph.max_constraint_degree);
+
+        hash_usize(&mut hasher, circuit.graph.nodes.len());
+        for node in &circuit.graph.nodes {
+            match *node {
+                Node::Const(c) => {
+                    hasher.update(&[0u8]);
+                    hash_field(&mut hasher, c);
+                }
+                Node::Var(col) => {
+                    let src_tag = match col.source {
+                        Source::Preprocessed => 0u8,
+                        Source::Main => 1u8,
+                        Source::Stage2 => 2u8,
+                    };
+                    let off_tag = match col.offset {
+                        RowOffset::Current => 0u8,
+                        RowOffset::Next => 1u8,
+                    };
+                    hasher.update(&[1u8, src_tag, off_tag]);
+                    hash_u32(&mut hasher, col.index);
+                }
+                Node::Public(idx) => {
+                    hasher.update(&[2u8]);
+                    hash_u32(&mut hasher, idx);
+                }
+                Node::IsFirstRow => {
+                    hasher.update(&[3u8]);
+                }
+                Node::IsLastRow => {
+                    hasher.update(&[4u8]);
+                }
+                Node::IsTransition => {
+                    hasher.update(&[5u8]);
+                }
+                Node::Add(a, b) => {
+                    hasher.update(&[6u8]);
+                    hash_u32(&mut hasher, a.0);
+                    hash_u32(&mut hasher, b.0);
+                }
+                Node::Sub(a, b) => {
+                    hasher.update(&[7u8]);
+                    hash_u32(&mut hasher, a.0);
+                    hash_u32(&mut hasher, b.0);
+                }
+                Node::Mul(a, b) => {
+                    hasher.update(&[8u8]);
+                    hash_u32(&mut hasher, a.0);
+                    hash_u32(&mut hasher, b.0);
+                }
+                Node::Neg(a) => {
+                    hasher.update(&[9u8]);
+                    hash_u32(&mut hasher, a.0);
+                }
+            }
+        }
+
+        hash_usize(&mut hasher, circuit.graph.zeros.len());
+        for z in &circuit.graph.zeros {
+            hash_u32(&mut hasher, z.0);
+        }
+
+        hash_usize(&mut hasher, circuit.graph.lookups.len());
+        for lookup in &circuit.graph.lookups {
+            hash_u32(&mut hasher, lookup.multiplicity.0);
+            hash_usize(&mut hasher, lookup.args.len());
+            for arg in &lookup.args {
+                hash_u32(&mut hasher, arg.0);
+            }
+        }
+    }
+
+    hasher.finalize().into()
 }
 
 /// Witness data for the system: stage-1 traces and the concrete lookup

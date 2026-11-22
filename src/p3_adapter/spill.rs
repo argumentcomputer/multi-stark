@@ -21,17 +21,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use p3_blake3::Blake3;
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
 use p3_commit::{BatchOpening, BatchOpeningRef, Mmcs, OpenedValues, Pcs, PeriodicLdeTable};
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::coset::TwoAdicMultiplicativeCoset;
 use p3_field::{
     BasedVectorSpace, ExtensionField, Field, PackedFieldExtension, PackedValue,
-    PrimeCharacteristicRing, PrimeField64, TwoAdicField, dot_product,
+    PrimeCharacteristicRing, PrimeField64, TwoAdicField, batch_multiplicative_inverse, dot_product,
     scale_slice_in_place_single_core,
 };
-use p3_fri::verifier::{self, FriError};
+use p3_fri::verifier::FriError;
 use p3_fri::{
     BatchMultiOpening, CommitmentWithOpeningPoints, FriParameters, FriProof,
     ProverDataWithOpeningPoints, TwoAdicFriFolding, TwoAdicFriFoldingForMmcs,
@@ -44,17 +43,31 @@ use p3_matrix::interpolation::{Interpolate, compute_adjusted_weights};
 use p3_matrix::{Dimensions, Matrix};
 use p3_maybe_rayon::prelude::*;
 use p3_merkle_tree::{MerkleTreeMmcs, PrunedMerklePaths};
-use p3_symmetric::{CryptographicHasher, MerkleCap, SerializingHasher};
+use p3_symmetric::{
+    CompressionFunctionFromHasher, CryptographicHasher, MerkleCap, SerializingHasher,
+};
 use p3_util::linear_map::LinearMap;
 use p3_util::{log2_ceil_usize, log2_strict_usize, reverse_slice_index_bits};
 use tracing::debug_span;
 
 use super::blake3_simd;
-use crate::types::{Blake3CompressionFunction, ExtVal, PackedVal, Val};
+use super::domain_blake3::{Blake3Domain, DomainBlake3};
+use super::fri_batching::{
+    FriBatching, FriBatchingSchedule, pack_ext_weights, verify_fri_with_batching,
+};
+use crate::traits::{ExtensionModulus, ExtensionOf};
+use crate::types::{PackedVal, Val};
 
-/// CPU reference MMCS used for verification and reference tests.
-pub type CpuMmcs =
-    MerkleTreeMmcs<Val, u8, SerializingHasher<Blake3>, Blake3CompressionFunction, 2, 32>;
+/// CPU reference MMCS supporting both legacy `v5` (plain BLAKE3) and `v6`
+/// (domain-separated BLAKE3 `derive_key`) Merkle trees.
+pub type CpuMmcs = MerkleTreeMmcs<
+    Val,
+    u8,
+    SerializingHasher<DomainBlake3>,
+    CompressionFunctionFromHasher<DomainBlake3, 2, 32>,
+    2,
+    32,
+>;
 type SpillCommitResult = (
     <SpillableMmcs as Mmcs<Val>>::Commitment,
     SpillableMmcsData<RowMajorMatrix<Val>>,
@@ -249,12 +262,13 @@ impl SpillPackWriter {
     pub(crate) fn append_matrix_and_hash(
         &mut self,
         mat: &RowMajorMatrix<Val>,
+        leaf_domain: Blake3Domain,
     ) -> (SpilledMatrix, Vec<[u8; 32]>) {
         let height = mat.height();
         let width = mat.width();
         let offset = self.next_offset;
         if width == 0 {
-            let empty_digest = Blake3.hash_slice(&[]);
+            let empty_digest = DomainBlake3::new(leaf_domain).hash_slice(&[]);
             return (
                 SpilledMatrix {
                     file: Arc::clone(&self.spill),
@@ -281,6 +295,7 @@ impl SpillPackWriter {
                         &self.scratch[..byte_len],
                         row_bytes,
                         &mut dst[row_start..row_start + n_rows],
+                        leaf_domain,
                     );
                     self.writer
                         .write_all(&self.scratch[..byte_len])
@@ -566,7 +581,7 @@ struct FastInMemoryMerkleTree<M> {
 }
 
 impl<M: Matrix<Val>> FastInMemoryMerkleTree<M> {
-    fn build(leaves: Vec<M>) -> Self {
+    fn build(leaves: Vec<M>, leaf_domain: Blake3Domain, compress_domain: Blake3Domain) -> Self {
         assert!(!leaves.is_empty(), "No matrices given?");
         let max_height = validate_reachable_heights_iter(leaves.iter().map(Matrix::height));
 
@@ -584,7 +599,7 @@ impl<M: Matrix<Val>> FastInMemoryMerkleTree<M> {
         // SAFETY: `hash_matrix_rows_uninit` initializes every element of `dst` (`0..max_height`).
         let first_layer = unsafe {
             blake3_simd::alloc_and_fill_digests(padded_len_binary(max_height), max_height, |dst| {
-                blake3_simd::hash_matrix_rows_uninit(&tallest_refs, 0, dst);
+                blake3_simd::hash_matrix_rows_uninit(&tallest_refs, 0, dst, leaf_domain);
             })
         };
 
@@ -609,10 +624,15 @@ impl<M: Matrix<Val>> FastInMemoryMerkleTree<M> {
             let inject_group = &order[inject_start..cursor];
 
             let next_digests = if inject_group.is_empty() {
-                compress_layer_binary(prev_layer)
+                compress_layer_binary(prev_layer, compress_domain)
             } else {
                 let inject_refs: Vec<&M> = inject_group.iter().map(|&idx| &leaves[idx]).collect();
-                compress_and_inject_in_memory(prev_layer, &inject_refs)
+                compress_and_inject_in_memory(
+                    prev_layer,
+                    &inject_refs,
+                    leaf_domain,
+                    compress_domain,
+                )
             };
             arity_schedule.push(step);
             digest_layers.push(next_digests);
@@ -715,6 +735,8 @@ impl SpilledMerkleTree {
         matrices: Vec<SpilledMatrix>,
         original_traces: Vec<Option<SpilledMatrix>>,
         mut prehashed: Vec<Option<Vec<[u8; 32]>>>,
+        leaf_domain: Blake3Domain,
+        compress_domain: Blake3Domain,
     ) -> Self {
         assert!(!matrices.is_empty(), "No matrices given?");
         let max_height =
@@ -739,7 +761,7 @@ impl SpilledMerkleTree {
             digests.resize(padded_len_binary(max_height), [0u8; 32]);
             digests
         } else {
-            hash_leaf_group_streaming(&matrices, tallest, max_height)
+            hash_leaf_group_streaming(&matrices, tallest, max_height, leaf_domain)
         };
         let mut digest_layers = vec![first_layer];
         let mut arity_schedule = Vec::new();
@@ -762,13 +784,19 @@ impl SpilledMerkleTree {
             let inject_group = &order[inject_start..cursor];
 
             let next_digests = if inject_group.is_empty() {
-                compress_layer_binary(prev_layer)
+                compress_layer_binary(prev_layer, compress_domain)
             } else if let &[single_idx] = inject_group
                 && let Some(rows_digests) = prehashed.get_mut(single_idx).and_then(Option::take)
             {
-                compress_and_inject_prehashed(prev_layer, &rows_digests)
+                compress_and_inject_prehashed(prev_layer, &rows_digests, compress_domain)
             } else {
-                compress_and_inject_streaming(prev_layer, &matrices, inject_group)
+                compress_and_inject_streaming(
+                    prev_layer,
+                    &matrices,
+                    inject_group,
+                    leaf_domain,
+                    compress_domain,
+                )
             };
             arity_schedule.push(step);
             digest_layers.push(next_digests);
@@ -897,6 +925,7 @@ fn hash_leaf_group_streaming(
     matrices: &[SpilledMatrix],
     group: &[usize],
     max_height: usize,
+    leaf_domain: Blake3Domain,
 ) -> Vec<[u8; 32]> {
     let padded = padded_len_binary(max_height);
     let block_rows = block_rows_for_group(matrices, group, max_height);
@@ -913,19 +942,23 @@ fn hash_leaf_group_streaming(
                         (m.read_raw_rows(start, n_rows), m.row_bytes())
                     })
                     .collect();
-                blake3_simd::hash_raw_multi_rows_uninit(&blocks, &mut dst[start..start + n_rows]);
+                blake3_simd::hash_raw_multi_rows_uninit(
+                    &blocks,
+                    &mut dst[start..start + n_rows],
+                    leaf_domain,
+                );
             }
         })
     }
 }
 
-fn compress_layer_binary(prev_layer: &[[u8; 32]]) -> Vec<[u8; 32]> {
+fn compress_layer_binary(prev_layer: &[[u8; 32]], compress_domain: Blake3Domain) -> Vec<[u8; 32]> {
     let raw_next = prev_layer.len() / 2;
     let next_len_padded = padded_len_binary(raw_next);
     // SAFETY: `compress_pairs_uninit` initializes every element of `dst` (`0..raw_next`).
     unsafe {
         blake3_simd::alloc_and_fill_digests(next_len_padded, raw_next, |dst| {
-            blake3_simd::compress_pairs_uninit(prev_layer, dst);
+            blake3_simd::compress_pairs_uninit(prev_layer, dst, compress_domain);
         })
     }
 }
@@ -933,6 +966,7 @@ fn compress_layer_binary(prev_layer: &[[u8; 32]]) -> Vec<[u8; 32]> {
 fn compress_and_inject_prehashed(
     prev_layer: &[[u8; 32]],
     rows_digests: &[[u8; 32]],
+    compress_domain: Blake3Domain,
 ) -> Vec<[u8; 32]> {
     let next_len = rows_digests.len();
     let raw_next = prev_layer.len() / 2;
@@ -945,6 +979,7 @@ fn compress_and_inject_prehashed(
                 prev_layer,
                 rows_digests,
                 &mut dst[..next_len],
+                compress_domain,
             );
             if raw_next > next_len {
                 let zeros = vec![[0u8; 32]; raw_next - next_len];
@@ -952,6 +987,7 @@ fn compress_and_inject_prehashed(
                     &prev_layer[2 * next_len..],
                     &zeros,
                     &mut dst[next_len..raw_next],
+                    compress_domain,
                 );
             }
         })
@@ -961,6 +997,8 @@ fn compress_and_inject_prehashed(
 fn compress_and_inject_in_memory<M: Matrix<Val>>(
     prev_layer: &[[u8; 32]],
     inject_group: &[&M],
+    leaf_domain: Blake3Domain,
+    compress_domain: Blake3Domain,
 ) -> Vec<[u8; 32]> {
     let next_len = inject_group[0].height();
     let raw_next = prev_layer.len() / 2;
@@ -974,11 +1012,17 @@ fn compress_and_inject_in_memory<M: Matrix<Val>>(
         blake3_simd::alloc_and_fill_digests(next_len_padded, raw_next, |dst| {
             for start in (0..next_len).step_by(BLOCK_ROWS) {
                 let n_rows = (next_len - start).min(BLOCK_ROWS);
-                blake3_simd::hash_matrix_rows(inject_group, start, &mut row_digests[..n_rows]);
+                blake3_simd::hash_matrix_rows(
+                    inject_group,
+                    start,
+                    &mut row_digests[..n_rows],
+                    leaf_domain,
+                );
                 blake3_simd::compress_and_inject_from_digests_uninit(
                     &prev_layer[2 * start..],
                     &row_digests[..n_rows],
                     &mut dst[start..start + n_rows],
+                    compress_domain,
                 );
             }
 
@@ -988,6 +1032,7 @@ fn compress_and_inject_in_memory<M: Matrix<Val>>(
                     &prev_layer[2 * next_len..],
                     &zeros,
                     &mut dst[next_len..raw_next],
+                    compress_domain,
                 );
             }
         })
@@ -998,6 +1043,8 @@ fn compress_and_inject_streaming(
     prev_layer: &[[u8; 32]],
     matrices: &[SpilledMatrix],
     inject_group: &[usize],
+    leaf_domain: Blake3Domain,
+    compress_domain: Blake3Domain,
 ) -> Vec<[u8; 32]> {
     let next_len = matrices[inject_group[0]].height();
     let raw_next = prev_layer.len() / 2;
@@ -1018,11 +1065,12 @@ fn compress_and_inject_streaming(
                         (m.read_raw_rows(start, n_rows), m.row_bytes())
                     })
                     .collect();
-                blake3_simd::hash_raw_multi_rows(&blocks, &mut row_digests[..n_rows]);
+                blake3_simd::hash_raw_multi_rows(&blocks, &mut row_digests[..n_rows], leaf_domain);
                 blake3_simd::compress_and_inject_from_digests_uninit(
                     &prev_layer[2 * start..],
                     &row_digests[..n_rows],
                     &mut dst[start..start + n_rows],
+                    compress_domain,
                 );
             }
 
@@ -1032,6 +1080,7 @@ fn compress_and_inject_streaming(
                     &prev_layer[2 * next_len..],
                     &zeros,
                     &mut dst[next_len..raw_next],
+                    compress_domain,
                 );
             }
         })
@@ -1115,25 +1164,57 @@ impl<M> SpillableMmcsData<M> {
 
 /// CPU MMCS supporting both in-memory commitments (default, accelerated via
 /// multi-buffer SIMD BLAKE3) and disk-spilled commitments with identical
-/// commitments and opening proofs.
+/// commitments and opening proofs, in both legacy `v5` (plain BLAKE3) and
+/// protocol `v6` (domain-separated `derive_key` BLAKE3) modes.
 #[derive(Clone, Debug)]
 pub struct SpillableMmcs {
     cpu: CpuMmcs,
+    leaf_domain: Blake3Domain,
+    compress_domain: Blake3Domain,
 }
 
 impl SpillableMmcs {
-    pub fn new(
-        hash: SerializingHasher<Blake3>,
-        compress: Blake3CompressionFunction,
+    /// Creates an MMCS using the given leaf and internal-node BLAKE3 domains.
+    pub fn new_with_domains(
+        leaf_domain: Blake3Domain,
+        compress_domain: Blake3Domain,
         cap_height: usize,
     ) -> Self {
+        let field_hash = SerializingHasher::new(DomainBlake3::new(leaf_domain));
+        let compress = CompressionFunctionFromHasher::new(DomainBlake3::new(compress_domain));
         Self {
-            cpu: CpuMmcs::new(hash, compress, cap_height),
+            cpu: CpuMmcs::new(field_hash, compress, cap_height),
+            leaf_domain,
+            compress_domain,
         }
+    }
+
+    /// Creates a legacy `v5` plain BLAKE3 MMCS (100% bit-identical to `p3_blake3::Blake3`).
+    pub fn new_plain(cap_height: usize) -> Self {
+        Self::new_with_domains(Blake3Domain::Plain, Blake3Domain::Plain, cap_height)
+    }
+
+    /// Creates a protocol `v6` domain-separated BLAKE3 MMCS separating Merkle
+    /// leaf row hashes (`MerkleLeaf`) from internal 2-to-1 compressions
+    /// (`MerkleCompress`).
+    pub fn new_v6(cap_height: usize) -> Self {
+        Self::new_with_domains(
+            Blake3Domain::MerkleLeaf,
+            Blake3Domain::MerkleCompress,
+            cap_height,
+        )
     }
 
     pub const fn cap_height(&self) -> usize {
         self.cpu.cap_height()
+    }
+
+    pub const fn leaf_domain(&self) -> Blake3Domain {
+        self.leaf_domain
+    }
+
+    pub const fn compress_domain(&self) -> Blake3Domain {
+        self.compress_domain
     }
 
     pub(crate) fn commit_in_memory_with_originals(
@@ -1141,7 +1222,7 @@ impl SpillableMmcs {
         ldes: Vec<RowMajorMatrix<Val>>,
         original_traces: Vec<Option<RowMajorMatrix<Val>>>,
     ) -> SpillCommitResult {
-        let tree = FastInMemoryMerkleTree::build(ldes);
+        let tree = FastInMemoryMerkleTree::build(ldes, self.leaf_domain, self.compress_domain);
         let commitment = tree.cap(self.cap_height());
         (
             commitment,
@@ -1159,7 +1240,13 @@ impl SpillableMmcs {
         prehashed: Vec<Option<Vec<[u8; 32]>>>,
     ) -> SpillCommitResult {
         let count = matrices.len();
-        let tree = SpilledMerkleTree::build_with_prehashed(matrices, original_traces, prehashed);
+        let tree = SpilledMerkleTree::build_with_prehashed(
+            matrices,
+            original_traces,
+            prehashed,
+            self.leaf_domain,
+            self.compress_domain,
+        );
         let cap = tree.cap(self.cap_height());
         let materialized = (0..count).map(|_| OnceLock::new()).collect();
         (
@@ -1200,7 +1287,7 @@ impl Mmcs<Val> for SpillableMmcs {
     type Error = <CpuMmcs as Mmcs<Val>>::Error;
 
     fn commit<M: Matrix<Val>>(&self, inputs: Vec<M>) -> (Self::Commitment, Self::ProverData<M>) {
-        let tree = FastInMemoryMerkleTree::build(inputs);
+        let tree = FastInMemoryMerkleTree::build(inputs, self.leaf_domain, self.compress_domain);
         let commitment = tree.cap(self.cap_height());
         (
             commitment,
@@ -1315,6 +1402,7 @@ pub struct SpillableTwoAdicFriPcs<Dft, FriMmcs> {
     mmcs: SpillableMmcs,
     fri: FriParameters<FriMmcs>,
     spill_dir: Option<PathBuf>,
+    batching: FriBatching,
 }
 
 impl<Dft, FriMmcs> SpillableTwoAdicFriPcs<Dft, FriMmcs> {
@@ -1324,7 +1412,21 @@ impl<Dft, FriMmcs> SpillableTwoAdicFriPcs<Dft, FriMmcs> {
             mmcs,
             fri,
             spill_dir: None,
+            batching: FriBatching::Horner,
         }
+    }
+
+    pub const fn with_batching(mut self, batching: FriBatching) -> Self {
+        self.batching = batching;
+        self
+    }
+
+    pub const fn batching(&self) -> FriBatching {
+        self.batching
+    }
+
+    pub const fn leaf_domain(&self) -> Blake3Domain {
+        self.mmcs.leaf_domain()
     }
 
     pub fn set_spill_dir(&mut self, spill_dir: Option<PathBuf>) {
@@ -1421,7 +1523,8 @@ impl<Dft, FriMmcs> SpillableTwoAdicFriPcs<Dft, FriMmcs> {
                 let writer = lde_pack.get_or_insert_with(|| SpillPackWriter::create(dir));
                 match first_idx_for_height.get_mut(&lde_height) {
                     None => {
-                        let (spilled, digests) = writer.append_matrix_and_hash(&lde);
+                        let (spilled, digests) =
+                            writer.append_matrix_and_hash(&lde, self.mmcs.leaf_domain());
                         spilled_ldes.push(spilled);
                         prehashed.push(Some(digests));
                         first_idx_for_height.insert(lde_height, Some(idx));
@@ -1479,10 +1582,11 @@ impl<Dft, FriMmcs> SpillableTwoAdicFriPcs<Dft, FriMmcs> {
     }
 }
 
-impl<Dft, FriMmcs, Challenger> Pcs<ExtVal, Challenger> for SpillableTwoAdicFriPcs<Dft, FriMmcs>
+impl<EF, Dft, FriMmcs, Challenger> Pcs<EF, Challenger> for SpillableTwoAdicFriPcs<Dft, FriMmcs>
 where
+    EF: ExtensionField<Val> + ExtensionOf<Val>,
     Dft: TwoAdicSubgroupDft<Val>,
-    FriMmcs: Mmcs<ExtVal>,
+    FriMmcs: Mmcs<EF>,
     Challenger:
         FieldChallenger<Val> + CanObserve<FriMmcs::Commitment> + GrindingChallenger<Witness = Val>,
 {
@@ -1490,7 +1594,7 @@ where
     type Commitment = <SpillableMmcs as Mmcs<Val>>::Commitment;
     type ProverData = <SpillableMmcs as Mmcs<Val>>::ProverData<RowMajorMatrix<Val>>;
     type EvaluationsOnDomain<'a> = BitReversedMatrixView<RowMajorMatrixCow<'a, Val>>;
-    type Proof = FriProof<ExtVal, FriMmcs, Val, Vec<BatchMultiOpening<Val, SpillableMmcs>>>;
+    type Proof = FriProof<EF, FriMmcs, Val, Vec<BatchMultiOpening<Val, SpillableMmcs>>>;
     type Error = FriError<FriMmcs::Error, <SpillableMmcs as Mmcs<Val>>::Error>;
     const ZK: bool = false;
 
@@ -1517,7 +1621,8 @@ where
                 let idx = spilled_ldes.len();
                 match first_idx_for_height.get_mut(&h) {
                     None => {
-                        let (spilled, digests) = pack.append_matrix_and_hash(&lde);
+                        let (spilled, digests) =
+                            pack.append_matrix_and_hash(&lde, self.mmcs.leaf_domain());
                         spilled_ldes.push(spilled);
                         prehashed.push(Some(digests));
                         first_idx_for_height.insert(h, Some(idx));
@@ -1572,7 +1677,7 @@ where
             let mut prehashed = Vec::with_capacity(ldes.len());
             for lde in ldes {
                 if height_counts[&lde.height()] == 1 {
-                    let (sp, digests) = pack.append_matrix_and_hash(&lde);
+                    let (sp, digests) = pack.append_matrix_and_hash(&lde, self.mmcs.leaf_domain());
                     spilled.push(sp);
                     prehashed.push(Some(digests));
                 } else {
@@ -1638,11 +1743,11 @@ where
     fn open(
         &self,
         commitment_data_with_opening_points: Vec<
-            ProverDataWithOpeningPoints<'_, ExtVal, Self::ProverData>,
+            ProverDataWithOpeningPoints<'_, EF, Self::ProverData>,
         >,
         challenger: &mut Challenger,
-    ) -> (OpenedValues<ExtVal>, Self::Proof) {
-        let dims_and_points: Vec<(Vec<Dimensions>, &Vec<Vec<ExtVal>>)> =
+    ) -> (OpenedValues<EF>, Self::Proof) {
+        let dims_and_points: Vec<(Vec<Dimensions>, &Vec<Vec<EF>>)> =
             commitment_data_with_opening_points
                 .iter()
                 .map(|(data, points)| {
@@ -1656,11 +1761,23 @@ where
                 })
                 .collect();
 
-        let (global_max_height, global_max_width) = dims_and_points
+        let global_max_height = dims_and_points
             .iter()
-            .flat_map(|(dims, _)| dims.iter().map(|d| (d.height, d.width)))
-            .reduce(|(hmax, wmax), (h, w)| (hmax.max(h), wmax.max(w)))
+            .flat_map(|(dims, _)| dims.iter().map(|d| d.height))
+            .max()
             .expect("No Matrices Supplied?");
+        let mut opened_max_width = 0usize;
+        let mut openings_per_height = [0usize; 33];
+        for (dims, points) in &dims_and_points {
+            for (dim, pts) in dims.iter().zip(*points) {
+                if !pts.is_empty() {
+                    opened_max_width = opened_max_width.max(dim.width);
+                    let lh = log2_strict_usize(dim.height);
+                    openings_per_height[lh] += pts.len();
+                }
+            }
+        }
+        let max_openings_per_height = openings_per_height.into_iter().max().unwrap_or(0);
         let log_global_max_height = log2_strict_usize(global_max_height);
 
         let coset = build_bitrev_coset(log_global_max_height);
@@ -1668,7 +1785,7 @@ where
         let inv_denoms = compute_inverse_denominators_from_dims(&dims_and_points, &coset);
         drop(coset);
 
-        let adjusted_weights: LinearMap<ExtVal, Vec<ExtVal>> = inv_denoms
+        let adjusted_weights: LinearMap<EF, Vec<EF>> = inv_denoms
             .iter()
             .map(|(point, denoms)| (*point, compute_adjusted_weights(*point, denoms)))
             .collect();
@@ -1677,7 +1794,7 @@ where
         // only the first `h = height >> log_blowup` rows of spilled matrices in
         // bounded chunks (and reading each matrix once across all its opening
         // points).
-        let all_opened_values: OpenedValues<ExtVal> = commitment_data_with_opening_points
+        let all_opened_values: OpenedValues<EF> = commitment_data_with_opening_points
             .iter()
             .zip(&dims_and_points)
             .map(|((data, points), (dims, _))| {
@@ -1741,18 +1858,26 @@ where
         // Free adjusted_weights before allocating reduced openings.
         drop(adjusted_weights);
 
-        let alpha: ExtVal = challenger.sample_algebra_element();
-        let packed_alpha_powers: Vec<_> =
-            <ExtVal as ExtensionField<Val>>::ExtensionPacking::packed_ext_powers_capped(
-                alpha,
-                global_max_width,
-            )
-            .collect();
+        let schedule = FriBatchingSchedule::<EF>::sample(
+            self.batching,
+            opened_max_width,
+            max_openings_per_height,
+            challenger,
+        );
+        let packed_col_weights: Vec<EF::ExtensionPacking> = match &schedule {
+            FriBatchingSchedule::Horner { alpha } => {
+                EF::ExtensionPacking::packed_ext_powers_capped(*alpha, opened_max_width).collect()
+            }
+            FriBatchingSchedule::Tensor { col_weights, .. } => {
+                pack_ext_weights::<Val, EF>(col_weights)
+            }
+        };
 
         // Pass 2: Build reduced-opening codewords, streaming spilled matrices in
         // bounded row blocks.
         let mut num_reduced = [0usize; 33];
-        let mut reduced_openings: [Option<Vec<ExtVal>>; 33] = core::array::from_fn(|_| None);
+        let mut opening_idx_by_height = [0usize; 33];
+        let mut reduced_openings: [Option<Vec<EF>>; 33] = core::array::from_fn(|_| None);
 
         for (((data, points), (dims, _)), openings_for_round) in commitment_data_with_opening_points
             .iter()
@@ -1767,19 +1892,38 @@ where
                 let _guard = debug_span!("reduce matrix quotient", dims = %dim).entered();
 
                 let reduced_opening_for_log_height = reduced_openings[log_height]
-                    .get_or_insert_with(|| ExtVal::zero_vec(dim.height));
+                    .get_or_insert_with(|| <EF as PrimeCharacteristicRing>::zero_vec(dim.height));
                 debug_assert_eq!(reduced_opening_for_log_height.len(), dim.height);
 
                 let mut point_params = Vec::with_capacity(points_for_mat.len());
                 for (&point, openings) in points_for_mat.iter().zip(openings_for_mat) {
-                    let alpha_pow_offset = alpha.exp_u64(
-                        u64::try_from(num_reduced[log_height])
-                            .expect("reduced column count exceeds u64"),
-                    );
-                    let reduced_val: ExtVal = dot_product(alpha.powers(), openings.iter().copied());
+                    let (opening_weight, reduced_val) = match &schedule {
+                        FriBatchingSchedule::Horner { alpha } => {
+                            let w_open = PrimeCharacteristicRing::exp_u64(
+                                alpha,
+                                u64::try_from(num_reduced[log_height])
+                                    .expect("reduced column count exceeds u64"),
+                            );
+                            let rv: EF = dot_product(
+                                PrimeCharacteristicRing::powers(alpha),
+                                openings.iter().copied(),
+                            );
+                            num_reduced[log_height] += dim.width;
+                            (w_open, rv)
+                        }
+                        FriBatchingSchedule::Tensor {
+                            col_weights,
+                            open_weights,
+                        } => {
+                            let w_open = open_weights[opening_idx_by_height[log_height]];
+                            opening_idx_by_height[log_height] += 1;
+                            let rv: EF =
+                                dot_product(col_weights.iter().copied(), openings.iter().copied());
+                            (w_open, rv)
+                        }
+                    };
                     let inv_denom = inv_denoms.get(&point).unwrap().as_slice();
-                    point_params.push((alpha_pow_offset, reduced_val, inv_denom));
-                    num_reduced[log_height] += dim.width;
+                    point_params.push((opening_weight, reduced_val, inv_denom));
                 }
 
                 if point_params.is_empty() {
@@ -1789,17 +1933,17 @@ where
                 match &data.0 {
                     SpillableMmcsDataInner::InMemory { tree, .. } => {
                         let mat = &tree.leaves[mat_idx];
-                        let mat_compressed: Vec<ExtVal> = mat
+                        let mat_compressed: Vec<EF> = mat
                             .as_view()
-                            .rowwise_packed_dot_product::<ExtVal>(&packed_alpha_powers)
+                            .rowwise_packed_dot_product::<EF>(&packed_col_weights)
                             .collect();
-                        for &(alpha_pow_offset, reduced_val, inv_denom) in &point_params {
+                        for &(opening_weight, reduced_val, inv_denom) in &point_params {
                             mat_compressed
                                 .par_iter()
                                 .zip(reduced_opening_for_log_height.par_iter_mut())
                                 .zip(inv_denom.par_iter())
                                 .for_each(|((&reduced_row, ro), &inv_d)| {
-                                    *ro += alpha_pow_offset * (reduced_val - reduced_row) * inv_d;
+                                    *ro += opening_weight * (reduced_val - reduced_row) * inv_d;
                                 });
                         }
                     }
@@ -1813,12 +1957,12 @@ where
                             let n_rows = (dim.height - row_start).min(chunk_rows);
                             let row_end = row_start + n_rows;
                             let chunk = spilled.read_rows(row_start, n_rows);
-                            let mat_compressed: Vec<ExtVal> = chunk
+                            let mat_compressed: Vec<EF> = chunk
                                 .as_view()
-                                .rowwise_packed_dot_product::<ExtVal>(&packed_alpha_powers)
+                                .rowwise_packed_dot_product::<EF>(&packed_col_weights)
                                 .collect();
                             drop(chunk);
-                            for &(alpha_pow_offset, reduced_val, inv_denom) in &point_params {
+                            for &(opening_weight, reduced_val, inv_denom) in &point_params {
                                 mat_compressed
                                     .par_iter()
                                     .zip(
@@ -1827,8 +1971,7 @@ where
                                     )
                                     .zip(inv_denom[row_start..row_end].par_iter())
                                     .for_each(|((&reduced_row, ro), &inv_d)| {
-                                        *ro +=
-                                            alpha_pow_offset * (reduced_val - reduced_row) * inv_d;
+                                        *ro += opening_weight * (reduced_val - reduced_row) * inv_d;
                                     });
                             }
                         }
@@ -1839,9 +1982,9 @@ where
 
         // Release opening scratch buffers before FRI commit phase starts.
         drop(inv_denoms);
-        drop(packed_alpha_powers);
+        drop(packed_col_weights);
 
-        let fri_input: Vec<Vec<ExtVal>> = reduced_openings.into_iter().rev().flatten().collect();
+        let fri_input: Vec<Vec<EF>> = reduced_openings.into_iter().rev().flatten().collect();
         let folding: TwoAdicFriFoldingForMmcs<Val, SpillableMmcs> = TwoAdicFriFolding(PhantomData);
         let fri_proof = prover::prove_fri(
             &folding,
@@ -1859,7 +2002,7 @@ where
     fn verify(
         &self,
         commitments_with_opening_points: Vec<
-            CommitmentWithOpeningPoints<ExtVal, Self::Commitment, Self::Domain>,
+            CommitmentWithOpeningPoints<EF, Self::Commitment, Self::Domain>,
         >,
         proof: &Self::Proof,
         challenger: &mut Challenger,
@@ -1872,13 +2015,14 @@ where
             }
         }
         let folding: TwoAdicFriFoldingForMmcs<Val, SpillableMmcs> = TwoAdicFriFolding(PhantomData);
-        verifier::verify_fri(
+        verify_fri_with_batching(
             &folding,
             &self.fri,
             proof,
             challenger,
             &commitments_with_opening_points,
             &self.mmcs,
+            self.batching,
         )?;
         Ok(())
     }
@@ -1969,35 +2113,38 @@ struct NormScratch {
     lane_invs: Vec<Val>,
 }
 
-/// Computes `[(z - x)^{-1} for x in coset]` in `Goldilocks[X]/(X^2 - W)` using
+struct CubicNormScratch {
+    d0: Vec<PackedVal>,
+    d1: Vec<PackedVal>,
+    d2: Vec<PackedVal>,
+    norms: Vec<PackedVal>,
+    prefixes: Vec<PackedVal>,
+    lane_invs: Vec<Val>,
+}
+
+/// Computes `[(z - x)^{-1} for x in coset]` in `Goldilocks[X]/(X^2 - w)` using
 /// the base-field norm trick:
 ///
 /// ```text
-/// (z_0 - x + z_1·X)^{-1} = ((z_0 - x) - z_1·X) / ((z_0 - x)^2 - W·z_1^2)
+/// (z_0 - x + z_1·X)^{-1} = ((z_0 - x) - z_1·X) / ((z_0 - x)^2 - w·z_1^2)
 /// ```
-///
-/// Every chunk runs Montgomery batch inversion in the base field `PackedVal`
-/// inside L1 cache (3× fewer base multiplications than extension-field batch
-/// inversion, SIMD-vectorized across `PackedVal::WIDTH` lanes, parallelized
-/// across all cores, and with zero intermediate `diffs` allocation).
-fn goldilocks_quadratic_inverse_denominators(z: ExtVal, coset: &[Val]) -> Vec<ExtVal> {
+fn goldilocks_quadratic_inverse_denominators<EF: ExtensionField<Val>>(
+    z: EF,
+    w: Val,
+    coset: &[Val],
+) -> Vec<EF> {
     const CHUNK: usize = 1024;
-    let coords = <ExtVal as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&z);
+    let coords = <EF as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&z);
     let z0 = coords[0];
     let z1 = coords[1];
     let neg_z1 = -z1;
-    let crate::traits::ExtensionModulus::Binomial { w } =
-        <ExtVal as crate::traits::ExtensionOf<Val>>::MODULUS
-    else {
-        unreachable!("ExtVal is a binomial quadratic extension")
-    };
     let w_z1_sq = w * z1 * z1;
 
     let pw = PackedVal::WIDTH;
     let packs_per_chunk = CHUNK / pw;
-    let mut out = ExtVal::zero_vec(coset.len());
+    let mut out = EF::zero_vec(coset.len());
 
-    let process_chunk = |scratch: &mut NormScratch, x_chunk: &[Val], out_chunk: &mut [ExtVal]| {
+    let process_chunk = |scratch: &mut NormScratch, x_chunk: &[Val], out_chunk: &mut [EF]| {
         let (x_packed, x_tail) = PackedVal::pack_slice_with_suffix(x_chunk);
         let n_packs = x_packed.len();
         if n_packs > 0 {
@@ -2024,7 +2171,8 @@ fn goldilocks_quadratic_inverse_denominators(z: ExtVal, coset: &[Val]) -> Vec<Ex
                 let c1_s = c1.as_slice();
                 let dst = &mut out_chunk[i * pw..(i + 1) * pw];
                 for lane in 0..pw {
-                    dst[lane] = ExtVal::new([c0_s[lane], c1_s[lane]]);
+                    dst[lane] = EF::from_basis_coefficients_slice(&[c0_s[lane], c1_s[lane]])
+                        .expect("quadratic extension element");
                 }
             }
         }
@@ -2033,7 +2181,8 @@ fn goldilocks_quadratic_inverse_denominators(z: ExtVal, coset: &[Val]) -> Vec<Ex
             for (&x, dst) in x_tail.iter().zip(tail_out.iter_mut()) {
                 let real = z0 - x;
                 let inv_norm = (real * real - w_z1_sq).inverse();
-                *dst = ExtVal::new([real * inv_norm, neg_z1 * inv_norm]);
+                *dst = EF::from_basis_coefficients_slice(&[real * inv_norm, neg_z1 * inv_norm])
+                    .expect("quadratic extension element");
             }
         }
     };
@@ -2063,11 +2212,154 @@ fn goldilocks_quadratic_inverse_denominators(z: ExtVal, coset: &[Val]) -> Vec<Ex
     out
 }
 
-fn compute_inverse_denominators_from_dims(
-    dims_and_points: &[(Vec<Dimensions>, &Vec<Vec<ExtVal>>)],
+/// Computes `[(z - x)^{-1} for x in coset]` in `Goldilocks[X]/(X^3 - X - 1)`
+/// using the SIMD base-field adjugate/norm trick:
+///
+/// For `a = (z_0 - x) + z_1 X + z_2 X^2` with `s = a_0 + z_2 = (z_0 + z_2) - x`:
+/// ```text
+/// d_0 = s^2 - z_1(z_1 + z_2)
+/// d_1 = z_2^2 - a_0 z_1
+/// d_2 = z_1^2 - z_2 s
+/// N   = a_0 d_0 + z_2 d_1 + z_1 d_2
+/// a^{-1} = (d_0 / N, d_1 / N, d_2 / N)
+/// ```
+///
+/// Runs Montgomery batch inversion on `N` in `PackedVal` inside L1 cache
+/// (12 base SIMD muls per point instead of ~110 scalar base muls).
+fn goldilocks_cubic_trinomial_inverse_denominators<EF: ExtensionField<Val>>(
+    z: EF,
     coset: &[Val],
-) -> LinearMap<ExtVal, Vec<ExtVal>> {
-    let mut max_log_height_for_point: LinearMap<ExtVal, usize> = LinearMap::new();
+) -> Vec<EF> {
+    const CHUNK: usize = 1024;
+    let coords = <EF as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&z);
+    let z0 = coords[0];
+    let z1 = coords[1];
+    let z2 = coords[2];
+    let z02 = z0 + z2;
+    let k0 = z1 * (z1 + z2);
+    let k1 = z2 * z2;
+    let k2 = z1 * z1;
+
+    let pw = PackedVal::WIDTH;
+    let packs_per_chunk = CHUNK / pw;
+    let mut out = EF::zero_vec(coset.len());
+
+    let process_chunk = |scratch: &mut CubicNormScratch, x_chunk: &[Val], out_chunk: &mut [EF]| {
+        let (x_packed, x_tail) = PackedVal::pack_slice_with_suffix(x_chunk);
+        let n_packs = x_packed.len();
+        if n_packs > 0 {
+            let z0_p = PackedVal::from(z0);
+            let z1_p = PackedVal::from(z1);
+            let z2_p = PackedVal::from(z2);
+            let z02_p = PackedVal::from(z02);
+            let k0_p = PackedVal::from(k0);
+            let k1_p = PackedVal::from(k1);
+            let k2_p = PackedVal::from(k2);
+            let mut acc = PackedVal::ONE;
+            for (i, &xp) in x_packed.iter().enumerate() {
+                let a0 = z0_p - xp;
+                let s = z02_p - xp;
+                let d0 = s * s - k0_p;
+                let d1 = k1_p - a0 * z1_p;
+                let d2 = k2_p - z2_p * s;
+                let norm = a0 * d0 + z2_p * d1 + z1_p * d2;
+                scratch.d0[i] = d0;
+                scratch.d1[i] = d1;
+                scratch.d2[i] = d2;
+                scratch.norms[i] = norm;
+                scratch.prefixes[i] = acc;
+                acc *= norm;
+            }
+            invert_lanes_in_place(acc.as_slice(), &mut scratch.lane_invs);
+            let mut inv = *PackedVal::from_slice(&scratch.lane_invs);
+            for i in (0..n_packs).rev() {
+                let inv_norm = scratch.prefixes[i] * inv;
+                inv *= scratch.norms[i];
+                let c0 = scratch.d0[i] * inv_norm;
+                let c1 = scratch.d1[i] * inv_norm;
+                let c2 = scratch.d2[i] * inv_norm;
+                let c0_s = c0.as_slice();
+                let c1_s = c1.as_slice();
+                let c2_s = c2.as_slice();
+                let dst = &mut out_chunk[i * pw..(i + 1) * pw];
+                for lane in 0..pw {
+                    dst[lane] =
+                        EF::from_basis_coefficients_slice(&[c0_s[lane], c1_s[lane], c2_s[lane]])
+                            .expect("cubic extension element");
+                }
+            }
+        }
+        if !x_tail.is_empty() {
+            let tail_out = &mut out_chunk[n_packs * pw..];
+            for (&x, dst) in x_tail.iter().zip(tail_out.iter_mut()) {
+                let a0 = z0 - x;
+                let s = z02 - x;
+                let d0 = s * s - k0;
+                let d1 = k1 - a0 * z1;
+                let d2 = k2 - z2 * s;
+                let inv_norm = (a0 * d0 + z2 * d1 + z1 * d2).inverse();
+                *dst = EF::from_basis_coefficients_slice(&[
+                    d0 * inv_norm,
+                    d1 * inv_norm,
+                    d2 * inv_norm,
+                ])
+                .expect("cubic extension element");
+            }
+        }
+    };
+
+    if coset.len() <= CHUNK {
+        let mut scratch = CubicNormScratch {
+            d0: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+            d1: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+            d2: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+            norms: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+            prefixes: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+            lane_invs: vec![Val::ZERO; pw],
+        };
+        process_chunk(&mut scratch, coset, &mut out);
+    } else {
+        out.par_chunks_mut(CHUNK)
+            .zip(coset.par_chunks(CHUNK))
+            .for_each_init(
+                || CubicNormScratch {
+                    d0: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+                    d1: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+                    d2: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+                    norms: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+                    prefixes: vec![PackedVal::ZERO; packs_per_chunk.max(1)],
+                    lane_invs: vec![Val::ZERO; pw],
+                },
+                |scratch, (out_chunk, x_chunk)| process_chunk(scratch, x_chunk, out_chunk),
+            );
+    }
+
+    out
+}
+
+fn compute_inverse_denominators_for_point<EF: ExtensionField<Val> + ExtensionOf<Val>>(
+    z: EF,
+    coset: &[Val],
+) -> Vec<EF> {
+    match (EF::D, EF::MODULUS) {
+        (2, ExtensionModulus::Binomial { w }) => {
+            goldilocks_quadratic_inverse_denominators(z, w, coset)
+        }
+        (3, ExtensionModulus::CubicTrinomial) => {
+            goldilocks_cubic_trinomial_inverse_denominators(z, coset)
+        }
+        _ => {
+            let diffs: Vec<EF> = coset.iter().map(|&x| z - x).collect();
+            batch_multiplicative_inverse(&diffs)
+        }
+    }
+}
+
+fn compute_inverse_denominators_from_dims<EF: ExtensionField<Val> + ExtensionOf<Val>>(
+    dims_and_points: &[(Vec<Dimensions>, &Vec<Vec<EF>>)],
+    coset: &[Val],
+) -> LinearMap<EF, Vec<EF>> {
+    let mut max_log_height_for_point: LinearMap<EF, usize> = LinearMap::new();
     for (dims, points) in dims_and_points {
         for (dim, points_for_mat) in dims.iter().zip(*points) {
             let log_height = log2_strict_usize(dim.height);
@@ -2086,7 +2378,7 @@ fn compute_inverse_denominators_from_dims(
         .map(|(z, log_height)| {
             (
                 z,
-                goldilocks_quadratic_inverse_denominators(z, &coset[..(1 << log_height)]),
+                compute_inverse_denominators_for_point(z, &coset[..(1 << log_height)]),
             )
         })
         .collect()
@@ -2095,15 +2387,14 @@ fn compute_inverse_denominators_from_dims(
 /// Streams rows `0..h` of `spilled` once in bounded chunks and computes the
 /// exact barycentric interpolation at every point in `points`, matching
 /// `Interpolate::interpolate_coset_with_precomputation`.
-fn interpolate_spilled_coset(
+fn interpolate_spilled_coset<EF: ExtensionField<Val>>(
     spilled: &SpilledMatrix,
     h: usize,
-    points: &[ExtVal],
-    adjusted_weights: &LinearMap<ExtVal, Vec<ExtVal>>,
-) -> Vec<Vec<ExtVal>> {
+    points: &[EF],
+    adjusted_weights: &LinearMap<EF, Vec<EF>>,
+) -> Vec<Vec<EF>> {
     let width = spilled.width();
-    let mut accumulators: Vec<Vec<ExtVal>> =
-        (0..points.len()).map(|_| ExtVal::zero_vec(width)).collect();
+    let mut accumulators: Vec<Vec<EF>> = (0..points.len()).map(|_| EF::zero_vec(width)).collect();
     let row_bytes = spilled.row_bytes().max(size_of::<u64>());
     let chunk_rows = (STREAM_BLOCK_BYTES / row_bytes).clamp(1, 1 << 14).min(h);
 
@@ -2137,17 +2428,22 @@ fn interpolate_spilled_coset(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use p3_field::batch_multiplicative_inverse;
+    use crate::types::ExtVal;
+    use p3_field::extension::CubicTrinomialExtensionField;
     use rand::rngs::SmallRng;
     use rand::{RngExt, SeedableRng};
 
-    fn make_mmcs(cap_height: usize) -> (CpuMmcs, SpillableMmcs) {
-        let byte_hash = Blake3;
-        let field_hash = SerializingHasher::new(byte_hash);
-        let compress = Blake3CompressionFunction::new(byte_hash);
+    fn make_mmcs(cap_height: usize, v6: bool) -> (CpuMmcs, SpillableMmcs) {
+        let (leaf_domain, compress_domain) = if v6 {
+            (Blake3Domain::MerkleLeaf, Blake3Domain::MerkleCompress)
+        } else {
+            (Blake3Domain::Plain, Blake3Domain::Plain)
+        };
+        let field_hash = SerializingHasher::new(DomainBlake3::new(leaf_domain));
+        let compress = CompressionFunctionFromHasher::new(DomainBlake3::new(compress_domain));
         (
-            CpuMmcs::new(field_hash, compress.clone(), cap_height),
-            SpillableMmcs::new(field_hash, compress, cap_height),
+            CpuMmcs::new(field_hash, compress, cap_height),
+            SpillableMmcs::new_with_domains(leaf_domain, compress_domain, cap_height),
         )
     }
 
@@ -2168,109 +2464,112 @@ mod tests {
         query_indices: &[usize],
         tag: &str,
     ) {
-        let dir = temp_spill_dir(tag);
-        let (cpu, spillable) = make_mmcs(cap_height);
-        let (cpu_com, cpu_data) = cpu.commit(mats.to_vec());
+        for v6 in [false, true] {
+            let dir = temp_spill_dir(&format!("{tag}-v{}", if v6 { 6 } else { 5 }));
+            let (cpu, spillable) = make_mmcs(cap_height, v6);
+            let (cpu_com, cpu_data) = cpu.commit(mats.to_vec());
 
-        // Also check our SIMD in-memory MMCS matches `CpuMmcs` bit-for-bit.
-        let (mem_com, mem_data) = spillable.commit(mats.to_vec());
-        assert_eq!(
-            mem_com.roots(),
-            cpu_com.roots(),
-            "in-memory SIMD cap mismatch for {tag} (cap_height={cap_height})"
-        );
-        let (cpu_vals, cpu_multi) = cpu.open_multi_batch(query_indices, &cpu_data);
-        let (mem_vals, mem_multi) = spillable.open_multi_batch(query_indices, &mem_data);
-        assert_eq!(mem_vals, cpu_vals);
-        assert_eq!(mem_multi.sibling_hashes, cpu_multi.sibling_hashes);
+            // Also check our SIMD in-memory MMCS matches `CpuMmcs` bit-for-bit.
+            let (mem_com, mem_data) = spillable.commit(mats.to_vec());
+            assert_eq!(
+                mem_com.roots(),
+                cpu_com.roots(),
+                "in-memory SIMD cap mismatch for {tag} (v6={v6}, cap_height={cap_height})"
+            );
+            let (cpu_vals, cpu_multi) = cpu.open_multi_batch(query_indices, &cpu_data);
+            let (mem_vals, mem_multi) = spillable.open_multi_batch(query_indices, &mem_data);
+            assert_eq!(mem_vals, cpu_vals);
+            assert_eq!(mem_multi.sibling_hashes, cpu_multi.sibling_hashes);
 
-        // Check spilled (streaming disk hash) path.
-        let mut pack = SpillPackWriter::create(&dir);
-        let spilled_mats: Vec<_> = mats.iter().map(|m| pack.append_matrix(m)).collect();
-        pack.flush();
-        let (spilled_com, spilled_data) = spillable.commit_spilled(spilled_mats, Vec::new());
+            // Check spilled (streaming disk hash) path.
+            let mut pack = SpillPackWriter::create(&dir);
+            let spilled_mats: Vec<_> = mats.iter().map(|m| pack.append_matrix(m)).collect();
+            pack.flush();
+            let (spilled_com, spilled_data) = spillable.commit_spilled(spilled_mats, Vec::new());
 
-        assert_eq!(
-            spilled_com.roots(),
-            cpu_com.roots(),
-            "cap mismatch for {tag} (cap_height={cap_height})"
-        );
-        assert!(spilled_data.is_spilled());
-        assert_eq!(
-            spillable.get_matrix_heights(&spilled_data),
-            cpu.get_matrix_heights(&cpu_data)
-        );
-        assert_eq!(
-            spillable.get_max_height(&spilled_data),
-            cpu.get_max_height(&cpu_data)
-        );
+            assert_eq!(
+                spilled_com.roots(),
+                cpu_com.roots(),
+                "cap mismatch for {tag} (v6={v6}, cap_height={cap_height})"
+            );
+            assert!(spilled_data.is_spilled());
+            assert_eq!(
+                spillable.get_matrix_heights(&spilled_data),
+                cpu.get_matrix_heights(&cpu_data)
+            );
+            assert_eq!(
+                spillable.get_max_height(&spilled_data),
+                cpu.get_max_height(&cpu_data)
+            );
 
-        let dims: Vec<Dimensions> = mats.iter().map(Matrix::dimensions).collect();
-        for &idx in query_indices {
-            let cpu_open = cpu.open_batch(idx, &cpu_data);
-            let spilled_open = spillable.open_batch(idx, &spilled_data);
-            assert_eq!(spilled_open.opened_values, cpu_open.opened_values);
-            assert_eq!(spilled_open.opening_proof, cpu_open.opening_proof);
-            cpu.verify_batch(
+            let dims: Vec<Dimensions> = mats.iter().map(Matrix::dimensions).collect();
+            for &idx in query_indices {
+                let cpu_open = cpu.open_batch(idx, &cpu_data);
+                let spilled_open = spillable.open_batch(idx, &spilled_data);
+                assert_eq!(spilled_open.opened_values, cpu_open.opened_values);
+                assert_eq!(spilled_open.opening_proof, cpu_open.opening_proof);
+                cpu.verify_batch(
+                    &spilled_com,
+                    &dims,
+                    idx,
+                    BatchOpeningRef::new(&spilled_open.opened_values, &spilled_open.opening_proof),
+                )
+                .expect("CpuMmcs must accept spilled single opening");
+            }
+
+            let (spilled_vals, spilled_multi) =
+                spillable.open_multi_batch(query_indices, &spilled_data);
+            assert_eq!(spilled_vals, cpu_vals);
+            assert_eq!(spilled_multi.sibling_hashes, cpu_multi.sibling_hashes);
+            cpu.verify_multi_batch(
                 &spilled_com,
                 &dims,
-                idx,
-                BatchOpeningRef::new(&spilled_open.opened_values, &spilled_open.opening_proof),
+                query_indices,
+                &spilled_vals,
+                &spilled_multi,
             )
-            .expect("CpuMmcs must accept spilled single opening");
-        }
+            .expect("CpuMmcs must accept spilled multi-batch opening");
 
-        let (spilled_vals, spilled_multi) =
-            spillable.open_multi_batch(query_indices, &spilled_data);
-        assert_eq!(spilled_vals, cpu_vals);
-        assert_eq!(spilled_multi.sibling_hashes, cpu_multi.sibling_hashes);
-        cpu.verify_multi_batch(
-            &spilled_com,
-            &dims,
-            query_indices,
-            &spilled_vals,
-            &spilled_multi,
-        )
-        .expect("CpuMmcs must accept spilled multi-batch opening");
-
-        // Also check hash-before-spill (`append_matrix_and_hash` + `commit_spilled_prehashed`).
-        let mut height_counts: HashMap<usize, usize> = HashMap::new();
-        for m in mats {
-            *height_counts.entry(m.height()).or_insert(0) += 1;
-        }
-        let mut pack_pre = SpillPackWriter::create(&dir);
-        let mut sp_pre = Vec::with_capacity(mats.len());
-        let mut prehashed = Vec::with_capacity(mats.len());
-        for m in mats {
-            if height_counts[&m.height()] == 1 {
-                let (sp, digests) = pack_pre.append_matrix_and_hash(m);
-                sp_pre.push(sp);
-                prehashed.push(Some(digests));
-            } else {
-                sp_pre.push(pack_pre.append_matrix(m));
-                prehashed.push(None);
+            // Also check hash-before-spill (`append_matrix_and_hash` + `commit_spilled_prehashed`).
+            let mut height_counts: HashMap<usize, usize> = HashMap::new();
+            for m in mats {
+                *height_counts.entry(m.height()).or_insert(0) += 1;
             }
-        }
-        pack_pre.flush();
-        let (pre_com, pre_data) = spillable.commit_spilled_prehashed(sp_pre, Vec::new(), prehashed);
-        assert_eq!(pre_com.roots(), cpu_com.roots());
-        let (pre_vals, pre_multi) = spillable.open_multi_batch(query_indices, &pre_data);
-        assert_eq!(pre_vals, cpu_vals);
-        assert_eq!(pre_multi.sibling_hashes, cpu_multi.sibling_hashes);
-        assert_eq!(pre_data.materialized_spilled_count(), 0);
-        drop(pre_data);
-        drop(pack_pre);
+            let mut pack_pre = SpillPackWriter::create(&dir);
+            let mut sp_pre = Vec::with_capacity(mats.len());
+            let mut prehashed = Vec::with_capacity(mats.len());
+            for m in mats {
+                if height_counts[&m.height()] == 1 {
+                    let (sp, digests) = pack_pre.append_matrix_and_hash(m, spillable.leaf_domain());
+                    sp_pre.push(sp);
+                    prehashed.push(Some(digests));
+                } else {
+                    sp_pre.push(pack_pre.append_matrix(m));
+                    prehashed.push(None);
+                }
+            }
+            pack_pre.flush();
+            let (pre_com, pre_data) =
+                spillable.commit_spilled_prehashed(sp_pre, Vec::new(), prehashed);
+            assert_eq!(pre_com.roots(), cpu_com.roots());
+            let (pre_vals, pre_multi) = spillable.open_multi_batch(query_indices, &pre_data);
+            assert_eq!(pre_vals, cpu_vals);
+            assert_eq!(pre_multi.sibling_hashes, cpu_multi.sibling_hashes);
+            assert_eq!(pre_data.materialized_spilled_count(), 0);
+            drop(pre_data);
+            drop(pack_pre);
 
-        // Ensure nothing materialized the spilled matrices back into RAM.
-        assert_eq!(spilled_data.materialized_spilled_count(), 0);
-        drop(spilled_data);
-        drop(pack);
-        let remaining = fs::read_dir(&dir).unwrap().count();
-        assert_eq!(
-            remaining, 0,
-            "spill directory must have zero leftover files"
-        );
-        let _ = fs::remove_dir_all(&dir);
+            // Ensure nothing materialized the spilled matrices back into RAM.
+            assert_eq!(spilled_data.materialized_spilled_count(), 0);
+            drop(spilled_data);
+            drop(pack);
+            let remaining = fs::read_dir(&dir).unwrap().count();
+            assert_eq!(
+                remaining, 0,
+                "spill directory must have zero leftover files"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
@@ -2435,6 +2734,7 @@ mod tests {
 
     #[test]
     fn parallel_bitrev_coset_and_norm_trick_match_reference() {
+        type Ext3 = CubicTrinomialExtensionField<Val>;
         for log_size in [0usize, 1, 2, 3, 5, 10, 13] {
             let expected_coset: Vec<Val> = {
                 let mut pts: Vec<Val> = TwoAdicMultiplicativeCoset::new(Val::GENERATOR, log_size)
@@ -2454,10 +2754,45 @@ mod tests {
             ] {
                 let diffs: Vec<ExtVal> = expected_coset.iter().map(|&x| point - x).collect();
                 let expected_invs = batch_multiplicative_inverse(&diffs);
-                let got_invs = goldilocks_quadratic_inverse_denominators(point, &got_coset);
+                let got_invs = compute_inverse_denominators_for_point(point, &got_coset);
                 assert_eq!(
                     got_invs, expected_invs,
-                    "norm-trick inverse mismatch at 2^{log_size}"
+                    "quadratic norm-trick inverse mismatch at 2^{log_size}"
+                );
+            }
+
+            for point in [
+                Ext3::from_basis_coefficients_slice(&[
+                    Goldilocks::new(12345),
+                    Goldilocks::new(67890),
+                    Goldilocks::new(54321),
+                ])
+                .unwrap(),
+                Ext3::from_basis_coefficients_slice(&[
+                    Goldilocks::new(987_654_321),
+                    Goldilocks::ZERO,
+                    Goldilocks::ZERO,
+                ])
+                .unwrap(),
+                Ext3::from_basis_coefficients_slice(&[
+                    Goldilocks::ZERO,
+                    Goldilocks::new(42),
+                    Goldilocks::new(99),
+                ])
+                .unwrap(),
+                Ext3::from_basis_coefficients_slice(&[
+                    Goldilocks::new(17),
+                    Goldilocks::ZERO,
+                    Goldilocks::new(73),
+                ])
+                .unwrap(),
+            ] {
+                let diffs: Vec<Ext3> = expected_coset.iter().map(|&x| point - x).collect();
+                let expected_invs = batch_multiplicative_inverse(&diffs);
+                let got_invs = compute_inverse_denominators_for_point(point, &got_coset);
+                assert_eq!(
+                    got_invs, expected_invs,
+                    "cubic trinomial norm-trick inverse mismatch at 2^{log_size}"
                 );
             }
         }

@@ -314,7 +314,10 @@ impl<SC: ProofConfig> Proof<SC> {
 
     #[inline]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let (proof, _num_bytes) = decode_from_slice(bytes, Self::serde_config())?;
+        let (proof, num_bytes) = decode_from_slice(bytes, Self::serde_config())?;
+        if num_bytes != bytes.len() {
+            return Err(DecodeError::Other("trailing bytes after proof"));
+        }
         Ok(proof)
     }
 }
@@ -404,7 +407,9 @@ where
         claims: &[&[Val<SC>]],
         stage_1: Stage1<SC>,
     ) -> Proof<SC> {
-        let mut challenger = self.config.initialise_challenger();
+        let mut challenger = self
+            .config
+            .initialise_challenger_for_mode(crate::config::TranscriptMode::Single);
 
         // Bind the system shape into the transcript. The protocol parameters
         // are already bound via the challenger seed.

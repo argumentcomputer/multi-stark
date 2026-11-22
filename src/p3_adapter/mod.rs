@@ -6,7 +6,9 @@ mod air;
 pub(crate) mod blake3_simd;
 pub mod challenger;
 pub mod domain;
+pub mod domain_blake3;
 pub mod field;
+pub mod fri_batching;
 pub mod pcs;
 #[cfg(not(feature = "cuda"))]
 pub mod spill;
