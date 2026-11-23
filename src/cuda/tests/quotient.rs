@@ -271,6 +271,7 @@ fn check_quotient(
                 &(circuit.preprocessed_width != 0).then(|| evaluations(0)),
                 &evaluations(1),
                 &evaluations(2),
+                None,
                 alpha,
                 constraint_count,
             );

@@ -1048,7 +1048,7 @@ fn bench_fp2_vs_fp3_cpu() {
     };
     let fri = FriParameters {
         log_final_poly_len: 0,
-        max_log_arity: 2,
+        max_log_arity: if cfg!(feature = "cuda") { 1 } else { 2 },
         num_queries: 64,
         commit_proof_of_work_bits: 0,
         query_proof_of_work_bits: 0,
@@ -1487,7 +1487,7 @@ fn v6_fp3_large_lde_above_1024_rows_roundtrip() {
     };
     let fri = FriParameters {
         log_final_poly_len: 1,
-        max_log_arity: 2,
+        max_log_arity: if cfg!(feature = "cuda") { 1 } else { 2 },
         num_queries: 24,
         commit_proof_of_work_bits: 0,
         query_proof_of_work_bits: 0,

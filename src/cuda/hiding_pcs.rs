@@ -360,12 +360,12 @@ where
             .saturating_add(max_transform_workspace)
             > initial_free
         {
+            let dft = &self.dft;
             let ldes: Vec<RowMajorMatrix<Goldilocks>> = prepared
                 .into_par_iter()
                 .map(|(domain, evals)| {
                     let shift = Goldilocks::GENERATOR / domain.shift();
-                    if let Some(lde) = self.dft.try_coset_lde_batch_host(&evals, added_bits, shift)
-                    {
+                    if let Some(lde) = dft.try_coset_lde_batch_host(&evals, added_bits, shift) {
                         return lde;
                     }
                     let cpu = Radix2DitParallel::<Goldilocks>::default();

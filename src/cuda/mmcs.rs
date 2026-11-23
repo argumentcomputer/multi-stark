@@ -1804,7 +1804,7 @@ mod tests {
             .iter()
             .map(|&i| cpu.open_batch(i, &expected_data))
             .collect();
-        let mmcs = CudaMmcs::with_device(cpu, 0, 0);
+        let mmcs = CudaMmcs::with_device(cpu, 0);
         let ldes = matrices
             .iter()
             .map(|m| CudaLde::from_row_major_matrix(mmcs.device_id, m))
@@ -1828,7 +1828,7 @@ mod tests {
         let (expected_commitment, expected_data) = cpu.commit(matrices.clone());
         let expected_opening = cpu.open_batch(5, &expected_data);
 
-        let mmcs = CudaMmcs::with_device(cpu, 0, 0);
+        let mmcs = CudaMmcs::with_device(cpu, 0);
         let resident = vec![
             Some(CudaLde::from_row_major_matrix(mmcs.device_id, &matrices[0])),
             None,

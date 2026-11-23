@@ -213,6 +213,7 @@ impl<M: Matrix<Goldilocks>> CpuHidingTree<M> {
         self.leaves.iter().map(Matrix::height).collect()
     }
 
+    #[allow(dead_code)]
     fn dimensions(&self) -> Vec<Dimensions> {
         self.leaves.iter().map(Matrix::dimensions).collect()
     }
