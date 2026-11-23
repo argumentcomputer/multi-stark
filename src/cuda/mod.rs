@@ -2849,13 +2849,92 @@ pub(crate) fn bounded_parallel_map<T: Sync, R: Send>(
     }
 }
 
+/// Device memory free for this backend's admission: what the driver and the
+/// allocation pool report free, less every live [`DeviceMemoryReservation`]
+/// on the device.
 pub(crate) fn device_memory_info(device_id: i32) -> (usize, usize) {
     let mut free_bytes = 0;
     let mut total_bytes = 0;
     let status =
         unsafe { multi_stark_cuda_memory_info(device_id, &mut free_bytes, &mut total_bytes) };
     check_cuda(status, "CUDA device initialization");
-    (free_bytes, total_bytes)
+    (
+        free_bytes.saturating_sub(reserved_device_bytes(device_id)),
+        total_bytes,
+    )
+}
+
+fn device_reservations() -> &'static std::sync::Mutex<std::collections::BTreeMap<i32, usize>> {
+    static RESERVATIONS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<i32, usize>>,
+    > = std::sync::OnceLock::new();
+    RESERVATIONS.get_or_init(Default::default)
+}
+
+/// Bytes the live reservations on `device_id` hold back from admission.
+#[must_use]
+pub fn reserved_device_bytes(device_id: i32) -> usize {
+    device_reservations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&device_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Device memory held back from this backend's admission for an allocation
+/// made outside it, until dropped.
+///
+/// Each proving phase sizes its device work from the free memory it measures
+/// when it starts, and allocates up to all of it. Memory another thread
+/// allocates on the device after that measurement, such as the next shard's
+/// population input uploaded while the current shard proves, is then missing
+/// when the phase allocates, and the phase fails with an out-of-memory error.
+/// A concurrent allocator takes a reservation of its size before any phase
+/// it can overlap measures free memory, allocates within it, and drops it
+/// once the allocation is live (or abandoned), so every measurement sees the
+/// memory as either reserved or allocated, never as free.
+#[must_use = "the reservation ends when dropped"]
+#[derive(Debug)]
+pub struct DeviceMemoryReservation {
+    device_id: i32,
+    bytes: usize,
+}
+
+impl DeviceMemoryReservation {
+    /// Holds `bytes` of `device_id` back from admission.
+    pub fn new(device_id: i32, bytes: usize) -> Self {
+        let mut reservations = device_reservations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let held = reservations.entry(device_id).or_default();
+        *held = held.saturating_add(bytes);
+        Self { device_id, bytes }
+    }
+
+    #[must_use]
+    pub const fn device_id(&self) -> i32 {
+        self.device_id
+    }
+
+    #[must_use]
+    pub const fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+impl Drop for DeviceMemoryReservation {
+    fn drop(&mut self) {
+        let mut reservations = device_reservations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(held) = reservations.get_mut(&self.device_id) {
+            *held = held.saturating_sub(self.bytes);
+            if *held == 0 {
+                reservations.remove(&self.device_id);
+            }
+        }
+    }
 }
 
 /// Returns the device memory this backend's allocation pool retains between
@@ -2867,13 +2946,15 @@ pub fn release_device_memory() {
     check_cuda(status, "CUDA memory release");
 }
 
-/// Device bytes the prover keeps free for its later stages: a quarter of the
-/// device unless `MULTI_STARK_CUDA_MIN_FREE_BYTES` says otherwise.
-pub(crate) fn minimum_free_bytes(total_bytes: usize) -> usize {
+/// Device bytes admission keeps free beyond what a phase needs:
+/// `MULTI_STARK_CUDA_MIN_FREE_BYTES`, by default none. Every phase admits
+/// its own allocations against the device's current free memory and spills
+/// to the host when they do not fit, so no standing reserve is needed.
+pub(crate) fn minimum_free_bytes() -> usize {
     std::env::var("MULTI_STARK_CUDA_MIN_FREE_BYTES")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(total_bytes / 4)
+        .unwrap_or(0)
 }
 
 pub(crate) fn memory_diagnostics_enabled() -> bool {
@@ -5291,6 +5372,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn device_memory_reservations_nest_and_release() {
+        // No other test reserves memory on this device id.
+        let device = 63;
+        assert_eq!(reserved_device_bytes(device), 0);
+        let outer = DeviceMemoryReservation::new(device, 3 << 30);
+        let inner = DeviceMemoryReservation::new(device, 1 << 20);
+        assert_eq!(reserved_device_bytes(device), (3 << 30) + (1 << 20));
+        assert_eq!(reserved_device_bytes(device - 1), 0);
+        drop(outer);
+        assert_eq!(reserved_device_bytes(device), 1 << 20);
+        drop(inner);
+        assert_eq!(reserved_device_bytes(device), 0);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive access to a CUDA device: hides its free memory"]
+    fn admission_excludes_reserved_device_memory() {
+        let device = configured_device();
+        let bytes = 1usize << 40;
+        let reservation = DeviceMemoryReservation::new(device, bytes);
+        let (free, total) = device_memory_info(device);
+        assert!(
+            total < bytes && free == 0,
+            "free={free} beside a reservation larger than the device"
+        );
+        drop(reservation);
+        assert!(device_memory_info(device).0 > 0);
     }
 
     #[test]

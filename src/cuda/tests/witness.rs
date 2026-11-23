@@ -356,3 +356,161 @@ fn generated_traces_prove_identically_under_lookup_pressure() {
         bincode::serde::encode_to_vec(&expected, bincode::config::standard()).unwrap()
     );
 }
+
+/// A small generated source whose first tile allocates `bytes` of device
+/// memory that commitment admission never charged, as a shard image
+/// uploaded by another thread while the commitment runs does. With a
+/// reservation, it drops it once that memory is allocated.
+struct ConcurrentAllocation {
+    rows: HostRows,
+    bytes: usize,
+    held: std::sync::Mutex<Vec<CudaLde>>,
+    reservation: std::sync::Mutex<Option<DeviceMemoryReservation>>,
+}
+
+impl TraceGenerator<Goldilocks> for ConcurrentAllocation {
+    fn height(&self) -> usize {
+        self.rows.height()
+    }
+
+    fn width(&self) -> usize {
+        self.rows.width()
+    }
+
+    fn write_rows(&self, first: usize, output: &mut [Goldilocks]) {
+        self.rows.write_rows(first, output);
+    }
+
+    fn device_workspace_bytes(&self) -> usize {
+        self.rows.device_workspace_bytes()
+    }
+
+    fn write_device_rows(&self, view: DeviceTraceView<'_>) -> Result<(), String> {
+        let mut held = self.held.lock().unwrap();
+        if held.is_empty() {
+            let mut remaining = self.bytes;
+            while remaining != 0 {
+                let chunk = (remaining / 2 + 1).next_power_of_two().min(1 << 30);
+                held.push(device_allocation(chunk));
+                remaining -= chunk;
+            }
+            drop(self.reservation.lock().unwrap().take());
+        }
+        drop(held);
+        self.rows.write_device_rows(view)
+    }
+}
+
+/// Fills the device until the stage-one commitment of `hosts` beside a tiny
+/// generated source fits resident with `slack` bytes to spare, then commits
+/// while that source allocates `external` bytes admission did not see.
+fn commit_beside_concurrent_allocation(reserve: bool) {
+    let config = GoldilocksBlake3Config::with_device(
+        CommitmentParameters {
+            log_blowup: 3,
+            cap_height: 0,
+        },
+        FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 8,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        },
+        Some(configured_device()),
+    );
+    let pcs: &crate::types::InnerPcs = config.pcs();
+    let device = configured_device();
+    let blowup = 3;
+    let (height, width, hosts) = (1usize << 20, 8usize, 8usize);
+    let matrices: Vec<_> = (0..hosts)
+        .map(|seed| {
+            RowMajorMatrix::new(
+                (0..height * width)
+                    .map(|index| Goldilocks::from_u64((index as u64 * 0x9e37_79b9) ^ seed as u64))
+                    .collect(),
+                width,
+            )
+        })
+        .collect();
+    let generated = RowMajorMatrix::new((0..(1 << 10) * 2).map(Goldilocks::from_u64).collect(), 2);
+    let external = 3usize << 30;
+    let slack = 256usize << 20;
+    let reservation = std::sync::Mutex::new(None);
+    let source = Arc::new(ConcurrentAllocation {
+        rows: HostRows::new(generated.clone(), None),
+        bytes: external,
+        held: std::sync::Mutex::new(Vec::new()),
+        reservation,
+    });
+    let domain = |height: usize| {
+        TwoAdicMultiplicativeCoset::new(Goldilocks::ONE, log2_strict_usize(height)).unwrap()
+    };
+    let evaluations = |first: TraceSource<Goldilocks>| {
+        core::iter::once((domain(generated.height()), first))
+            .chain(
+                matrices
+                    .iter()
+                    .map(|matrix| (domain(matrix.height()), TraceSource::Host(matrix.clone()))),
+            )
+            .collect::<Vec<_>>()
+    };
+    // Also caches every transform constant before free memory is measured.
+    let (expected, _) = commit_with(pcs, evaluations(TraceSource::Host(generated.clone())), None);
+
+    // The resident footprint `commit_with` admits for this batch.
+    let trace_bytes = height * width * size_of::<Goldilocks>();
+    let plan = pcs
+        .dft
+        .lde_plan(height, width, blowup, Goldilocks::GENERATOR);
+    let footprint = (trace_bytes << blowup)
+        .saturating_add(trace_bytes)
+        .saturating_mul(hosts)
+        .saturating_add(plan.scratch_bytes() + plan.constant_bytes() + WRITER_WORKSPACE)
+        .saturating_add((height << blowup) * 96)
+        .saturating_add(minimum_free_bytes() + (128 << 20));
+    let generated_bytes = generated.values.len() * size_of::<Goldilocks>() * ((1 << blowup) + 1);
+    let target = footprint + generated_bytes + slack;
+    assert!(
+        external > target - (trace_bytes << blowup).saturating_add(trace_bytes) * hosts,
+        "the external allocation must not fit in the admitted headroom"
+    );
+    let mut ballast = Vec::new();
+    loop {
+        let free = device_memory_info(device).0;
+        let remaining = free.saturating_sub(target);
+        if remaining < 4 << 20 {
+            break;
+        }
+        let chunk = (remaining / 2 + 1).next_power_of_two().min(1 << 30);
+        ballast.push(device_allocation(chunk));
+    }
+    if reserve {
+        *source.reservation.lock().unwrap() = Some(DeviceMemoryReservation::new(device, external));
+    }
+    let (commitment, _data) = commit_with(
+        pcs,
+        evaluations(TraceSource::Generated(source.clone())),
+        None,
+    );
+    drop(ballast);
+    assert_eq!(commitment, expected);
+    assert_eq!(reserved_device_bytes(device), 0);
+}
+
+/// Memory another thread allocates after commitment measured free memory
+/// fails the resident LDEs that admission sized into it.
+#[test]
+#[ignore = "requires exclusive access to a CUDA device: fills its memory"]
+#[should_panic(expected = "resident coset LDE failed (2): out of memory")]
+fn unreserved_concurrent_allocation_exhausts_admitted_memory() {
+    commit_beside_concurrent_allocation(false);
+}
+
+/// Reserved before the commitment measures free memory, the same allocation
+/// makes admission choose a construction that fits beside it.
+#[test]
+#[ignore = "requires exclusive access to a CUDA device: fills its memory"]
+fn reserved_concurrent_allocation_keeps_commitment_admissible() {
+    commit_beside_concurrent_allocation(true);
+}

@@ -748,7 +748,7 @@ where
         let max_transform_workspace = transform_workspaces.iter().copied().max().unwrap_or(0);
         let (initial_free, total_bytes) =
             crate::cuda::device_memory_info(self.mmcs.cuda_device_id());
-        let minimum_free = crate::cuda::minimum_free_bytes(total_bytes);
+        let minimum_free = crate::cuda::minimum_free_bytes();
         let source_bytes = source_cells.saturating_mul(size_of::<Val>());
         let lde_bytes = source_bytes
             .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
@@ -758,7 +758,21 @@ where
             .saturating_add(minimum_free)
             .saturating_add(max_transform_workspace)
             > initial_free;
+        // An LDE uploads its whole trace beside its values, and a trace
+        // released after construction is still resident while its own LDE
+        // runs, so the all-device path always needs the largest trace.
+        let max_trace_bytes = evaluations
+            .iter()
+            .map(|(_, matrix)| {
+                matrix
+                    .height()
+                    .saturating_mul(matrix.width())
+                    .saturating_mul(size_of::<Val>())
+            })
+            .max()
+            .unwrap_or(0);
         if lde_bytes
+            .saturating_add(max_trace_bytes)
             .saturating_add(minimum_free)
             .saturating_add(max_transform_workspace)
             > initial_free
