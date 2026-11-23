@@ -1041,8 +1041,9 @@ impl GoldilocksBlake3Config {
                 "the CUDA backend currently supports only cap_height = 0"
             );
             assert!(
-                fri_parameters.max_log_arity <= 1,
-                "the CUDA backend currently supports only binary FRI folds"
+                (1..=10).contains(&fri_parameters.max_log_arity),
+                "the CUDA backend requires 1 <= max_log_arity <= 10 (got {})",
+                fri_parameters.max_log_arity
             );
         }
         #[cfg(feature = "cuda")]
@@ -1860,8 +1861,9 @@ where
                 "the CUDA backend currently supports only cap_height = 0"
             );
             assert!(
-                fri_parameters.max_log_arity <= 1,
-                "the CUDA backend currently supports only binary FRI folds"
+                (1..=10).contains(&fri_parameters.max_log_arity),
+                "the CUDA backend requires 1 <= max_log_arity <= 10 (got {})",
+                fri_parameters.max_log_arity
             );
         }
         #[cfg(not(feature = "cuda"))]
@@ -2668,8 +2670,9 @@ where
                 "the CUDA backend currently supports only cap_height = 0"
             );
             assert!(
-                fri_parameters.max_log_arity <= 1,
-                "the CUDA backend currently supports only binary FRI folds"
+                (1..=10).contains(&fri_parameters.max_log_arity),
+                "the CUDA backend requires 1 <= max_log_arity <= 10 (got {})",
+                fri_parameters.max_log_arity
             );
         }
         #[cfg(not(feature = "cuda"))]
@@ -3471,15 +3474,43 @@ mod pcs_ref_gen {
 
     #[cfg(feature = "cuda")]
     #[test]
-    #[should_panic(expected = "binary FRI folds")]
-    fn cuda_rejects_multi_bit_fri_folds() {
+    #[should_panic(expected = "1 <= max_log_arity <= 10")]
+    fn cuda_rejects_zero_fri_arity() {
         let _ = GoldilocksBlake3Config::new(
             CommitmentParameters {
                 log_blowup: 1,
                 cap_height: 0,
             },
-            test_fri_parameters(2),
+            test_fri_parameters(0),
         );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[should_panic(expected = "1 <= max_log_arity <= 10")]
+    fn cuda_rejects_excessive_fri_arity() {
+        let _ = GoldilocksBlake3V6Config::new(
+            CommitmentParameters {
+                log_blowup: 1,
+                cap_height: 0,
+            },
+            test_fri_parameters(11),
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_accepts_multi_bit_fri_folds() {
+        let comm = CommitmentParameters {
+            log_blowup: 2,
+            cap_height: 0,
+        };
+        for max_log_arity in 1..=4 {
+            let fri = test_fri_parameters(max_log_arity);
+            let _ = GoldilocksBlake3Config::new(comm, fri);
+            let _ = GoldilocksBlake3V6Config::new(comm, fri);
+            let _ = GoldilocksBlake3V6ZkConfig::new(comm, fri);
+        }
     }
 
     fn limbs(d: [u8; 32]) -> [u64; 4] {

@@ -477,6 +477,15 @@ impl CudaLde {
     ) -> Self {
         let _span = tracing::info_span!("cuda/fri_fold").entered();
         assert!(ext_degree == 2 || ext_degree == 3);
+        assert!(
+            log_arity > 0 && log_arity < usize::BITS as usize,
+            "invalid FRI log_arity {log_arity}"
+        );
+        assert!(
+            self.height.is_power_of_two() && self.height >= (1usize << log_arity),
+            "codeword height {} incompatible with log_arity {log_arity}",
+            self.height
+        );
         assert_eq!(self.width, ext_degree);
         assert_eq!(betas.len(), log_arity * ext_degree);
         assert_eq!(beta_power.len(), ext_degree);
@@ -4753,6 +4762,7 @@ mod tests {
     use p3_symmetric::CryptographicHasher;
     use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
+    mod fri_arity;
     mod lookup_graph;
     mod quotient;
     mod witness;

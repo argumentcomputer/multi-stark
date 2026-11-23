@@ -319,11 +319,7 @@ fn fp3_v6_single_proof_matrix() {
         };
         let fri = FriParameters {
             log_final_poly_len: 1,
-            max_log_arity: if cfg!(feature = "cuda") {
-                1
-            } else {
-                max_log_arity
-            },
+            max_log_arity,
             num_queries: 12,
             commit_proof_of_work_bits: pow_bits,
             query_proof_of_work_bits: pow_bits,
@@ -387,7 +383,7 @@ fn fp3_v6_plonkish_proof_with_blake3_gadget() {
     };
     let fri = FriParameters {
         log_final_poly_len: 1,
-        max_log_arity: if cfg!(feature = "cuda") { 1 } else { 2 },
+        max_log_arity: 2,
         num_queries: 12,
         commit_proof_of_work_bits: 0,
         query_proof_of_work_bits: 0,
@@ -432,7 +428,7 @@ fn fp3_v6_batch_proof_retain_regenerate_and_messages() {
     };
     let fri = FriParameters {
         log_final_poly_len: 1,
-        max_log_arity: if cfg!(feature = "cuda") { 1 } else { 2 },
+        max_log_arity: 2,
         num_queries: 10,
         commit_proof_of_work_bits: 2,
         query_proof_of_work_bits: 2,
@@ -590,7 +586,7 @@ fn fp3_v6_streaming_and_disk_spill_byte_identical() {
     };
     let fri = FriParameters {
         log_final_poly_len: 1,
-        max_log_arity: if cfg!(feature = "cuda") { 1 } else { 2 },
+        max_log_arity: 2,
         num_queries: 10,
         commit_proof_of_work_bits: 2,
         query_proof_of_work_bits: 2,
@@ -890,7 +886,7 @@ fn v6_fp3_canonical_deserialization_and_tamper_rejection() {
     };
     let fri = FriParameters {
         log_final_poly_len: 1,
-        max_log_arity: if cfg!(feature = "cuda") { 1 } else { 2 },
+        max_log_arity: 2,
         num_queries: 10,
         commit_proof_of_work_bits: 0,
         query_proof_of_work_bits: 0,
@@ -1048,7 +1044,7 @@ fn bench_fp2_vs_fp3_cpu() {
     };
     let fri = FriParameters {
         log_final_poly_len: 0,
-        max_log_arity: if cfg!(feature = "cuda") { 1 } else { 2 },
+        max_log_arity: 2,
         num_queries: 64,
         commit_proof_of_work_bits: 0,
         query_proof_of_work_bits: 0,
@@ -1487,7 +1483,7 @@ fn v6_fp3_large_lde_above_1024_rows_roundtrip() {
     };
     let fri = FriParameters {
         log_final_poly_len: 1,
-        max_log_arity: if cfg!(feature = "cuda") { 1 } else { 2 },
+        max_log_arity: 2,
         num_queries: 24,
         commit_proof_of_work_bits: 0,
         query_proof_of_work_bits: 0,
@@ -1522,6 +1518,183 @@ fn v6_fp3_large_lde_above_1024_rows_roundtrip() {
             system
                 .verify_multiple_claims(&claim_refs, &tampered)
                 .is_err()
+        );
+    }
+}
+
+/// Multi-arity FRI (`max_log_arity = 2, 3, 4`) + `log_final_poly_len = 8` on
+/// both single-circuit uniform and multi-circuit mismatched heights above 1024
+/// LDE rows (exercises CUDA resident multi-ary folding on GPU builds and CPU
+/// folding on CPU builds).
+#[test]
+fn v6_fp3_multi_arity_and_final_poly_roundtrip() {
+    let comm = CommitmentParameters {
+        log_blowup: 2,
+        cap_height: 0,
+    };
+
+    // Single-circuit 4096-row cubic AIR (LDE height = 16384 = 2^14 > 1024).
+    let single_inputs = vec![CircuitInputs {
+        main_width: 3,
+        preprocessed: None,
+        constraints: vec![
+            Expr::main(0) * Expr::main(0) * Expr::main(0) - Expr::main(1),
+            Expr::main(0) + Expr::main(1) - Expr::main(2),
+        ],
+        ext_constraints: vec![],
+        lookups: vec![],
+        lookup_group_size: 1,
+    }];
+    let single_trace = RowMajorMatrix::new(
+        (0..4096u32)
+            .flat_map(|i| {
+                let x = f(i + 5);
+                let x3 = x * x * x;
+                [x, x3, x + x3]
+            })
+            .collect(),
+        3,
+    );
+
+    // Multi-circuit mismatched heights: 256-row byte ROM (LDE 1024) + 2048-row u32_add (LDE 8192).
+    // For `log_final_poly_len = 6` (`final = 256 < 1024`) this hits mixed arities.
+    let multi_inputs = u32_add_system_inputs(4);
+    let (multi_traces, multi_claims) = u32_add_witness(2048);
+    let multi_claim_refs: Vec<&[Val]> = multi_claims.iter().map(Vec::as_slice).collect();
+
+    let v6_pins = [
+        (
+            2usize,
+            "086737873d2f8ae34d0a32422cbf40142eeb263ac8501c001b564ca50b6a27a5",
+            "d237e09c7e37281163e3d3c0b241f14c90827bf93dbc0ede1b4d1749696fbced",
+        ),
+        (
+            3,
+            "3c2ee68b168628fcfd32151e4cf34558c77f37c994ef8c89b8f2b9ba42ea03fe",
+            "30f612a81fdae48acaa04a722b2f68e0b8ff65da5f796c04544237f2b639022f",
+        ),
+        (
+            4,
+            "58b29e8066350a58a04a22fc68bf9dcd8ceb705cc7ba1afa7258b0a900c2ac9b",
+            "b6a1446af46cdbb95741da5ef0be85c9a3aef7d4cbb9063c1e7edcca31ebc047",
+        ),
+    ];
+
+    for (max_log_arity, expected_uniform_pin, expected_mixed_pin) in v6_pins {
+        // Uniform single circuit with `log_final_poly_len = 8` (final height = 1024 < 16384).
+        let fri_uniform = FriParameters {
+            log_final_poly_len: 8,
+            max_log_arity,
+            num_queries: 20,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        };
+        let (sys, key) = System::new(
+            GoldilocksBlake3V6Config::new_with_batching(comm, fri_uniform, FriBatching::Tensor),
+            single_inputs.clone(),
+        );
+        let proof = sys.prove_multiple_claims(
+            &key,
+            &[],
+            SystemWitness::from_stage_1(vec![single_trace.clone()], &sys),
+        );
+        sys.verify_multiple_claims(&[], &proof).unwrap();
+        let arities: Vec<usize> = proof
+            .opening_proof
+            .commit_phase_openings
+            .iter()
+            .map(|s| usize::from(s.log_arity))
+            .collect();
+        assert!(
+            arities.contains(&max_log_arity),
+            "uniform v6 expected log_arity={max_log_arity} in {arities:?}"
+        );
+        assert_eq!(
+            blake3::hash(&proof.to_bytes().unwrap()).to_hex().as_str(),
+            expected_uniform_pin,
+            "v6 uniform proof bytes drifted from CPU/GPU pin (max_log_arity={max_log_arity})"
+        );
+
+        // Multi-circuit mismatched heights with `log_final_poly_len = 6` (final height = 256 < 1024).
+        let fri_mixed = FriParameters {
+            log_final_poly_len: 6,
+            max_log_arity,
+            num_queries: 20,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        };
+        let (msys, mkey) = System::new(
+            GoldilocksBlake3V6Config::new_with_batching(comm, fri_mixed, FriBatching::Tensor),
+            multi_inputs.clone(),
+        );
+        let mproof = msys.prove_multiple_claims(
+            &mkey,
+            &multi_claim_refs,
+            SystemWitness::from_stage_1(multi_traces.clone(), &msys),
+        );
+        msys.verify_multiple_claims(&multi_claim_refs, &mproof)
+            .unwrap();
+        assert_eq!(
+            blake3::hash(&mproof.to_bytes().unwrap()).to_hex().as_str(),
+            expected_mixed_pin,
+            "v6 mixed proof bytes drifted from CPU/GPU pin (max_log_arity={max_log_arity})"
+        );
+    }
+
+    // v5 (Ext2): uniform (LDE 16384) and multi-circuit mismatched heights (LDE 1024 & 8192)
+    // at max_log_arity = 2, 3 (cross-backend byte-identical pins).
+    let v5_pins = [
+        (
+            2usize,
+            "aade459d9f7323e51fbc8754b9efa59d76b33639375e4a86832369a4f699ac23",
+            "92eef3aa6c33dea9fb81728cb06bf8bcfd89c2e69c5c5ef1d4c13dabefc54ff1",
+        ),
+        (
+            3,
+            "6011dced08818b9a22c306bb1cd936d566ff9d73fc135f78479644a913fe096b",
+            "a2613d86c4f72788df9b47a3bfcdcac20f5e0941b509004e512457747c2477af",
+        ),
+    ];
+    for (max_log_arity, expected_uniform_pin, expected_mixed_pin) in v5_pins {
+        let fri_u = FriParameters {
+            log_final_poly_len: 6,
+            max_log_arity,
+            num_queries: 20,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        };
+        let (sys5, key5) = System::new(
+            GoldilocksBlake3Config::new(comm, fri_u),
+            single_inputs.clone(),
+        );
+        let p5 = sys5.prove_multiple_claims(
+            &key5,
+            &[],
+            SystemWitness::from_stage_1(vec![single_trace.clone()], &sys5),
+        );
+        sys5.verify_multiple_claims(&[], &p5).unwrap();
+        assert_eq!(
+            blake3::hash(&p5.to_bytes().unwrap()).to_hex().as_str(),
+            expected_uniform_pin,
+            "v5 uniform proof bytes drifted from CPU/GPU pin (max_log_arity={max_log_arity})"
+        );
+
+        let (msys5, mkey5) = System::new(
+            GoldilocksBlake3Config::new(comm, fri_u),
+            multi_inputs.clone(),
+        );
+        let mp5 = msys5.prove_multiple_claims(
+            &mkey5,
+            &multi_claim_refs,
+            SystemWitness::from_stage_1(multi_traces.clone(), &msys5),
+        );
+        msys5
+            .verify_multiple_claims(&multi_claim_refs, &mp5)
+            .unwrap();
+        assert_eq!(
+            blake3::hash(&mp5.to_bytes().unwrap()).to_hex().as_str(),
+            expected_mixed_pin,
+            "v5 mixed proof bytes drifted from CPU/GPU pin (max_log_arity={max_log_arity})"
         );
     }
 }

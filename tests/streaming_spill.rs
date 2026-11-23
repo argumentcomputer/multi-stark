@@ -323,7 +323,7 @@ fn streaming_and_spilled_proofs_are_byte_identical_across_configs() {
     ) in cases.iter().enumerate()
     {
         #[cfg(feature = "cuda")]
-        if cap_height != 0 || max_log_arity > 1 {
+        if cap_height != 0 {
             continue;
         }
         let inputs = multi_circuit_inputs(k, work_rows);

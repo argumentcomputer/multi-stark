@@ -1277,6 +1277,13 @@ __global__ void init_fri_powers(uint64_t* powers,size_t height,uint64_t g_inv){
         powers[row]=goldilocks_mul(0x7fffffff80000001ULL,goldilocks_pow(g_inv,exponent));
     }
 }
+__global__ void halve_fri_powers(uint64_t* output,const uint64_t* input,size_t height){
+    for(size_t row=static_cast<size_t>(blockIdx.x)*blockDim.x+threadIdx.x;row<height;row+=static_cast<size_t>(gridDim.x)*blockDim.x){
+        const uint64_t v=input[row<<1];
+        const uint64_t sq=goldilocks_mul(v,v);
+        output[row]=goldilocks_add(sq,sq);
+    }
+}
 template <typename Ext>
 __global__ void add_scaled_t(Ext* output,const Ext* input,size_t count,Ext scale,uint64_t ext_w){
     using Ops = ExtOps<Ext>;
@@ -3560,20 +3567,67 @@ int fri_fold_resident_impl(int device_id,void** output,const void* input,
     const void* next_reduced,const uint64_t* beta,size_t log_arity,
     Ext beta_power,uint64_t g_inv,uint64_t ext_w){
     constexpr size_t D = ExtOps<Ext>::D;
-    if(!output||!input||!beta||log_arity!=1)return static_cast<int>(cudaErrorInvalidValue);*output=nullptr;
-    auto* in=static_cast<const ResidentLde*>(input);if(in->width!=D||in->height%2)return static_cast<int>(cudaErrorInvalidValue);
-    const size_t final_height=in->height>>log_arity;auto* next=static_cast<const ResidentReducedOpening*>(next_reduced);
-    if(next&&(next->height!=final_height||next->ext_degree!=D))return static_cast<int>(cudaErrorInvalidValue);
-    cudaError_t status=cudaSetDevice(device_id);Ext *a=reinterpret_cast<Ext*>(in->values),*first=nullptr;uint64_t* powers=nullptr;
-    if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&first),(in->height/2)*sizeof(Ext));
-    if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&powers),(in->height/2)*sizeof(uint64_t));
-    if(status==cudaSuccess){init_fri_powers<<<blocks_for(in->height/2),THREADS>>>(powers,in->height/2,g_inv);status=cudaGetLastError();}
-    if(status==cudaSuccess){fold_fri_t<Ext><<<blocks_for(final_height),THREADS>>>(first,a,powers,final_height,ExtOps<Ext>::load(beta),ext_w);status=cudaGetLastError();}
-    a=first;
-    if(status==cudaSuccess&&next){add_scaled_t<Ext><<<blocks_for(final_height),THREADS>>>(a,reinterpret_cast<const Ext*>(next->values),final_height,beta_power,ext_w);status=cudaGetLastError();}
-    ResidentLde* result=nullptr;if(status==cudaSuccess)status=create_resident_lde(&result);
-    if(status==cudaSuccess){result->values=reinterpret_cast<uint64_t*>(a);result->height=final_height;result->width=D;first=nullptr;*output=result;}else destroy_resident_lde(result);
-    cudaFree(powers);cudaFree(first);return static_cast<int>(status);
+    if(!output||!input||!beta||log_arity==0||log_arity>=sizeof(size_t)*8)
+        return static_cast<int>(cudaErrorInvalidValue);
+    *output=nullptr;
+    auto* in=static_cast<const ResidentLde*>(input);
+    const size_t arity=size_t(1)<<log_arity;
+    if(in->width!=D||!is_power_of_two(in->height)||in->height<arity)
+        return static_cast<int>(cudaErrorInvalidValue);
+    const size_t final_height=in->height>>log_arity;
+    auto* next=static_cast<const ResidentReducedOpening*>(next_reduced);
+    if(next&&(next->height!=final_height||next->ext_degree!=D))
+        return static_cast<int>(cudaErrorInvalidValue);
+    cudaError_t status=cudaSetDevice(device_id);
+    Ext *out_buf=nullptr,*scratch_a=nullptr,*scratch_b=nullptr;
+    uint64_t *powers_a=nullptr,*powers_b=nullptr;
+    const size_t first_half=in->height>>1;
+    if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&out_buf),final_height*sizeof(Ext));
+    if(status==cudaSuccess)status=cudaMalloc(reinterpret_cast<void**>(&powers_a),first_half*sizeof(uint64_t));
+    if(status==cudaSuccess&&log_arity>=2)status=cudaMalloc(reinterpret_cast<void**>(&scratch_a),first_half*sizeof(Ext));
+    if(status==cudaSuccess&&log_arity>=2)status=cudaMalloc(reinterpret_cast<void**>(&powers_b),(first_half>>1)*sizeof(uint64_t));
+    if(status==cudaSuccess&&log_arity>=3)status=cudaMalloc(reinterpret_cast<void**>(&scratch_b),(first_half>>1)*sizeof(Ext));
+    const Ext* src=reinterpret_cast<const Ext*>(in->values);
+    const uint64_t* cur_powers=powers_a;
+    size_t half_height=first_half;
+    for(size_t step=0;status==cudaSuccess&&step<log_arity;++step){
+        if(step==0){
+            init_fri_powers<<<blocks_for(half_height),THREADS>>>(powers_a,half_height,g_inv);
+            status=cudaGetLastError();
+            cur_powers=powers_a;
+        }else{
+            uint64_t* next_powers=(step&1U)?powers_b:powers_a;
+            halve_fri_powers<<<blocks_for(half_height),THREADS>>>(next_powers,cur_powers,half_height);
+            status=cudaGetLastError();
+            cur_powers=next_powers;
+        }
+        Ext* dst=(step+1==log_arity)?out_buf:((step&1U)==0?scratch_a:scratch_b);
+        if(status==cudaSuccess){
+            fold_fri_t<Ext><<<blocks_for(half_height),THREADS>>>(
+                dst,src,cur_powers,half_height,ExtOps<Ext>::load(beta+step*D),ext_w);
+            status=cudaGetLastError();
+        }
+        src=dst;
+        half_height>>=1;
+    }
+    if(status==cudaSuccess&&next){
+        add_scaled_t<Ext><<<blocks_for(final_height),THREADS>>>(
+            out_buf,reinterpret_cast<const Ext*>(next->values),final_height,beta_power,ext_w);
+        status=cudaGetLastError();
+    }
+    ResidentLde* result=nullptr;
+    if(status==cudaSuccess)status=create_resident_lde(&result);
+    if(status==cudaSuccess){
+        result->values=reinterpret_cast<uint64_t*>(out_buf);
+        result->height=final_height;
+        result->width=D;
+        out_buf=nullptr;
+        *output=result;
+    }else{
+        destroy_resident_lde(result);
+    }
+    cudaFree(powers_b);cudaFree(powers_a);cudaFree(scratch_b);cudaFree(scratch_a);cudaFree(out_buf);
+    return static_cast<int>(status);
 }
 
 template <typename Ext>
@@ -5030,7 +5084,7 @@ int fri_merkle_create_impl(
     }
     const auto* codeword = static_cast<const ResidentLde*>(codeword_handle);
     if ((codeword->width != 2 && codeword->width != 3) ||
-        codeword->height % arity != 0) {
+        !is_power_of_two(codeword->height) || codeword->height < arity) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
     ResidentLde view;

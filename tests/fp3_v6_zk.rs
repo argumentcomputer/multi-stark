@@ -1180,3 +1180,92 @@ fn v6_vs_v6_zk_proof_size_comparison() {
         assert!(zk_bytes > v6_bytes);
     }
 }
+
+/// Multi-arity FRI (`max_log_arity = 2, 3, 4`) + `log_final_poly_len = 8` for
+/// Protocol `v6-zk` (`Ext3` hiding) across both single-circuit uniform height
+/// and multi-circuit mismatched heights strictly above 1024 LDE rows (runs on
+/// both CPU and CUDA builds).
+#[test]
+fn v6_zk_multi_arity_and_final_poly_roundtrip() {
+    let comm = CommitmentParameters {
+        log_blowup: 2,
+        cap_height: 0,
+    };
+
+    // Single-circuit 2048-row trace -> ZK LDE height = 2 * 2048 * 4 = 16384 = 2^14 > 1024.
+    let single_rows = 2048usize;
+    let (single_traces, single_claims) = build_single_circuit_witness(single_rows, 999, 13);
+    let single_claim_refs: Vec<&[Val]> = single_claims.iter().map(Vec::as_slice).collect();
+
+    // Multi-circuit mismatched heights: byte ROM / aux / work = 256 (ZK LDE 2048 = 2^11),
+    // sq = 4096 (ZK LDE 32768 = 2^15) — all > 2^(8+2) = 1024, exercising mixed log_arity
+    // including full max_log_arity = 2, 3, 4!
+    let (multi_traces, multi_claims) = build_multi_circuit_zk_witness(256, 256, 4096, true, 17);
+    let multi_claim_refs: Vec<&[Val]> = multi_claims.iter().map(Vec::as_slice).collect();
+
+    for max_log_arity in [2usize, 3, 4] {
+        let fri = FriParameters {
+            log_final_poly_len: 8,
+            max_log_arity,
+            num_queries: 24,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        };
+
+        let (sys, key) = System::new(
+            GoldilocksBlake3V6ZkConfig::new(comm, fri),
+            single_circuit_private_sum_inputs(single_rows),
+        );
+        let proof = sys.prove_multiple_claims(
+            &key,
+            &single_claim_refs,
+            SystemWitness::from_stage_1(single_traces.clone(), &sys),
+        );
+        sys.verify_multiple_claims(&single_claim_refs, &proof)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "v6-zk single-circuit multi-arity verify failed (arity={max_log_arity}): {e:?}"
+                )
+            });
+        let single_arities: Vec<usize> = proof
+            .opening_proof
+            .commit_phase_openings
+            .iter()
+            .map(|s| usize::from(s.log_arity))
+            .collect();
+        assert!(
+            single_arities.contains(&max_log_arity),
+            "v6-zk single-circuit expected log_arity={max_log_arity} in {single_arities:?}"
+        );
+        let bytes = proof.to_bytes().unwrap();
+        let decoded = Proof::<GoldilocksBlake3V6ZkConfig>::from_bytes(&bytes).unwrap();
+        sys.verify_multiple_claims(&single_claim_refs, &decoded)
+            .unwrap();
+
+        let (msys, mkey) = System::new(
+            GoldilocksBlake3V6ZkConfig::new(comm, fri),
+            multi_circuit_zk_inputs(2, 256, 256, true),
+        );
+        let mproof = msys.prove_multiple_claims(
+            &mkey,
+            &multi_claim_refs,
+            SystemWitness::from_stage_1(multi_traces.clone(), &msys),
+        );
+        msys.verify_multiple_claims(&multi_claim_refs, &mproof)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "v6-zk multi-circuit multi-arity verify failed (arity={max_log_arity}): {e:?}"
+                )
+            });
+        let marities: Vec<usize> = mproof
+            .opening_proof
+            .commit_phase_openings
+            .iter()
+            .map(|s| usize::from(s.log_arity))
+            .collect();
+        assert!(
+            marities.contains(&max_log_arity) && marities.contains(&1),
+            "v6-zk multi-circuit expected mixed arities containing {max_log_arity} and 1, got {marities:?}"
+        );
+    }
+}
