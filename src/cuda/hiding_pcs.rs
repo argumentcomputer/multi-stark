@@ -348,16 +348,43 @@ where
             })
             .max()
             .unwrap_or(0);
-        let (initial_free, total_bytes) = super::device_memory_info(self.mmcs.device_id());
-        let minimum_free = super::minimum_free_bytes(total_bytes);
+        let (initial_free, _) = super::device_memory_info(self.mmcs.device_id());
+        let minimum_free = super::minimum_free_bytes();
         let lde_bytes = source_cells
             .saturating_mul(size_of::<Goldilocks>())
             .checked_shl(u32::try_from(added_bits).expect("LDE blowup exceeds u32"))
             .unwrap_or(usize::MAX);
+        // An LDE uploads its whole trace beside its values, and a trace
+        // released after construction is still resident while its own LDE
+        // runs, so the all-device path always needs the largest trace.
+        let max_trace_bytes = prepared
+            .iter()
+            .map(|(_, mat)| {
+                mat.height()
+                    .saturating_mul(mat.width())
+                    .saturating_mul(size_of::<Goldilocks>())
+            })
+            .max()
+            .unwrap_or(0);
+        let max_lde_height = prepared
+            .iter()
+            .map(|(_, mat)| {
+                mat.height()
+                    .checked_shl(u32::try_from(added_bits).expect("LDE blowup exceeds u32"))
+                    .unwrap_or(usize::MAX)
+            })
+            .max()
+            .unwrap_or(0);
+        // The salted Merkle tree built immediately after the LDE loop holds
+        // all binary digest layers plus one injected frontier (~96 bytes/row).
+        let tree_workspace_bytes = max_lde_height.saturating_mul(96);
+        let peak_workspace = max_trace_bytes
+            .saturating_add(max_transform_workspace)
+            .max(tree_workspace_bytes);
 
         if lde_bytes
+            .saturating_add(peak_workspace)
             .saturating_add(minimum_free)
-            .saturating_add(max_transform_workspace)
             > initial_free
         {
             let dft = &self.dft;
@@ -549,200 +576,237 @@ where
                 .unwrap_or(0);
             let final_fri_height = self.fri.blowup() * self.fri.final_poly_len();
             if resident_max_height > 1024 && resident_max_height > final_fri_height {
-                let _resident_guard = tracing::info_span!("stark/fri_resident_zk").entered();
                 let device_id = self.mmcs.device_id();
                 let (ext_degree, ext_w) = cuda_ext_degree_and_w::<Goldilocks, Challenge>();
                 let mut opened_max_width = 0usize;
                 let mut openings_per_height = [0usize; 33];
+                let mut max_log: LinearMap<Challenge, usize> = LinearMap::new();
                 for (ldes, points) in &resident_rounds {
                     for (lde, ps) in ldes.iter().zip(points.iter()) {
                         if !ps.is_empty() {
                             opened_max_width = opened_max_width.max(lde.width());
                             let lh = log2_strict_usize(lde.height());
                             openings_per_height[lh] += ps.len();
-                        }
-                    }
-                }
-                let max_openings_per_height = openings_per_height.into_iter().max().unwrap_or(0);
-                let log_global_max_height = log2_strict_usize(resident_max_height);
-                let coset_gold = bit_reversed_coset::<Goldilocks>(log_global_max_height);
-                let mut max_log: LinearMap<Challenge, usize> = LinearMap::new();
-                for (ldes, points) in &resident_rounds {
-                    for (lde, ps) in ldes.iter().zip(points.iter()) {
-                        for &z in ps {
-                            if let Some(h) = max_log.get_mut(&z) {
-                                *h = (*h).max(log2_strict_usize(lde.height()));
-                            } else {
-                                max_log.insert(z, log2_strict_usize(lde.height()));
+                            for &z in ps {
+                                if let Some(h) = max_log.get_mut(&z) {
+                                    *h = (*h).max(lh);
+                                } else {
+                                    max_log.insert(z, lh);
+                                }
                             }
                         }
                     }
                 }
-                let mut inv_offsets = LinearMap::new();
-                let mut inverse_points = Vec::new();
-                let mut inverse_counts = Vec::new();
-                let mut inverse_count = 0usize;
-                for (point, lh) in max_log {
-                    inv_offsets.insert(point, inverse_count);
-                    let (buf, d) = ext_to_goldilocks::<Goldilocks, Challenge>(point, ext_degree);
-                    inverse_points.extend_from_slice(&buf[..d]);
-                    let count = 1usize << lh;
-                    inverse_counts.push(count);
-                    inverse_count += count;
-                }
-                let mut workspace = CudaFriWorkspace::new(
-                    device_id,
-                    &inverse_points,
-                    &inverse_counts,
-                    &coset_gold,
-                    ext_w,
-                    ext_degree,
-                );
-                let mut interpolation_tasks = CudaInterpolationTasks::new(ext_degree);
-                let mut output_count = 0usize;
-                let layouts = resident_rounds
+                let point_logs = max_log.into_iter().collect_vec();
+                let inverse_elements: usize = point_logs.iter().map(|&(_, lh)| 1usize << lh).sum();
+                let max_inverse_elements: usize = point_logs
                     .iter()
-                    .map(|(ldes, points)| {
-                        ldes.iter()
-                            .zip(points.iter())
-                            .map(|(lde, ps)| {
-                                let h = lde.height() >> self.fri.log_blowup;
-                                let lh = log2_strict_usize(h);
-                                ps.iter()
-                                    .map(|&point| {
-                                        let offset = output_count;
-                                        output_count += lde.width();
-                                        let shift_pow = Goldilocks::GENERATOR.exp_power_of_2(lh);
-                                        let scale = (point.exp_power_of_2(lh) - shift_pow)
-                                            * (Goldilocks::from_usize(h) * shift_pow).inverse();
-                                        let (scale_buf, d) =
-                                            ext_to_goldilocks::<Goldilocks, Challenge>(
-                                                scale, ext_degree,
-                                            );
-                                        interpolation_tasks.push(
-                                            lde,
-                                            h,
-                                            *inv_offsets.get(&point).unwrap(),
-                                            offset,
-                                            &scale_buf[..d],
-                                        );
-                                        (offset, lde.width())
-                                    })
-                                    .collect_vec()
-                            })
-                            .collect_vec()
-                    })
-                    .collect_vec();
-                let interpolated = tracing::info_span!("stark/fri_interpolate")
-                    .in_scope(|| workspace.interpolate(&interpolation_tasks, output_count, ext_w));
-                let all_opened_values = layouts
-                    .into_iter()
-                    .map(|round| {
-                        round
-                            .into_iter()
-                            .map(|matrix| {
-                                matrix
-                                    .into_iter()
-                                    .map(|(offset, width)| {
-                                        interpolated
-                                            [offset * ext_degree..(offset + width) * ext_degree]
-                                            .chunks_exact(ext_degree)
-                                            .map(ext_from_goldilocks::<Goldilocks, Challenge>)
-                                            .collect_vec()
-                                    })
-                                    .collect_vec()
-                            })
-                            .collect_vec()
-                    })
-                    .collect_vec();
-                for round in &all_opened_values {
-                    for matrix in round {
-                        for values in matrix {
-                            challenger.observe_algebra_slice(values);
-                        }
+                    .map(|&(_, lh)| 1usize << lh)
+                    .max()
+                    .unwrap_or(0);
+                let reduced_elements: usize = openings_per_height
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(lh, &count)| (count > 0).then_some(1usize << lh))
+                    .sum();
+                let (free_bytes, total_device_bytes) = super::device_memory_info(device_id);
+                let minimum_free = super::minimum_free_bytes();
+                let fri_workspace_bytes = inverse_elements
+                    .saturating_mul(ext_degree * size_of::<Goldilocks>())
+                    .saturating_add(resident_max_height.saturating_mul(size_of::<Goldilocks>()))
+                    .saturating_add(
+                        max_inverse_elements.saturating_mul(ext_degree * size_of::<Goldilocks>()),
+                    )
+                    .saturating_add(
+                        reduced_elements.saturating_mul(ext_degree * size_of::<Goldilocks>()),
+                    )
+                    .saturating_add(
+                        resident_max_height
+                            .saturating_mul(ext_degree * size_of::<Goldilocks>() + 96),
+                    )
+                    .saturating_add(total_device_bytes / 64);
+                if fri_workspace_bytes.saturating_add(minimum_free) <= free_bytes {
+                    let _resident_guard = tracing::info_span!("stark/fri_resident_zk").entered();
+                    let max_openings_per_height =
+                        openings_per_height.into_iter().max().unwrap_or(0);
+                    let log_global_max_height = log2_strict_usize(resident_max_height);
+                    let coset_gold = bit_reversed_coset::<Goldilocks>(log_global_max_height);
+                    let mut inv_offsets = LinearMap::new();
+                    let mut inverse_points = Vec::new();
+                    let mut inverse_counts = Vec::new();
+                    let mut inverse_count = 0usize;
+                    for (point, lh) in point_logs {
+                        inv_offsets.insert(point, inverse_count);
+                        let (buf, d) =
+                            ext_to_goldilocks::<Goldilocks, Challenge>(point, ext_degree);
+                        inverse_points.extend_from_slice(&buf[..d]);
+                        let count = 1usize << lh;
+                        inverse_counts.push(count);
+                        inverse_count += count;
                     }
-                }
-                let schedule = FriBatchingSchedule::<Challenge>::sample(
-                    self.batching,
-                    opened_max_width,
-                    max_openings_per_height,
-                    challenger,
-                );
-                let col_weights: Vec<Challenge> = match &schedule {
-                    FriBatchingSchedule::Horner { alpha } => {
-                        alpha.powers().take(opened_max_width).collect()
-                    }
-                    FriBatchingSchedule::Tensor { col_weights, .. } => col_weights.clone(),
-                };
-                let mut col_weights_flat = Vec::with_capacity(col_weights.len() * ext_degree);
-                for &w in &col_weights {
-                    let (buf, d) = ext_to_goldilocks::<Goldilocks, Challenge>(w, ext_degree);
-                    col_weights_flat.extend_from_slice(&buf[..d]);
-                }
-                let mut num_reduced = [0usize; 33];
-                let mut opening_idx_by_height = [0usize; 33];
-                let mut reduced: [Option<CudaReducedOpening>; 33] = core::array::from_fn(|_| None);
-                let mut reduction_tasks = CudaReductionTasks::new(ext_degree);
-                for ((ldes, points), openings_round) in
-                    resident_rounds.iter().zip(all_opened_values.iter())
-                {
-                    for ((lde, ps), openings) in
-                        ldes.iter().zip(points.iter()).zip(openings_round.iter())
-                    {
-                        if ps.is_empty() {
-                            continue;
-                        }
-                        let lh = log2_strict_usize(lde.height());
-                        let target = reduced[lh].get_or_insert_with(|| {
-                            CudaReducedOpening::new_with_degree(device_id, lde.height(), ext_degree)
-                        });
-                        for (&point, ys) in ps.iter().zip(openings.iter()) {
-                            let reduced_y: Challenge =
-                                dot_product(col_weights.iter().copied(), ys.iter().copied());
-                            let offset = match &schedule {
-                                FriBatchingSchedule::Horner { alpha } => alpha.exp_u64(
-                                    u64::try_from(num_reduced[lh])
-                                        .expect("reduced column count exceeds u64"),
-                                ),
-                                FriBatchingSchedule::Tensor { open_weights, .. } => {
-                                    open_weights[opening_idx_by_height[lh]]
-                                }
-                            };
-                            let (y_buf, d) =
-                                ext_to_goldilocks::<Goldilocks, Challenge>(reduced_y, ext_degree);
-                            let (off_buf, _) =
-                                ext_to_goldilocks::<Goldilocks, Challenge>(offset, ext_degree);
-                            reduction_tasks.push(
-                                target,
-                                lde,
-                                *inv_offsets.get(&point).unwrap(),
-                                &y_buf[..d],
-                                &off_buf[..d],
-                            );
-                            num_reduced[lh] += lde.width();
-                            opening_idx_by_height[lh] += 1;
-                        }
-                    }
-                }
-                if !reduction_tasks.is_empty() {
-                    tracing::info_span!("stark/fri_reduce").in_scope(|| {
-                        workspace.reduce(&reduction_tasks, &col_weights_flat, ext_w);
-                    });
-                }
-                let fri_input = reduced.into_iter().rev().flatten().collect_vec();
-                let fri_proof = tracing::info_span!("stark/fri_prove").in_scope(|| {
-                    prove_fri_cuda_resident_hiding(
-                        &self.fri,
-                        fri_input,
-                        challenger,
-                        log_global_max_height,
-                        &commitment_data_with_opening_points,
-                        &self.mmcs,
+                    let mut workspace = CudaFriWorkspace::new(
+                        device_id,
+                        &inverse_points,
+                        &inverse_counts,
+                        &coset_gold,
                         ext_w,
                         ext_degree,
-                    )
-                });
-                return (all_opened_values, fri_proof);
+                    );
+                    let mut interpolation_tasks = CudaInterpolationTasks::new(ext_degree);
+                    let mut output_count = 0usize;
+                    let layouts = resident_rounds
+                        .iter()
+                        .map(|(ldes, points)| {
+                            ldes.iter()
+                                .zip(points.iter())
+                                .map(|(lde, ps)| {
+                                    let h = lde.height() >> self.fri.log_blowup;
+                                    let lh = log2_strict_usize(h);
+                                    ps.iter()
+                                        .map(|&point| {
+                                            let offset = output_count;
+                                            output_count += lde.width();
+                                            let shift_pow =
+                                                Goldilocks::GENERATOR.exp_power_of_2(lh);
+                                            let scale = (point.exp_power_of_2(lh) - shift_pow)
+                                                * (Goldilocks::from_usize(h) * shift_pow).inverse();
+                                            let (scale_buf, d) =
+                                                ext_to_goldilocks::<Goldilocks, Challenge>(
+                                                    scale, ext_degree,
+                                                );
+                                            interpolation_tasks.push(
+                                                lde,
+                                                h,
+                                                *inv_offsets.get(&point).unwrap(),
+                                                offset,
+                                                &scale_buf[..d],
+                                            );
+                                            (offset, lde.width())
+                                        })
+                                        .collect_vec()
+                                })
+                                .collect_vec()
+                        })
+                        .collect_vec();
+                    let interpolated =
+                        tracing::info_span!("stark/fri_interpolate").in_scope(|| {
+                            workspace.interpolate(&interpolation_tasks, output_count, ext_w)
+                        });
+                    let all_opened_values = layouts
+                        .into_iter()
+                        .map(|round| {
+                            round
+                                .into_iter()
+                                .map(|matrix| {
+                                    matrix
+                                        .into_iter()
+                                        .map(|(offset, width)| {
+                                            interpolated
+                                                [offset * ext_degree..(offset + width) * ext_degree]
+                                                .chunks_exact(ext_degree)
+                                                .map(ext_from_goldilocks::<Goldilocks, Challenge>)
+                                                .collect_vec()
+                                        })
+                                        .collect_vec()
+                                })
+                                .collect_vec()
+                        })
+                        .collect_vec();
+                    for round in &all_opened_values {
+                        for matrix in round {
+                            for values in matrix {
+                                challenger.observe_algebra_slice(values);
+                            }
+                        }
+                    }
+                    let schedule = FriBatchingSchedule::<Challenge>::sample(
+                        self.batching,
+                        opened_max_width,
+                        max_openings_per_height,
+                        challenger,
+                    );
+                    let col_weights: Vec<Challenge> = match &schedule {
+                        FriBatchingSchedule::Horner { alpha } => {
+                            alpha.powers().take(opened_max_width).collect()
+                        }
+                        FriBatchingSchedule::Tensor { col_weights, .. } => col_weights.clone(),
+                    };
+                    let mut col_weights_flat = Vec::with_capacity(col_weights.len() * ext_degree);
+                    for &w in &col_weights {
+                        let (buf, d) = ext_to_goldilocks::<Goldilocks, Challenge>(w, ext_degree);
+                        col_weights_flat.extend_from_slice(&buf[..d]);
+                    }
+                    let mut num_reduced = [0usize; 33];
+                    let mut opening_idx_by_height = [0usize; 33];
+                    let mut reduced: [Option<CudaReducedOpening>; 33] =
+                        core::array::from_fn(|_| None);
+                    let mut reduction_tasks = CudaReductionTasks::new(ext_degree);
+                    for ((ldes, points), openings_round) in
+                        resident_rounds.iter().zip(all_opened_values.iter())
+                    {
+                        for ((lde, ps), openings) in
+                            ldes.iter().zip(points.iter()).zip(openings_round.iter())
+                        {
+                            if ps.is_empty() {
+                                continue;
+                            }
+                            let lh = log2_strict_usize(lde.height());
+                            let target = reduced[lh].get_or_insert_with(|| {
+                                CudaReducedOpening::new_with_degree(
+                                    device_id,
+                                    lde.height(),
+                                    ext_degree,
+                                )
+                            });
+                            for (&point, ys) in ps.iter().zip(openings.iter()) {
+                                let reduced_y: Challenge =
+                                    dot_product(col_weights.iter().copied(), ys.iter().copied());
+                                let offset = match &schedule {
+                                    FriBatchingSchedule::Horner { alpha } => alpha.exp_u64(
+                                        u64::try_from(num_reduced[lh])
+                                            .expect("reduced column count exceeds u64"),
+                                    ),
+                                    FriBatchingSchedule::Tensor { open_weights, .. } => {
+                                        open_weights[opening_idx_by_height[lh]]
+                                    }
+                                };
+                                let (y_buf, d) = ext_to_goldilocks::<Goldilocks, Challenge>(
+                                    reduced_y, ext_degree,
+                                );
+                                let (off_buf, _) =
+                                    ext_to_goldilocks::<Goldilocks, Challenge>(offset, ext_degree);
+                                reduction_tasks.push(
+                                    target,
+                                    lde,
+                                    *inv_offsets.get(&point).unwrap(),
+                                    &y_buf[..d],
+                                    &off_buf[..d],
+                                );
+                                num_reduced[lh] += lde.width();
+                                opening_idx_by_height[lh] += 1;
+                            }
+                        }
+                    }
+                    if !reduction_tasks.is_empty() {
+                        tracing::info_span!("stark/fri_reduce").in_scope(|| {
+                            workspace.reduce(&reduction_tasks, &col_weights_flat, ext_w);
+                        });
+                    }
+                    let fri_input = reduced.into_iter().rev().flatten().collect_vec();
+                    let fri_proof = tracing::info_span!("stark/fri_prove").in_scope(|| {
+                        prove_fri_cuda_resident_hiding(
+                            &self.fri,
+                            fri_input,
+                            challenger,
+                            log_global_max_height,
+                            &commitment_data_with_opening_points,
+                            &self.mmcs,
+                            ext_w,
+                            ext_degree,
+                        )
+                    });
+                    return (all_opened_values, fri_proof);
+                }
             }
         }
 
@@ -971,5 +1035,160 @@ where
             &trace_domain,
             &quotient_domain,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use p3_commit::{ExtensionMmcs, Mmcs, Pcs};
+    use p3_field::coset::TwoAdicMultiplicativeCoset;
+    use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
+    use p3_fri::FriParameters;
+    use p3_goldilocks::Goldilocks;
+    use p3_matrix::dense::RowMajorMatrix;
+    use p3_util::log2_strict_usize;
+
+    use super::HidingCudaTwoAdicFriPcs;
+    use crate::config::ProofConfig;
+    use crate::cuda::hiding_mmcs::HidingCudaMmcs;
+    use crate::cuda::{CudaDft, DeviceMemoryReservation, configured_device};
+    use crate::p3_adapter::fri_batching::FriBatching;
+    use crate::types::{
+        CommitmentParameters, ExtVal3, FriParameters as ConfigFriParameters,
+        GoldilocksBlake3V6ZkConfig,
+    };
+
+    #[test]
+    #[ignore = "requires exclusive access to a CUDA device: hides its free memory"]
+    fn hiding_pcs_and_mmcs_honor_device_memory_reservation() {
+        let device = configured_device();
+        let mmcs = HidingCudaMmcs::new_v6_zk(0, device);
+        let ext_mmcs: ExtensionMmcs<Goldilocks, ExtVal3, HidingCudaMmcs> =
+            ExtensionMmcs::new(mmcs.clone());
+        let fri = FriParameters {
+            log_blowup: 2,
+            log_final_poly_len: 1,
+            max_log_arity: 2,
+            num_queries: 8,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+            mmcs: ext_mmcs,
+        };
+        let pcs = HidingCudaTwoAdicFriPcs::new(CudaDft::new(device), mmcs.clone(), fri)
+            .with_batching(FriBatching::Tensor);
+        let config = GoldilocksBlake3V6ZkConfig::with_device(
+            CommitmentParameters {
+                log_blowup: 2,
+                cap_height: 0,
+            },
+            ConfigFriParameters {
+                log_final_poly_len: 1,
+                max_log_arity: 2,
+                num_queries: 8,
+                commit_proof_of_work_bits: 0,
+                query_proof_of_work_bits: 0,
+            },
+            FriBatching::Tensor,
+            Some(device),
+        );
+
+        // Height 512 -> LDE height 512 * 2 * 4 = 4096 (> 1024 GPU FRI threshold).
+        let height = 512usize;
+        let width = 8usize;
+        let domain =
+            TwoAdicMultiplicativeCoset::new(Goldilocks::ONE, log2_strict_usize(height)).unwrap();
+        let matrix = RowMajorMatrix::new(
+            (0..height * width)
+                .map(|i| Goldilocks::from_u64((i as u64).wrapping_mul(0x9e37_79b9) ^ 0x5a5a))
+                .collect(),
+            width,
+        );
+
+        // 1. Unreserved: commit_preprocessed and commit stay CUDA-resident.
+        let (gpu_prep_commit, gpu_prep_data) = pcs.commit_preprocessed([(domain, matrix.clone())]);
+        assert!(
+            mmcs.is_cuda_resident(&gpu_prep_data),
+            "unreserved v6-zk preprocessed commit should be CUDA-resident"
+        );
+        type ZkChallenger = <GoldilocksBlake3V6ZkConfig as ProofConfig>::Challenger;
+        let (gpu_commit, gpu_data) = <HidingCudaTwoAdicFriPcs<_, _, _, _> as Pcs<
+            ExtVal3,
+            ZkChallenger,
+        >>::commit(&pcs, [(domain, matrix.clone())]);
+        assert!(
+            mmcs.is_cuda_resident(&gpu_data),
+            "unreserved v6-zk commit should be CUDA-resident"
+        );
+
+        // 2. Under a reservation larger than VRAM, admission must spill to CPU
+        //    and still produce identical commitments and verifying openings.
+        let reservation = DeviceMemoryReservation::new(device, 1usize << 40);
+
+        let (cpu_prep_commit, cpu_prep_data) = pcs.commit_preprocessed([(domain, matrix)]);
+        assert!(
+            !mmcs.is_cuda_resident(&cpu_prep_data),
+            "reserved v6-zk preprocessed commit must fall back to CPU"
+        );
+        assert_eq!(
+            cpu_prep_commit, gpu_prep_commit,
+            "CPU fallback and GPU v6-zk preprocessed commitments must match"
+        );
+
+        // HidingCudaMmcs::commit_cuda_storage_with_seed & Mmcs::commit (> 1<<18 cells).
+        let big_lde = RowMajorMatrix::new(
+            (0..(1 << 16) * 5)
+                .map(|i| Goldilocks::from_usize(i + 1))
+                .collect(),
+            5,
+        );
+        let salt_seed = [0x33u8; 32];
+        let (reserved_storage_commit, reserved_storage_data) =
+            mmcs.commit_cuda_storage_with_seed(vec![big_lde.clone()], salt_seed);
+        assert!(
+            !mmcs.is_cuda_resident(&reserved_storage_data),
+            "reserved commit_cuda_storage_with_seed must fall back to CPU"
+        );
+        let (_, reserved_mmcs_data) = mmcs.commit(vec![big_lde.clone()]);
+        assert!(
+            !mmcs.is_cuda_resident(&reserved_mmcs_data),
+            "reserved Mmcs::commit must fall back to CPU"
+        );
+
+        // Opening already-resident GPU data while VRAM is reserved falls back
+        // cleanly to the CPU opening path and verifies.
+        let z = ExtVal3::from_basis_coefficients_slice(&[
+            Goldilocks::from_u64(11),
+            Goldilocks::from_u64(19),
+            Goldilocks::from_u64(29),
+        ])
+        .unwrap();
+        let mut prover_challenger = config.initialise_challenger();
+        let (opened, proof) = <HidingCudaTwoAdicFriPcs<_, _, _, _> as Pcs<ExtVal3, _>>::open(
+            &pcs,
+            vec![(&gpu_data, vec![vec![z]])],
+            &mut prover_challenger,
+        );
+        let mut verifier_challenger = config.initialise_challenger();
+        <HidingCudaTwoAdicFriPcs<_, _, _, _> as Pcs<ExtVal3, _>>::verify(
+            &pcs,
+            vec![(
+                gpu_commit,
+                vec![(domain, vec![(z, opened[0][0][0].clone())])],
+            )],
+            &proof,
+            &mut verifier_challenger,
+        )
+        .expect("v6-zk proof opened under DeviceMemoryReservation must verify");
+
+        drop(reservation);
+
+        // After dropping the reservation, storage commit returns to GPU and matches.
+        let (gpu_storage_commit, gpu_storage_data) =
+            mmcs.commit_cuda_storage_with_seed(vec![big_lde], salt_seed);
+        assert!(
+            mmcs.is_cuda_resident(&gpu_storage_data),
+            "unreserved commit_cuda_storage_with_seed should return to GPU"
+        );
+        assert_eq!(reserved_storage_commit, gpu_storage_commit);
     }
 }

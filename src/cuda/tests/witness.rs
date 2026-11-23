@@ -456,7 +456,11 @@ fn commit_beside_concurrent_allocation(reserve: bool) {
             .collect::<Vec<_>>()
     };
     // Also caches every transform constant before free memory is measured.
-    let (expected, _) = commit_with(pcs, evaluations(TraceSource::Host(generated.clone())), None);
+    let (expected, _) = commit_with::<crate::types::ExtVal, crate::types::Challenger>(
+        pcs,
+        evaluations(TraceSource::Host(generated.clone())),
+        None,
+    );
 
     // The resident footprint `commit_with` admits for this batch.
     let trace_bytes = height * width * size_of::<Goldilocks>();
@@ -488,7 +492,7 @@ fn commit_beside_concurrent_allocation(reserve: bool) {
     if reserve {
         *source.reservation.lock().unwrap() = Some(DeviceMemoryReservation::new(device, external));
     }
-    let (commitment, _data) = commit_with(
+    let (commitment, _data) = commit_with::<crate::types::ExtVal, crate::types::Challenger>(
         pcs,
         evaluations(TraceSource::Generated(source.clone())),
         None,

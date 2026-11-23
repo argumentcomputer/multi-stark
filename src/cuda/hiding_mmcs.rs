@@ -535,9 +535,14 @@ impl HidingCudaMmcs {
                     .saturating_mul(size_of::<Goldilocks>())
             })
             .sum();
-        let (free_bytes, total_device_bytes) = super::device_memory_info(self.device_id);
-        let min_free = super::minimum_free_bytes(total_device_bytes);
-        if total_bytes.saturating_add(min_free) > free_bytes
+        let max_height = ldes.iter().map(Matrix::height).max().unwrap_or(0);
+        let tree_workspace_bytes = max_height.saturating_mul(96);
+        let (free_bytes, _) = super::device_memory_info(self.device_id);
+        let min_free = super::minimum_free_bytes();
+        if total_bytes
+            .saturating_add(tree_workspace_bytes)
+            .saturating_add(min_free)
+            > free_bytes
             || !host_hashed_heights_zk(ldes.iter().map(Matrix::dimensions)).is_empty()
         {
             return self.commit_cpu_with_seed(ldes, salt_seed);
@@ -674,9 +679,15 @@ impl Mmcs<Goldilocks> for HidingCudaMmcs {
             .sum();
         let total_bytes = total_cells.saturating_mul(size_of::<Goldilocks>());
         if device_hashable && total_cells > (1 << 18) {
-            let (free_bytes, total_device_bytes) = super::device_memory_info(self.device_id);
-            let min_free = super::minimum_free_bytes(total_device_bytes);
-            if total_bytes.saturating_add(min_free) <= free_bytes {
+            let max_height = inputs.iter().map(Matrix::height).max().unwrap_or(0);
+            let tree_workspace_bytes = max_height.saturating_mul(96);
+            let (free_bytes, _) = super::device_memory_info(self.device_id);
+            let min_free = super::minimum_free_bytes();
+            if total_bytes
+                .saturating_add(tree_workspace_bytes)
+                .saturating_add(min_free)
+                <= free_bytes
+            {
                 let resident: Vec<CudaLde> = inputs
                     .iter()
                     .map(|matrix| {
