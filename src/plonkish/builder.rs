@@ -3,6 +3,7 @@ use std::{collections::HashMap, fmt};
 
 use p3_maybe_rayon::prelude::*;
 
+use crate::p3_adapter::domain_blake3::Blake3Domain;
 use crate::traits::Field;
 
 use super::{Witness, WitnessError};
@@ -260,6 +261,17 @@ impl<F: Field> Circuit<F> {
             .map(|c| (c.input.as_slice(), &c.output))
     }
 
+    /// Compact BLAKE3 calls with their [`Blake3Domain`] that a backend must
+    /// constrain, including byte bindings.
+    pub fn blake3_domain_calls(
+        &self,
+    ) -> impl Iterator<Item = (Blake3Domain, &[Value], &[Value; 32])> {
+        self.hashes
+            .iter()
+            .flat_map(|h| &h.calls)
+            .map(|c| (c.domain, c.input.as_slice(), &c.output))
+    }
+
     /// Public bindings in the order they were exposed.
     pub fn public_values(&self) -> &[Value] {
         &self.publics
@@ -414,11 +426,33 @@ impl<F: Field> CircuitBuilder<F> {
     /// Both input and output bytes are range constrained by the lowering.
     /// This adds a relation, not a witness recipe for the output wires.
     pub fn constrain_blake3(&mut self, input: Vec<Value>, output: &[Value; 32]) {
-        self.enable_compact_blake3();
-        self.record_hash(input, output);
+        self.constrain_blake3_domain(Blake3Domain::Plain, input, output);
     }
 
+    /// Constrain existing byte wires to a domain-separated BLAKE3 digest using
+    /// compact traces. Both input and output bytes are range constrained by
+    /// the lowering. This adds a relation, not a witness recipe for the output wires.
+    pub fn constrain_blake3_domain(
+        &mut self,
+        domain: Blake3Domain,
+        input: Vec<Value>,
+        output: &[Value; 32],
+    ) {
+        self.enable_compact_blake3();
+        self.record_hash_domain(domain, input, output);
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn record_hash(&mut self, input: Vec<Value>, output: &[Value; 32]) {
+        self.record_hash_domain(Blake3Domain::Plain, input, output);
+    }
+
+    pub(super) fn record_hash_domain(
+        &mut self,
+        domain: Blake3Domain,
+        input: Vec<Value>,
+        output: &[Value; 32],
+    ) {
         for &v in input.iter().chain(output) {
             self.check(v);
         }
@@ -434,6 +468,7 @@ impl<F: Field> CircuitBuilder<F> {
             .as_mut()
             .expect("compact hash enabled")
             .add_call(super::hash::HashCall {
+                domain,
                 input,
                 output: *output,
             });
