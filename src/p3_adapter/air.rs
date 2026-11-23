@@ -306,6 +306,11 @@ impl<F: Field> AirBuilder for P3AirBuilder<F> {
 /// This is the unit `System::new` accepts for AIR-authored circuits: it
 /// converts into [`CircuitInputs`] by evaluating the AIR (see
 /// [`circuit_inputs_from_air`]) and attaching the lookups.
+///
+/// The lookups read trace columns only: the builder's row selectors
+/// (`is_first_row`, `is_last_row`, `is_transition`) are for the AIR's
+/// constraints and are rejected in a lookup when the circuit is compiled
+/// (see [`CircuitInputs::lookups`]).
 pub struct LookupAir<A, F: Field> {
     pub inner_air: A,
     pub lookups: Vec<Lookup<P3Expr<F>>>,
