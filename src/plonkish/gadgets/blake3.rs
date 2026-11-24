@@ -1,3 +1,4 @@
+use crate::p3_adapter::domain_blake3::Blake3Domain;
 use crate::traits::PrimeField;
 
 use super::bytes::Word;
@@ -105,33 +106,36 @@ impl Output {
 fn subtree<F: PrimeField>(
     b: &mut CircuitBuilder<F>,
     bytes: &ByteGadgets,
+    domain: Blake3Domain,
     input: &[ByteValue],
     counter: u64,
 ) -> Output {
-    let iv = IV.map(|x| bytes.word_constant(b, x));
+    let cv_init = domain.key_words().map(|x| bytes.word_constant(b, x));
+    let domain_flags = domain.domain_flags();
     if input.len() > 1024 {
         let chunks = input.len().div_ceil(1024);
         let left_chunks = 1usize << (usize::BITS - 1 - (chunks - 1).leading_zeros());
         let split = left_chunks * 1024;
-        let left = subtree(b, bytes, &input[..split], counter).compress(b, bytes, false);
+        let left = subtree(b, bytes, domain, &input[..split], counter).compress(b, bytes, false);
         let right = subtree(
             b,
             bytes,
+            domain,
             &input[split..],
             counter + u64::try_from(left_chunks).unwrap(),
         )
         .compress(b, bytes, false);
         return Output {
-            cv: iv,
+            cv: cv_init,
             block: std::array::from_fn(|i| if i < 8 { left[i] } else { right[i - 8] }),
             counter: 0,
             len: 64,
-            flags: PARENT,
+            flags: PARENT | domain_flags,
         };
     }
     let zero = bytes.constant(b, 0);
     let blocks = input.len().div_ceil(64).max(1);
-    let mut cv = iv;
+    let mut cv = cv_init;
     for i in 0..blocks {
         let start = i * 64;
         let len = input.len().saturating_sub(start).min(64);
@@ -154,7 +158,9 @@ fn subtree<F: PrimeField>(
             block,
             counter,
             len: u32::try_from(len).unwrap(),
-            flags: if i == 0 { CHUNK_START } else { 0 } | if last { CHUNK_END } else { 0 },
+            flags: (if i == 0 { CHUNK_START } else { 0 })
+                | (if last { CHUNK_END } else { 0 })
+                | domain_flags,
         };
         if last {
             return output;
@@ -172,10 +178,22 @@ pub fn blake3<F: PrimeField>(
     bytes: &ByteGadgets,
     input: &[ByteValue],
 ) -> [ByteValue; 32] {
+    blake3_domain(b, bytes, Blake3Domain::Plain, input)
+}
+
+/// Domain-separated BLAKE3 (`Plain` unkeyed or BLAKE3 `derive_key` mode),
+/// 32-byte output, with a construction-time fixed input length. Uses the
+/// builder's compact BLAKE3 custom gates when enabled, or generic Plonkish
+/// gates otherwise.
+pub fn blake3_domain<F: PrimeField>(
+    b: &mut CircuitBuilder<F>,
+    bytes: &ByteGadgets,
+    domain: Blake3Domain,
+    input: &[ByteValue],
+) -> [ByteValue; 32] {
     if b.compact_blake3_enabled() {
-        use p3_symmetric::CryptographicHasher;
         let input: Vec<_> = input.iter().map(|v| v.value()).collect();
-        let output = b.hint_many("BLAKE3 advice", &input, |values| {
+        let output = b.hint_many("BLAKE3 advice", &input, move |values| {
             let bytes: Result<Vec<_>, String> = values
                 .iter()
                 .map(|&v| {
@@ -183,13 +201,13 @@ pub fn blake3<F: PrimeField>(
                         .map_err(|_error| "non-byte hash input".into())
                 })
                 .collect();
-            let digest: [u8; 32] = p3_blake3::Blake3.hash_iter(bytes?);
+            let digest = domain.hash_bytes(&bytes?);
             Ok(digest.map(F::from_u8))
         });
-        b.record_hash(input, &output);
+        b.record_hash_domain(domain, input, &output);
         return output.map(|v| bytes.constrain_byte(b, v));
     }
-    let output = subtree(b, bytes, input, 0).compress(b, bytes, true);
+    let output = subtree(b, bytes, domain, input, 0).compress(b, bytes, true);
     let words = output.map(|w| bytes.word_bytes(b, w));
     std::array::from_fn(|i| words[i / 4][i % 4])
 }
@@ -205,7 +223,7 @@ pub fn blake3_xof<F: PrimeField>(
     if length == 0 {
         return vec![];
     }
-    let root = subtree(b, bytes, input, 0);
+    let root = subtree(b, bytes, Blake3Domain::Plain, input, 0);
     let mut result = Vec::with_capacity(length);
     for counter in 0..length.div_ceil(64) {
         let state = root.state(b, bytes, true, counter as u64);

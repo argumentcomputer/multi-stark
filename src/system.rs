@@ -9,17 +9,18 @@
 //! ([`crate::lookup::logup_constraint_values`]), folding their values after
 //! the user roots.
 
-use crate::traits::{ExtensionOf, Field};
+use crate::traits::{ExtensionModulus, ExtensionOf, Field};
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
 
-use crate::config::{Com, PcsData, ProofConfig, Val};
+use crate::config::{Com, PcsData, ProofConfig, ProtocolVersion, Val};
 use crate::lookup::LookupValues;
 
 use crate::eval::VarValues;
-use crate::expr::{CircuitSpec, Expr, ExtExpr};
-use crate::graph::{ConstraintGraph, ExtensionParams, compile};
+use crate::expr::{CircuitSpec, Expr, ExtExpr, RowOffset, Source};
+use crate::graph::{ConstraintGraph, ExtensionParams, Node, compile};
 use crate::lookup::{Lookup, logup_constraint_count, logup_max_degree, num_publics, stage2_width};
+use crate::p3_adapter::domain_blake3::Blake3Domain;
 use crate::traits::{Pcs, Transcript};
 
 /// User-facing definition of one circuit: main-trace width, optional
@@ -33,6 +34,27 @@ pub struct CircuitInputs<F: Field> {
     pub preprocessed: Option<RowMajorMatrix<F>>,
     pub constraints: Vec<Expr<F>>,
     pub ext_constraints: Vec<ExtExpr<F>>,
+    /// Lookup multiplicities and arguments are evaluated on the trace rows
+    /// when the lookup witness is built, so they may read only the
+    /// preprocessed and main traces: stage-2 columns and public values (the
+    /// lookup challenges and accumulators, which do not exist yet) are
+    /// rejected at compile time.
+    ///
+    /// The built-in row selectors (`IsFirstRow`, `IsLastRow`,
+    /// `IsTransition`) are rejected too, anywhere in a multiplicity or an
+    /// argument ([`CompileError::SelectorInLookup`]). They are not 0/1
+    /// indicators: on a trace of `n` rows with generator `g`, the
+    /// constraints see `IsFirstRow = n` on the first row, `IsLastRow = n·g`
+    /// on the last row and `IsTransition = g^r − g⁻¹` on row `r`, so their
+    /// values depend on the trace height. That is harmless when a selector
+    /// gates an ordinary constraint, where only the rows on which it is zero
+    /// matter, but a lookup would take those values as multiplicities or
+    /// message entries. Read a 0/1 column instead: a column of the
+    /// preprocessed trace, or a main-trace column `s` pinned to the
+    /// first-row indicator by the constraints `IsFirstRow * (s − 1) = 0` and
+    /// `IsTransition * s_next = 0`.
+    ///
+    /// [`CompileError::SelectorInLookup`]: crate::graph::CompileError::SelectorInLookup
     pub lookups: Vec<Lookup<Expr<F>>>,
     /// How many logUp messages share one chained-accumulator step (and one
     /// committed accumulator column): stage-2 width becomes `⌈L/k⌉·D` at
@@ -127,11 +149,31 @@ impl<F: Field> Circuit<F> {
     pub fn quotient_degree(&self) -> usize {
         (self.max_constraint_degree().max(2) - 1).next_power_of_two()
     }
+
+    /// Quotient degree multiple for non-ZK (`is_zk == false`) or `v6-zk`
+    /// (`is_zk == true`).
+    ///
+    /// In `v6-zk`, 2× odd-coset witness blinding yields trace polynomials of
+    /// degree `< 2N` so `deg(Q) <= (2d - 1)N - d + 1 < 2N · q_zk` where
+    /// `q_zk = max(d, 1).next_power_of_two()` (matching Plonky3's
+    /// `get_log_num_quotient_chunks(..., is_zk = 1)`).
+    pub fn quotient_degree_for(&self, is_zk: bool) -> usize {
+        if is_zk {
+            self.max_constraint_degree().max(1).next_power_of_two()
+        } else {
+            self.quotient_degree()
+        }
+    }
+
+    /// Returns `true` if any compiled node reads a column from `source` at `offset`.
+    pub fn uses_row(&self, source: Source, offset: RowOffset) -> bool {
+        self.graph.uses_row(source, offset)
+    }
 }
 
 /// A multi-circuit STARK system over compiled constraint circuits. Contains
-/// all circuits together with their shared preprocessed commitment and the
-/// protocol configuration.
+/// all circuits together with their shared preprocessed commitment, canonical
+/// verifying-key / constraint-graph digest, and the protocol configuration.
 pub struct System<SC: ProofConfig> {
     pub config: SC,
     pub circuits: Vec<Circuit<Val<SC>>>,
@@ -140,6 +182,11 @@ pub struct System<SC: ProofConfig> {
     /// Maps each circuit index to its position within the preprocessed
     /// commitment; `None` if that circuit has no preprocessed trace.
     pub preprocessed_indices: Vec<Option<usize>>,
+    /// Canonical BLAKE3 `derive_key("multi-stark/v6/vk")` digest committing to
+    /// the extension degree/modulus and every circuit's full constraint DAG,
+    /// lookup definitions, and metadata (independent of whether preprocessed
+    /// trace matrices are retained in RAM).
+    pub vk_digest: [u8; 32],
 }
 
 /// Prover-side data retained between system setup and proving.
@@ -149,10 +196,9 @@ pub struct ProverKey<SC: ProofConfig> {
 }
 
 impl<SC: ProofConfig> System<SC> {
-    pub fn opens_next_row(&self, circuit: usize, source: crate::expr::Source) -> bool {
-        !self.config.omit_unused_next_row_openings() || self.circuits[circuit].graph.nodes.iter().any(|node| {
-            matches!(node, crate::graph::Node::Var(col) if col.source == source && col.offset == crate::expr::RowOffset::Next)
-        })
+    pub fn opens_next_row(&self, circuit: usize, source: Source) -> bool {
+        !self.config.omit_unused_next_row_openings()
+            || self.circuits[circuit].uses_row(source, RowOffset::Next)
     }
 
     /// Builds the system from per-circuit inputs.
@@ -167,9 +213,15 @@ impl<SC: ProofConfig> System<SC> {
         Self::new_inner(config, inputs, true)
     }
 
-    /// Commit preprocessing without retaining its evaluation matrices in the system.
-    /// Use with `prove_committed` and a backend that reconstructs lookup traces from
-    /// committed data. Ordinary witness construction may need those matrices.
+    /// Commit preprocessing without retaining its evaluation matrices in the
+    /// system.
+    ///
+    /// When disk spilling is enabled on the configuration, preprocessed traces
+    /// are streamed one circuit at a time through commitment without holding
+    /// all preprocessed matrices in memory simultaneously. Works with both
+    /// lazy lookup evaluation ([`SystemWitness::from_stage_1_lazy`],
+    /// [`crate::witness::PreparedWitness::from_stage_1_lazy`],
+    /// [`Self::prove_stage_1_streaming`]) and `prove_committed`.
     pub fn new_without_preprocessed(
         config: SC,
         inputs: impl IntoIterator<Item: Into<CircuitInputs<Val<SC>>>>,
@@ -183,13 +235,34 @@ impl<SC: ProofConfig> System<SC> {
         retain_preprocessed: bool,
     ) -> (Self, ProverKey<SC>) {
         let pcs = config.pcs();
+        let is_zk = config.is_zk();
+        if is_zk {
+            assert!(
+                config.zk_randomizer_width() >= crate::p3_adapter::zk::ZK_RANDOMIZER_WIDTH,
+                "v6-zk requires randomizer width W_R >= {} (got {})",
+                crate::p3_adapter::zk::ZK_RANDOMIZER_WIDTH,
+                config.zk_randomizer_width()
+            );
+            assert!(
+                config.log_blowup() >= 1,
+                "v6-zk requires log_blowup >= 1 (got {})",
+                config.log_blowup()
+            );
+        }
+        let min_zk_height = if is_zk {
+            1usize << config.min_log_degree()
+        } else {
+            0
+        };
+        let max_quotient_degree = config.max_quotient_degree();
         let params = extension_params::<SC>();
         let d = params.degree;
 
         let mut circuits = vec![];
-        let mut preprocessed_traces = vec![];
         let mut preprocessed_indices = vec![];
-        for (i, input) in inputs.into_iter().enumerate() {
+        let mut next_preprocessed_index = 0usize;
+
+        let mut prep_iter = inputs.into_iter().enumerate().filter_map(|(i, input)| {
             let input = input.into();
             let num_lookups = input.lookups.len();
             let group_size = input.lookup_group_size.max(1);
@@ -240,53 +313,91 @@ impl<SC: ProofConfig> System<SC> {
             };
             // The prover obtains trace evaluations on the quotient domain
             // from the PCS, which can only serve domains up to
-            // `max_quotient_degree` times the trace domain (the blowup
-            // factor for FRI). Beyond that, proving would silently produce
-            // invalid proofs, so reject the circuit upfront.
+            // `max_quotient_degree` times the committed trace domain (the
+            // blowup factor for FRI). Beyond that, proving would silently
+            // produce invalid proofs, so reject the circuit upfront.
+            let required_quotient_degree = circuit.quotient_degree_for(is_zk);
             assert!(
-                circuit.quotient_degree() <= config.max_quotient_degree(),
+                required_quotient_degree <= max_quotient_degree,
                 "circuit {i}: constraint degree {} needs quotient degree {}, but the PCS only \
                  supports {}; increase log_blowup or lower the constraint degree",
                 circuit.max_constraint_degree(),
-                circuit.quotient_degree(),
-                config.max_quotient_degree(),
+                required_quotient_degree,
+                max_quotient_degree,
             );
+            if is_zk && circuit.preprocessed_height > 0 {
+                assert!(
+                    circuit.preprocessed_height >= min_zk_height,
+                    "circuit {i}: preprocessed trace height {} is below v6-zk minimum height {}",
+                    circuit.preprocessed_height,
+                    min_zk_height,
+                );
+            }
 
-            if let Some(preprocessed) = circuit.preprocessed.take() {
-                preprocessed_indices.push(Some(preprocessed_traces.len()));
+            let item = if let Some(preprocessed) = circuit.preprocessed.take() {
+                preprocessed_indices.push(Some(next_preprocessed_index));
+                next_preprocessed_index += 1;
                 let domain = pcs.natural_domain_for_degree(preprocessed.height());
+                let retain_1x =
+                    !retain_preprocessed && circuit.graph.lookup_prefix_uses_preprocessed();
                 if retain_preprocessed {
                     circuit.preprocessed = Some(preprocessed.clone());
                 }
-                preprocessed_traces.push((domain, preprocessed));
+                Some((domain, preprocessed, retain_1x))
             } else {
                 preprocessed_indices.push(None);
-            }
+                None
+            };
             circuits.push(circuit);
-        }
+            item
+        });
 
-        let (preprocessed_commit, preprocessed_data) = if preprocessed_traces.is_empty() {
-            (None, None)
-        } else {
-            let (commit, data) = pcs.commit(preprocessed_traces);
-            (Some(commit), Some(data))
+        let (preprocessed_commit, preprocessed_data) =
+            match config.commit_preprocessed(&mut prep_iter) {
+                Some((commit, data)) => (Some(commit), Some(data)),
+                None => (None, None),
+            };
+        // Ensure all inputs are drained even if a custom backend stopped early.
+        for _ in prep_iter {}
+
+        let vk_domain = match config.protocol_version() {
+            ProtocolVersion::V6Zk => Blake3Domain::ZkVerifyingKey,
+            ProtocolVersion::V5 | ProtocolVersion::V6 => Blake3Domain::VerifyingKey,
         };
+        let vk_digest =
+            compute_vk_digest_with_domain::<Val<SC>, SC::Challenge>(&circuits, vk_domain);
         let system = Self {
             config,
             circuits,
             preprocessed_commit,
             preprocessed_indices,
+            vk_digest,
         };
         (system, ProverKey { preprocessed_data })
     }
 
-    /// Binds the system shape into the Fiat-Shamir transcript. The prover and
-    /// the verifier must call this identically, before observing any
-    /// commitment, so that transcripts of systems with different circuit
-    /// shapes never collide. The protocol parameters are bound separately,
-    /// via the challenger seed (see
-    /// [`ProofConfig::initialise_challenger`]).
+    /// Binds the system shape (and, under protocol `v6` / `v6-zk`, the
+    /// extension degree/modulus and canonical VK / constraint-graph digest)
+    /// into the Fiat-Shamir transcript. The prover and the verifier must call
+    /// this identically, before observing any commitment, so that transcripts
+    /// of systems with different constraint graphs or circuit shapes never
+    /// collide. The protocol parameters are bound separately via the
+    /// challenger seed (see [`ProofConfig::initialise_challenger_for_mode`]).
     pub fn observe_shape(&self, challenger: &mut SC::Challenger) {
+        if matches!(
+            self.config.protocol_version(),
+            ProtocolVersion::V6 | ProtocolVersion::V6Zk
+        ) {
+            challenger.observe_field(Val::<SC>::from_usize(
+                <SC::Challenge as ExtensionOf<Val<SC>>>::D,
+            ));
+            let modulus = <SC::Challenge as ExtensionOf<Val<SC>>>::MODULUS;
+            challenger.observe_field(Val::<SC>::from_u8(modulus.tag()));
+            if let ExtensionModulus::Binomial { w } = modulus {
+                challenger.observe_field(w);
+            }
+            challenger.observe_digest(self.vk_digest);
+        }
         let mut observe = |x: usize| challenger.observe_field(Val::<SC>::from_usize(x));
         observe(self.circuits.len());
         for circuit in &self.circuits {
@@ -301,6 +412,139 @@ impl<SC: ProofConfig> System<SC> {
             observe(circuit.lookup_group_size);
         }
     }
+}
+
+/// Computes the canonical protocol-`v6` verifying-key / constraint-graph digest
+/// under `BLAKE3_derive_key("multi-stark/v6/vk")`.
+///
+/// Commits to the extension degree, extension modulus, and every circuit's
+/// metadata, compiled DAG nodes (including canonical field constants), zero
+/// constraint roots, and lookup expressions. Intentionally excludes the
+/// in-memory `circuit.preprocessed` matrix so `System::new` and
+/// `System::new_without_preprocessed` produce identical digests (the
+/// preprocessed traces themselves are bound via `preprocessed_commit`).
+pub fn compute_vk_digest<F: Field, EF: ExtensionOf<F>>(circuits: &[Circuit<F>]) -> [u8; 32] {
+    compute_vk_digest_with_domain::<F, EF>(circuits, Blake3Domain::VerifyingKey)
+}
+
+/// Computes the canonical verifying-key / constraint-graph digest under the
+/// requested BLAKE3 `derive_key` domain (`VerifyingKey` for `v6`,
+/// `ZkVerifyingKey` for `v6-zk`).
+pub fn compute_vk_digest_with_domain<F: Field, EF: ExtensionOf<F>>(
+    circuits: &[Circuit<F>],
+    domain: Blake3Domain,
+) -> [u8; 32] {
+    let mut hasher = domain.hasher();
+    let bincode_cfg = bincode::config::standard()
+        .with_little_endian()
+        .with_fixed_int_encoding();
+
+    let hash_u32 = |h: &mut blake3::Hasher, x: u32| {
+        h.update(&x.to_le_bytes());
+    };
+    let hash_u64 = |h: &mut blake3::Hasher, x: u64| {
+        h.update(&x.to_le_bytes());
+    };
+    let hash_usize = |h: &mut blake3::Hasher, x: usize| {
+        hash_u64(h, u64::try_from(x).expect("usize exceeds u64"));
+    };
+    let hash_field = |h: &mut blake3::Hasher, x: F| {
+        let bytes =
+            bincode::serde::encode_to_vec(x, bincode_cfg).expect("field serialization cannot fail");
+        h.update(&bytes);
+    };
+
+    hash_usize(&mut hasher, EF::D);
+    hasher.update(&[EF::MODULUS.tag()]);
+    if let ExtensionModulus::Binomial { w } = EF::MODULUS {
+        hash_field(&mut hasher, w);
+    }
+
+    hash_usize(&mut hasher, circuits.len());
+    for circuit in circuits {
+        hash_usize(&mut hasher, circuit.main_width);
+        hash_usize(&mut hasher, circuit.preprocessed_width);
+        hash_usize(&mut hasher, circuit.preprocessed_height);
+        hash_usize(&mut hasher, circuit.num_lookups);
+        hash_usize(&mut hasher, circuit.stage_2_width);
+        hash_usize(&mut hasher, circuit.num_publics);
+        hash_usize(&mut hasher, circuit.lookup_group_size);
+        hash_usize(&mut hasher, circuit.constraint_count);
+        hash_usize(&mut hasher, circuit.max_constraint_degree);
+        hash_usize(&mut hasher, circuit.graph.lookup_prefix_len);
+        hash_u32(&mut hasher, circuit.graph.max_constraint_degree);
+
+        hash_usize(&mut hasher, circuit.graph.nodes.len());
+        for node in &circuit.graph.nodes {
+            match *node {
+                Node::Const(c) => {
+                    hasher.update(&[0u8]);
+                    hash_field(&mut hasher, c);
+                }
+                Node::Var(col) => {
+                    let src_tag = match col.source {
+                        Source::Preprocessed => 0u8,
+                        Source::Main => 1u8,
+                        Source::Stage2 => 2u8,
+                    };
+                    let off_tag = match col.offset {
+                        RowOffset::Current => 0u8,
+                        RowOffset::Next => 1u8,
+                    };
+                    hasher.update(&[1u8, src_tag, off_tag]);
+                    hash_u32(&mut hasher, col.index);
+                }
+                Node::Public(idx) => {
+                    hasher.update(&[2u8]);
+                    hash_u32(&mut hasher, idx);
+                }
+                Node::IsFirstRow => {
+                    hasher.update(&[3u8]);
+                }
+                Node::IsLastRow => {
+                    hasher.update(&[4u8]);
+                }
+                Node::IsTransition => {
+                    hasher.update(&[5u8]);
+                }
+                Node::Add(a, b) => {
+                    hasher.update(&[6u8]);
+                    hash_u32(&mut hasher, a.0);
+                    hash_u32(&mut hasher, b.0);
+                }
+                Node::Sub(a, b) => {
+                    hasher.update(&[7u8]);
+                    hash_u32(&mut hasher, a.0);
+                    hash_u32(&mut hasher, b.0);
+                }
+                Node::Mul(a, b) => {
+                    hasher.update(&[8u8]);
+                    hash_u32(&mut hasher, a.0);
+                    hash_u32(&mut hasher, b.0);
+                }
+                Node::Neg(a) => {
+                    hasher.update(&[9u8]);
+                    hash_u32(&mut hasher, a.0);
+                }
+            }
+        }
+
+        hash_usize(&mut hasher, circuit.graph.zeros.len());
+        for z in &circuit.graph.zeros {
+            hash_u32(&mut hasher, z.0);
+        }
+
+        hash_usize(&mut hasher, circuit.graph.lookups.len());
+        for lookup in &circuit.graph.lookups {
+            hash_u32(&mut hasher, lookup.multiplicity.0);
+            hash_usize(&mut hasher, lookup.args.len());
+            for arg in &lookup.args {
+                hash_u32(&mut hasher, arg.0);
+            }
+        }
+    }
+
+    hasher.finalize().into()
 }
 
 /// Witness data for the system: stage-1 traces and the concrete lookup
@@ -359,11 +603,58 @@ impl<F: Field> SystemWitness<F> {
         );
         Self { traces, lookups }
     }
+
+    /// Builds a lazy witness from the stage-1 traces without materializing
+    /// [`LookupValues`] upfront.
+    ///
+    /// Lookup expressions are evaluated on demand in bounded row chunks during
+    /// stage-2 trace construction instead of holding concrete lookup arguments
+    /// and multiplicities in RAM alongside the traces and LDEs. Produces proofs
+    /// byte-identical to [`Self::from_stage_1`].
+    ///
+    /// # Panics
+    /// Panics under the same shape checks as [`Self::from_stage_1`]: trace
+    /// count must match circuit count, and any active circuit with a
+    /// preprocessed trace must match its preprocessed height.
+    pub fn from_stage_1_lazy<SC>(traces: Vec<RowMajorMatrix<F>>, system: &System<SC>) -> Self
+    where
+        SC: ProofConfig,
+        SC::Pcs: Pcs<F = F>,
+    {
+        assert_eq!(
+            traces.len(),
+            system.circuits.len(),
+            "expected one trace per circuit"
+        );
+        let lookups = traces
+            .iter()
+            .zip(&system.circuits)
+            .enumerate()
+            .map(|(i, (trace, circuit))| {
+                let height = trace.height();
+                if circuit.preprocessed_height != 0 && height != 0 {
+                    assert_eq!(
+                        height, circuit.preprocessed_height,
+                        "circuit {i}: main trace height must equal preprocessed trace height"
+                    );
+                }
+                let slot_widths: Vec<usize> = circuit
+                    .graph
+                    .lookups
+                    .iter()
+                    .map(|lookup| lookup.args.len())
+                    .collect();
+                LookupValues::shape_only(height, &slot_widths)
+            })
+            .collect();
+        Self { traces, lookups }
+    }
 }
 
 /// Computes a circuit's concrete lookup values by sweeping the compiled
 /// lookup prefix over each row (with wrap-around for the next-row window).
-fn compute_lookup_values<F: Field>(
+/// Rows are independent, so they are swept in parallel.
+pub(crate) fn compute_lookup_values<F: Field>(
     circuit: &Circuit<F>,
     trace: &RowMajorMatrix<F>,
 ) -> LookupValues<F> {
@@ -378,8 +669,14 @@ pub(crate) fn compute_lookup_values_with_fixed<F: Field>(
     compute_lookup_values_range(&circuit.graph, trace, preprocessed, 0..trace.height())
 }
 
-/// Evaluate lookup messages for a row range. Selectors and next-row reads use
-/// the full trace height, including wraparound at its last row.
+/// Evaluate lookup messages for a row range. Next-row reads use the full
+/// trace height, including wraparound at its last row.
+///
+/// Compiled lookups never contain row selectors
+/// ([`crate::graph::CompileError::SelectorInLookup`]). In a graph that was
+/// not produced by the compiler, a selector in the lookup prefix evaluates
+/// here as a 0/1 indicator of the full trace, which is NOT the value the
+/// constraints give it.
 pub fn compute_lookup_values_range<F: Field>(
     graph: &ConstraintGraph<F>,
     trace: &RowMajorMatrix<F>,
@@ -407,8 +704,8 @@ pub fn compute_lookup_values_range<F: Field>(
         .for_each_init(
             || (Vec::new(), Vec::new()),
             |(buf, args), (offset, mut writer)| {
-                // Selectors and the next-row window refer to the full trace,
-                // even when only a range of lookup rows is materialized.
+                // The next-row window refers to the full trace, even when
+                // only a range of lookup rows is materialized.
                 let r = rows.start + offset;
                 let r_next = (r + 1) % height;
                 let main_cur = trace.row_slice(r).unwrap();
@@ -424,6 +721,8 @@ pub fn compute_lookup_values_range<F: Field>(
                     main: [&main_cur, &main_next],
                     stage2: [&empty, &empty],
                     publics: &empty,
+                    // Never read for a compiled circuit: the compiler
+                    // rejects selectors in lookup expressions.
                     is_first_row: if r == 0 { F::ONE } else { F::ZERO },
                     is_last_row: if r == height - 1 { F::ONE } else { F::ZERO },
                     is_transition: if r == height - 1 { F::ZERO } else { F::ONE },
@@ -440,15 +739,9 @@ pub fn compute_lookup_values_range<F: Field>(
     builder.finish()
 }
 
-/// The binomial extension parameters of the challenge field, read off
-/// the `ExtensionOf` constants (`X^D = W`; `W` is unused when `D = 1`).
+/// The extension parameters of the challenge field, read off [`ExtensionOf`].
 pub fn extension_params<SC: ProofConfig>() -> ExtensionParams<Val<SC>> {
-    let d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
-    ExtensionParams {
-        degree: d,
-        w: <SC::Challenge as ExtensionOf<Val<SC>>>::W,
-        karatsuba: d == 2,
-    }
+    ExtensionParams::for_extension::<SC::Challenge>()
 }
 
 #[cfg(test)]
@@ -456,6 +749,7 @@ mod tests {
     mod lookup_values;
 
     use super::*;
+    use crate::graph::CompileError;
     use crate::p3_adapter::LookupAir;
     use crate::types::{CommitmentParameters, FriParameters, GoldilocksBlake3Config, Val};
     use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
@@ -547,6 +841,171 @@ mod tests {
         let no_claims: &[&[Val]] = &[];
         let proof = system.prove_multiple_claims(&key, no_claims, witness);
         system.verify_multiple_claims(no_claims, &proof).unwrap();
+    }
+
+    /// Public values are the coordinates of the lookup challenges and
+    /// accumulators, which do not exist when the lookup witness is built. A
+    /// lookup reading one used to compile and then panic (index out of
+    /// bounds) in `SystemWitness::from_stage_1`; it must be rejected at
+    /// compile time. Base constraints may still read public values.
+    #[test]
+    fn public_in_lookup_rejected() {
+        let params = extension_params::<GoldilocksBlake3Config>();
+        let public = || Expr::<Val>::public(0);
+        for lookup in [
+            Lookup::push(public(), vec![Expr::main(0)]),
+            Lookup::push(Expr::main(0), vec![Expr::main(0) * public()]),
+        ] {
+            let inputs = CircuitInputs {
+                main_width: 1,
+                lookups: vec![lookup],
+                ..Default::default()
+            };
+            assert_eq!(
+                inputs.compile_graph(&params).unwrap_err(),
+                CompileError::PublicInLookup
+            );
+        }
+        let inputs = CircuitInputs {
+            main_width: 1,
+            constraints: vec![Expr::main(0) * public()],
+            ..Default::default()
+        };
+        assert!(inputs.compile_graph(&params).is_ok());
+    }
+
+    /// The built-in row selectors are not 0/1 indicators on the trace rows:
+    /// the constraints see Plonky3's unnormalised selectors, while the lookup
+    /// witness evaluates a selector as an indicator. A lookup reading one
+    /// used to compile and then yield a proof that the verifier rejects; it
+    /// must be rejected at compile time, at any depth of a multiplicity or
+    /// of an argument. Base and extension constraints may still use them.
+    #[test]
+    fn selector_in_lookup_rejected() {
+        use crate::expr::RowOffset;
+        use crate::graph::{Node, RowSelector};
+
+        let params = extension_params::<GoldilocksBlake3Config>();
+        let d = u32::try_from(params.degree).unwrap();
+        let x = || Expr::<Val>::main(0);
+        let y = || Expr::<Val>::main(1);
+        let two = || Expr::constant(Val::from_u32(2));
+        for (expr, selector, node) in [
+            (Expr::IsFirstRow, RowSelector::IsFirstRow, Node::IsFirstRow),
+            (Expr::IsLastRow, RowSelector::IsLastRow, Node::IsLastRow),
+            (
+                Expr::IsTransition,
+                RowSelector::IsTransition,
+                Node::IsTransition,
+            ),
+        ] {
+            let sel = || expr.clone();
+            for lookup in [
+                // The multiplicity: bare, negated, inside an expression.
+                Lookup::push(sel(), vec![x()]),
+                Lookup::pull(sel(), vec![x()]),
+                Lookup::push(x() * (y() - two() * sel()), vec![x()]),
+                // An argument: bare, inside an expression.
+                Lookup::push(x(), vec![y(), sel()]),
+                Lookup::push(x(), vec![y() + x() * -(sel() - two())]),
+            ] {
+                let inputs = CircuitInputs {
+                    main_width: 2,
+                    lookups: vec![lookup],
+                    ..Default::default()
+                };
+                assert_eq!(
+                    inputs.compile_graph(&params).unwrap_err(),
+                    CompileError::SelectorInLookup { selector }
+                );
+            }
+            // Next to a selector-free lookup, a base constraint and an
+            // extension constraint keep the selector.
+            let stage2 = |offset| ExtExpr::stage2(0, d, offset);
+            let inputs = CircuitInputs {
+                main_width: 2,
+                constraints: vec![sel() * (x() - y())],
+                ext_constraints: vec![
+                    sel() * (stage2(RowOffset::Next) - stage2(RowOffset::Current)),
+                ],
+                lookups: vec![Lookup::push(x(), vec![y()])],
+                ..Default::default()
+            };
+            let graph = inputs.compile_graph(&params).unwrap();
+            assert!(graph.nodes[graph.lookup_prefix_len..].contains(&node));
+            assert!(!graph.nodes[..graph.lookup_prefix_len].contains(&node));
+        }
+    }
+
+    /// What `CircuitInputs::lookups` documents in place of a selector: a 0/1
+    /// column of the preprocessed trace, or a main column `s` pinned to the
+    /// first-row indicator by `IsFirstRow * (s − 1) = 0` and
+    /// `IsTransition * s_next = 0`. Each gates a pull that happens once, on
+    /// the first row, whatever the trace height; a main column marking
+    /// another row violates the pinning constraints.
+    #[test]
+    fn indicator_columns_replace_selectors_in_lookups() {
+        let config = || {
+            GoldilocksBlake3Config::new(
+                CommitmentParameters {
+                    log_blowup: 1,
+                    cap_height: 0,
+                },
+                FriParameters {
+                    log_final_poly_len: 0,
+                    max_log_arity: 1,
+                    num_queries: 64,
+                    commit_proof_of_work_bits: 0,
+                    query_proof_of_work_bits: 0,
+                },
+            )
+        };
+        let f = Val::from_usize;
+        let one = Expr::constant(f(1));
+        for n in [4usize, 32] {
+            // Main columns `[x, s]`, with `s` the pinned indicator.
+            let pinned = CircuitInputs {
+                main_width: 2,
+                constraints: vec![
+                    Expr::IsFirstRow * (Expr::main(1) - one.clone()),
+                    Expr::IsTransition * Expr::main_next(1),
+                ],
+                lookups: vec![Lookup::pull(Expr::main(1), vec![Expr::main(0)])],
+                ..Default::default()
+            };
+            // Main column `[x]`, with the indicator in the preprocessed trace.
+            let fixed = CircuitInputs {
+                main_width: 1,
+                preprocessed: Some(RowMajorMatrix::new_col(
+                    (0..n).map(|r| f(usize::from(r == 0))).collect(),
+                )),
+                lookups: vec![Lookup::pull(Expr::preprocessed(0), vec![Expr::main(0)])],
+                ..Default::default()
+            };
+            let (system, key) = System::new(config(), [pinned, fixed]);
+            let pinned_trace = |marked: usize| {
+                RowMajorMatrix::new(
+                    (0..n)
+                        .flat_map(|r| [f(100 + r), f(usize::from(r == marked))])
+                        .collect(),
+                    2,
+                )
+            };
+            let fixed_trace = RowMajorMatrix::new_col((0..n).map(|r| f(200 + r)).collect());
+            let run = |marked: usize| {
+                let witness = SystemWitness::from_stage_1(
+                    vec![pinned_trace(marked), fixed_trace.clone()],
+                    &system,
+                );
+                // One claim per pull: the row the indicator marks.
+                let claims = [[f(100 + marked)], [f(200)]];
+                let claims: Vec<&[Val]> = claims.iter().map(|c| c.as_slice()).collect();
+                let proof = system.prove_multiple_claims(&key, &claims, witness);
+                system.verify_multiple_claims(&claims, &proof)
+            };
+            run(0).unwrap();
+            assert!(run(1).is_err(), "height {n}");
+        }
     }
 
     #[test]

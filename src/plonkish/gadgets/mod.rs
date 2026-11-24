@@ -7,5 +7,6 @@
 mod blake3;
 mod bytes;
 
-pub use blake3::{blake3, blake3_xof};
+pub use crate::p3_adapter::domain_blake3::Blake3Domain;
+pub use blake3::{blake3, blake3_domain, blake3_xof};
 pub use bytes::{ByteGadgets, ByteValue};

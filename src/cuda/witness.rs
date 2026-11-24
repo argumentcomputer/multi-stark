@@ -2,15 +2,16 @@
 
 use std::sync::{OnceLock, atomic::AtomicBool};
 
-use p3_commit::Pcs;
-use p3_field::Field;
+use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
+use p3_commit::{ExtensionMmcs, Pcs};
+use p3_field::{ExtensionField, Field, coset::TwoAdicMultiplicativeCoset};
 use p3_matrix::{Dimensions, dense::RowMajorMatrix};
 use p3_symmetric::MerkleCap;
 
-use super::mmcs::CudaMmcsData;
-use super::{CudaLde, CudaMixedMerkleTree, device_memory_info};
-use crate::config::{Com, Domain, PcsData};
-use crate::types::{GoldilocksBlake3Config as Config, InnerPcs as CudaPcs, Val};
+use super::mmcs::{CudaMmcs, CudaMmcsData};
+use super::pcs::CudaTwoAdicFriPcs;
+use super::{CudaDft, CudaLde, CudaMixedMerkleTree, device_memory_info};
+use crate::types::Val;
 use crate::witness::TraceSource;
 
 pub(crate) fn record_lde_spill(device: i32, bytes: usize) {
@@ -25,10 +26,39 @@ fn spill_lde(lde: &CudaLde) -> RowMajorMatrix<Val> {
     matrix
 }
 
-pub(crate) fn commit(
-    pcs: &CudaPcs,
-    evaluations: Vec<(Domain<Config>, TraceSource<Val>)>,
-) -> (Com<Config>, PcsData<Config>) {
+pub(crate) fn commit<EF, Ch>(
+    pcs: &CudaTwoAdicFriPcs<Val, CudaDft, CudaMmcs, ExtensionMmcs<Val, EF, CudaMmcs>>,
+    evaluations: Vec<(TwoAdicMultiplicativeCoset<Val>, TraceSource<Val>)>,
+) -> (MerkleCap<Val, [u8; 32]>, CudaMmcsData<RowMajorMatrix<Val>>)
+where
+    EF: ExtensionField<Val>,
+    Ch: FieldChallenger<Val>
+        + CanObserve<MerkleCap<Val, [u8; 32]>>
+        + GrindingChallenger<Witness = Val>,
+{
+    commit_with::<EF, Ch>(pcs, evaluations, None)
+}
+
+/// Stage-one LDEs with the per-matrix storage the Merkle tree is built over.
+struct Constructed {
+    resident: Vec<Option<CudaLde>>,
+    host: Vec<Option<RowMajorMatrix<Val>>>,
+    retained: Vec<Option<RowMajorMatrix<Val>>>,
+}
+
+/// `keep_traces` overrides the memory-derived choice between the resident
+/// and the bounded construction, so tests can exercise both.
+pub(crate) fn commit_with<EF, Ch>(
+    pcs: &CudaTwoAdicFriPcs<Val, CudaDft, CudaMmcs, ExtensionMmcs<Val, EF, CudaMmcs>>,
+    evaluations: Vec<(TwoAdicMultiplicativeCoset<Val>, TraceSource<Val>)>,
+    keep_traces: Option<bool>,
+) -> (MerkleCap<Val, [u8; 32]>, CudaMmcsData<RowMajorMatrix<Val>>)
+where
+    EF: ExtensionField<Val>,
+    Ch: FieldChallenger<Val>
+        + CanObserve<MerkleCap<Val, [u8; 32]>>
+        + GrindingChallenger<Witness = Val>,
+{
     if evaluations
         .iter()
         .all(|(_, m)| matches!(m, TraceSource::Host(_)))
@@ -38,7 +68,10 @@ pub(crate) fn commit(
             path = "host_pcs",
             "main commitment path"
         );
-        return <CudaPcs as Pcs<crate::types::ExtVal, crate::types::Challenger>>::commit(
+        return <CudaTwoAdicFriPcs<Val, CudaDft, CudaMmcs, ExtensionMmcs<Val, EF, CudaMmcs>> as Pcs<
+            EF,
+            Ch,
+        >>::commit(
             pcs,
             evaluations.into_iter().map(|(d, m)| (d, m.materialize())),
         );
@@ -64,74 +97,63 @@ pub(crate) fn commit(
         );
     }
     let max_height = dimensions.iter().map(|d| d.height).max().unwrap();
-    let (_, total) = device_memory_info(device);
-    let reserve = super::minimum_free_bytes(total).saturating_add(128 << 20);
-    let mut resident: Vec<Option<CudaLde>> = Vec::with_capacity(evaluations.len());
-    let mut host: Vec<Option<RowMajorMatrix<Val>>> = Vec::with_capacity(evaluations.len());
-    let mut retained = Vec::with_capacity(evaluations.len());
-    for (domain, source) in evaluations {
-        let shift = Val::GENERATOR / domain.shift();
-        let plan = pcs
-            .dft
-            .lde_plan(source.height(), source.width(), blowup, shift);
-        let needed = source
-            .height()
-            .saturating_mul(source.width())
-            .saturating_mul(8)
-            .saturating_mul((1 << blowup) + 1)
-            .saturating_add(plan.scratch_bytes())
-            .saturating_add(plan.constant_bytes())
-            .saturating_add(reserve);
-        // Generator caches go before any LDE spills: they are rebuilt from
-        // host seeds on demand, a spilled LDE is uploaded again.
-        for slot in resident.iter() {
-            if device_memory_info(device).0 >= needed {
-                break;
-            }
-            slot.as_ref().unwrap().release_generator_device();
-        }
-        for index in 0..resident.len() {
-            if device_memory_info(device).0 >= needed {
-                break;
-            }
-            if host[index].is_none() {
-                let lde = resident[index].as_ref().unwrap();
-                host[index] = Some(spill_lde(lde));
-            }
-        }
-        assert!(
-            device_memory_info(device).0 >= needed,
-            "generated trace commitment exceeds device admission; reduce the shard cell budget"
-        );
-        let source_span = tracing::info_span!(
-            "stark/commit_source",
-            kind = match &source {
-                TraceSource::Host(_) => "host",
-                TraceSource::Generated(_) => "generated",
-            },
-            height = source.height(),
-            width = source.width()
-        )
-        .entered();
-        pcs.dft
-            .prepare_coset_lde_constants(source.height(), blowup, shift);
-        let (lde, trace) = match source {
-            TraceSource::Host(matrix) => (
-                pcs.dft.coset_lde_batch_resident(&matrix, blowup, shift),
-                Some(matrix),
-            ),
-            TraceSource::Generated(source) => {
-                (pcs.dft.generate_coset_lde(source, blowup, shift), None)
-            }
-        };
-        // Both kinds retain a bounded recovery source. Raw device rows need
-        // not coexist with later lookup/quotient workspace.
-        unsafe { lde.release_trace() };
-        resident.push(Some(lde));
-        host.push(None);
-        retained.push(trace);
-        drop(source_span);
-    }
+    let (initial_free, total) = device_memory_info(device);
+    let minimum_free = super::minimum_free_bytes();
+    let reserve = minimum_free.saturating_add(128 << 20);
+    let source_bytes = evaluations
+        .iter()
+        .map(|(_, m)| m.height().saturating_mul(m.width()))
+        .sum::<usize>()
+        .saturating_mul(size_of::<Val>());
+    let lde_bytes = source_bytes
+        .checked_shl(blowup.try_into().expect("LDE blowup exceeds u32"))
+        .unwrap_or(usize::MAX);
+    let max_workspace = evaluations
+        .iter()
+        .map(|(domain, source)| {
+            let plan = pcs.dft.lde_plan(
+                source.height(),
+                source.width(),
+                blowup,
+                Val::GENERATOR / domain.shift(),
+            );
+            plan.scratch_bytes()
+                .saturating_add(plan.constant_bytes())
+                .saturating_add(writer_workspace(source))
+        })
+        .max()
+        .unwrap_or(0);
+    let restore = evaluations
+        .iter()
+        .map(|(_, source)| state_restore_bytes(source))
+        .max()
+        .unwrap_or(0);
+    // Every trace and LDE stays resident through the tree build, as on the
+    // all-host path when its batch fits beside the minimum free headroom.
+    let resident_footprint = source_bytes
+        .saturating_add(lde_bytes)
+        .saturating_add(max_workspace)
+        .saturating_add(restore)
+        .saturating_add(max_height.saturating_mul(96))
+        .saturating_add(reserve);
+    let keep_traces = keep_traces.unwrap_or(resident_footprint <= initial_free);
+    let Constructed {
+        resident,
+        mut host,
+        retained,
+    } = if keep_traces {
+        let wave_size = initial_free
+            .saturating_sub(source_bytes)
+            .saturating_sub(lde_bytes)
+            .saturating_sub(restore)
+            .saturating_sub(reserve)
+            .checked_div(max_workspace.max(1))
+            .unwrap_or(1)
+            .clamp(1, super::MAX_CONCURRENT_LDES);
+        construct_resident(pcs, evaluations, source_bytes, total, wave_size)
+    } else {
+        construct_bounded(pcs, evaluations, reserve)
+    };
     let _merkle_span = tracing::info_span!("stark/commit_merkle").entered();
     let needed = max_height.saturating_mul(96).saturating_add(reserve);
     for index in 0..resident.len() {
@@ -172,9 +194,16 @@ pub(crate) fn commit(
         &resident_refs,
         &deferred,
         &std::collections::BTreeSet::new(),
+        pcs.mmcs.leaf_domain(),
     );
-    let tree =
-        CudaMixedMerkleTree::from_hybrid(device, &resident_refs, &host_refs, &deferred, &digests);
+    let tree = CudaMixedMerkleTree::from_hybrid_with_domain(
+        device,
+        &resident_refs,
+        &host_refs,
+        &deferred,
+        &digests,
+        pcs.mmcs.is_domain_v6(),
+    );
     let commitment = MerkleCap::new(vec![tree.root()]);
     let active = host.iter().map(|h| AtomicBool::new(h.is_none())).collect();
     let committed = host
@@ -201,4 +230,195 @@ pub(crate) fn commit(
             tree,
         },
     )
+}
+
+fn writer_workspace(source: &TraceSource<Val>) -> usize {
+    match source {
+        TraceSource::Host(_) => 0,
+        TraceSource::Generated(generator) => generator.device_workspace_bytes(),
+    }
+}
+
+/// Device bytes a generated source allocates to restore released state
+/// before its first tile.
+fn state_restore_bytes(source: &TraceSource<Val>) -> usize {
+    match source {
+        TraceSource::Generated(generator) if !generator.device_state_resident() => {
+            generator.device_state_bytes()
+        }
+        _ => 0,
+    }
+}
+
+fn lde_of<EF: ExtensionField<Val>>(
+    pcs: &CudaTwoAdicFriPcs<Val, CudaDft, CudaMmcs, ExtensionMmcs<Val, EF, CudaMmcs>>,
+    domain: &TwoAdicMultiplicativeCoset<Val>,
+    source: &TraceSource<Val>,
+) -> CudaLde {
+    let blowup = pcs.fri.log_blowup;
+    let shift = Val::GENERATOR / domain.shift();
+    let _source_span = tracing::info_span!(
+        "stark/commit_source",
+        kind = match source {
+            TraceSource::Host(_) => "host",
+            TraceSource::Generated(_) => "generated",
+        },
+        height = source.height(),
+        width = source.width()
+    )
+    .entered();
+    match source {
+        TraceSource::Host(matrix) => pcs.dft.coset_lde_batch_resident(matrix, blowup, shift),
+        TraceSource::Generated(generator) => {
+            pcs.dft
+                .generate_coset_lde(std::sync::Arc::clone(generator), blowup, shift)
+        }
+    }
+}
+
+/// Builds every LDE in concurrent waves and keeps each device trace for the
+/// lookup pass, releasing traces only where the all-host path would: when
+/// this commitment is large enough to crowd later stages, or free memory
+/// falls below the minimum headroom.
+fn construct_resident<EF: ExtensionField<Val>>(
+    pcs: &CudaTwoAdicFriPcs<Val, CudaDft, CudaMmcs, ExtensionMmcs<Val, EF, CudaMmcs>>,
+    evaluations: Vec<(TwoAdicMultiplicativeCoset<Val>, TraceSource<Val>)>,
+    source_bytes: usize,
+    total_bytes: usize,
+    wave_size: usize,
+) -> Constructed {
+    let device = pcs.dft.device_id();
+    let blowup = pcs.fri.log_blowup;
+    for (domain, source) in &evaluations {
+        pcs.dft.prepare_coset_lde_constants(
+            source.height(),
+            blowup,
+            Val::GENERATOR / domain.shift(),
+        );
+    }
+    // Small batches of many tiny matrices lose more to concurrent CUDA entry
+    // than they gain from overlap.
+    let parallel = source_bytes >= 10_000_000 * size_of::<Val>();
+    let transform = |(domain, source): &(TwoAdicMultiplicativeCoset<Val>, TraceSource<Val>)| {
+        lde_of(pcs, domain, source)
+    };
+    let ldes = if parallel {
+        super::bounded_parallel_map(&evaluations, wave_size, transform)
+    } else {
+        evaluations.iter().map(transform).collect()
+    };
+    let (free_bytes, _) = device_memory_info(device);
+    let minimum_free = super::minimum_free_bytes();
+    let proactive_spill = source_bytes >= total_bytes / 12;
+    let large_matrix = total_bytes / 120;
+    let mut projected_free = free_bytes;
+    let mut by_size: Vec<_> = evaluations
+        .iter()
+        .enumerate()
+        .map(|(index, (_, source))| {
+            (
+                index,
+                source
+                    .height()
+                    .saturating_mul(source.width())
+                    .saturating_mul(size_of::<Val>()),
+            )
+        })
+        .collect();
+    by_size.sort_unstable_by_key(|&(_, bytes)| core::cmp::Reverse(bytes));
+    for (index, bytes) in by_size {
+        let needs_headroom = projected_free < minimum_free;
+        let crowds_later_stages = proactive_spill && bytes >= large_matrix;
+        if !needs_headroom && !crowds_later_stages {
+            break;
+        }
+        // SAFETY: construction is synchronous and complete; a host source
+        // stays retained below and a generated one regenerates its rows.
+        unsafe { ldes[index].release_trace() };
+        projected_free = projected_free.saturating_add(bytes);
+    }
+    let count = ldes.len();
+    Constructed {
+        resident: ldes.into_iter().map(Some).collect(),
+        host: (0..count).map(|_| None).collect(),
+        retained: evaluations
+            .into_iter()
+            .map(|(_, source)| match source {
+                TraceSource::Host(matrix) => Some(matrix),
+                TraceSource::Generated(_) => None,
+            })
+            .collect(),
+    }
+}
+
+/// Builds one LDE at a time when the batch does not fit resident. Each
+/// device trace is released after its LDE, and earlier LDEs spill to the
+/// host whenever the next one would leave less than `reserve` free.
+fn construct_bounded<EF: ExtensionField<Val>>(
+    pcs: &CudaTwoAdicFriPcs<Val, CudaDft, CudaMmcs, ExtensionMmcs<Val, EF, CudaMmcs>>,
+    evaluations: Vec<(TwoAdicMultiplicativeCoset<Val>, TraceSource<Val>)>,
+    reserve: usize,
+) -> Constructed {
+    let device = pcs.dft.device_id();
+    let blowup = pcs.fri.log_blowup;
+    let mut resident: Vec<Option<CudaLde>> = Vec::with_capacity(evaluations.len());
+    let mut host: Vec<Option<RowMajorMatrix<Val>>> = Vec::with_capacity(evaluations.len());
+    let mut retained = Vec::with_capacity(evaluations.len());
+    for (domain, source) in evaluations {
+        let shift = Val::GENERATOR / domain.shift();
+        let plan = pcs
+            .dft
+            .lde_plan(source.height(), source.width(), blowup, shift);
+        let needed = source
+            .height()
+            .saturating_mul(source.width())
+            .saturating_mul(8)
+            .saturating_mul((1 << blowup) + 1)
+            .saturating_add(plan.scratch_bytes())
+            .saturating_add(plan.constant_bytes())
+            .saturating_add(writer_workspace(&source))
+            .saturating_add(state_restore_bytes(&source))
+            .saturating_add(reserve);
+        // Generator caches go before any LDE spills: they are rebuilt from
+        // host seeds on demand, a spilled LDE is uploaded again. A generated
+        // source would rebuild a released cache at once, so it releases none.
+        if matches!(source, TraceSource::Host(_)) {
+            for slot in resident.iter() {
+                if device_memory_info(device).0 >= needed {
+                    break;
+                }
+                slot.as_ref().unwrap().release_generator_device();
+            }
+        }
+        for index in 0..resident.len() {
+            if device_memory_info(device).0 >= needed {
+                break;
+            }
+            if host[index].is_none() {
+                let lde = resident[index].as_ref().unwrap();
+                host[index] = Some(spill_lde(lde));
+            }
+        }
+        assert!(
+            device_memory_info(device).0 >= needed,
+            "generated trace commitment exceeds device admission; reduce the shard cell budget"
+        );
+        pcs.dft
+            .prepare_coset_lde_constants(source.height(), blowup, shift);
+        let lde = lde_of(pcs, &domain, &source);
+        // Both kinds retain a bounded recovery source. Raw device rows need
+        // not coexist with later lookup/quotient workspace.
+        unsafe { lde.release_trace() };
+        resident.push(Some(lde));
+        host.push(None);
+        retained.push(match source {
+            TraceSource::Host(matrix) => Some(matrix),
+            TraceSource::Generated(_) => None,
+        });
+    }
+    Constructed {
+        resident,
+        host,
+        retained,
+    }
 }

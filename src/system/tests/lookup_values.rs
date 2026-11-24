@@ -33,6 +33,7 @@ fn serial_values<F: Field>(
             main: [&main_cur, &main_next],
             stage2: [&[], &[]],
             publics: &[],
+            // Never read: compiled lookups contain no selectors.
             is_first_row: F::from_bool(r == 0),
             is_last_row: F::from_bool(r == height - 1),
             is_transition: F::from_bool(r != height - 1),
@@ -48,25 +49,65 @@ fn serial_values<F: Field>(
     builder.finish()
 }
 
-fn fixture<F: Field>(height: usize, fixed: bool) -> (Circuit<F>, RowMajorMatrix<F>) {
-    let trace = RowMajorMatrix::new(
+/// Main columns `[x, y]`, distinct on every row.
+fn xy_trace<F: Field>(height: usize) -> RowMajorMatrix<F> {
+    RowMajorMatrix::new(
         (0..height * 2).map(|i| F::from_usize(i * 13 + 7)).collect(),
         2,
-    );
-    let preprocessed = fixed.then(|| {
-        RowMajorMatrix::new(
+    )
+}
+
+/// Appends the 0/1 row-indicator columns `[first, last, transition]`.
+fn with_row_indicators<F: Field>(matrix: &RowMajorMatrix<F>) -> RowMajorMatrix<F> {
+    let (height, width) = (matrix.height(), matrix.width());
+    RowMajorMatrix::new(
+        matrix
+            .values
+            .chunks(width)
+            .enumerate()
+            .flat_map(|(r, row)| {
+                row.iter().copied().chain([
+                    F::from_bool(r == 0),
+                    F::from_bool(r + 1 == height),
+                    F::from_bool(r + 1 != height),
+                ])
+            })
+            .collect(),
+        width + 3,
+    )
+}
+
+/// Lookup expressions may not use the built-in row selectors
+/// (`CompileError::SelectorInLookup`), so the lookups below read the row
+/// position from 0/1 indicator columns instead: of the preprocessed trace
+/// when `fixed`, of the main trace otherwise.
+fn fixture<F: Field>(height: usize, fixed: bool) -> (Circuit<F>, RowMajorMatrix<F>) {
+    let (trace, preprocessed) = if fixed {
+        let preprocessed = RowMajorMatrix::new(
             (0..height * 2)
                 .map(|i| F::from_usize(i * 17 + 11))
                 .collect(),
             2,
-        )
-    });
+        );
+        (xy_trace(height), Some(with_row_indicators(&preprocessed)))
+    } else {
+        (with_row_indicators(&xy_trace(height)), None)
+    };
+    let indicator = |i: u32| {
+        if fixed {
+            Expr::preprocessed(2 + i)
+        } else {
+            Expr::main(2 + i)
+        }
+    };
+    let (is_first, is_last, is_transition) = (indicator(0), indicator(1), indicator(2));
+    let main_width = trace.width();
     let spec = CircuitSpec {
-        main_width: 2,
-        preprocessed_width: usize::from(fixed) * 2,
+        main_width,
+        preprocessed_width: preprocessed.as_ref().map_or(0, |p| p.width()),
         lookups: vec![
             Lookup::push(
-                Expr::IsFirstRow + Expr::main(0),
+                is_first.clone() + Expr::main(0),
                 vec![
                     Expr::main_next(1),
                     if fixed {
@@ -82,23 +123,15 @@ fn fixture<F: Field>(height: usize, fixed: bool) -> (Circuit<F>, RowMajorMatrix<
                         },
                 ],
             ),
-            Lookup::pull(Expr::IsTransition, vec![Expr::IsLastRow, Expr::main(1)]),
-            Lookup::push(Expr::IsLastRow - Expr::IsFirstRow, vec![]),
+            Lookup::pull(is_transition, vec![is_last.clone(), Expr::main(1)]),
+            Lookup::push(is_last - is_first, vec![]),
         ],
         ..Default::default()
     };
-    let graph = compile(
-        &spec,
-        &ExtensionParams {
-            degree: 1,
-            w: F::ONE,
-            karatsuba: false,
-        },
-    )
-    .unwrap();
+    let graph = compile(&spec, &ExtensionParams::base()).unwrap();
     let circuit = Circuit {
         graph,
-        main_width: 2,
+        main_width,
         preprocessed,
         preprocessed_width: spec.preprocessed_width,
         preprocessed_height: if fixed { height } else { 0 },
@@ -231,11 +264,13 @@ fn witness_circuit_order_and_lookup_totals() {
         .into_iter()
         .map(|height| fixture::<Val>(height, true))
         .unzip();
+    let vk_digest = compute_vk_digest::<Val, ExtVal>(&circuits);
     let system = System {
         config: config(),
         circuits,
         preprocessed_commit: None,
         preprocessed_indices: vec![None; 3],
+        vk_digest,
     };
     let expected: Vec<_> = traces
         .iter()
@@ -282,6 +317,46 @@ fn witness_circuit_order_and_lookup_totals() {
 }
 
 #[test]
+fn per_circuit_stage_2_traces_chain_like_a_joint_pass() {
+    let (circuits, traces): (Vec<_>, Vec<_>) = [65, 0, 513, 64]
+        .into_iter()
+        .map(|height| fixture::<Val>(height, true))
+        .unzip();
+    let lookups: Vec<_> = traces
+        .iter()
+        .zip(&circuits)
+        .map(|(trace, circuit)| compute_lookup_values(circuit, trace))
+        .collect();
+    let group_sizes = [2, 1, 3, 1];
+    let challenges = [
+        ExtVal::from_u8(29),
+        ExtVal::from_u8(31),
+        ExtVal::from_u8(37),
+    ];
+    let (joint_traces, joint_totals) = LookupValues::stage_2_traces(
+        &lookups,
+        &group_sizes,
+        challenges[0],
+        &challenges[1],
+        challenges[2],
+    );
+    let mut acc = challenges[2];
+    for (position, values) in lookups.iter().enumerate() {
+        let (traces, totals) = LookupValues::stage_2_traces(
+            std::slice::from_ref(values),
+            &group_sizes[position..=position],
+            challenges[0],
+            &challenges[1],
+            acc,
+        );
+        assert_eq!(totals, [joint_totals[position]]);
+        assert_eq!(traces[0].dimensions(), joint_traces[position].dimensions());
+        assert_eq!(traces[0].values, joint_traces[position].values);
+        acc = totals[0];
+    }
+}
+
+#[test]
 fn lookup_witness_preserves_proof_bytes() {
     let inputs = [false, true].map(|pull| CircuitInputs {
         main_width: 2,
@@ -299,7 +374,7 @@ fn lookup_witness_preserves_proof_bytes() {
         ..Default::default()
     });
     let (system, key) = System::new(config(), inputs);
-    let (_, trace) = fixture::<Val>(64, false);
+    let trace = xy_trace::<Val>(64);
     let traces = vec![trace.clone(), trace];
     let serial_lookups = traces
         .iter()

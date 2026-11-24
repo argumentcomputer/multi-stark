@@ -13,6 +13,8 @@ links = "multi_stark_cuda"
 [workspace]
 
 [dependencies]
+blake3 = "1"
+getrandom = "0.4"
 tracing = "0.1"
 itertools = { version = "0.14", optional = true }
 rayon = { version = "1", optional = true }
@@ -42,7 +44,6 @@ optional = true
 features = ["cuda"]
 
 [dev-dependencies]
-blake3 = "1"
 criterion = "0.5"
 p3-baby-bear = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
 rand = "0.10"

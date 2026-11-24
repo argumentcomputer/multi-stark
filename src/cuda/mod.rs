@@ -5,6 +5,10 @@
 //! lookup traces, quotient evaluations, and FRI codewords on the selected GPU.
 //! All public protocol types and serialized proofs remain unchanged.
 
+#[doc(hidden)]
+pub mod hiding_mmcs;
+#[doc(hidden)]
+pub mod hiding_pcs;
 pub(crate) mod mmcs;
 mod offload;
 #[doc(hidden)]
@@ -49,7 +53,9 @@ impl Default for CudaDft {
     }
 }
 
-pub(crate) fn configured_device() -> i32 {
+/// The device a prover uses when none is requested:
+/// `MULTI_STARK_CUDA_DEVICE`, otherwise zero.
+pub fn configured_device() -> i32 {
     std::env::var("MULTI_STARK_CUDA_DEVICE").map_or(0, |value| {
         value
             .parse()
@@ -355,6 +361,7 @@ unsafe extern "C" {
         writer: unsafe extern "C" fn(*mut c_void, i32, *mut u64, usize, usize) -> i32,
         destroy: unsafe extern "C" fn(*mut c_void),
     ) -> i32;
+    fn multi_stark_cuda_lde_has_device_trace(handle: *const c_void) -> bool;
     fn multi_stark_cuda_lde_has_generator(handle: *const c_void) -> bool;
     fn multi_stark_cuda_lde_generator_context(handle: *const c_void) -> *mut c_void;
 }
@@ -372,6 +379,11 @@ unsafe impl Send for CudaLde {}
 unsafe impl Sync for CudaLde {}
 
 impl CudaLde {
+    /// Whether the original trace is still resident on the device.
+    pub(crate) fn has_device_trace(&self) -> bool {
+        unsafe { multi_stark_cuda_lde_has_device_trace(self.raw_handle()) }
+    }
+
     pub(crate) fn has_generator(&self) -> bool {
         unsafe { multi_stark_cuda_lde_has_generator(self.raw_handle()) }
     }
@@ -379,14 +391,32 @@ impl CudaLde {
     /// Frees what the trace generator, if any, caches on this device. The
     /// generator stays attached and keeps serving tiles from the host.
     pub(crate) fn release_generator_device(&self) {
-        let context = unsafe { multi_stark_cuda_lde_generator_context(self.raw_handle()) };
-        if context.is_null() {
-            return;
+        if let Some(generator) = self.generator() {
+            generator.release_device(self.device_id);
         }
+    }
+
+    /// Device bytes regenerating this LDE's trace may allocate: its
+    /// generator's releasable state, whether or not it is resident now, since
+    /// admission can release it before the regeneration runs, plus one write
+    /// workspace. Zero while the trace is on the device or without a
+    /// generator.
+    pub(crate) fn regeneration_bytes(&self) -> usize {
+        if self.has_device_trace() {
+            return 0;
+        }
+        self.generator().map_or(0, |generator| {
+            generator
+                .device_state_bytes()
+                .saturating_add(generator.device_workspace_bytes())
+        })
+    }
+
+    fn generator(&self) -> Option<&Generator> {
+        let context = unsafe { multi_stark_cuda_lde_generator_context(self.raw_handle()) };
         // SAFETY: the handle owns the boxed generator until it is destroyed,
         // and the box holds exactly the `Generator` the LDE was created with.
-        let generator = unsafe { &*context.cast::<Generator>() };
-        generator.release_device(self.device_id);
+        (!context.is_null()).then(|| unsafe { &*context.cast::<Generator>() })
     }
 
     pub(crate) const fn raw_handle(&self) -> *const c_void {
@@ -434,36 +464,73 @@ impl CudaLde {
         check_cuda(status, "resident trace attachment");
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn fri_fold(
         &self,
         next: Option<&CudaReducedOpening>,
-        betas: &[[Goldilocks; 2]],
-        beta_power: [Goldilocks; 2],
+        betas: &[Goldilocks],
+        log_arity: usize,
+        beta_power: &[Goldilocks],
         g_inv: Goldilocks,
         ext_w: Goldilocks,
+        ext_degree: usize,
     ) -> Self {
         let _span = tracing::info_span!("cuda/fri_fold").entered();
+        assert!(ext_degree == 2 || ext_degree == 3);
+        assert!(
+            log_arity > 0 && log_arity < usize::BITS as usize,
+            "invalid FRI log_arity {log_arity}"
+        );
+        assert!(
+            self.height.is_power_of_two() && self.height >= (1usize << log_arity),
+            "codeword height {} incompatible with log_arity {log_arity}",
+            self.height
+        );
+        assert_eq!(self.width, ext_degree);
+        assert_eq!(betas.len(), log_arity * ext_degree);
+        assert_eq!(beta_power.len(), ext_degree);
         let mut handle = core::ptr::null_mut();
-        let status = unsafe {
-            multi_stark_cuda_fri_fold_resident(
-                self.device_id,
-                &mut handle,
-                self.raw_handle(),
-                next.map_or(core::ptr::null(), |value| value.handle.as_ptr()),
-                betas.as_ptr().cast(),
-                betas.len(),
-                raw_u64(beta_power[0]),
-                raw_u64(beta_power[1]),
-                raw_u64(g_inv),
-                raw_u64(ext_w),
-            )
+        let next_ptr = next.map_or(core::ptr::null(), |value| {
+            assert_eq!(value.ext_degree, ext_degree);
+            value.handle.as_ptr()
+        });
+        let status = match ext_degree {
+            2 => unsafe {
+                multi_stark_cuda_fri_fold_resident(
+                    self.device_id,
+                    &mut handle,
+                    self.raw_handle(),
+                    next_ptr,
+                    betas.as_ptr().cast(),
+                    log_arity,
+                    raw_u64(beta_power[0]),
+                    raw_u64(beta_power[1]),
+                    raw_u64(g_inv),
+                    raw_u64(ext_w),
+                )
+            },
+            3 => unsafe {
+                multi_stark_cuda_fri_fold_resident_ext3(
+                    self.device_id,
+                    &mut handle,
+                    self.raw_handle(),
+                    next_ptr,
+                    betas.as_ptr().cast(),
+                    log_arity,
+                    raw_u64(beta_power[0]),
+                    raw_u64(beta_power[1]),
+                    raw_u64(beta_power[2]),
+                    raw_u64(g_inv),
+                )
+            },
+            _ => unreachable!(),
         };
         check_cuda(status, "resident CUDA FRI fold");
         Self {
             device_id: self.device_id,
             handle: NonNull::new(handle).expect("CUDA returned a null folded codeword"),
-            height: self.height >> betas.len(),
-            width: 2,
+            height: self.height >> log_arity,
+            width: ext_degree,
         }
     }
     /// Uploads an already bit-reversed LDE matrix into resident storage.
@@ -761,7 +828,9 @@ pub(crate) fn quotient_lde_memory_upper_bound(
     quotient_size: usize,
     quotient_degree: usize,
     log_blowup: usize,
+    ext_degree: usize,
 ) -> (usize, usize) {
+    assert!(ext_degree == 2 || ext_degree == 3);
     let (nodes, _, slot_count) = encode_quotient_nodes(graph);
     let lookup_arg_count = graph
         .lookups
@@ -781,11 +850,11 @@ pub(crate) fn quotient_lde_memory_upper_bound(
         4usize
             .saturating_mul(quotient_size)
             .saturating_mul(size_of::<Goldilocks>()),
-        2usize
+        ext_degree
             .saturating_mul(constraint_count)
             .saturating_mul(size_of::<Goldilocks>()),
-        2 * size_of::<Goldilocks>(),
-        2usize
+        ext_degree.saturating_mul(size_of::<Goldilocks>()),
+        ext_degree
             .saturating_mul(quotient_size)
             .saturating_mul(size_of::<Goldilocks>()),
     ]
@@ -802,7 +871,7 @@ pub(crate) fn quotient_lde_memory_upper_bound(
         .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
         .unwrap_or(usize::MAX);
     let output_bytes = lde_height
-        .saturating_mul(2)
+        .saturating_mul(ext_degree)
         .saturating_mul(quotient_degree)
         .saturating_mul(size_of::<Goldilocks>());
     (output_bytes, allocation_bytes.saturating_add(scratch_bytes))
@@ -945,9 +1014,12 @@ pub(crate) fn lookup_graph_lde_memory_upper_bound(
     graph: &ConstraintGraph<Goldilocks>,
     height: usize,
     main_width: usize,
+    preprocessed_width: usize,
     group_size: usize,
     log_blowup: usize,
+    ext_degree: usize,
 ) -> Option<(usize, usize)> {
+    assert!(ext_degree == 2 || ext_degree == 3);
     let (nodes, slot_count, lookups, args) = encode_lookup_nodes(graph)?;
     let lookup_count = lookups.len();
     let groups = lookup_count.div_ceil(group_size.max(1));
@@ -956,7 +1028,7 @@ pub(crate) fn lookup_graph_lde_memory_upper_bound(
         .unwrap_or(usize::MAX);
     let output_bytes = extended_height
         .saturating_mul(groups)
-        .saturating_mul(2 * size_of::<Goldilocks>());
+        .saturating_mul(ext_degree * size_of::<Goldilocks>());
 
     const LOOKUP_ROWS_PER_CHUNK: usize = 1 << 16;
     let chunk_rows = height.min(LOOKUP_ROWS_PER_CHUNK);
@@ -972,11 +1044,11 @@ pub(crate) fn lookup_graph_lde_memory_upper_bound(
     .into_iter()
     .map(align8)
     .sum::<usize>();
-    // Per message: conjugate Ext2, norm, inverse norm, multiplicity.
-    let message_bytes = message_count.saturating_mul(5 * size_of::<Goldilocks>());
+    // Per message: adjugate (ext_degree words), norm, inverse norm, multiplicity.
+    let message_bytes = message_count.saturating_mul((ext_degree + 3) * size_of::<Goldilocks>());
     let delta_bytes = height
         .saturating_mul(groups)
-        .saturating_mul(2 * size_of::<Goldilocks>());
+        .saturating_mul(ext_degree * size_of::<Goldilocks>());
     let shared_tile = (48 * 1024) / slot_count.saturating_mul(size_of::<Goldilocks>()).max(1);
     let scratch_bytes = if shared_tile < 32 {
         chunk_rows
@@ -987,12 +1059,13 @@ pub(crate) fn lookup_graph_lde_memory_upper_bound(
     } else {
         0
     };
-    // Some stage-1 policies retain the original trace in pinned host memory.
-    // Charge one bounded staging chunk even when this particular LDE still
-    // owns a device trace, keeping admission safe across both representations.
+    // Some commitment policies retain the original preprocessed and stage-1
+    // traces only in host memory. Charge one bounded staging chunk for each
+    // even when the LDE still owns a device trace, keeping admission safe
+    // across both representations.
     let trace_chunk_bytes = chunk_rows
         .saturating_add(1)
-        .saturating_mul(main_width)
+        .saturating_mul(main_width.saturating_add(preprocessed_width))
         .saturating_mul(size_of::<Goldilocks>());
     Some((
         output_bytes,
@@ -1067,8 +1140,9 @@ pub(crate) fn quotient_values_resident(
     publics: &[Goldilocks],
     selectors: CudaCosetSelectors,
     alpha: &[Goldilocks],
-    delta: &[Goldilocks; 2],
+    delta: &[Goldilocks],
     ext_w: Goldilocks,
+    ext_degree: usize,
     quotient_size: usize,
     next_step: usize,
     group_size: usize,
@@ -1077,8 +1151,10 @@ pub(crate) fn quotient_values_resident(
         quotient_graph_supported(graph),
         "the CUDA quotient evaluator needs a constraint graph with at least one node"
     );
+    assert!(ext_degree == 2 || ext_degree == 3);
     assert!((1..=8).contains(&group_size));
-    assert!(publics.len() >= 4);
+    assert!(publics.len() >= 2 * ext_degree);
+    assert_eq!(delta.len(), ext_degree);
     assert!(next_step.is_power_of_two());
     assert!(next_step <= quotient_size);
     let (nodes, slots, slot_count) = encode_quotient_nodes(graph);
@@ -1099,49 +1175,84 @@ pub(crate) fn quotient_values_resident(
             }
         })
         .collect();
-    let constraint_count = alpha.len() / 2;
+    let constraint_count = alpha.len() / ext_degree;
     let expected_constraints = roots.len()
         + if lookups.is_empty() {
-            2
+            ext_degree
         } else {
-            2 * lookups.len().div_ceil(group_size)
+            ext_degree * lookups.len().div_ceil(group_size)
         };
-    assert_eq!(alpha.len(), 2 * expected_constraints);
-    let mut output = Goldilocks::zero_vec(2 * quotient_size);
-    let status = unsafe {
-        multi_stark_cuda_quotient_values(
-            main.device_id,
-            output.as_mut_ptr().cast(),
-            nodes.as_ptr().cast(),
-            nodes.len(),
-            slot_count,
-            roots.as_ptr(),
-            roots.len(),
-            lookups.as_ptr().cast(),
-            lookups.len(),
-            args.as_ptr(),
-            args.len(),
-            group_size,
-            preprocessed.map_or(core::ptr::null(), CudaLde::raw_handle),
-            main.raw_handle(),
-            stage2.raw_handle(),
-            publics.as_ptr().cast(),
-            publics.len(),
-            raw_u64(selectors.coset_shift),
-            raw_u64(selectors.coset_generator),
-            raw_u64(selectors.trace_last),
-            raw_u64(selectors.vanishing_start),
-            raw_u64(selectors.vanishing_step),
-            alpha.as_ptr().cast(),
-            constraint_count,
-            delta.as_ptr().cast(),
-            raw_u64(ext_w),
-            quotient_size,
-            next_step,
-        )
+    assert_eq!(alpha.len(), ext_degree * expected_constraints);
+    let mut output = Goldilocks::zero_vec(ext_degree * quotient_size);
+    let preprocessed_ptr = preprocessed.map_or(core::ptr::null(), CudaLde::raw_handle);
+    let status = match ext_degree {
+        2 => unsafe {
+            multi_stark_cuda_quotient_values(
+                main.device_id,
+                output.as_mut_ptr().cast(),
+                nodes.as_ptr().cast(),
+                nodes.len(),
+                slot_count,
+                roots.as_ptr(),
+                roots.len(),
+                lookups.as_ptr().cast(),
+                lookups.len(),
+                args.as_ptr(),
+                args.len(),
+                group_size,
+                preprocessed_ptr,
+                main.raw_handle(),
+                stage2.raw_handle(),
+                publics.as_ptr().cast(),
+                publics.len(),
+                raw_u64(selectors.coset_shift),
+                raw_u64(selectors.coset_generator),
+                raw_u64(selectors.trace_last),
+                raw_u64(selectors.vanishing_start),
+                raw_u64(selectors.vanishing_step),
+                alpha.as_ptr().cast(),
+                constraint_count,
+                delta.as_ptr().cast(),
+                raw_u64(ext_w),
+                quotient_size,
+                next_step,
+            )
+        },
+        3 => unsafe {
+            multi_stark_cuda_quotient_values_ext3(
+                main.device_id,
+                output.as_mut_ptr().cast(),
+                nodes.as_ptr().cast(),
+                nodes.len(),
+                slot_count,
+                roots.as_ptr(),
+                roots.len(),
+                lookups.as_ptr().cast(),
+                lookups.len(),
+                args.as_ptr(),
+                args.len(),
+                group_size,
+                preprocessed_ptr,
+                main.raw_handle(),
+                stage2.raw_handle(),
+                publics.as_ptr().cast(),
+                publics.len(),
+                raw_u64(selectors.coset_shift),
+                raw_u64(selectors.coset_generator),
+                raw_u64(selectors.trace_last),
+                raw_u64(selectors.vanishing_start),
+                raw_u64(selectors.vanishing_step),
+                alpha.as_ptr().cast(),
+                constraint_count,
+                delta.as_ptr().cast(),
+                quotient_size,
+                next_step,
+            )
+        },
+        _ => unreachable!(),
     };
     check_cuda(status, "resident quotient evaluation");
-    RowMajorMatrix::new(output, 2)
+    RowMajorMatrix::new(output, ext_degree)
 }
 
 /// Evaluate a quotient and carry it through coefficient slicing and the
@@ -1158,8 +1269,9 @@ pub(crate) fn quotient_lde_mixed(
     publics: &[Goldilocks],
     selectors: CudaCosetSelectors,
     alpha: &[Goldilocks],
-    delta: &[Goldilocks; 2],
+    delta: &[Goldilocks],
     ext_w: Goldilocks,
+    ext_degree: usize,
     quotient_size: usize,
     next_step: usize,
     group_size: usize,
@@ -1185,6 +1297,7 @@ pub(crate) fn quotient_lde_mixed(
         alpha,
         delta,
         ext_w,
+        ext_degree,
         quotient_size,
         next_step,
         group_size,
@@ -1203,8 +1316,9 @@ fn quotient_lde_sources(
     publics: &[Goldilocks],
     selectors: CudaCosetSelectors,
     alpha: &[Goldilocks],
-    delta: &[Goldilocks; 2],
+    delta: &[Goldilocks],
     ext_w: Goldilocks,
+    ext_degree: usize,
     quotient_size: usize,
     next_step: usize,
     group_size: usize,
@@ -1215,8 +1329,10 @@ fn quotient_lde_sources(
         quotient_graph_supported(graph),
         "the CUDA quotient evaluator needs a constraint graph with at least one node"
     );
+    assert!(ext_degree == 2 || ext_degree == 3);
     assert!((1..=8).contains(&group_size));
-    assert!(publics.len() >= 4);
+    assert!(publics.len() >= 2 * ext_degree);
+    assert_eq!(delta.len(), ext_degree);
     assert!(next_step.is_power_of_two());
     assert!(next_step <= quotient_size);
     assert!(quotient_degree.is_power_of_two());
@@ -1239,18 +1355,18 @@ fn quotient_lde_sources(
             }
         })
         .collect();
-    let constraint_count = alpha.len() / 2;
+    let constraint_count = alpha.len() / ext_degree;
     let expected_constraints = roots.len()
         + if lookups.is_empty() {
-            2
+            ext_degree
         } else {
-            2 * lookups.len().div_ceil(group_size)
+            ext_degree * lookups.len().div_ceil(group_size)
         };
-    assert_eq!(alpha.len(), 2 * expected_constraints);
+    assert_eq!(alpha.len(), ext_degree * expected_constraints);
     let trace_height = quotient_size / quotient_degree;
     let lde_height = trace_height << log_blowup;
-    let quotient_plan = dft.forward_plan(quotient_size, 2);
-    let lde_plan = dft.forward_plan(lde_height, 2 * quotient_degree);
+    let quotient_plan = dft.forward_plan(quotient_size, ext_degree);
+    let lde_plan = dft.forward_plan(lde_height, ext_degree * quotient_degree);
     let height_inverse = Goldilocks::ONE.div_2exp_u64(log2_strict_usize(quotient_size) as u64);
     let weight_step = Goldilocks::GENERATOR.exp_u64(trace_height as u64).inverse();
     let weights: Vec<_> = weight_step
@@ -1282,10 +1398,8 @@ fn quotient_lde_sources(
     let (stage2_handle, stage2_host, stage2_height, stage2_width) = source_parts(Some(stage2));
     let mixed = !preprocessed_host.is_null() || !main_host.is_null() || !stage2_host.is_null();
     let mut handle = core::ptr::null_mut();
-    let status = if mixed {
-        // SAFETY: every host matrix and resident handle remains borrowed for
-        // this synchronous call. The returned LDE owns its device storage.
-        unsafe {
+    let status = match (mixed, ext_degree) {
+        (true, 2) => unsafe {
             multi_stark_cuda_quotient_lde_mixed(
                 dft.device_id,
                 &mut handle,
@@ -1330,11 +1444,53 @@ fn quotient_lde_sources(
                 lde_plan.raw(),
                 weights.as_ptr().cast(),
             )
-        }
-    } else {
-        // SAFETY: all resident handles and input slices remain live for this
-        // synchronous call. The returned LDE owns its device storage.
-        unsafe {
+        },
+        (true, 3) => unsafe {
+            multi_stark_cuda_quotient_lde_mixed_ext3(
+                dft.device_id,
+                &mut handle,
+                nodes.as_ptr().cast(),
+                nodes.len(),
+                slot_count,
+                roots.as_ptr(),
+                roots.len(),
+                lookups.as_ptr().cast(),
+                lookups.len(),
+                args.as_ptr(),
+                args.len(),
+                group_size,
+                preprocessed_handle,
+                preprocessed_host,
+                preprocessed_height,
+                preprocessed_width,
+                main_handle,
+                main_host,
+                main_height,
+                main_width,
+                stage2_handle,
+                stage2_host,
+                stage2_height,
+                stage2_width,
+                publics.as_ptr().cast(),
+                publics.len(),
+                raw_u64(selectors.coset_shift),
+                raw_u64(selectors.coset_generator),
+                raw_u64(selectors.trace_last),
+                raw_u64(selectors.vanishing_start),
+                raw_u64(selectors.vanishing_step),
+                alpha.as_ptr().cast(),
+                constraint_count,
+                delta.as_ptr().cast(),
+                quotient_size,
+                next_step,
+                quotient_degree,
+                log_blowup,
+                quotient_plan.raw(),
+                lde_plan.raw(),
+                weights.as_ptr().cast(),
+            )
+        },
+        (false, 2) => unsafe {
             multi_stark_cuda_quotient_lde(
                 dft.device_id,
                 &mut handle,
@@ -1370,14 +1526,51 @@ fn quotient_lde_sources(
                 lde_plan.raw(),
                 weights.as_ptr().cast(),
             )
-        }
+        },
+        (false, 3) => unsafe {
+            multi_stark_cuda_quotient_lde_ext3(
+                dft.device_id,
+                &mut handle,
+                nodes.as_ptr().cast(),
+                nodes.len(),
+                slot_count,
+                roots.as_ptr(),
+                roots.len(),
+                lookups.as_ptr().cast(),
+                lookups.len(),
+                args.as_ptr(),
+                args.len(),
+                group_size,
+                preprocessed_handle,
+                main_handle,
+                stage2_handle,
+                publics.as_ptr().cast(),
+                publics.len(),
+                raw_u64(selectors.coset_shift),
+                raw_u64(selectors.coset_generator),
+                raw_u64(selectors.trace_last),
+                raw_u64(selectors.vanishing_start),
+                raw_u64(selectors.vanishing_step),
+                alpha.as_ptr().cast(),
+                constraint_count,
+                delta.as_ptr().cast(),
+                quotient_size,
+                next_step,
+                quotient_degree,
+                log_blowup,
+                quotient_plan.raw(),
+                lde_plan.raw(),
+                weights.as_ptr().cast(),
+            )
+        },
+        _ => unreachable!(),
     };
     check_cuda(status, "CUDA quotient LDE");
     CudaLde {
         device_id: dft.device_id,
         handle: NonNull::new(handle).expect("CUDA returned a null quotient LDE"),
         height: lde_height,
-        width: 2 * quotient_degree,
+        width: ext_degree * quotient_degree,
     }
 }
 
@@ -1514,31 +1707,61 @@ pub(crate) struct CudaReducedOpening {
     device_id: i32,
     handle: NonNull<c_void>,
     height: usize,
+    ext_degree: usize,
 }
 impl CudaReducedOpening {
+    #[cfg(test)]
     pub(crate) fn new(device_id: i32, height: usize) -> Self {
+        Self::new_with_degree(device_id, height, 2)
+    }
+
+    pub(crate) fn new_with_degree(device_id: i32, height: usize, ext_degree: usize) -> Self {
+        assert!(ext_degree == 2 || ext_degree == 3);
         let mut handle = core::ptr::null_mut();
-        let status = unsafe { multi_stark_cuda_reduced_create(device_id, &mut handle, height) };
+        let status = match ext_degree {
+            2 => unsafe { multi_stark_cuda_reduced_create(device_id, &mut handle, height) },
+            3 => unsafe { multi_stark_cuda_reduced_create_ext3(device_id, &mut handle, height) },
+            _ => unreachable!(),
+        };
         check_cuda(status, "reduced opening allocation");
         Self {
             device_id,
             handle: NonNull::new(handle).unwrap(),
             height,
+            ext_degree,
         }
     }
+
     pub(crate) const fn height(&self) -> usize {
         self.height
     }
 
+    #[cfg(test)]
     pub(crate) fn add_host(&mut self, values: &[[Goldilocks; 2]]) {
-        assert_eq!(values.len(), self.height);
-        let status = unsafe {
-            multi_stark_cuda_reduced_add_host(
-                self.device_id,
-                self.handle.as_ptr(),
-                values.as_ptr().cast(),
-                values.len(),
-            )
+        assert_eq!(self.ext_degree, 2);
+        self.add_host_flat(values.as_flattened());
+    }
+
+    pub(crate) fn add_host_flat(&mut self, values: &[Goldilocks]) {
+        assert_eq!(values.len(), self.height * self.ext_degree);
+        let status = match self.ext_degree {
+            2 => unsafe {
+                multi_stark_cuda_reduced_add_host(
+                    self.device_id,
+                    self.handle.as_ptr(),
+                    values.as_ptr().cast(),
+                    self.height,
+                )
+            },
+            3 => unsafe {
+                multi_stark_cuda_reduced_add_host_ext3(
+                    self.device_id,
+                    self.handle.as_ptr(),
+                    values.as_ptr().cast(),
+                    self.height,
+                )
+            },
+            _ => unreachable!(),
         };
         check_cuda(status, "host reduced-opening accumulation")
     }
@@ -1552,6 +1775,7 @@ impl CudaReducedOpening {
         offset: [Goldilocks; 2],
         ext_w: Goldilocks,
     ) {
+        assert_eq!(self.ext_degree, 2);
         assert_eq!(inv.len(), self.height);
         assert_eq!(alpha.len(), lde.width());
         let status = unsafe {
@@ -1571,6 +1795,7 @@ impl CudaReducedOpening {
     }
     #[cfg(test)]
     pub(crate) fn to_host(&self) -> Vec<[Goldilocks; 2]> {
+        assert_eq!(self.ext_degree, 2);
         let mut out = vec![[Goldilocks::ZERO; 2]; self.height];
         let status = unsafe {
             multi_stark_cuda_reduced_copy(
@@ -1592,7 +1817,7 @@ impl CudaReducedOpening {
             device_id: self.device_id,
             handle: NonNull::new(handle).unwrap(),
             height: self.height,
-            width: 2,
+            width: self.ext_degree,
         }
     }
 }
@@ -1614,6 +1839,16 @@ pub(crate) struct CudaInterpolationTask {
     pub(crate) scale1: u64,
 }
 #[repr(C)]
+pub(crate) struct CudaInterpolationTaskExt3 {
+    pub(crate) lde: *const c_void,
+    pub(crate) height: usize,
+    pub(crate) inv_offset: usize,
+    pub(crate) output_offset: usize,
+    pub(crate) scale0: u64,
+    pub(crate) scale1: u64,
+    pub(crate) scale2: u64,
+}
+#[repr(C)]
 pub(crate) struct CudaReductionTask {
     pub(crate) reduced: *mut c_void,
     pub(crate) lde: *const c_void,
@@ -1624,56 +1859,196 @@ pub(crate) struct CudaReductionTask {
     pub(crate) offset0: u64,
     pub(crate) offset1: u64,
 }
+#[repr(C)]
+pub(crate) struct CudaReductionTaskExt3 {
+    pub(crate) reduced: *mut c_void,
+    pub(crate) lde: *const c_void,
+    pub(crate) height: usize,
+    pub(crate) inv_offset: usize,
+    pub(crate) y0: u64,
+    pub(crate) y1: u64,
+    pub(crate) y2: u64,
+    pub(crate) offset0: u64,
+    pub(crate) offset1: u64,
+    pub(crate) offset2: u64,
+}
+
+pub(crate) enum CudaInterpolationTasks {
+    Ext2(Vec<CudaInterpolationTask>),
+    Ext3(Vec<CudaInterpolationTaskExt3>),
+}
+impl CudaInterpolationTasks {
+    pub(crate) fn new(ext_degree: usize) -> Self {
+        match ext_degree {
+            2 => Self::Ext2(Vec::new()),
+            3 => Self::Ext3(Vec::new()),
+            _ => panic!("CUDA supports extension degrees 2 and 3"),
+        }
+    }
+    pub(crate) fn push(
+        &mut self,
+        lde: &CudaLde,
+        height: usize,
+        inv_offset: usize,
+        output_offset: usize,
+        scale: &[Goldilocks],
+    ) {
+        match self {
+            Self::Ext2(tasks) => {
+                assert_eq!(scale.len(), 2);
+                tasks.push(lde.interpolation_task(
+                    height,
+                    inv_offset,
+                    output_offset,
+                    [scale[0], scale[1]],
+                ));
+            }
+            Self::Ext3(tasks) => {
+                assert_eq!(scale.len(), 3);
+                tasks.push(lde.interpolation_task_ext3(
+                    height,
+                    inv_offset,
+                    output_offset,
+                    [scale[0], scale[1], scale[2]],
+                ));
+            }
+        }
+    }
+}
+
+pub(crate) enum CudaReductionTasks {
+    Ext2(Vec<CudaReductionTask>),
+    Ext3(Vec<CudaReductionTaskExt3>),
+}
+impl CudaReductionTasks {
+    pub(crate) fn new(ext_degree: usize) -> Self {
+        match ext_degree {
+            2 => Self::Ext2(Vec::new()),
+            3 => Self::Ext3(Vec::new()),
+            _ => panic!("CUDA supports extension degrees 2 and 3"),
+        }
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            Self::Ext2(tasks) => tasks.is_empty(),
+            Self::Ext3(tasks) => tasks.is_empty(),
+        }
+    }
+    pub(crate) fn push(
+        &mut self,
+        target: &mut CudaReducedOpening,
+        lde: &CudaLde,
+        inv_offset: usize,
+        y: &[Goldilocks],
+        offset: &[Goldilocks],
+    ) {
+        match self {
+            Self::Ext2(tasks) => {
+                assert_eq!(target.ext_degree, 2);
+                assert_eq!(y.len(), 2);
+                assert_eq!(offset.len(), 2);
+                tasks.push(target.reduction_task(
+                    lde,
+                    inv_offset,
+                    [y[0], y[1]],
+                    [offset[0], offset[1]],
+                ));
+            }
+            Self::Ext3(tasks) => {
+                assert_eq!(target.ext_degree, 3);
+                assert_eq!(y.len(), 3);
+                assert_eq!(offset.len(), 3);
+                tasks.push(target.reduction_task_ext3(
+                    lde,
+                    inv_offset,
+                    [y[0], y[1], y[2]],
+                    [offset[0], offset[1], offset[2]],
+                ));
+            }
+        }
+    }
+}
 
 pub(crate) struct CudaFriWorkspace {
     device_id: i32,
     handle: NonNull<c_void>,
+    ext_degree: usize,
 }
 impl CudaFriWorkspace {
     pub(crate) fn new(
         device_id: i32,
-        points: &[[Goldilocks; 2]],
+        points: &[Goldilocks],
         counts: &[usize],
         coset: &[Goldilocks],
         ext_w: Goldilocks,
+        ext_degree: usize,
     ) -> Self {
-        assert_eq!(points.len(), counts.len());
+        assert!(ext_degree == 2 || ext_degree == 3);
+        assert_eq!(points.len(), counts.len() * ext_degree);
         let mut handle = core::ptr::null_mut();
-        let status = unsafe {
-            multi_stark_cuda_fri_workspace_create(
-                device_id,
-                &mut handle,
-                points.as_ptr().cast(),
-                counts.as_ptr(),
-                points.len(),
-                coset.as_ptr().cast(),
-                coset.len(),
-                raw_u64(ext_w),
-            )
+        let status = match ext_degree {
+            2 => unsafe {
+                multi_stark_cuda_fri_workspace_create(
+                    device_id,
+                    &mut handle,
+                    points.as_ptr().cast(),
+                    counts.as_ptr(),
+                    counts.len(),
+                    coset.as_ptr().cast(),
+                    coset.len(),
+                    raw_u64(ext_w),
+                )
+            },
+            3 => unsafe {
+                multi_stark_cuda_fri_workspace_create_ext3(
+                    device_id,
+                    &mut handle,
+                    points.as_ptr().cast(),
+                    counts.as_ptr(),
+                    counts.len(),
+                    coset.as_ptr().cast(),
+                    coset.len(),
+                )
+            },
+            _ => unreachable!(),
         };
         check_cuda(status, "FRI workspace allocation");
         Self {
             device_id,
             handle: NonNull::new(handle).unwrap(),
+            ext_degree,
         }
     }
     pub(crate) fn interpolate(
         &mut self,
-        tasks: &[CudaInterpolationTask],
+        tasks: &CudaInterpolationTasks,
         output_count: usize,
         ext_w: Goldilocks,
-    ) -> Vec<[Goldilocks; 2]> {
-        let mut output = vec![[Goldilocks::ZERO; 2]; output_count];
-        let status = unsafe {
-            multi_stark_cuda_fri_interpolate_batch(
-                self.device_id,
-                self.handle.as_ptr(),
-                output.as_mut_ptr().cast(),
-                output_count,
-                tasks.as_ptr().cast(),
-                tasks.len(),
-                raw_u64(ext_w),
-            )
+    ) -> Vec<Goldilocks> {
+        let mut output = vec![Goldilocks::ZERO; output_count * self.ext_degree];
+        let status = match (self.ext_degree, tasks) {
+            (2, CudaInterpolationTasks::Ext2(tasks)) => unsafe {
+                multi_stark_cuda_fri_interpolate_batch(
+                    self.device_id,
+                    self.handle.as_ptr(),
+                    output.as_mut_ptr().cast(),
+                    output_count,
+                    tasks.as_ptr().cast(),
+                    tasks.len(),
+                    raw_u64(ext_w),
+                )
+            },
+            (3, CudaInterpolationTasks::Ext3(tasks)) => unsafe {
+                multi_stark_cuda_fri_interpolate_batch_ext3(
+                    self.device_id,
+                    self.handle.as_ptr(),
+                    output.as_mut_ptr().cast(),
+                    output_count,
+                    tasks.as_ptr().cast(),
+                    tasks.len(),
+                )
+            },
+            _ => panic!("FRI workspace extension degree mismatch"),
         };
         check_cuda(status, "batched FRI interpolation");
         output
@@ -1681,20 +2056,35 @@ impl CudaFriWorkspace {
 
     pub(crate) fn reduce(
         &mut self,
-        tasks: &[CudaReductionTask],
-        alpha: &[[Goldilocks; 2]],
+        tasks: &CudaReductionTasks,
+        alpha: &[Goldilocks],
         ext_w: Goldilocks,
     ) {
-        let status = unsafe {
-            multi_stark_cuda_fri_reduce_batch(
-                self.device_id,
-                self.handle.as_ptr(),
-                tasks.as_ptr().cast(),
-                tasks.len(),
-                alpha.as_ptr().cast(),
-                alpha.len(),
-                raw_u64(ext_w),
-            )
+        assert_eq!(alpha.len() % self.ext_degree, 0);
+        let alpha_count = alpha.len() / self.ext_degree;
+        let status = match (self.ext_degree, tasks) {
+            (2, CudaReductionTasks::Ext2(tasks)) => unsafe {
+                multi_stark_cuda_fri_reduce_batch(
+                    self.device_id,
+                    self.handle.as_ptr(),
+                    tasks.as_ptr().cast(),
+                    tasks.len(),
+                    alpha.as_ptr().cast(),
+                    alpha_count,
+                    raw_u64(ext_w),
+                )
+            },
+            (3, CudaReductionTasks::Ext3(tasks)) => unsafe {
+                multi_stark_cuda_fri_reduce_batch_ext3(
+                    self.device_id,
+                    self.handle.as_ptr(),
+                    tasks.as_ptr().cast(),
+                    tasks.len(),
+                    alpha.as_ptr().cast(),
+                    alpha_count,
+                )
+            },
+            _ => panic!("FRI workspace extension degree mismatch"),
         };
         check_cuda(status, "batched FRI reduction")
     }
@@ -1716,11 +2106,12 @@ pub(crate) fn lookup_lde_resident(
     height: usize,
     num_lookups: usize,
     group_size: usize,
-    beta: [Goldilocks; 2],
-    gamma: [Goldilocks; 2],
+    beta: &[Goldilocks],
+    gamma: &[Goldilocks],
     ext_w: Goldilocks,
+    ext_degree: usize,
     log_blowup: usize,
-) -> (CudaLde, [Goldilocks; 2]) {
+) -> (CudaLde, Vec<Goldilocks>) {
     let _span = tracing::info_span!(
         "cuda/lookup_lde",
         path = "direct",
@@ -1731,6 +2122,9 @@ pub(crate) fn lookup_lde_resident(
         added_bits = log_blowup
     )
     .entered();
+    assert!(ext_degree == 2 || ext_degree == 3);
+    assert_eq!(beta.len(), ext_degree);
+    assert_eq!(gamma.len(), ext_degree);
     assert!((1..=8).contains(&group_size));
     assert_eq!(arg_offsets.len(), num_lookups + 1);
     assert_eq!(arg_offsets.first(), Some(&0));
@@ -1739,7 +2133,12 @@ pub(crate) fn lookup_lde_resident(
         let extended_height = height << log_blowup;
         let mut handle = core::ptr::null_mut();
         let status = unsafe {
-            multi_stark_cuda_zero_lde_create(dft.device_id, &mut handle, extended_height, 2)
+            multi_stark_cuda_zero_lde_create(
+                dft.device_id,
+                &mut handle,
+                extended_height,
+                ext_degree,
+            )
         };
         check_cuda(status, "zero lookup LDE");
         return (
@@ -1747,9 +2146,9 @@ pub(crate) fn lookup_lde_resident(
                 device_id: dft.device_id,
                 handle: NonNull::new(handle).expect("CUDA returned a null zero LDE"),
                 height: extended_height,
-                width: 2,
+                width: ext_degree,
             },
-            [Goldilocks::ZERO; 2],
+            vec![Goldilocks::ZERO; ext_degree],
         );
     }
     let slots = num_lookups.div_ceil(group_size.max(1));
@@ -1759,40 +2158,64 @@ pub(crate) fn lookup_lde_resident(
     let extended_height = height << log_blowup;
     let plan = dft.lde_plan(
         height,
-        2 * num_lookups.div_ceil(group_size),
+        ext_degree * num_lookups.div_ceil(group_size),
         log_blowup,
         Goldilocks::GENERATOR,
     );
-    let mut tail = [Goldilocks::ZERO; 4];
+    let mut tail = vec![Goldilocks::ZERO; 2 * ext_degree];
     let mut handle = core::ptr::null_mut();
-    let status = unsafe {
-        multi_stark_cuda_lookup_lde(
-            dft.device_id,
-            &mut handle,
-            tail.as_mut_ptr().cast(),
-            multiplicities.as_ptr().cast(),
-            args.as_ptr().cast(),
-            arg_offsets.as_ptr(),
-            height,
-            num_lookups,
-            args_width,
-            group_size.max(1),
-            beta.as_ptr().cast(),
-            gamma.as_ptr().cast(),
-            raw_u64(ext_w),
-            log_blowup,
-            plan.raw(),
-        )
+    let status = match ext_degree {
+        2 => unsafe {
+            multi_stark_cuda_lookup_lde(
+                dft.device_id,
+                &mut handle,
+                tail.as_mut_ptr().cast(),
+                multiplicities.as_ptr().cast(),
+                args.as_ptr().cast(),
+                arg_offsets.as_ptr(),
+                height,
+                num_lookups,
+                args_width,
+                group_size.max(1),
+                beta.as_ptr().cast(),
+                gamma.as_ptr().cast(),
+                raw_u64(ext_w),
+                log_blowup,
+                plan.raw(),
+            )
+        },
+        3 => unsafe {
+            multi_stark_cuda_lookup_lde_ext3(
+                dft.device_id,
+                &mut handle,
+                tail.as_mut_ptr().cast(),
+                multiplicities.as_ptr().cast(),
+                args.as_ptr().cast(),
+                arg_offsets.as_ptr(),
+                height,
+                num_lookups,
+                args_width,
+                group_size.max(1),
+                beta.as_ptr().cast(),
+                gamma.as_ptr().cast(),
+                log_blowup,
+                plan.raw(),
+            )
+        },
+        _ => unreachable!(),
     };
     check_cuda(status, "resident CUDA lookup LDE");
+    let total = (0..ext_degree)
+        .map(|c| tail[c] + tail[ext_degree + c])
+        .collect();
     (
         CudaLde {
             device_id: dft.device_id,
             handle: NonNull::new(handle).expect("CUDA returned a null lookup LDE"),
             height: extended_height,
-            width: 2 * slots,
+            width: ext_degree * slots,
         },
-        [tail[0] + tail[2], tail[1] + tail[3]],
+        total,
     )
 }
 
@@ -1805,12 +2228,13 @@ pub(crate) fn lookup_lde_resident_partitioned(
     height: usize,
     num_lookups: usize,
     group_size: usize,
-    beta: [Goldilocks; 2],
-    gamma: [Goldilocks; 2],
+    beta: &[Goldilocks],
+    gamma: &[Goldilocks],
     ext_w: Goldilocks,
+    ext_degree: usize,
     log_blowup: usize,
-    cpu_deltas: impl Fn(core::ops::Range<usize>) -> Vec<[Goldilocks; 2]> + Sync,
-) -> (CudaLde, [Goldilocks; 2]) {
+    cpu_deltas: impl Fn(core::ops::Range<usize>) -> Vec<Goldilocks> + Sync,
+) -> (CudaLde, Vec<Goldilocks>) {
     let _span = tracing::info_span!(
         "cuda/lookup_lde",
         path = "partitioned",
@@ -1821,6 +2245,9 @@ pub(crate) fn lookup_lde_resident_partitioned(
         added_bits = log_blowup
     )
     .entered();
+    assert!(ext_degree == 2 || ext_degree == 3);
+    assert_eq!(beta.len(), ext_degree);
+    assert_eq!(gamma.len(), ext_degree);
     assert!((1..=8).contains(&group_size));
     assert_eq!(arg_offsets.len(), num_lookups + 1);
     assert_eq!(arg_offsets.first(), Some(&0));
@@ -1833,24 +2260,39 @@ pub(crate) fn lookup_lde_resident_partitioned(
     let extended_height = height << log_blowup;
     let plan = dft.lde_plan(
         height,
-        2 * num_lookups.div_ceil(group_size),
+        ext_degree * num_lookups.div_ceil(group_size),
         log_blowup,
         Goldilocks::GENERATOR,
     );
     let total_started = std::time::Instant::now();
     let create_started = std::time::Instant::now();
     let mut pending_handle = core::ptr::null_mut();
-    let status = unsafe {
-        multi_stark_cuda_lookup_lde_begin_partitioned(
-            dft.device_id,
-            &mut pending_handle,
-            arg_offsets.as_ptr(),
-            height,
-            num_lookups,
-            args_width,
-            group_size,
-            log_blowup,
-        )
+    let status = match ext_degree {
+        2 => unsafe {
+            multi_stark_cuda_lookup_lde_begin_partitioned(
+                dft.device_id,
+                &mut pending_handle,
+                arg_offsets.as_ptr(),
+                height,
+                num_lookups,
+                args_width,
+                group_size,
+                log_blowup,
+            )
+        },
+        3 => unsafe {
+            multi_stark_cuda_lookup_lde_begin_partitioned_ext3(
+                dft.device_id,
+                &mut pending_handle,
+                arg_offsets.as_ptr(),
+                height,
+                num_lookups,
+                args_width,
+                group_size,
+                log_blowup,
+            )
+        },
+        _ => unreachable!(),
     };
     check_cuda(status, "create partitioned CUDA lookup");
     let create_elapsed = create_started.elapsed();
@@ -1901,18 +2343,33 @@ pub(crate) fn lookup_lde_resident_partitioned(
                 let Some(chunk) = chunk else { break };
                 let row_start = chunk * ROWS_PER_CHUNK;
                 let rows = (height - row_start).min(ROWS_PER_CHUNK);
-                let status = unsafe {
-                    multi_stark_cuda_lookup_lde_gpu_rows_partitioned(
-                        device_id,
-                        raw_pending as *mut c_void,
-                        multiplicities.as_ptr().cast(),
-                        args.as_ptr().cast(),
-                        row_start,
-                        rows,
-                        beta.as_ptr().cast(),
-                        gamma.as_ptr().cast(),
-                        ext_w,
-                    )
+                let status = match ext_degree {
+                    2 => unsafe {
+                        multi_stark_cuda_lookup_lde_gpu_rows_partitioned(
+                            device_id,
+                            raw_pending as *mut c_void,
+                            multiplicities.as_ptr().cast(),
+                            args.as_ptr().cast(),
+                            row_start,
+                            rows,
+                            beta.as_ptr().cast(),
+                            gamma.as_ptr().cast(),
+                            ext_w,
+                        )
+                    },
+                    3 => unsafe {
+                        multi_stark_cuda_lookup_lde_gpu_rows_partitioned_ext3(
+                            device_id,
+                            raw_pending as *mut c_void,
+                            multiplicities.as_ptr().cast(),
+                            args.as_ptr().cast(),
+                            row_start,
+                            rows,
+                            beta.as_ptr().cast(),
+                            gamma.as_ptr().cast(),
+                        )
+                    },
+                    _ => unreachable!(),
                 };
                 check_cuda(status, "partitioned CUDA lookup chunk");
                 chunks += 1;
@@ -1937,15 +2394,27 @@ pub(crate) fn lookup_lde_resident_partitioned(
             let row_start = chunk * ROWS_PER_CHUNK;
             let rows = (height - row_start).min(ROWS_PER_CHUNK);
             let values = cpu_deltas(row_start..row_start + rows);
-            assert_eq!(values.len(), rows * slots);
-            let status = unsafe {
-                multi_stark_cuda_lookup_lde_cpu_rows_partitioned(
-                    dft.device_id,
-                    pending_handle.as_ptr(),
-                    values.as_ptr().cast(),
-                    row_start,
-                    rows,
-                )
+            assert_eq!(values.len(), rows * slots * ext_degree);
+            let status = match ext_degree {
+                2 => unsafe {
+                    multi_stark_cuda_lookup_lde_cpu_rows_partitioned(
+                        dft.device_id,
+                        pending_handle.as_ptr(),
+                        values.as_ptr().cast(),
+                        row_start,
+                        rows,
+                    )
+                },
+                3 => unsafe {
+                    multi_stark_cuda_lookup_lde_cpu_rows_partitioned_ext3(
+                        dft.device_id,
+                        pending_handle.as_ptr(),
+                        values.as_ptr().cast(),
+                        row_start,
+                        rows,
+                    )
+                },
+                _ => unreachable!(),
             };
             check_cuda(status, "upload partitioned CPU lookup chunk");
             cpu_chunks += 1;
@@ -1959,26 +2428,41 @@ pub(crate) fn lookup_lde_resident_partitioned(
 
     let finish_started = std::time::Instant::now();
     let mut handle = core::ptr::null_mut();
-    let mut tail = [Goldilocks::ZERO; 4];
-    let status = unsafe {
-        multi_stark_cuda_lookup_lde_finish_partitioned(
-            dft.device_id,
-            pending_handle.as_ptr(),
-            &mut handle,
-            tail.as_mut_ptr().cast(),
-            plan.raw(),
-        )
+    let mut tail = vec![Goldilocks::ZERO; 2 * ext_degree];
+    let status = match ext_degree {
+        2 => unsafe {
+            multi_stark_cuda_lookup_lde_finish_partitioned(
+                dft.device_id,
+                pending_handle.as_ptr(),
+                &mut handle,
+                tail.as_mut_ptr().cast(),
+                plan.raw(),
+            )
+        },
+        3 => unsafe {
+            multi_stark_cuda_lookup_lde_finish_partitioned_ext3(
+                dft.device_id,
+                pending_handle.as_ptr(),
+                &mut handle,
+                tail.as_mut_ptr().cast(),
+                plan.raw(),
+            )
+        },
+        _ => unreachable!(),
     };
     pending.handle = None;
     check_cuda(status, "partitioned CUDA lookup finish");
+    let total = (0..ext_degree)
+        .map(|c| tail[c] + tail[ext_degree + c])
+        .collect();
     let result = (
         CudaLde {
             device_id: dft.device_id,
             handle: NonNull::new(handle).expect("CUDA returned a null lookup LDE"),
             height: extended_height,
-            width: 2 * slots,
+            width: ext_degree * slots,
         },
-        [tail[0] + tail[2], tail[1] + tail[3]],
+        total,
     );
     if memory_diagnostics_enabled() {
         eprintln!(
@@ -1997,15 +2481,19 @@ pub(crate) fn lookup_lde_resident_partitioned(
 pub(crate) fn lookup_graph_lde_resident(
     dft: &CudaDft,
     graph: &ConstraintGraph<Goldilocks>,
-    preprocessed: Option<&CudaLde>,
+    preprocessed: Option<(&CudaLde, Option<&RowMajorMatrix<Goldilocks>>)>,
     main: &CudaLde,
     height: usize,
     group_size: usize,
-    beta: [Goldilocks; 2],
-    gamma: [Goldilocks; 2],
+    beta: &[Goldilocks],
+    gamma: &[Goldilocks],
     ext_w: Goldilocks,
+    ext_degree: usize,
     log_blowup: usize,
-) -> Option<(CudaLde, [Goldilocks; 2])> {
+) -> Option<(CudaLde, Vec<Goldilocks>)> {
+    assert!(ext_degree == 2 || ext_degree == 3);
+    assert_eq!(beta.len(), ext_degree);
+    assert_eq!(gamma.len(), ext_degree);
     assert!((1..=8).contains(&group_size));
     let _span = tracing::info_span!(
         "cuda/lookup_lde",
@@ -2017,49 +2505,86 @@ pub(crate) fn lookup_graph_lde_resident(
         added_bits = log_blowup
     )
     .entered();
+    if let Some((lde, Some(host))) = preprocessed {
+        assert_eq!(host.height(), height, "preprocessed host trace height");
+        assert_eq!(host.width(), lde.width, "preprocessed host trace width");
+    }
     let (nodes, slot_count, lookups, args) = encode_lookup_nodes(graph)?;
     let num_lookups = lookups.len();
     let groups = num_lookups.div_ceil(group_size.max(1));
     let extended_height = height << log_blowup;
     let plan = dft.lde_plan(
         height,
-        2 * num_lookups.div_ceil(group_size),
+        ext_degree * num_lookups.div_ceil(group_size),
         log_blowup,
         Goldilocks::GENERATOR,
     );
-    let mut tail = [Goldilocks::ZERO; 4];
+    let mut tail = vec![Goldilocks::ZERO; 2 * ext_degree];
     let mut handle = core::ptr::null_mut();
-    let status = unsafe {
-        multi_stark_cuda_lookup_graph_lde(
-            dft.device_id,
-            &mut handle,
-            tail.as_mut_ptr().cast(),
-            nodes.as_ptr().cast(),
-            nodes.len(),
-            slot_count,
-            lookups.as_ptr().cast(),
-            lookups.len(),
-            args.as_ptr(),
-            args.len(),
-            preprocessed.map_or(core::ptr::null(), CudaLde::raw_handle),
-            main.raw_handle(),
-            group_size.max(1),
-            beta.as_ptr().cast(),
-            gamma.as_ptr().cast(),
-            raw_u64(ext_w),
-            log_blowup,
-            plan.raw(),
-        )
+    let preprocessed_ptr = preprocessed.map_or(core::ptr::null(), |(lde, _)| lde.raw_handle());
+    let preprocessed_host_ptr = preprocessed
+        .and_then(|(_, host)| host)
+        .map_or(core::ptr::null(), |host| host.values.as_ptr().cast());
+    let status = match ext_degree {
+        2 => unsafe {
+            multi_stark_cuda_lookup_graph_lde(
+                dft.device_id,
+                &mut handle,
+                tail.as_mut_ptr().cast(),
+                nodes.as_ptr().cast(),
+                nodes.len(),
+                slot_count,
+                lookups.as_ptr().cast(),
+                lookups.len(),
+                args.as_ptr(),
+                args.len(),
+                preprocessed_ptr,
+                preprocessed_host_ptr,
+                main.raw_handle(),
+                group_size.max(1),
+                beta.as_ptr().cast(),
+                gamma.as_ptr().cast(),
+                raw_u64(ext_w),
+                log_blowup,
+                plan.raw(),
+            )
+        },
+        3 => unsafe {
+            multi_stark_cuda_lookup_graph_lde_ext3(
+                dft.device_id,
+                &mut handle,
+                tail.as_mut_ptr().cast(),
+                nodes.as_ptr().cast(),
+                nodes.len(),
+                slot_count,
+                lookups.as_ptr().cast(),
+                lookups.len(),
+                args.as_ptr(),
+                args.len(),
+                preprocessed_ptr,
+                preprocessed_host_ptr,
+                main.raw_handle(),
+                group_size.max(1),
+                beta.as_ptr().cast(),
+                gamma.as_ptr().cast(),
+                log_blowup,
+                plan.raw(),
+            )
+        },
+        _ => unreachable!(),
     };
     check_cuda(status, "resident CUDA graph lookup LDE");
+    let total = (0..ext_degree)
+        .map(|c| tail[c] + tail[ext_degree + c])
+        .collect();
     Some((
         CudaLde {
             device_id: dft.device_id,
             handle: NonNull::new(handle).expect("CUDA returned a null graph lookup LDE"),
             height: extended_height,
-            width: 2 * groups,
+            width: ext_degree * groups,
         },
-        [tail[0] + tail[2], tail[1] + tail[3]],
+        total,
     ))
 }
 
@@ -2080,6 +2605,24 @@ impl CudaLde {
             scale1: raw_u64(scale[1]),
         }
     }
+
+    pub(crate) fn interpolation_task_ext3(
+        &self,
+        height: usize,
+        inv_offset: usize,
+        output_offset: usize,
+        scale: [Goldilocks; 3],
+    ) -> CudaInterpolationTaskExt3 {
+        CudaInterpolationTaskExt3 {
+            lde: self.raw_handle(),
+            height,
+            inv_offset,
+            output_offset,
+            scale0: raw_u64(scale[0]),
+            scale1: raw_u64(scale[1]),
+            scale2: raw_u64(scale[2]),
+        }
+    }
 }
 impl CudaReducedOpening {
     pub(crate) fn reduction_task(
@@ -2098,6 +2641,27 @@ impl CudaReducedOpening {
             y1: raw_u64(y[1]),
             offset0: raw_u64(offset[0]),
             offset1: raw_u64(offset[1]),
+        }
+    }
+
+    pub(crate) fn reduction_task_ext3(
+        &mut self,
+        lde: &CudaLde,
+        inv_offset: usize,
+        y: [Goldilocks; 3],
+        offset: [Goldilocks; 3],
+    ) -> CudaReductionTaskExt3 {
+        CudaReductionTaskExt3 {
+            reduced: self.handle.as_ptr(),
+            lde: lde.raw_handle(),
+            height: self.height,
+            inv_offset,
+            y0: raw_u64(y[0]),
+            y1: raw_u64(y[1]),
+            y2: raw_u64(y[2]),
+            offset0: raw_u64(offset[0]),
+            offset1: raw_u64(offset[1]),
+            offset2: raw_u64(offset[2]),
         }
     }
 }
@@ -2231,13 +2795,146 @@ fn raw_u64(value: Goldilocks) -> u64 {
     value.as_canonical_u64()
 }
 
+/// The most stage-one LDEs a commitment builds concurrently, each on its own
+/// Rayon worker stream. The bound keeps pageable upload staging within the
+/// driver's reliable concurrency range while retaining substantial overlap;
+/// it also bounds how many trace writers run at once.
+pub const MAX_CONCURRENT_LDES: usize = 16;
+
+/// Maps `items` in order with at most `concurrency` calls in flight, each on
+/// a Rayon worker. A call starts as soon as any earlier one finishes rather
+/// than with a fixed wave, so one long transform, or one long host upload,
+/// no longer holds back the calls behind it while the device idles. A
+/// panicking call stops the others from taking further items before the
+/// panic propagates. Without the `parallel` feature the calls run serially.
+pub(crate) fn bounded_parallel_map<T: Sync, R: Send>(
+    items: &[T],
+    concurrency: usize,
+    transform: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct StopOnPanic<'a>(&'a AtomicBool);
+        impl Drop for StopOnPanic<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    self.0.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        let next = AtomicUsize::new(0);
+        let stop = AtomicBool::new(false);
+        let mut results: Vec<(usize, R)> = (0..concurrency.clamp(1, items.len().max(1)))
+            .into_par_iter()
+            .flat_map_iter(|_| {
+                let _guard = StopOnPanic(&stop);
+                let mut done = Vec::new();
+                while !stop.load(Ordering::Relaxed) {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(item) = items.get(index) else { break };
+                    done.push((index, transform(item)));
+                }
+                done
+            })
+            .collect();
+        results.sort_unstable_by_key(|&(index, _)| index);
+        results.into_iter().map(|(_, result)| result).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let _ = concurrency;
+        items.iter().map(transform).collect()
+    }
+}
+
+/// Device memory free for this backend's admission: what the driver and the
+/// allocation pool report free, less every live [`DeviceMemoryReservation`]
+/// on the device.
 pub(crate) fn device_memory_info(device_id: i32) -> (usize, usize) {
     let mut free_bytes = 0;
     let mut total_bytes = 0;
     let status =
         unsafe { multi_stark_cuda_memory_info(device_id, &mut free_bytes, &mut total_bytes) };
     check_cuda(status, "CUDA device initialization");
-    (free_bytes, total_bytes)
+    (
+        free_bytes.saturating_sub(reserved_device_bytes(device_id)),
+        total_bytes,
+    )
+}
+
+fn device_reservations() -> &'static std::sync::Mutex<std::collections::BTreeMap<i32, usize>> {
+    static RESERVATIONS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<i32, usize>>,
+    > = std::sync::OnceLock::new();
+    RESERVATIONS.get_or_init(Default::default)
+}
+
+/// Bytes the live reservations on `device_id` hold back from admission.
+#[must_use]
+pub fn reserved_device_bytes(device_id: i32) -> usize {
+    device_reservations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&device_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Device memory held back from this backend's admission for an allocation
+/// made outside it, until dropped.
+///
+/// Each proving phase sizes its device work from the free memory it measures
+/// when it starts, and allocates up to all of it. Memory another thread
+/// allocates on the device after that measurement, such as the next shard's
+/// population input uploaded while the current shard proves, is then missing
+/// when the phase allocates, and the phase fails with an out-of-memory error.
+/// A concurrent allocator takes a reservation of its size before any phase
+/// it can overlap measures free memory, allocates within it, and drops it
+/// once the allocation is live (or abandoned), so every measurement sees the
+/// memory as either reserved or allocated, never as free.
+#[must_use = "the reservation ends when dropped"]
+#[derive(Debug)]
+pub struct DeviceMemoryReservation {
+    device_id: i32,
+    bytes: usize,
+}
+
+impl DeviceMemoryReservation {
+    /// Holds `bytes` of `device_id` back from admission.
+    pub fn new(device_id: i32, bytes: usize) -> Self {
+        let mut reservations = device_reservations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let held = reservations.entry(device_id).or_default();
+        *held = held.saturating_add(bytes);
+        Self { device_id, bytes }
+    }
+
+    #[must_use]
+    pub const fn device_id(&self) -> i32 {
+        self.device_id
+    }
+
+    #[must_use]
+    pub const fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+impl Drop for DeviceMemoryReservation {
+    fn drop(&mut self) {
+        let mut reservations = device_reservations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(held) = reservations.get_mut(&self.device_id) {
+            *held = held.saturating_sub(self.bytes);
+            if *held == 0 {
+                reservations.remove(&self.device_id);
+            }
+        }
+    }
 }
 
 /// Returns the device memory this backend's allocation pool retains between
@@ -2249,13 +2946,15 @@ pub fn release_device_memory() {
     check_cuda(status, "CUDA memory release");
 }
 
-/// Device bytes the prover keeps free for its later stages: a quarter of the
-/// device unless `MULTI_STARK_CUDA_MIN_FREE_BYTES` says otherwise.
-pub(crate) fn minimum_free_bytes(total_bytes: usize) -> usize {
+/// Device bytes admission keeps free beyond what a phase needs:
+/// `MULTI_STARK_CUDA_MIN_FREE_BYTES`, by default none. Every phase admits
+/// its own allocations against the device's current free memory and spills
+/// to the host when they do not fit, so no standing reserve is needed.
+pub(crate) fn minimum_free_bytes() -> usize {
     std::env::var("MULTI_STARK_CUDA_MIN_FREE_BYTES")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(total_bytes / 4)
+        .unwrap_or(0)
 }
 
 pub(crate) fn memory_diagnostics_enabled() -> bool {
@@ -2451,10 +3150,11 @@ unsafe impl Sync for CudaMixedMerkleTree {}
 
 impl CudaMixedMerkleTree {
     #[must_use]
-    pub(crate) fn hash_hybrid_height_group(
+    pub(crate) fn hash_hybrid_height_group_with_domain(
         device_id: i32,
         ldes: &[Option<&CudaLde>],
         host_matrices: &[Option<&RowMajorMatrix<Goldilocks>>],
+        domain_v6: bool,
     ) -> Vec<[u8; 32]> {
         assert!(device_id >= 0, "CUDA device id must be non-negative");
         assert_eq!(ldes.len(), host_matrices.len());
@@ -2495,17 +3195,32 @@ impl CudaMixedMerkleTree {
         let mut digests = vec![[0u8; 32]; height];
         // SAFETY: every pointer is backed by a matrix or CUDA handle borrowed
         // for this synchronous call, and `digests` has exactly `height` rows.
-        let status = unsafe {
-            multi_stark_cuda_hash_hybrid_height_group(
-                device_id,
-                digests.as_mut_ptr().cast(),
-                handles.as_ptr(),
-                host_values.as_ptr(),
-                widths.as_ptr(),
-                heights.as_ptr(),
-                handles.len(),
-                height,
-            )
+        let status = if domain_v6 {
+            unsafe {
+                multi_stark_cuda_hash_hybrid_height_group_v6(
+                    device_id,
+                    digests.as_mut_ptr().cast(),
+                    handles.as_ptr(),
+                    host_values.as_ptr(),
+                    widths.as_ptr(),
+                    heights.as_ptr(),
+                    handles.len(),
+                    height,
+                )
+            }
+        } else {
+            unsafe {
+                multi_stark_cuda_hash_hybrid_height_group(
+                    device_id,
+                    digests.as_mut_ptr().cast(),
+                    handles.as_ptr(),
+                    host_values.as_ptr(),
+                    widths.as_ptr(),
+                    heights.as_ptr(),
+                    handles.len(),
+                    height,
+                )
+            }
         };
         check_cuda(status, "hybrid CUDA height-group hashing");
         digests
@@ -2569,8 +3284,14 @@ impl CudaMixedMerkleTree {
     /// Builds the exact mixed-height tree directly from resident bit-reversed
     /// LDE matrices. Matrix rows are concatenated in slice order at each
     /// height using device-to-device copies.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn from_ldes(device_id: i32, ldes: &[CudaLde]) -> Self {
+        Self::from_ldes_with_domain(device_id, ldes, false)
+    }
+
+    #[must_use]
+    pub(crate) fn from_ldes_with_domain(device_id: i32, ldes: &[CudaLde], domain_v6: bool) -> Self {
         assert!(device_id >= 0, "CUDA device id must be non-negative");
         assert!(!ldes.is_empty(), "mixed Merkle tree has no resident LDEs");
         assert!(
@@ -2585,14 +3306,26 @@ impl CudaMixedMerkleTree {
         let mut root = [0u8; 32];
         // SAFETY: every handle is live for the synchronous construction call;
         // the resulting tree owns only its own digest allocation.
-        let status = unsafe {
-            multi_stark_cuda_mixed_merkle_create_from_ldes(
-                device_id,
-                &mut handle,
-                root.as_mut_ptr(),
-                handles.as_ptr(),
-                handles.len(),
-            )
+        let status = if domain_v6 {
+            unsafe {
+                multi_stark_cuda_mixed_merkle_create_from_ldes_v6(
+                    device_id,
+                    &mut handle,
+                    root.as_mut_ptr(),
+                    handles.as_ptr(),
+                    handles.len(),
+                )
+            }
+        } else {
+            unsafe {
+                multi_stark_cuda_mixed_merkle_create_from_ldes(
+                    device_id,
+                    &mut handle,
+                    root.as_mut_ptr(),
+                    handles.as_ptr(),
+                    handles.len(),
+                )
+            }
         };
         if status != 0 {
             let dimensions: Vec<(usize, usize)> =
@@ -2613,6 +3346,7 @@ impl CudaMixedMerkleTree {
     /// Builds a mixed-height tree from resident CUDA LDEs, host matrices, and
     /// pre-hashed height groups. Deferred dimensions are accepted only when a
     /// pre-hashed group supplies that height's complete digest frontier.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn from_hybrid(
         device_id: i32,
@@ -2620,6 +3354,25 @@ impl CudaMixedMerkleTree {
         host_matrices: &[Option<&RowMajorMatrix<Goldilocks>>],
         deferred_dimensions: &[Option<Dimensions>],
         host_digest_groups: &[(usize, Vec<[u8; 32]>)],
+    ) -> Self {
+        Self::from_hybrid_with_domain(
+            device_id,
+            ldes,
+            host_matrices,
+            deferred_dimensions,
+            host_digest_groups,
+            false,
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn from_hybrid_with_domain(
+        device_id: i32,
+        ldes: &[Option<&CudaLde>],
+        host_matrices: &[Option<&RowMajorMatrix<Goldilocks>>],
+        deferred_dimensions: &[Option<Dimensions>],
+        host_digest_groups: &[(usize, Vec<[u8; 32]>)],
+        domain_v6: bool,
     ) -> Self {
         assert!(device_id >= 0, "CUDA device id must be non-negative");
         assert_eq!(ldes.len(), host_matrices.len());
@@ -2702,20 +3455,38 @@ impl CudaMixedMerkleTree {
         let mut root = [0u8; 32];
         // SAFETY: all resident handles and host digest buffers remain live for
         // this synchronous call; the returned tree owns its digest allocation.
-        let status = unsafe {
-            multi_stark_cuda_mixed_merkle_create_hybrid(
-                device_id,
-                &mut handle,
-                root.as_mut_ptr(),
-                handles.as_ptr(),
-                host_values.as_ptr(),
-                widths.as_ptr(),
-                heights.as_ptr(),
-                ldes.len(),
-                host_digest_pointers.as_ptr(),
-                host_digest_heights.as_ptr(),
-                host_digest_groups.len(),
-            )
+        let status = if domain_v6 {
+            unsafe {
+                multi_stark_cuda_mixed_merkle_create_hybrid_v6(
+                    device_id,
+                    &mut handle,
+                    root.as_mut_ptr(),
+                    handles.as_ptr(),
+                    host_values.as_ptr(),
+                    widths.as_ptr(),
+                    heights.as_ptr(),
+                    ldes.len(),
+                    host_digest_pointers.as_ptr(),
+                    host_digest_heights.as_ptr(),
+                    host_digest_groups.len(),
+                )
+            }
+        } else {
+            unsafe {
+                multi_stark_cuda_mixed_merkle_create_hybrid(
+                    device_id,
+                    &mut handle,
+                    root.as_mut_ptr(),
+                    handles.as_ptr(),
+                    host_values.as_ptr(),
+                    widths.as_ptr(),
+                    heights.as_ptr(),
+                    ldes.len(),
+                    host_digest_pointers.as_ptr(),
+                    host_digest_heights.as_ptr(),
+                    host_digest_groups.len(),
+                )
+            }
         };
         if status != 0 {
             let dims: Vec<Option<(usize, usize)>> = ldes
@@ -2748,22 +3519,320 @@ impl CudaMixedMerkleTree {
         }
     }
 
-    pub(crate) fn from_fri_codeword(codeword: &CudaLde, arity: usize) -> Self {
-        assert_eq!(codeword.width, 2);
+    pub(crate) fn from_fri_codeword_with_domain(
+        codeword: &CudaLde,
+        arity: usize,
+        domain_v6: bool,
+    ) -> Self {
+        assert!(codeword.width == 2 || codeword.width == 3);
         assert!(arity.is_power_of_two());
         assert_eq!(codeword.height % arity, 0);
         let mut handle = core::ptr::null_mut();
         let mut root = [0u8; 32];
+        let status = if domain_v6 {
+            unsafe {
+                multi_stark_cuda_fri_merkle_create_v6(
+                    codeword.device_id,
+                    &mut handle,
+                    root.as_mut_ptr(),
+                    codeword.raw_handle(),
+                    arity,
+                )
+            }
+        } else {
+            unsafe {
+                multi_stark_cuda_fri_merkle_create(
+                    codeword.device_id,
+                    &mut handle,
+                    root.as_mut_ptr(),
+                    codeword.raw_handle(),
+                    arity,
+                )
+            }
+        };
+        check_cuda(status, "resident CUDA FRI Merkle tree creation");
+        Self {
+            device_id: codeword.device_id,
+            handle: NonNull::new(handle).expect("CUDA returned a null FRI Merkle handle"),
+            root,
+            row_count: codeword.height / arity,
+        }
+    }
+
+    /// Hashes a single hybrid height group under Protocol `v6-zk` (`ZkMerkleLeaf`)
+    /// with on-the-fly BLAKE3-CTR leaf salts derived from `salt_seed`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn hash_hybrid_height_group_v6zk(
+        device_id: i32,
+        ldes: &[Option<&CudaLde>],
+        host_matrices: &[Option<&RowMajorMatrix<Goldilocks>>],
+        salt_seed: &[u8; 32],
+    ) -> Vec<[u8; 32]> {
+        assert!(device_id >= 0, "CUDA device id must be non-negative");
+        assert_eq!(ldes.len(), host_matrices.len());
+        assert!(!ldes.is_empty(), "hybrid height group is empty");
+        assert!(
+            ldes.iter().flatten().all(|lde| lde.device_id == device_id),
+            "hybrid height group spans CUDA devices"
+        );
+        assert!(
+            ldes.iter()
+                .zip(host_matrices)
+                .all(|(lde, matrix)| lde.is_some() ^ matrix.is_some()),
+            "every hybrid height-group matrix must have exactly one storage backend"
+        );
+        let heights = ldes
+            .iter()
+            .zip(host_matrices)
+            .map(|(lde, matrix)| lde.map_or_else(|| matrix.unwrap().height(), CudaLde::height))
+            .collect::<Vec<_>>();
+        let height = heights[0];
+        assert!(
+            heights.iter().all(|&candidate| candidate == height),
+            "hybrid height group contains unequal heights"
+        );
+        let handles = ldes
+            .iter()
+            .map(|lde| lde.map_or(core::ptr::null(), CudaLde::raw_handle))
+            .collect::<Vec<_>>();
+        let host_values = host_matrices
+            .iter()
+            .map(|matrix| matrix.map_or(core::ptr::null(), |matrix| matrix.values.as_ptr().cast()))
+            .collect::<Vec<_>>();
+        let widths = ldes
+            .iter()
+            .zip(host_matrices)
+            .map(|(lde, matrix)| lde.map_or_else(|| matrix.unwrap().width(), CudaLde::width))
+            .collect::<Vec<_>>();
+        let mut digests = vec![[0u8; 32]; height];
+        // SAFETY: every pointer is backed by a matrix, CUDA handle, or stack
+        // salt seed borrowed for this synchronous call.
         let status = unsafe {
-            multi_stark_cuda_fri_merkle_create(
+            multi_stark_cuda_hash_hybrid_height_group_v6zk(
+                device_id,
+                digests.as_mut_ptr().cast(),
+                handles.as_ptr(),
+                host_values.as_ptr(),
+                widths.as_ptr(),
+                heights.as_ptr(),
+                handles.len(),
+                height,
+                salt_seed.as_ptr(),
+            )
+        };
+        check_cuda(status, "hybrid CUDA v6-zk height-group hashing");
+        digests
+    }
+
+    /// Builds a salted `v6-zk` mixed-height tree directly from resident CUDA LDEs.
+    #[must_use]
+    pub(crate) fn from_ldes_v6zk(device_id: i32, ldes: &[CudaLde], salt_seed: &[u8; 32]) -> Self {
+        assert!(device_id >= 0, "CUDA device id must be non-negative");
+        assert!(!ldes.is_empty(), "mixed Merkle tree has no resident LDEs");
+        assert!(
+            ldes.iter().all(|lde| lde.device_id == device_id),
+            "resident LDEs belong to different CUDA devices"
+        );
+        let handles: Vec<*const c_void> = ldes
+            .iter()
+            .map(|lde| lde.handle.as_ptr().cast_const())
+            .collect();
+        let mut handle = core::ptr::null_mut();
+        let mut root = [0u8; 32];
+        // SAFETY: all handles and `salt_seed` remain live for the synchronous call.
+        let status = unsafe {
+            multi_stark_cuda_mixed_merkle_create_from_ldes_v6zk(
+                device_id,
+                &mut handle,
+                root.as_mut_ptr(),
+                handles.as_ptr(),
+                handles.len(),
+                salt_seed.as_ptr(),
+            )
+        };
+        if status != 0 {
+            let dimensions: Vec<(usize, usize)> =
+                ldes.iter().map(|lde| (lde.height(), lde.width())).collect();
+            check_cuda(
+                status,
+                &format!(
+                    "resident LDE v6-zk Merkle tree creation over (height, width) {dimensions:?}"
+                ),
+            );
+        }
+        Self {
+            device_id,
+            handle: NonNull::new(handle).expect("CUDA returned a null mixed Merkle handle"),
+            root,
+            row_count: ldes.iter().map(CudaLde::height).max().unwrap(),
+        }
+    }
+
+    /// Builds a salted `v6-zk` mixed-height tree from resident CUDA LDEs, host
+    /// matrices, and pre-hashed salted height groups.
+    #[must_use]
+    pub(crate) fn from_hybrid_v6zk(
+        device_id: i32,
+        ldes: &[Option<&CudaLde>],
+        host_matrices: &[Option<&RowMajorMatrix<Goldilocks>>],
+        deferred_dimensions: &[Option<Dimensions>],
+        host_digest_groups: &[(usize, Vec<[u8; 32]>)],
+        salt_seed: &[u8; 32],
+    ) -> Self {
+        assert!(device_id >= 0, "CUDA device id must be non-negative");
+        assert_eq!(ldes.len(), host_matrices.len());
+        assert_eq!(ldes.len(), deferred_dimensions.len());
+        assert!(!ldes.is_empty(), "mixed Merkle tree has no LDE groups");
+        assert!(
+            ldes.iter().flatten().all(|lde| lde.device_id == device_id),
+            "resident LDEs belong to different CUDA devices"
+        );
+        for (height, digests) in host_digest_groups {
+            assert!(
+                height.is_power_of_two(),
+                "host digest height is not a power of two"
+            );
+            assert_eq!(
+                *height,
+                digests.len(),
+                "host digest group has the wrong height"
+            );
+        }
+        assert!(
+            ldes.iter().zip(host_matrices).zip(deferred_dimensions).all(
+                |((lde, matrix), deferred)| {
+                    let sources = usize::from(lde.is_some())
+                        + usize::from(matrix.is_some())
+                        + usize::from(deferred.is_some());
+                    sources == 1
+                        && deferred.is_none_or(|dimensions| {
+                            host_digest_groups
+                                .iter()
+                                .any(|(height, _)| *height == dimensions.height)
+                        })
+                }
+            ),
+            "every hybrid matrix needs one source, and deferred matrices need pre-hashed rows"
+        );
+        let handles: Vec<*const c_void> = ldes
+            .iter()
+            .map(|lde| lde.map_or(core::ptr::null(), |lde| lde.handle.as_ptr().cast_const()))
+            .collect();
+        let host_values = host_matrices
+            .iter()
+            .map(|matrix| {
+                matrix.map_or(core::ptr::null(), |matrix| {
+                    matrix.values.as_ptr().cast::<u64>()
+                })
+            })
+            .collect::<Vec<_>>();
+        let widths = ldes
+            .iter()
+            .zip(host_matrices)
+            .zip(deferred_dimensions)
+            .map(|((lde, matrix), deferred)| {
+                lde.map_or_else(
+                    || matrix.map_or_else(|| deferred.unwrap().width, Matrix::width),
+                    CudaLde::width,
+                )
+            })
+            .collect::<Vec<_>>();
+        let heights: Vec<usize> = ldes
+            .iter()
+            .zip(host_matrices)
+            .zip(deferred_dimensions)
+            .map(|((lde, matrix), deferred)| {
+                lde.map_or_else(
+                    || matrix.map_or_else(|| deferred.unwrap().height, Matrix::height),
+                    CudaLde::height,
+                )
+            })
+            .collect();
+        let host_digest_pointers: Vec<*const u8> = host_digest_groups
+            .iter()
+            .map(|(_, digests)| digests.as_ptr().cast())
+            .collect();
+        let host_digest_heights: Vec<usize> = host_digest_groups
+            .iter()
+            .map(|(height, _)| *height)
+            .collect();
+        let mut handle = core::ptr::null_mut();
+        let mut root = [0u8; 32];
+        // SAFETY: all resident handles, host buffers, and `salt_seed` remain live
+        // for this synchronous call.
+        let status = unsafe {
+            multi_stark_cuda_mixed_merkle_create_hybrid_v6zk(
+                device_id,
+                &mut handle,
+                root.as_mut_ptr(),
+                handles.as_ptr(),
+                host_values.as_ptr(),
+                widths.as_ptr(),
+                heights.as_ptr(),
+                ldes.len(),
+                host_digest_pointers.as_ptr(),
+                host_digest_heights.as_ptr(),
+                host_digest_groups.len(),
+                salt_seed.as_ptr(),
+            )
+        };
+        if status != 0 {
+            let dims: Vec<Option<(usize, usize)>> = ldes
+                .iter()
+                .zip(host_matrices)
+                .zip(deferred_dimensions)
+                .map(|((lde, host), deferred)| {
+                    lde.map(|l| (l.height(), l.width()))
+                        .or_else(|| host.map(|m| (m.height(), m.width())))
+                        .or_else(|| deferred.map(|d| (d.height, d.width)))
+                })
+                .collect();
+            check_cuda(
+                status,
+                &format!(
+                    "hybrid v6-zk Merkle tree creation over (height, width) {dims:?}, host digest groups at heights {:?}",
+                    host_digest_groups
+                        .iter()
+                        .map(|(h, _)| *h)
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+        let row_count = heights.into_iter().max().unwrap();
+        Self {
+            device_id,
+            handle: NonNull::new(handle).expect("CUDA returned a null mixed Merkle handle"),
+            root,
+            row_count,
+        }
+    }
+
+    /// Builds a salted `v6-zk` FRI commit-phase Merkle tree from a resident
+    /// extension-field codeword.
+    #[must_use]
+    pub(crate) fn from_fri_codeword_v6zk(
+        codeword: &CudaLde,
+        arity: usize,
+        salt_seed: &[u8; 32],
+    ) -> Self {
+        assert!(codeword.width == 2 || codeword.width == 3);
+        assert!(arity.is_power_of_two());
+        assert_eq!(codeword.height % arity, 0);
+        let mut handle = core::ptr::null_mut();
+        let mut root = [0u8; 32];
+        // SAFETY: `codeword` handle and `salt_seed` remain live for this synchronous call.
+        let status = unsafe {
+            multi_stark_cuda_fri_merkle_create_v6zk(
                 codeword.device_id,
                 &mut handle,
                 root.as_mut_ptr(),
                 codeword.raw_handle(),
                 arity,
+                salt_seed.as_ptr(),
             )
         };
-        check_cuda(status, "resident CUDA FRI Merkle tree creation");
+        check_cuda(status, "resident CUDA v6-zk FRI Merkle tree creation");
         Self {
             device_id: codeword.device_id,
             handle: NonNull::new(handle).expect("CUDA returned a null FRI Merkle handle"),
@@ -2998,6 +4067,14 @@ unsafe extern "C" {
     ) -> i32;
 
     #[cfg(test)]
+    fn multi_stark_cuda_copy_to_device(
+        device_id: i32,
+        output: *mut u64,
+        input: *const u64,
+        words: usize,
+    ) -> i32;
+
+    #[cfg(test)]
     fn multi_stark_cuda_lde_copy_row(
         device_id: i32,
         handle: *const c_void,
@@ -3227,6 +4304,7 @@ unsafe extern "C" {
         lookup_args: *const u32,
         lookup_arg_count: usize,
         preprocessed_handle: *const c_void,
+        preprocessed_host: *const u64,
         main_handle: *const c_void,
         group_size: usize,
         beta: *const u64,
@@ -3427,6 +4505,310 @@ unsafe extern "C" {
         codeword: *const c_void,
         arity: usize,
     ) -> i32;
+    fn multi_stark_cuda_mixed_merkle_create_from_ldes_v6(
+        device_id: i32,
+        handle: *mut *mut c_void,
+        root: *mut u8,
+        lde_handles: *const *const c_void,
+        lde_count: usize,
+    ) -> i32;
+    fn multi_stark_cuda_mixed_merkle_create_hybrid_v6(
+        device_id: i32,
+        handle: *mut *mut c_void,
+        root: *mut u8,
+        lde_handles: *const *const c_void,
+        host_values: *const *const u64,
+        widths: *const usize,
+        heights: *const usize,
+        matrix_count: usize,
+        host_digest_groups: *const *const u8,
+        host_digest_heights: *const usize,
+        host_digest_group_count: usize,
+    ) -> i32;
+    fn multi_stark_cuda_hash_hybrid_height_group_v6(
+        device_id: i32,
+        host_digests: *mut u8,
+        lde_handles: *const *const c_void,
+        host_values: *const *const u64,
+        widths: *const usize,
+        heights: *const usize,
+        matrix_count: usize,
+        height: usize,
+    ) -> i32;
+    fn multi_stark_cuda_fri_merkle_create_v6(
+        device_id: i32,
+        handle: *mut *mut c_void,
+        root: *mut u8,
+        codeword: *const c_void,
+        arity: usize,
+    ) -> i32;
+    fn multi_stark_cuda_mixed_merkle_create_from_ldes_v6zk(
+        device_id: i32,
+        handle: *mut *mut c_void,
+        root: *mut u8,
+        lde_handles: *const *const c_void,
+        lde_count: usize,
+        salt_seed: *const u8,
+    ) -> i32;
+    fn multi_stark_cuda_mixed_merkle_create_hybrid_v6zk(
+        device_id: i32,
+        handle: *mut *mut c_void,
+        root: *mut u8,
+        lde_handles: *const *const c_void,
+        host_values: *const *const u64,
+        widths: *const usize,
+        heights: *const usize,
+        matrix_count: usize,
+        host_digest_groups: *const *const u8,
+        host_digest_heights: *const usize,
+        host_digest_group_count: usize,
+        salt_seed: *const u8,
+    ) -> i32;
+    #[cfg(test)]
+    fn multi_stark_cuda_hash_hybrid_height_group_v6zk(
+        device_id: i32,
+        host_digests: *mut u8,
+        lde_handles: *const *const c_void,
+        host_values: *const *const u64,
+        widths: *const usize,
+        heights: *const usize,
+        matrix_count: usize,
+        height: usize,
+        salt_seed: *const u8,
+    ) -> i32;
+    fn multi_stark_cuda_fri_merkle_create_v6zk(
+        device_id: i32,
+        handle: *mut *mut c_void,
+        root: *mut u8,
+        codeword: *const c_void,
+        arity: usize,
+        salt_seed: *const u8,
+    ) -> i32;
+
+    fn multi_stark_cuda_quotient_values_ext3(
+        device_id: i32,
+        output: *mut u64,
+        nodes: *const c_void,
+        node_count: usize,
+        slot_count: usize,
+        roots: *const u32,
+        root_count: usize,
+        lookups: *const c_void,
+        lookup_count: usize,
+        lookup_args: *const u32,
+        lookup_arg_count: usize,
+        group_size: usize,
+        preprocessed_handle: *const c_void,
+        main_handle: *const c_void,
+        stage2_handle: *const c_void,
+        publics: *const u64,
+        public_count: usize,
+        coset_shift: u64,
+        coset_generator: u64,
+        trace_last: u64,
+        vanishing_start: u64,
+        vanishing_step: u64,
+        alpha: *const u64,
+        constraint_count: usize,
+        delta: *const u64,
+        quotient_size: usize,
+        next_step: usize,
+    ) -> i32;
+    fn multi_stark_cuda_quotient_lde_ext3(
+        device_id: i32,
+        output_handle: *mut *mut c_void,
+        nodes: *const c_void,
+        node_count: usize,
+        slot_count: usize,
+        roots: *const u32,
+        root_count: usize,
+        lookups: *const c_void,
+        lookup_count: usize,
+        lookup_args: *const u32,
+        lookup_arg_count: usize,
+        group_size: usize,
+        preprocessed_handle: *const c_void,
+        main_handle: *const c_void,
+        stage2_handle: *const c_void,
+        publics: *const u64,
+        public_count: usize,
+        coset_shift: u64,
+        coset_generator: u64,
+        trace_last: u64,
+        vanishing_start: u64,
+        vanishing_step: u64,
+        alpha: *const u64,
+        constraint_count: usize,
+        delta: *const u64,
+        quotient_size: usize,
+        next_step: usize,
+        quotient_degree: usize,
+        log_blowup: usize,
+        quotient_plan: *const RawPlan,
+        lde_plan: *const RawPlan,
+        slice_weights: *const u64,
+    ) -> i32;
+    fn multi_stark_cuda_quotient_lde_mixed_ext3(
+        device_id: i32,
+        output_handle: *mut *mut c_void,
+        nodes: *const c_void,
+        node_count: usize,
+        slot_count: usize,
+        roots: *const u32,
+        root_count: usize,
+        lookups: *const c_void,
+        lookup_count: usize,
+        lookup_args: *const u32,
+        lookup_arg_count: usize,
+        group_size: usize,
+        preprocessed_handle: *const c_void,
+        preprocessed_host: *const u64,
+        preprocessed_height: usize,
+        preprocessed_width: usize,
+        main_handle: *const c_void,
+        main_host: *const u64,
+        main_height: usize,
+        main_width: usize,
+        stage2_handle: *const c_void,
+        stage2_host: *const u64,
+        stage2_height: usize,
+        stage2_width: usize,
+        publics: *const u64,
+        public_count: usize,
+        coset_shift: u64,
+        coset_generator: u64,
+        trace_last: u64,
+        vanishing_start: u64,
+        vanishing_step: u64,
+        alpha: *const u64,
+        constraint_count: usize,
+        delta: *const u64,
+        quotient_size: usize,
+        next_step: usize,
+        quotient_degree: usize,
+        log_blowup: usize,
+        quotient_plan: *const RawPlan,
+        lde_plan: *const RawPlan,
+        slice_weights: *const u64,
+    ) -> i32;
+    fn multi_stark_cuda_fri_workspace_create_ext3(
+        device_id: i32,
+        handle: *mut *mut c_void,
+        points: *const u64,
+        counts: *const usize,
+        point_count: usize,
+        coset: *const u64,
+        coset_count: usize,
+    ) -> i32;
+    fn multi_stark_cuda_fri_interpolate_batch_ext3(
+        device_id: i32,
+        handle: *mut c_void,
+        output: *mut u64,
+        output_count: usize,
+        tasks: *const c_void,
+        task_count: usize,
+    ) -> i32;
+    fn multi_stark_cuda_fri_reduce_batch_ext3(
+        device_id: i32,
+        handle: *mut c_void,
+        tasks: *const c_void,
+        task_count: usize,
+        alpha: *const u64,
+        alpha_count: usize,
+    ) -> i32;
+    fn multi_stark_cuda_fri_fold_resident_ext3(
+        device_id: i32,
+        output: *mut *mut c_void,
+        input: *const c_void,
+        next_reduced: *const c_void,
+        beta: *const u64,
+        log_arity: usize,
+        beta_power0: u64,
+        beta_power1: u64,
+        beta_power2: u64,
+        g_inv: u64,
+    ) -> i32;
+    fn multi_stark_cuda_reduced_create_ext3(
+        device_id: i32,
+        handle: *mut *mut c_void,
+        height: usize,
+    ) -> i32;
+    fn multi_stark_cuda_reduced_add_host_ext3(
+        device_id: i32,
+        handle: *mut c_void,
+        values: *const u64,
+        height: usize,
+    ) -> i32;
+    fn multi_stark_cuda_lookup_graph_lde_ext3(
+        device_id: i32,
+        output_handle: *mut *mut c_void,
+        total: *mut u64,
+        nodes: *const c_void,
+        node_count: usize,
+        slot_count: usize,
+        lookups: *const c_void,
+        lookup_count: usize,
+        lookup_args: *const u32,
+        lookup_arg_count: usize,
+        preprocessed_handle: *const c_void,
+        preprocessed_host: *const u64,
+        main_handle: *const c_void,
+        group_size: usize,
+        beta: *const u64,
+        gamma: *const u64,
+        added_bits: usize,
+        plan: *const RawPlan,
+    ) -> i32;
+    fn multi_stark_cuda_lookup_lde_ext3(
+        device_id: i32,
+        output_handle: *mut *mut c_void,
+        total: *mut u64,
+        multiplicities: *const u64,
+        args: *const u64,
+        arg_offsets: *const usize,
+        height: usize,
+        num_lookups: usize,
+        args_width: usize,
+        group_size: usize,
+        beta: *const u64,
+        gamma: *const u64,
+        added_bits: usize,
+        plan: *const RawPlan,
+    ) -> i32;
+    fn multi_stark_cuda_lookup_lde_begin_partitioned_ext3(
+        device_id: i32,
+        pending_handle: *mut *mut c_void,
+        arg_offsets: *const usize,
+        height: usize,
+        num_lookups: usize,
+        args_width: usize,
+        group_size: usize,
+        added_bits: usize,
+    ) -> i32;
+    fn multi_stark_cuda_lookup_lde_gpu_rows_partitioned_ext3(
+        device_id: i32,
+        pending_handle: *mut c_void,
+        multiplicities: *const u64,
+        args: *const u64,
+        row_start: usize,
+        rows: usize,
+        beta: *const u64,
+        gamma: *const u64,
+    ) -> i32;
+    fn multi_stark_cuda_lookup_lde_cpu_rows_partitioned_ext3(
+        device_id: i32,
+        pending_handle: *mut c_void,
+        deltas: *const u64,
+        row_start: usize,
+        rows: usize,
+    ) -> i32;
+    fn multi_stark_cuda_lookup_lde_finish_partitioned_ext3(
+        device_id: i32,
+        pending_handle: *mut c_void,
+        output_handle: *mut *mut c_void,
+        total: *mut u64,
+        plan: *const RawPlan,
+    ) -> i32;
 
     #[cfg(test)]
     fn multi_stark_cuda_mixed_merkle_create_from_host_matrices(
@@ -3461,7 +4843,47 @@ mod tests {
     use p3_symmetric::CryptographicHasher;
     use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
+    mod fri_arity;
+    mod lookup_graph;
     mod quotient;
+    mod witness;
+
+    #[test]
+    fn bounded_parallel_map_keeps_order_and_bounds_calls_in_flight() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let items: Vec<usize> = (0..200).collect();
+        for concurrency in [1, 3, 16, 400] {
+            let (running, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+            let mapped = bounded_parallel_map(&items, concurrency, |&item| {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_micros(200));
+                running.fetch_sub(1, Ordering::SeqCst);
+                item * 2
+            });
+            assert_eq!(mapped, items.iter().map(|i| i * 2).collect::<Vec<_>>());
+            assert!(peak.load(Ordering::SeqCst) <= concurrency);
+        }
+        assert!(bounded_parallel_map(&[] as &[usize], 4, |&i| i).is_empty());
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn bounded_parallel_map_stops_taking_items_after_a_panic() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let items: Vec<usize> = (0..10_000).collect();
+        let calls = AtomicUsize::new(0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bounded_parallel_map(&items, 4, |&item| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_micros(50));
+                assert_ne!(item, 10, "injected");
+                item
+            })
+        }));
+        assert!(result.is_err());
+        assert!(calls.load(Ordering::SeqCst) < 100);
+    }
 
     #[test]
     fn device_coset_selectors_match_cpu() {
@@ -3541,11 +4963,7 @@ mod tests {
         };
         let graph = compile(
             &spec,
-            &ExtensionParams {
-                degree: 2,
-                w: Goldilocks::from_u64(7),
-                karatsuba: true,
-            },
+            &ExtensionParams::binomial(2, Goldilocks::from_u64(7), true),
         )
         .unwrap();
         let height = 8;
@@ -3957,6 +5375,36 @@ mod tests {
     }
 
     #[test]
+    fn device_memory_reservations_nest_and_release() {
+        // No other test reserves memory on this device id.
+        let device = 63;
+        assert_eq!(reserved_device_bytes(device), 0);
+        let outer = DeviceMemoryReservation::new(device, 3 << 30);
+        let inner = DeviceMemoryReservation::new(device, 1 << 20);
+        assert_eq!(reserved_device_bytes(device), (3 << 30) + (1 << 20));
+        assert_eq!(reserved_device_bytes(device - 1), 0);
+        drop(outer);
+        assert_eq!(reserved_device_bytes(device), 1 << 20);
+        drop(inner);
+        assert_eq!(reserved_device_bytes(device), 0);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive access to a CUDA device: hides its free memory"]
+    fn admission_excludes_reserved_device_memory() {
+        let device = configured_device();
+        let bytes = 1usize << 40;
+        let reservation = DeviceMemoryReservation::new(device, bytes);
+        let (free, total) = device_memory_info(device);
+        assert!(
+            total < bytes && free == 0,
+            "free={free} beside a reservation larger than the device"
+        );
+        drop(reservation);
+        assert!(device_memory_info(device).0 > 0);
+    }
+
+    #[test]
     #[ignore = "requires exclusive access to a CUDA device"]
     fn admission_release_restores_pool_capacity() {
         let gpu = CudaDft::without_auxiliary_devices(configured_device());
@@ -4141,6 +5589,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ext3_field_kernels_match_cpu() {
+        use p3_field::BasedVectorSpace;
+        use p3_field::extension::CubicTrinomialExtensionField;
+        type Ext3 = CubicTrinomialExtensionField<Goldilocks>;
+
+        let mut rng = SmallRng::seed_from_u64(0x00c0_dae3);
+        let mut left = vec![Ext3::ZERO, Ext3::ONE];
+        let mut right = vec![Ext3::ONE, Ext3::ZERO];
+        left.extend((0..2048).map(|_| {
+            Ext3::from_basis_coefficients_slice(&[
+                rng.random::<Goldilocks>(),
+                rng.random::<Goldilocks>(),
+                rng.random::<Goldilocks>(),
+            ])
+            .unwrap()
+        }));
+        right.extend((0..2048).map(|_| {
+            Ext3::from_basis_coefficients_slice(&[
+                rng.random::<Goldilocks>(),
+                rng.random::<Goldilocks>(),
+                rng.random::<Goldilocks>(),
+            ])
+            .unwrap()
+        }));
+        let flatten = |xs: &[Ext3]| -> Vec<Goldilocks> {
+            xs.iter()
+                .flat_map(|x| x.as_basis_coefficients_slice().iter().copied())
+                .collect()
+        };
+        let left_flat = flatten(&left);
+        let right_flat = flatten(&right);
+        let mut sums = Goldilocks::zero_vec(left_flat.len());
+        let mut differences = Goldilocks::zero_vec(left_flat.len());
+        let mut products = Goldilocks::zero_vec(left_flat.len());
+        let mut inverses = Goldilocks::zero_vec(left_flat.len());
+        let status = unsafe {
+            multi_stark_cuda_ext3_ops(
+                0,
+                sums.as_mut_ptr().cast(),
+                differences.as_mut_ptr().cast(),
+                products.as_mut_ptr().cast(),
+                inverses.as_mut_ptr().cast(),
+                left_flat.as_ptr().cast(),
+                right_flat.as_ptr().cast(),
+                left.len(),
+            )
+        };
+        check_cuda(status, "Ext3 arithmetic contract");
+        for i in 0..left.len() {
+            let s = Ext3::from_basis_coefficients_slice(&sums[3 * i..3 * i + 3]).unwrap();
+            let d = Ext3::from_basis_coefficients_slice(&differences[3 * i..3 * i + 3]).unwrap();
+            let p = Ext3::from_basis_coefficients_slice(&products[3 * i..3 * i + 3]).unwrap();
+            let inv = Ext3::from_basis_coefficients_slice(&inverses[3 * i..3 * i + 3]).unwrap();
+            assert_eq!(s, left[i] + right[i], "sum {i}");
+            assert_eq!(d, left[i] - right[i], "difference {i}");
+            assert_eq!(p, left[i] * right[i], "product {i}");
+            let expected_inv = left[i].try_inverse().unwrap_or(Ext3::ZERO);
+            assert_eq!(inv, expected_inv, "inverse {i}");
+        }
+    }
+
     unsafe extern "C" {
         fn multi_stark_cuda_goldilocks_ops(
             device_id: i32,
@@ -4152,7 +5662,16 @@ mod tests {
             right: *const u64,
             len: usize,
         ) -> i32;
-
+        fn multi_stark_cuda_ext3_ops(
+            device_id: i32,
+            sums: *mut u64,
+            differences: *mut u64,
+            products: *mut u64,
+            inverses: *mut u64,
+            left: *const u64,
+            right: *const u64,
+            len: usize,
+        ) -> i32;
     }
 }
 #[test]

@@ -271,6 +271,7 @@ fn check_quotient(
                 &(circuit.preprocessed_width != 0).then(|| evaluations(0)),
                 &evaluations(1),
                 &evaluations(2),
+                None,
                 alpha,
                 constraint_count,
             );
@@ -281,6 +282,10 @@ fn check_quotient(
                     .collect(),
                 2,
             );
+            let ext_w = match ext.modulus {
+                crate::traits::ExtensionModulus::Binomial { w } => w,
+                _ => Goldilocks::ZERO,
+            };
             let actual_values = quotient_values_resident(
                 &circuit.graph,
                 (circuit.preprocessed_width != 0).then_some(&resident[0]),
@@ -290,7 +295,8 @@ fn check_quotient(
                 selectors,
                 &alpha_flat,
                 &delta,
-                ext.w,
+                ext_w,
+                ext.degree,
                 quotient_size,
                 quotient_degree,
                 group_size,
@@ -336,7 +342,8 @@ fn check_quotient(
                     selectors,
                     &alpha_flat,
                     &delta,
-                    ext.w,
+                    ext_w,
+                    ext.degree,
                     quotient_size,
                     quotient_degree,
                     group_size,

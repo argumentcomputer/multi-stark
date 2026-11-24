@@ -1,6 +1,7 @@
 //! Scalar fields, working algebras and SIMD packings used by the protocol.
-//! [`ExtensionOf`] describes binomial challenge extensions `X^D = W`, including
-//! `D = 1` when the base field is also the challenge field.
+//! [`ExtensionOf`] describes challenge extensions over the base field —
+//! degree-1 (`Base`), binomial `X^D - W` (`Binomial`), and cubic trinomial
+//! `X^3 - X - 1` (`CubicTrinomial`).
 
 use core::fmt::Debug;
 use core::iter::Iterator;
@@ -8,8 +9,8 @@ use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use p3_matrix::Matrix;
 use p3_maybe_rayon::prelude::*;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 /// Ring operations shared by every layer, over `Rhs`.
 pub trait RingOps<Rhs = Self>:
@@ -160,21 +161,70 @@ pub trait Packed<F: Field>: Algebra<F> {
     /// matrix, `WIDTH` vertically adjacent rows per packet — the sweep's
     /// input gather. Row indices wrap modulo the height.
     fn packed_row_pair<M: Matrix<F>>(matrix: &M, i: usize, step: usize) -> Vec<Self>;
+
+    /// Fill `out` (`out.len() <= matrix.width()`) with the first `out.len()`
+    /// columns of vertically packed rows `i..i + WIDTH` (wrapping modulo
+    /// `matrix.height()`), reusing caller-owned scratch memory.
+    fn fill_packed_row<M: Matrix<F>>(matrix: &M, i: usize, out: &mut [Self]) {
+        if out.is_empty() {
+            return;
+        }
+        let pair = Self::packed_row_pair(matrix, i, 0);
+        out.copy_from_slice(&pair[..out.len()]);
+    }
 }
 
-/// The challenge field as a binomial extension `X^D = W` of the base
-/// field, `D >= 1`. For `D = 1` the field is its own challenge field:
-/// `W` is unused and the basis is the identity.
+/// Defining irreducible modulus polynomial of a challenge extension over `F`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExtensionModulus<F> {
+    /// Trivial degree-1 extension (`F` itself).
+    Base,
+    /// Binomial extension `F[X] / (X^D - w)`.
+    Binomial { w: F },
+    /// Cubic trinomial extension `F[X] / (X^3 - X - 1)`.
+    CubicTrinomial,
+}
+
+impl<F> ExtensionModulus<F> {
+    /// Canonical protocol tag identifying the extension modulus family.
+    ///
+    /// - `0`: `Base` (`D = 1`)
+    /// - `1`: `Binomial` (`X^D - w`)
+    /// - `2`: `CubicTrinomial` (`X^3 - X - 1`)
+    #[inline]
+    pub const fn tag(&self) -> u8 {
+        match self {
+            Self::Base => 0,
+            Self::Binomial { .. } => 1,
+            Self::CubicTrinomial => 2,
+        }
+    }
+}
+
+/// The challenge field as a degree-`D` extension (`D >= 1`) of the base
+/// field, with defining polynomial [`Self::MODULUS`]. For `D = 1` the field
+/// is its own challenge field (`MODULUS = ExtensionModulus::Base`).
 pub trait ExtensionOf<F: Field>: Field + Algebra<F> {
     const D: usize;
-    /// The binomial modulus constant (`X^D = W`); unused when `D = 1`.
-    const W: F;
+    /// Defining modulus polynomial of the extension over `F`.
+    const MODULUS: ExtensionModulus<F>;
 
     /// Packed representation: `D` base packings.
     type ExtPacking: PackedExtension<F, Self>;
 
     fn as_basis_coefficients_slice(&self) -> &[F];
     fn from_basis_coefficients_fn(f: impl FnMut(usize) -> F) -> Self;
+
+    /// Flatten a vector of extension elements into contiguous base-field
+    /// basis coordinates. Extensions laid out as `[F; D]` override this to
+    /// reinterpret the backing allocation in place with zero copies.
+    fn flatten_vec_to_base(values: Vec<Self>) -> Vec<F> {
+        let mut out = F::zero_vec(values.len() * Self::D);
+        out.par_chunks_exact_mut(Self::D)
+            .zip(values.par_iter())
+            .for_each(|(dst, src)| dst.copy_from_slice(src.as_basis_coefficients_slice()));
+        out
+    }
 }
 
 /// Packed challenge values: `D` base packets, used to reassemble the
@@ -192,10 +242,7 @@ pub fn flatten_to_base<F: Field, EF: ExtensionOf<F>>(
     m: p3_matrix::dense::RowMajorMatrix<EF>,
 ) -> p3_matrix::dense::RowMajorMatrix<F> {
     let width = m.width * EF::D;
-    let mut values = Vec::with_capacity(m.values.len() * EF::D);
-    for value in m.values {
-        values.extend_from_slice(value.as_basis_coefficients_slice());
-    }
+    let values = EF::flatten_vec_to_base(m.values);
     p3_matrix::dense::RowMajorMatrix::new(values, width)
 }
 
@@ -237,11 +284,75 @@ pub trait PrimeField: Field {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use p3_field::extension::BinomialExtensionField;
+    use p3_field::extension::{BinomialExtensionField, CubicTrinomialExtensionField};
     use p3_goldilocks::Goldilocks;
     use p3_matrix::dense::RowMajorMatrix;
 
     type Ext = BinomialExtensionField<Goldilocks, 2>;
+    type Ext3 = CubicTrinomialExtensionField<Goldilocks>;
+
+    #[test]
+    fn flatten_to_base_cubic_trinomial_is_zero_copy_and_matches_algebra() {
+        let values: Vec<Ext3> = (0..6u64)
+            .map(|i| {
+                Ext3::from_basis_coefficients_fn(|k| {
+                    p3_field::PrimeCharacteristicRing::from_u64(3 * i + k as u64 + 1)
+                })
+            })
+            .collect();
+        let expected = values.clone();
+        let original_ptr = values.as_ptr().cast::<Goldilocks>();
+        let flat = flatten_to_base::<Goldilocks, Ext3>(RowMajorMatrix::new(values, 2));
+        assert_eq!(
+            flat.values.as_ptr(),
+            original_ptr,
+            "p3 cubic trinomial extension flatten_to_base must be zero-copy"
+        );
+        assert_eq!(flat.width, 6);
+        assert_eq!(flat.values.len(), 18);
+        for (i, value) in expected.iter().enumerate() {
+            assert_eq!(
+                &flat.values[3 * i..3 * i + 3],
+                value.as_basis_coefficients_slice()
+            );
+        }
+
+        // Pin X^3 = X + 1 Karatsuba multiplication and adjugate/norm inversion
+        // formulas against Plonky3's CubicTrinomialExtensionField.
+        for i in 0..expected.len() {
+            let a = expected[i];
+            let b = expected[(i + 1) % expected.len()];
+            let [a0, a1, a2] = *a.as_basis_coefficients_slice() else {
+                unreachable!()
+            };
+            let [b0, b1, b2] = *b.as_basis_coefficients_slice() else {
+                unreachable!()
+            };
+            let v0 = a0 * b0;
+            let v1 = a1 * b1;
+            let v2 = a2 * b2;
+            let m01 = (a0 + a1) * (b0 + b1) - v0 - v1;
+            let m02 = (a0 + a2) * (b0 + b2) - v0 - v2;
+            let m12 = (a1 + a2) * (b1 + b2) - v1 - v2;
+            let c0 = v0 + m12;
+            let c1 = m01 + m12 + v2;
+            let c2 = m02 + v1 + v2;
+            let prod = a * b;
+            assert_eq!(prod.as_basis_coefficients_slice(), &[c0, c1, c2]);
+
+            let s = a0 + a2;
+            let d0 = s * s - a1 * (a1 + a2);
+            let d1 = a2 * a2 - a0 * a1;
+            let d2 = a1 * a1 - a2 * s;
+            let norm = a0 * d0 + a2 * d1 + a1 * d2;
+            let inv_norm = norm.inverse();
+            let inv = a.inverse();
+            assert_eq!(
+                inv.as_basis_coefficients_slice(),
+                &[d0 * inv_norm, d1 * inv_norm, d2 * inv_norm]
+            );
+        }
+    }
 
     #[test]
     fn flatten_to_base_lays_out_basis_coefficients_in_row_order() {
@@ -252,10 +363,17 @@ mod tests {
                 })
             })
             .collect();
-        let flat = flatten_to_base::<Goldilocks, Ext>(RowMajorMatrix::new(values.clone(), 3));
+        let expected = values.clone();
+        let original_ptr = values.as_ptr().cast::<Goldilocks>();
+        let flat = flatten_to_base::<Goldilocks, Ext>(RowMajorMatrix::new(values, 3));
+        assert_eq!(
+            flat.values.as_ptr(),
+            original_ptr,
+            "p3 binomial extension flatten_to_base must be zero-copy"
+        );
         assert_eq!(flat.width, 6);
         assert_eq!(flat.values.len(), 12);
-        for (i, value) in values.iter().enumerate() {
+        for (i, value) in expected.iter().enumerate() {
             assert_eq!(
                 &flat.values[2 * i..2 * i + 2],
                 value.as_basis_coefficients_slice()

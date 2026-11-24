@@ -1,5 +1,6 @@
 use super::*;
-use crate::plonkish::gadgets::{ByteGadgets, blake3};
+use crate::plonkish::gadgets::{Blake3Domain, ByteGadgets, blake3, blake3_domain};
+use crate::types::GoldilocksBlake3V6Config;
 use p3_blake3::Blake3;
 use p3_symmetric::CryptographicHasher;
 
@@ -157,4 +158,151 @@ fn compact_hash_bridge_rejects_valid_hash_traces_for_a_different_witness() {
         bad[t].values.clear();
         assert!(!relations_hold(&defs, &bad, claims));
     }
+}
+
+#[test]
+fn domain_separated_blake3_compact_and_generic_match_native_across_boundaries() {
+    let domains = [
+        Blake3Domain::Plain,
+        Blake3Domain::MerkleLeaf,
+        Blake3Domain::MerkleCompress,
+        Blake3Domain::TranscriptSingle,
+        Blake3Domain::TranscriptBatch,
+    ];
+    let lengths = [0usize, 1, 63, 64, 65, 1023, 1024, 1025, 2049];
+    for compact in [false, true] {
+        let mut b = CircuitBuilder::<Val>::new();
+        if compact {
+            b.enable_compact_blake3();
+        }
+        let bytes = ByteGadgets::new(&mut b);
+        let mut calls = vec![];
+        for (idx, &len) in lengths.iter().enumerate() {
+            let domain = domains[idx % domains.len()];
+            let input: Vec<_> = (0..len)
+                .map(|i| bytes.input(&mut b, &format!("d{idx}/{i}")))
+                .collect();
+            let digest = blake3_domain(&mut b, &bytes, domain, &input);
+            for byte in digest {
+                b.expose_public(byte.value());
+            }
+            calls.push((domain, input));
+        }
+        let circuit = b.finish();
+        if compact {
+            assert_eq!(circuit.stats().hash_calls, lengths.len());
+            let recorded: Vec<_> = circuit.blake3_domain_calls().map(|(d, _, _)| d).collect();
+            let expected_domains: Vec<_> = calls.iter().map(|(d, _)| *d).collect();
+            assert_eq!(recorded, expected_domains);
+        } else {
+            assert_eq!(circuit.stats().hash_calls, 0);
+        }
+        let compiled = circuit.lower_to_multi_stark(Val::from_u8(95)).unwrap();
+        let defs = compiled.circuit_inputs();
+        let mut w = compiled.witness();
+        let mut expected = vec![];
+        for (domain, input) in &calls {
+            let message: Vec<u8> = (0..input.len())
+                .map(|i| u8::try_from((i * 19 + 7) % 256).unwrap())
+                .collect();
+            for (wire, &byte) in input.iter().zip(&message) {
+                w.set(wire.value(), Val::from_u8(byte)).unwrap();
+            }
+            let digest = domain.hash_bytes(&message);
+            expected.extend(digest.map(Val::from_u8));
+        }
+        let a = w.generate().unwrap();
+        assert_eq!(a.public_values(), expected);
+        let traces = compiled.traces(&a).unwrap();
+        let claims = compiled.claims(&expected).unwrap();
+        assert!(relations_hold(&defs, &traces, &claims));
+    }
+}
+
+#[test]
+fn compact_domain_separated_blake3_roundtrips_and_rejects_cross_domain_forgery() {
+    let domains = [
+        Blake3Domain::Plain,
+        Blake3Domain::MerkleLeaf,
+        Blake3Domain::MerkleCompress,
+        Blake3Domain::TranscriptSingle,
+        Blake3Domain::TranscriptBatch,
+    ];
+    let mut b = CircuitBuilder::<Val>::new();
+    b.enable_compact_blake3();
+    let bytes = ByteGadgets::new(&mut b);
+    let input: Vec<_> = (0..64)
+        .map(|i| bytes.input(&mut b, &format!("msg{i}")))
+        .collect();
+    for &domain in &domains {
+        let digest = blake3_domain(&mut b, &bytes, domain, &input);
+        for byte in digest {
+            b.expose_public(byte.value());
+        }
+    }
+    let circuit = b.finish();
+    let compiled = circuit.lower_to_multi_stark(Val::from_u8(96)).unwrap();
+    let defs = compiled.circuit_inputs();
+    let v6_cfg = GoldilocksBlake3V6Config::new(
+        CommitmentParameters {
+            log_blowup: 2,
+            cap_height: 0,
+        },
+        FriParameters {
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: 32,
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: 0,
+        },
+    );
+    let (system, key) = System::new(v6_cfg, defs.clone());
+
+    let message: Vec<u8> = (0..64).map(|i| u8::try_from(i * 3 + 5).unwrap()).collect();
+    let mut w = compiled.witness();
+    for (wire, &byte) in input.iter().zip(&message) {
+        w.set(wire.value(), Val::from_u8(byte)).unwrap();
+    }
+    let a = w.generate().unwrap();
+    let mut expected = vec![];
+    for &domain in &domains {
+        expected.extend(domain.hash_bytes(&message).map(Val::from_u8));
+    }
+    assert_eq!(a.public_values(), expected);
+
+    let traces = compiled.traces(&a).unwrap();
+    let claims = compiled.claims(&expected).unwrap();
+    assert!(relations_hold(&defs, &traces, &claims));
+    let refs: Vec<_> = claims.iter().map(Vec::as_slice).collect();
+    let proof = system.prove_multiple_claims(
+        &key,
+        &refs,
+        SystemWitness::from_stage_1(traces.clone(), &system),
+    );
+    system.verify_multiple_claims(&refs, &proof).unwrap();
+
+    // Swapping Plain's digest into MerkleLeaf's public slots must fail both
+    // relations and STARK verification.
+    let mut swapped_publics = expected.clone();
+    swapped_publics[32..64].copy_from_slice(&expected[0..32]);
+    let swapped_claims = compiled.claims(&swapped_publics).unwrap();
+    assert!(!relations_hold(&defs, &traces, &swapped_claims));
+    let swapped_refs: Vec<_> = swapped_claims.iter().map(Vec::as_slice).collect();
+    assert!(
+        system
+            .verify_multiple_claims(&swapped_refs, &proof)
+            .is_err()
+    );
+
+    // Direct check_values must reject a witness with Plain's digest in a keyed call.
+    let mut bad_values = a.values(compiled.circuit().id()).unwrap().to_vec();
+    let (_, _, leaf_output) = compiled.circuit().blake3_domain_calls().nth(1).unwrap();
+    let plain_digest = Blake3Domain::Plain.hash_bytes(&message);
+    for (wire, byte) in leaf_output.iter().zip(plain_digest) {
+        bad_values[wire.index()] = Val::from_u8(byte);
+    }
+    assert_eq!(
+        compiled.circuit().check_values(&bad_values),
+        Err(WitnessError::HashMismatch)
+    );
 }

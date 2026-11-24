@@ -18,12 +18,11 @@
 //! pull from generic wires; digest bindings push back. Channel 4 contains
 //! this entire vocabulary, disjoint from generic copy/public/table channels.
 use super::{Value, WitnessError};
+use crate::p3_adapter::domain_blake3::Blake3Domain;
 use crate::traits::Field;
 use crate::{expr::Expr, lookup::Lookup, system::CircuitInputs};
-use p3_blake3::Blake3;
 use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
-use p3_symmetric::CryptographicHasher;
 use std::collections::HashMap;
 const IV: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
@@ -98,6 +97,7 @@ struct Output {
     flags: u32,
 }
 pub(super) struct HashCall {
+    pub domain: Blake3Domain,
     pub input: Vec<Value>,
     pub output: [Value; 32],
 }
@@ -176,31 +176,39 @@ impl Compact {
             w
         })
     }
-    fn subtree(&mut self, input: &[usize], len: usize, counter: u64) -> Output {
-        let iv = IV.map(|x| self.constant(x));
+    fn subtree(
+        &mut self,
+        input: &[usize],
+        len: usize,
+        counter: u64,
+        domain: Blake3Domain,
+    ) -> Output {
+        let cv_init = domain.key_words().map(|x| self.constant(x));
+        let domain_flags = domain.domain_flags();
         if len > 1024 {
             let chunks = len.div_ceil(1024);
             let left = 1usize << (usize::BITS - 1 - (chunks - 1).leading_zeros());
             let split = left * 1024;
-            let lo = self.subtree(&input[..split / 4], split, counter);
+            let lo = self.subtree(&input[..split / 4], split, counter, domain);
             let lo = self.compress(lo, false);
             let hi = self.subtree(
                 &input[split / 4..],
                 len - split,
                 counter + u64::try_from(left).unwrap(),
+                domain,
             );
             let hi = self.compress(hi, false);
             return Output {
-                cv: iv,
+                cv: cv_init,
                 block: std::array::from_fn(|i| if i < 8 { lo[i] } else { hi[i - 8] }),
                 counter: 0,
                 len: 64,
-                flags: 4,
+                flags: 4 | domain_flags,
             };
         }
         let zero = self.constant(0);
         let blocks = len.div_ceil(64).max(1);
-        let mut cv = iv;
+        let mut cv = cv_init;
         for i in 0..blocks {
             let block = std::array::from_fn(|j| input.get(i * 16 + j).copied().unwrap_or(zero));
             let out = Output {
@@ -208,7 +216,9 @@ impl Compact {
                 block,
                 counter,
                 len: u32::try_from(len.saturating_sub(i * 64).min(64)).unwrap(),
-                flags: if i == 0 { 1 } else { 0 } | if i + 1 == blocks { 2 } else { 0 },
+                flags: (if i == 0 { 1 } else { 0 })
+                    | (if i + 1 == blocks { 2 } else { 0 })
+                    | domain_flags,
             };
             if i + 1 == blocks {
                 return out;
@@ -233,7 +243,7 @@ impl Compact {
                 output: false,
             });
         }
-        let out = self.subtree(&input, len, 0);
+        let out = self.subtree(&input, len, 0, call.domain);
         let digest = self.compress(out, true);
         for (i, w) in digest.into_iter().enumerate() {
             self.rows[5].push(vec![w]);
@@ -275,7 +285,7 @@ impl Compact {
     }
     pub(super) fn check_values<F: Field>(&self, values: &[F]) -> Result<(), WitnessError> {
         for (call, msg) in self.calls.iter().zip(self.messages(values)?) {
-            let digest: [u8; 32] = Blake3.hash_iter(msg);
+            let digest: [u8; 32] = call.domain.hash_bytes(&msg);
             if call
                 .output
                 .iter()
